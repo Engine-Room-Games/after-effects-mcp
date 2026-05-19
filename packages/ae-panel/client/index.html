@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AE MCP Bridge</title>
+  <style>
+    body { font-family: -apple-system, "Segoe UI", sans-serif; background: #2a2a2a; color: #ddd; padding: 12px; margin: 0; font-size: 12px; }
+    h1 { font-size: 13px; margin: 0 0 8px 0; color: #fff; }
+    .row { margin: 4px 0; }
+    .label { color: #888; }
+    .ok { color: #6f6; } .err { color: #f66; } .warn { color: #fc6; }
+    #log { margin-top: 8px; font-family: ui-monospace, Menlo, monospace; font-size: 10px; background: #1a1a1a; padding: 6px; border-radius: 4px; max-height: 220px; overflow: auto; }
+    #log div { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>AE MCP Bridge</h1>
+  <div class="row"><span class="label">Status:</span> <span id="status">starting…</span></div>
+  <div class="row"><span class="label">Port:</span> <span id="port">—</span></div>
+  <div class="row"><span class="label">AE:</span> <span id="ae">—</span></div>
+  <div class="row"><span class="label">JSX:</span> <span id="jsx">—</span></div>
+  <div class="row"><span class="label">Requests:</span> <span id="reqs">0</span></div>
+  <div id="log"></div>
+  <script src="./csinterface.js"></script>
+  <script src="./main.js"></script>
+</body>
+</html>
