@@ -20,7 +20,16 @@ function __applyInterpolationToKey(prop, keyIndex, interp) {
   var outT = interp["out"] && __INTERP_MAP[interp["out"]] ? __INTERP_MAP[interp["out"]] : prop.keyOutInterpolationType(keyIndex);
   prop.setInterpolationTypeAtKey(keyIndex, inT, outT);
   if (interp.easeIn || interp.easeOut) {
-    var dim = (prop.value && prop.value.length) ? prop.value.length : 1;
+    // AE's setTemporalEaseAtKey expects an array of KeyframeEase per dimension —
+    // BUT spatial properties (Position, Anchor Point) use a single ease entry that
+    // applies along the motion path, regardless of 2D/3D. Non-spatial multi-dim
+    // properties (Scale, Color) need one entry per dimension.
+    var dim;
+    if (prop.isSpatial) {
+      dim = 1;
+    } else {
+      dim = (prop.value && prop.value.length) ? prop.value.length : 1;
+    }
     var inEase = interp.easeIn || { influence: 33, speed: 0 };
     var outEase = interp.easeOut || { influence: 33, speed: 0 };
     var inArr = []; var outArr = [];

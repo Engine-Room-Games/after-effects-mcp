@@ -49,11 +49,14 @@ export function createServer() {
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const tools = Object.keys(OpSchemas).map((name) => {
       const schema = OpSchemas[name as keyof typeof OpSchemas];
-      const jsonSchema = zodToJsonSchema(schema, { target: "openApi3" });
+      const jsonSchema = zodToJsonSchema(schema, {
+        target: "jsonSchema7",
+        $refStrategy: "none",
+      });
       return {
         name,
         description: descriptions[name] ?? `AE op: ${name}`,
-        inputSchema: jsonSchema as any,
+        inputSchema: toDraft2020(jsonSchema) as any,
       };
     });
     return { tools };
@@ -151,6 +154,28 @@ function errorResult(message: string) {
     content: [{ type: "text" as const, text: message }],
     isError: true,
   };
+}
+
+// Rewrite a JSON Schema (draft-07 output from zod-to-json-schema) into draft 2020-12.
+// The Anthropic API validates tool input_schema against draft 2020-12, which rejects
+// the draft-07 tuple form `{ type: "array", items: [<schemas>] }` — that shape is
+// only valid in 2020-12 as `prefixItems`, with `items` (singular) covering trailing
+// positions. We also drop the legacy `additionalItems` keyword (renamed to `items`).
+function toDraft2020(node: any): any {
+  if (Array.isArray(node)) return node.map(toDraft2020);
+  if (!node || typeof node !== "object") return node;
+  const out: any = {};
+  for (const k of Object.keys(node)) out[k] = toDraft2020(node[k]);
+  if (out.type === "array" && Array.isArray(out.items)) {
+    out.prefixItems = out.items;
+    if ("additionalItems" in out) {
+      out.items = out.additionalItems;
+      delete out.additionalItems;
+    } else {
+      out.items = false;
+    }
+  }
+  return out;
 }
 
 function isAsyncEnvelope(v: unknown): boolean {

@@ -83,6 +83,8 @@ npm run doctor              # sanity checks (debug mode, install, port, AE runni
 npm run inspect             # MCP Inspector UI against the server
 ```
 
+`build:jsx` writes both the source bundle and, if the panel is installed, the installed bundle at `~/Library/.../<bundleId>/jsx/bundle.jsx`. So `/reload-jsx` always sees fresh content — no manual `cp` step. (If you installed with `--symlink`, the installed path *is* the source path; the sync is a no-op.)
+
 ## Verification recipes (run by hand against a live AE 2026)
 
 1. `list_comps` → JSON array, empty `[]` on fresh project.
@@ -91,7 +93,7 @@ npm run inspect             # MCP Inspector UI against the server
 4. `add_effect({compId, layerId, matchName:"ADBE Gaussian Blur 2"})`, `set_effect_param({...paramName:"Blurriness", value:25})`.
 5. `set_expression({propertyPath:["Effects","Gaussian Blur","Blurriness"], expression:"time*10"})`, then `get_layer_full` echoes the expression.
 6. `run_batch` with 50 `create_solid_layer` ops, `transactional:true` → single undo step.
-7. `run_batch` with 500 ops → returns `{jobId}`. With `progressToken` set, `notifications/progress` fire ~20/sec. Without it, `await_job(jobId)` resolves with the final result.
+7. `run_batch` with 600 ops → returns `{jobId}` (inline cutoff is 500). With `progressToken` set, `notifications/progress` fire ~20/sec. Without it, `await_job(jobId)` resolves with the final result.
 8. `run_jsx("app.project.activeItem.name")` → comp name. With deliberate error → structured `AeError` with line number.
 
 ## Known fragile areas
@@ -100,6 +102,9 @@ npm run inspect             # MCP Inspector UI against the server
 - ExtendScript single-threading: `run_jsx` with a long synchronous loop will freeze AE's UI. Document for the agent in the tool description (already done).
 - CEP manifest's `<AutoVisible>false</AutoVisible>` was unreliable in early CEP 12 builds. Current manifest uses `AutoVisible=true` with a small geometry — the panel still auto-loads invisibly enough; the user can dock the small status panel out of the way.
 - CEP panels installed without signing require `PlayerDebugMode=1`. The user does this once via `npm run enable:debug` and a reboot.
+- **Anthropic API requires JSON Schema draft 2020-12** for tool input schemas. `zod-to-json-schema` 3.x has no 2020-12 target — `openApi3` emits `nullable` (rejected) and `jsonSchema7` emits draft-07 tuple form `items:[...]` (rejected; 2020-12 wants `prefixItems`). `server.ts` uses `jsonSchema7` + `$refStrategy:"none"` + a `toDraft2020()` post-pass that rewrites tuples. Don't switch back to `openApi3`.
+- **`setTemporalEaseAtKey` on spatial properties takes a single-element array**, regardless of 2D/3D — for Position/Anchor Point, the ease is along the motion path. Non-spatial multi-dim (Scale, Color) need one entry per dimension. `keyframes.jsx` branches on `prop.isSpatial`. If you ever see "Value array does not have 1 elements", a spatial property is being fed N entries.
+- **`addText()` anchors point text at the bbox center**, not the baseline-left an agent would assume. `paragraphJustification: LEFT_JUSTIFY` doesn't move the anchor for point text. `create_text_layer` defaults `anchorAlign: "left"` so `position` semantically matches the visible left edge; pass `"center"`/`"right"`/`"none"` to override.
 
 ## Out of scope (v1)
 

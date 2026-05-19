@@ -63,6 +63,8 @@ export const CreateTextLayer = z.object({
   size: z.number().positive().optional(),
   color: Color.optional(),
   position: VecAny.optional(),
+  anchorAlign: z.enum(["left", "center", "right", "none"]).default("left").optional()
+    .describe("Where the anchor point sits on the rendered text. Default 'left' makes `position` mean the visible left edge of the first character's baseline — the natural assumption. AE's addText() defaults to a centered anchor, which surprises agents; use 'none' to keep AE's raw default."),
   name: z.string().optional(),
 });
 export const CreateShapeLayer = z.object({

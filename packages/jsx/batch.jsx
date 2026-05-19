@@ -5,8 +5,11 @@ OPS.run_batch = function (args) {
   var ops = args.ops || [];
   var transactional = args.transactional !== false;
   var name = args.undoGroupName || "AE MCP Batch";
-  // Short batches: run inline synchronously.
-  if (ops.length <= 100) {
+  // Short batches: run inline synchronously. Inline stays sub-second for
+  // typical create/keyframe ops up to a few hundred; the async-job overhead
+  // (jobId envelope, polling, progress notifications) is only worth it for
+  // genuinely long jobs.
+  if (ops.length <= 500) {
     var results = []; var errors = [];
     for (var i = 0; i < ops.length; i++) {
       var step = ops[i];

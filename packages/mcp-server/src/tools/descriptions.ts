@@ -1,107 +1,94 @@
 /**
- * Tool descriptions written for an LLM agent reading the tool list. They tell
- * the agent (a) what the tool does, (b) when to reach for it, (c) what to avoid.
- *
- * The vision tools' descriptions explicitly include the "one-off, do not
- * screenshot every frame" guidance the user asked for.
+ * Tool descriptions written for an LLM agent reading the tool list. Keep them
+ * tight — every char is in the eager-tool budget. Say what the tool does, when
+ * to reach for it, and only the gotchas an agent can't see from the schema.
  */
 export const descriptions: Record<string, string> = {
   // ---------- comps ----------
-  list_comps: "Lists all compositions in the current project with id, name, dimensions, duration, frameRate and layer count. Use for project overview.",
-  get_comp: "Returns a single composition's summary (no layers). Use list_comps if you don't know which comp.",
-  get_comp_tree: "Returns a comp and its nested layer tree, recursing into pre-comps up to `depth`. The richest 'show me everything' read for a comp.",
-  create_comp: "Creates a new composition. Returns the new comp's id and summary. Use for setting up a scene.",
-  set_comp: "Modify an existing comp (name, dimensions, frameRate, duration, work area, bg color). Properties left undefined are unchanged.",
-  delete_comp: "Removes a composition from the project. Irreversible from outside AE (the user can Undo inside AE).",
-  set_active_comp: "Opens a comp in the viewer/timeline (makes it the focused comp).",
+  list_comps: "All comps: id, name, dims, duration, fps, layer count.",
+  get_comp: "Single comp summary by id (no layers).",
+  get_comp_tree: "Comp + nested layer tree, recursing pre-comps to `depth`.",
+  create_comp: "Create a new comp. Returns id.",
+  set_comp: "Modify a comp (name, dims, fps, duration, work area, bg). Undefined fields unchanged.",
+  delete_comp: "Delete a comp. Reversible only via AE's Undo.",
+  set_active_comp: "Focus a comp in the viewer/timeline.",
 
   // ---------- layers ----------
-  list_layers: "Lists layers in a comp with concise per-layer summary. Use get_layer_full when you need details on a specific layer.",
-  get_layer_full: "Returns the COMPLETE state of one layer in a single call: transform values + keyframes + expressions, all effects with their params + keyframes + expressions, masks, markers, parenting, blend mode, in/out, content-specific extras (text/shape/footage/precomp). Always prefer this over multiple smaller queries.",
-  create_text_layer: "Creates a text layer. Optional font/size/color/position applied immediately.",
-  create_shape_layer: "Creates an empty shape layer. Use add_shape_content to fill it with rects, ellipses, paths, fills, strokes, trims, repeaters.",
-  create_solid_layer: "Creates a solid-color layer of given dimensions. color is RGB 0..1.",
-  create_null_layer: "Creates a null object (invisible parent layer).",
-  create_adjustment_layer: "Creates an adjustment layer — effects on it apply to layers beneath.",
-  create_precomp_layer: "Drops an existing composition into another comp as a pre-comp layer.",
-  create_camera_layer: "Creates a camera. 3D layers below will be viewed through it.",
-  create_light_layer: "Creates a light (parallel, spot, point, or ambient).",
-  duplicate_layer: "Duplicates a layer N times. Each duplicate is a fresh, independently-IDed layer.",
-  delete_layer: "Removes a layer from its comp.",
-  set_layer: "Bulk-update a layer's metadata (name, enabled, locked, shy, solo, 3D, blendingMode, label, in/out points, stretch, track matte). Undefined fields are unchanged.",
-  parent_layer: "Sets a layer's parent. Pass parentLayerId=null to unparent.",
-  reorder_layer: "Moves a layer to a new 1-based index in the comp's stacking order.",
+  list_layers: "Layers in a comp, one-line each. Use get_layer_full for details.",
+  get_layer_full: "Full state of one layer: transform + keyframes + expressions, effects, masks, markers, parenting, text/shape/footage extras, and sourceRect (visible bounds). Always prefer over multiple smaller queries.",
+  create_text_layer: "Text layer with optional font/size/color/position. anchorAlign defaults to 'left' so position means the visible left edge.",
+  create_shape_layer: "Empty shape layer; fill via add_shape_content.",
+  create_solid_layer: "Solid-color layer. color is RGB 0..1.",
+  create_null_layer: "Null parent layer.",
+  create_adjustment_layer: "Adjustment layer — effects on it apply to layers below.",
+  create_precomp_layer: "Insert an existing comp into another as a pre-comp layer.",
+  create_camera_layer: "Camera. 3D layers below view through it.",
+  create_light_layer: "Light (parallel|spot|point|ambient).",
+  duplicate_layer: "Duplicate a layer N times; each has a fresh id.",
+  delete_layer: "Remove a layer.",
+  set_layer: "Update layer metadata (name/enabled/locked/shy/solo/3D/blend/label/in-out/stretch/trackMatte). Undefined fields unchanged.",
+  parent_layer: "Set/clear a layer's parent (parentLayerId=null to unparent).",
+  reorder_layer: "Move layer to 1-based stack index.",
 
   // ---------- transforms ----------
-  set_transform: "Convenience: set any combination of position/scale/rotation/anchorPoint/opacity (plus 3D orientation and per-axis rotations on 3D layers) in one call. If `keyframe:true` and `time` is given, sets keyframes; otherwise sets the static value.",
+  set_transform: "Set any of position/scale/rotation/anchorPoint/opacity (+3D orientation/per-axis on 3D). keyframe:true + time sets keyframes.",
 
   // ---------- keyframes ----------
-  add_keyframe: "Adds a keyframe at `time` on a property identified by propertyPath (e.g. ['Transform','Position'] or ['Effects','Gaussian Blur','Blurriness']). Optionally sets interpolation (in/out: linear|bezier|hold) and ease (influence + speed) for that key.",
-  remove_keyframe: "Removes the keyframe at `time` on the given property.",
-  get_keyframes: "Returns ALL keyframes on a property with time, value, in/out interpolation, ease, and spatial tangents (if spatial).",
-  set_interpolation: "Sets the in/out interpolation type of a specific keyframe (linear|bezier|hold).",
-  set_temporal_ease: "Sets influence + speed for the in/out ease of a specific keyframe.",
-  set_spatial_tangents: "Sets the in/out spatial tangents for a position-style keyframe (2D or 3D).",
+  add_keyframe: "Keyframe at `time` on propertyPath (e.g. ['Transform','Position']). Optional in/out interpolation + ease.",
+  remove_keyframe: "Remove keyframe at `time`.",
+  get_keyframes: "All keyframes on a property: time, value, interpolation, ease, spatial tangents.",
+  set_interpolation: "Set in/out interpolation type of a specific keyframe.",
+  set_temporal_ease: "Set influence+speed for in/out ease of a keyframe.",
+  set_spatial_tangents: "Set in/out spatial tangents for a position-style keyframe.",
 
   // ---------- expressions ----------
-  get_expression: "Returns the expression text on a property (empty string if none) and whether it's enabled.",
-  set_expression: "Sets an expression on a property and enables it.",
-  toggle_expression: "Enables/disables an expression without clearing it.",
-  clear_expression: "Removes the expression from a property.",
+  get_expression: "Expression text + enabled state on a property.",
+  set_expression: "Set + enable an expression on a property.",
+  toggle_expression: "Enable/disable an expression without clearing.",
+  clear_expression: "Remove an expression.",
 
   // ---------- effects ----------
-  list_effects: "Lists every effect on a layer with all current parameter values and any keyframes/expressions on those parameters.",
-  add_effect: "Adds an effect by its matchName (use list_available_effects to find the matchName for an effect — matchNames are stable across AE versions, display names are not).",
-  remove_effect: "Removes an effect by its 1-based index on the layer.",
-  set_effect_param: "Sets the value of an effect parameter (by paramName or paramMatchName). Optionally at a specific time with keyframe:true.",
-  set_effect_enabled: "Enables/disables an effect without removing it.",
-  list_available_effects: "Returns every effect installed in this AE, with displayName, matchName, and category. Use this to discover matchNames before calling add_effect.",
+  list_effects: "All effects on a layer with current param values + keyframes/expressions.",
+  add_effect: "Add effect by matchName (use list_available_effects — matchNames are stable across AE versions; display names aren't).",
+  remove_effect: "Remove effect by 1-based index.",
+  set_effect_param: "Set an effect param by name/matchName. keyframe:true+time for keyframed value.",
+  set_effect_enabled: "Toggle an effect on/off without removing.",
+  list_available_effects: "All effects installed in this AE: displayName, matchName, category.",
 
   // ---------- text ----------
-  set_text: "Sets text content and styling on a text layer (font, size, fill/stroke color, tracking, leading, justification, etc.). Properties left undefined are unchanged.",
-  add_text_animator: "Adds a text animator group of the given type (position, scale, rotation, opacity, tracking, skew, fillColor, strokeColor). Optional range selector with start/end/offset percentages.",
+  set_text: "Set text content + styling (font, size, fill/stroke, tracking, leading, justification). Undefined fields unchanged.",
+  add_text_animator: "Add a text animator group (position/scale/rotation/opacity/tracking/skew/fillColor/strokeColor). Optional range selector.",
 
   // ---------- shapes ----------
-  set_shape_path: "Replaces the path of a shape (the property at `shapePath`) with new vertices/tangents/closed flag.",
-  add_shape_content: "Adds shape content (rect, ellipse, star, path, fill, stroke, trim, repeater, merge, group) into the layer's Contents (or into a sub-group identified by parentGroupPath).",
-  set_shape_property: "Sets any property on a shape content node (path+property name pair), optionally as a keyframe at `time`.",
+  set_shape_path: "Replace a shape path with new vertices/tangents/closed.",
+  add_shape_content: "Add shape content (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group) under Contents or a sub-group.",
+  set_shape_property: "Set a property on a shape content node. Optional keyframe at time.",
 
   // ---------- masks ----------
-  add_mask: "Adds a mask to a layer with vertices/tangents/closed/mode.",
-  set_mask: "Modifies an existing mask: vertices/tangents/closed/mode/inverted/expansion/feather/opacity.",
-  remove_mask: "Removes a mask by 1-based index.",
+  add_mask: "Add a mask with vertices/tangents/closed/mode.",
+  set_mask: "Modify mask vertices/tangents/closed/mode/inverted/expansion/feather/opacity.",
+  remove_mask: "Remove a mask by 1-based index.",
 
   // ---------- markers ----------
-  add_marker: "Adds a marker on a layer (if layerId given) or on the comp. Includes time, optional duration, comment, label, chapter, url, frameTarget.",
-  remove_marker: "Removes a marker by 1-based index.",
+  add_marker: "Add a marker on a layer (layerId) or on the comp. time + optional duration/comment/label/chapter/url/frameTarget.",
+  remove_marker: "Remove a marker by 1-based index.",
 
   // ---------- vision ----------
-  screenshot_frame:
-    "ONE-OFF diagnostic snapshot of a composition at a specific time. Returns a base64 PNG inline (plus dimensions in a metadata text block). " +
-    "USE ONLY to verify visual state at key moments (e.g., the value at a specific keyframe). " +
-    "Do NOT screenshot every frame. Do NOT scrub through time with this. Do NOT call this in a loop. " +
-    "For motion verification, take 2–3 snapshots at chosen times and infer motion from those plus the actual property values returned by get_layer_full.",
-  screenshot_layer:
-    "ONE-OFF diagnostic snapshot of a single layer (isolated by soloing it) at a specific time. Same rules as screenshot_frame: " +
-    "one-off only, never per-frame, never in a loop.",
+  screenshot_frame: "ONE-OFF visual check of a comp at a time. Base64 PNG. Use only at key moments — never per-frame or in a loop. For motion, 2-3 snapshots + get_layer_full property values.",
+  screenshot_layer: "ONE-OFF visual check of a single layer (solo'd) at a time. Same one-off rule as screenshot_frame.",
 
   // ---------- batch ----------
-  run_batch:
-    "Run many ops in a single ExtendScript pass, sharing one undo step. Ideal for 'create 30 layers and set their positions' style work — far faster than individual calls. " +
-    "For >100 ops, this returns a `jobId` immediately and streams progress notifications; subscribe to those or call await_job(jobId). " +
-    "If transactional:true (default), the first error rolls everything back.",
+  run_batch: "Many ops in one ExtendScript pass, one undo step. >500 ops returns a jobId + streams progress; use await_job. transactional:true (default) rolls back on first error.",
 
   // ---------- explore ----------
-  get_project_summary: "Top-level project state: file path, item count, active item, and a flat list of items with type tags.",
-  find_layers: "Search across one or all comps for layers matching name/type/effect filters. Returns layer summaries with comp identifiers.",
+  get_project_summary: "Project state: path, item count, active item, flat item list with type.",
+  find_layers: "Search across one or all comps for layers matching name/type/effect filters.",
 
   // ---------- raw ----------
-  run_jsx:
-    "Escape hatch: run arbitrary ExtendScript inside an undo group. Prefer typed tools first. " +
-    "`comp`, `app`, `OPS` and all helpers are in scope. The last expression's value is JSON-encoded and returned; complex AE objects are coerced to plain props.",
+  run_jsx: "Escape hatch: arbitrary ExtendScript in an undo group. `comp`/`app`/`OPS`/helpers in scope. Use `return X` to send a value back; complex AE objects are coerced to plain props.",
 
   // ---------- jobs ----------
-  await_job: "Blocks until the given job reaches a terminal state (completed/failed/cancelled). Default timeout 10 minutes. Returns the same payload the long-running tool would have returned.",
-  get_job: "Non-blocking status snapshot for a job: progress/total/status/error.",
-  cancel_job: "Sets the cancel flag on a running job. The chunked async loop checks between chunks and stops at the next chunk boundary.",
+  await_job: "Block until job is done. Default 10min timeout. Returns the same payload the tool would have.",
+  get_job: "Non-blocking job status: progress/total/state/error.",
+  cancel_job: "Set cancel flag; chunked loop stops at next boundary.",
 };

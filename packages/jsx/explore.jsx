@@ -157,6 +157,13 @@ OPS.get_layer_full = noUndo(function (args) {
     masks: __serializeMasks(l),
     markers: __serializeMarkers(l),
   };
+  // Visual bounds at the comp's current time — cheap to fetch and removes a
+  // class of "I need to screenshot to know where this renders" round-trips.
+  // Coordinates are in the layer's local space (origin at the Anchor Point).
+  try {
+    var __rect = l.sourceRectAtTime(c.time, false);
+    out.sourceRect = { left: __rect.left, top: __rect.top, width: __rect.width, height: __rect.height, time: c.time };
+  } catch (__e) {}
   if (l instanceof TextLayer) out.text = __serializeText(l);
   if (l instanceof ShapeLayer) {
     try { out.shape = { contents: __serializeShapeContents(l.property("Contents"), 4) }; }

@@ -2,6 +2,7 @@
 // Concatenates packages/jsx/*.jsx in dependency order into ae-panel/jsx/bundle.jsx.
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,6 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const srcDir = path.join(root, "packages", "jsx");
 const outFile = path.join(root, "packages", "ae-panel", "jsx", "bundle.jsx");
+const BUNDLE_ID = "games.engine-room.ae-mcp";
 
 const order = [
   "core.jsx",
@@ -45,3 +47,26 @@ for (const f of order) {
 fs.mkdirSync(path.dirname(outFile), { recursive: true });
 fs.writeFileSync(outFile, parts.join("\n"), "utf8");
 console.log(`Wrote ${outFile} (${parts.length - 2} modules concatenated)`);
+
+// Sync the bundle into the installed panel (mac copy installs only — symlink
+// installs already point at outFile). Without this, `/reload-jsx` would
+// re-evaluate the stale installed bundle and silently no-op the JSX change.
+if (process.platform === "darwin") {
+  const installedBundle = path.join(
+    os.homedir(),
+    "Library", "Application Support", "Adobe", "CEP", "extensions",
+    BUNDLE_ID, "jsx", "bundle.jsx"
+  );
+  if (fs.existsSync(path.dirname(installedBundle))) {
+    try {
+      const installedStat = fs.lstatSync(path.dirname(path.dirname(installedBundle)));
+      // If the panel dir is a symlink to the source, copying is a self-write — skip.
+      if (!installedStat.isSymbolicLink()) {
+        fs.copyFileSync(outFile, installedBundle);
+        console.log(`Synced -> ${installedBundle}`);
+      }
+    } catch {
+      // Best-effort: missing install dir or perms — leave the source bundle in place.
+    }
+  }
+}

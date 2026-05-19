@@ -48,7 +48,7 @@ OPS.create_text_layer = function (args) {
   var c = getCompById(args.compId);
   var l = c.layers.addText(args.text || "");
   if (args.name) l.name = args.name;
-  // Apply font/size/color through TextDocument
+  // Apply font/size/color through TextDocument first — sourceRectAtTime depends on these.
   if (args.font || args.size || args.color) {
     var srcText = l.property("Source Text");
     var td = srcText.value;
@@ -56,6 +56,19 @@ OPS.create_text_layer = function (args) {
     if (args.size) td.fontSize = args.size;
     if (args.color) { td.applyFill = true; td.fillColor = [args.color[0], args.color[1], args.color[2]]; }
     srcText.setValue(td);
+  }
+  // AE's addText() puts the anchor at the bbox center, which surprises agents
+  // who expect position to mean the left edge. Default to 'left' so position
+  // semantically matches the visible start of the text. 'none' opts out.
+  var align = args.anchorAlign === undefined ? "left" : args.anchorAlign;
+  if (align !== "none") {
+    try {
+      var __rect = l.sourceRectAtTime(c.time, false);
+      var __ax = __rect.left;
+      if (align === "center") __ax = __rect.left + __rect.width / 2;
+      else if (align === "right") __ax = __rect.left + __rect.width;
+      l.property("Transform").property("Anchor Point").setValue([__ax, 0, 0]);
+    } catch (__e) {}
   }
   if (args.position) {
     var p = args.position;
