@@ -1,0 +1,421 @@
+import { z } from "zod";
+
+/**
+ * Single source of truth for op input contracts. The MCP server uses these as
+ * tool input schemas (via zod-to-json-schema). The ExtendScript side validates
+ * loosely — it trusts that the MCP server already validated.
+ */
+
+// ---------- primitives ----------
+export const Color = z.tuple([z.number(), z.number(), z.number()]).describe("RGB 0..1");
+export const ColorRGBA = z.tuple([z.number(), z.number(), z.number(), z.number()]);
+export const Vec2 = z.tuple([z.number(), z.number()]);
+export const Vec3 = z.tuple([z.number(), z.number(), z.number()]);
+export const VecAny = z.union([z.number(), Vec2, Vec3, z.array(z.number())]);
+
+export const PropertyPath = z
+  .array(z.union([z.string(), z.number()]))
+  .min(1)
+  .describe("Dotted property path into a layer, e.g. ['Transform','Position'] or ['Effects','Gaussian Blur','Blurriness'].");
+
+export const Interpolation = z.object({
+  in: z.enum(["linear", "bezier", "hold"]).optional(),
+  out: z.enum(["linear", "bezier", "hold"]).optional(),
+  easeIn: z.object({ influence: z.number(), speed: z.number() }).optional(),
+  easeOut: z.object({ influence: z.number(), speed: z.number() }).optional(),
+});
+
+// ---------- comps ----------
+export const ListComps = z.object({}).strict();
+export const GetComp = z.object({ compId: z.number() });
+export const GetCompTree = z.object({ compId: z.number(), depth: z.number().int().min(0).max(8).default(2).optional() });
+export const CreateComp = z.object({
+  name: z.string().default("Untitled"),
+  width: z.number().int().positive().default(1920),
+  height: z.number().int().positive().default(1080),
+  frameRate: z.number().positive().default(30),
+  duration: z.number().positive().default(5),
+  pixelAspect: z.number().positive().default(1).optional(),
+  bgColor: Color.optional(),
+});
+export const SetComp = z.object({
+  compId: z.number(),
+  name: z.string().optional(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  frameRate: z.number().positive().optional(),
+  duration: z.number().positive().optional(),
+  workAreaStart: z.number().optional(),
+  workAreaDuration: z.number().positive().optional(),
+  bgColor: Color.optional(),
+});
+export const DeleteComp = z.object({ compId: z.number() });
+export const SetActiveComp = z.object({ compId: z.number() });
+
+// ---------- layers ----------
+export const ListLayers = z.object({ compId: z.number() });
+export const GetLayerFull = z.object({ compId: z.number(), layerId: z.number(), includeChildren: z.boolean().default(false).optional() });
+
+export const CreateTextLayer = z.object({
+  compId: z.number(),
+  text: z.string().default(""),
+  font: z.string().optional(),
+  size: z.number().positive().optional(),
+  color: Color.optional(),
+  position: VecAny.optional(),
+  name: z.string().optional(),
+});
+export const CreateShapeLayer = z.object({
+  compId: z.number(),
+  name: z.string().optional(),
+  shapes: z.array(z.record(z.string(), z.unknown())).default([]),
+  fill: Color.optional(),
+  stroke: Color.optional(),
+  strokeWidth: z.number().nonnegative().optional(),
+});
+export const CreateSolidLayer = z.object({
+  compId: z.number(),
+  name: z.string().optional(),
+  color: Color,
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  duration: z.number().positive().optional(),
+});
+export const CreateNullLayer = z.object({ compId: z.number(), name: z.string().optional() });
+export const CreateAdjustmentLayer = z.object({ compId: z.number(), name: z.string().optional() });
+export const CreatePrecompLayer = z.object({ compId: z.number(), sourceCompId: z.number(), position: VecAny.optional() });
+export const CreateCameraLayer = z.object({ compId: z.number(), name: z.string().optional(), oneNode: z.boolean().default(false), position: VecAny.optional() });
+export const CreateLightLayer = z.object({
+  compId: z.number(),
+  name: z.string().optional(),
+  lightType: z.enum(["parallel", "spot", "point", "ambient"]).default("point"),
+  color: Color.optional(),
+  intensity: z.number().optional(),
+  position: VecAny.optional(),
+});
+export const DuplicateLayer = z.object({ compId: z.number(), layerId: z.number(), count: z.number().int().positive().default(1).optional() });
+export const DeleteLayer = z.object({ compId: z.number(), layerId: z.number() });
+export const SetLayer = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  name: z.string().optional(),
+  enabled: z.boolean().optional(),
+  locked: z.boolean().optional(),
+  shy: z.boolean().optional(),
+  solo: z.boolean().optional(),
+  threeDLayer: z.boolean().optional(),
+  blendingMode: z.string().optional(),
+  label: z.number().int().min(0).max(16).optional(),
+  inPoint: z.number().optional(),
+  outPoint: z.number().optional(),
+  startTime: z.number().optional(),
+  stretch: z.number().optional(),
+  preserveTransparency: z.boolean().optional(),
+  trackMatte: z.object({ type: z.string(), layerId: z.number().optional() }).optional(),
+});
+export const ParentLayer = z.object({ compId: z.number(), layerId: z.number(), parentLayerId: z.number().nullable() });
+export const ReorderLayer = z.object({ compId: z.number(), layerId: z.number(), toIndex: z.number().int().positive() });
+
+// ---------- transforms ----------
+export const SetTransform = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  time: z.number().optional(),
+  keyframe: z.boolean().default(false).optional(),
+  properties: z.object({
+    position: VecAny.optional(),
+    scale: VecAny.optional(),
+    rotation: z.number().optional(),
+    anchorPoint: VecAny.optional(),
+    opacity: z.number().min(0).max(100).optional(),
+    orientation: Vec3.optional(),
+    xRotation: z.number().optional(),
+    yRotation: z.number().optional(),
+    zRotation: z.number().optional(),
+  }),
+});
+
+// ---------- keyframes ----------
+export const AddKeyframe = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  propertyPath: PropertyPath,
+  time: z.number(),
+  value: VecAny,
+  interpolation: Interpolation.optional(),
+});
+export const RemoveKeyframe = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  propertyPath: PropertyPath,
+  time: z.number(),
+});
+export const GetKeyframes = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  propertyPath: PropertyPath,
+});
+export const SetInterpolation = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  propertyPath: PropertyPath,
+  keyIndex: z.number().int().positive(),
+  in: z.enum(["linear", "bezier", "hold"]).optional(),
+  out: z.enum(["linear", "bezier", "hold"]).optional(),
+});
+export const SetTemporalEase = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  propertyPath: PropertyPath,
+  keyIndex: z.number().int().positive(),
+  easeIn: z.object({ influence: z.number(), speed: z.number() }).optional(),
+  easeOut: z.object({ influence: z.number(), speed: z.number() }).optional(),
+});
+export const SetSpatialTangents = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  propertyPath: PropertyPath,
+  keyIndex: z.number().int().positive(),
+  inTangent: z.array(z.number()).min(2).max(3),
+  outTangent: z.array(z.number()).min(2).max(3),
+});
+
+// ---------- expressions ----------
+export const GetExpression = z.object({ compId: z.number(), layerId: z.number(), propertyPath: PropertyPath });
+export const SetExpression = z.object({ compId: z.number(), layerId: z.number(), propertyPath: PropertyPath, expression: z.string() });
+export const ToggleExpression = z.object({ compId: z.number(), layerId: z.number(), propertyPath: PropertyPath, enabled: z.boolean() });
+export const ClearExpression = z.object({ compId: z.number(), layerId: z.number(), propertyPath: PropertyPath });
+
+// ---------- effects ----------
+export const ListEffects = z.object({ compId: z.number(), layerId: z.number() });
+export const AddEffect = z.object({ compId: z.number(), layerId: z.number(), matchName: z.string() });
+export const RemoveEffect = z.object({ compId: z.number(), layerId: z.number(), effectIndex: z.number().int().positive() });
+export const SetEffectParam = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  effectIndex: z.number().int().positive(),
+  paramName: z.string().optional(),
+  paramMatchName: z.string().optional(),
+  value: VecAny,
+  time: z.number().optional(),
+  keyframe: z.boolean().default(false).optional(),
+});
+export const SetEffectEnabled = z.object({ compId: z.number(), layerId: z.number(), effectIndex: z.number().int().positive(), enabled: z.boolean() });
+export const ListAvailableEffects = z.object({}).strict();
+
+// ---------- text ----------
+export const SetText = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  text: z.string().optional(),
+  font: z.string().optional(),
+  size: z.number().positive().optional(),
+  fillColor: Color.optional(),
+  strokeColor: Color.optional(),
+  strokeWidth: z.number().nonnegative().optional(),
+  tracking: z.number().optional(),
+  leading: z.number().optional(),
+  justification: z.enum(["left", "center", "right", "full"]).optional(),
+  applyFill: z.boolean().optional(),
+  applyStroke: z.boolean().optional(),
+  fauxBold: z.boolean().optional(),
+  fauxItalic: z.boolean().optional(),
+  allCaps: z.boolean().optional(),
+  smallCaps: z.boolean().optional(),
+  baselineShift: z.number().optional(),
+});
+export const AddTextAnimator = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  type: z.enum(["position", "scale", "rotation", "opacity", "tracking", "skew", "fillColor", "strokeColor"]),
+  range: z.object({ start: z.number().default(0), end: z.number().default(100), offset: z.number().default(0) }).optional(),
+});
+
+// ---------- shapes ----------
+export const SetShapePath = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  shapePath: PropertyPath,
+  vertices: z.array(Vec2),
+  inTangents: z.array(Vec2).optional(),
+  outTangents: z.array(Vec2).optional(),
+  closed: z.boolean().default(true).optional(),
+});
+export const AddShapeContent = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  parentGroupPath: PropertyPath.optional(),
+  content: z.record(z.string(), z.unknown()),
+});
+export const SetShapeProperty = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  contentPath: PropertyPath,
+  property: z.string(),
+  value: VecAny,
+  time: z.number().optional(),
+  keyframe: z.boolean().default(false).optional(),
+});
+
+// ---------- masks ----------
+export const AddMask = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  vertices: z.array(Vec2),
+  inTangents: z.array(Vec2).optional(),
+  outTangents: z.array(Vec2).optional(),
+  closed: z.boolean().default(true).optional(),
+  mode: z.string().default("ADD").optional(),
+});
+export const SetMask = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  maskIndex: z.number().int().positive(),
+  vertices: z.array(Vec2).optional(),
+  inTangents: z.array(Vec2).optional(),
+  outTangents: z.array(Vec2).optional(),
+  closed: z.boolean().optional(),
+  mode: z.string().optional(),
+  inverted: z.boolean().optional(),
+  expansion: z.number().optional(),
+  feather: Vec2.optional(),
+  opacity: z.number().optional(),
+});
+export const RemoveMask = z.object({ compId: z.number(), layerId: z.number(), maskIndex: z.number().int().positive() });
+
+// ---------- markers ----------
+export const AddMarker = z.object({
+  compId: z.number(),
+  layerId: z.number().optional(),
+  time: z.number(),
+  duration: z.number().nonnegative().default(0).optional(),
+  comment: z.string().optional(),
+  label: z.number().int().min(0).max(16).optional(),
+  chapter: z.string().optional(),
+  url: z.string().optional(),
+  frameTarget: z.string().optional(),
+});
+export const RemoveMarker = z.object({
+  compId: z.number(),
+  layerId: z.number().optional(),
+  markerIndex: z.number().int().positive(),
+});
+
+// ---------- vision ----------
+export const ScreenshotFrame = z.object({
+  compId: z.number(),
+  time: z.number().optional(),
+  downsample: z.number().int().min(1).max(8).default(1).optional(),
+});
+export const ScreenshotLayer = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  time: z.number().optional(),
+  downsample: z.number().int().min(1).max(8).default(1).optional(),
+});
+
+// ---------- batch ----------
+export const RunBatch = z.object({
+  ops: z.array(z.object({ op: z.string(), args: z.unknown() })),
+  transactional: z.boolean().default(true).optional(),
+  undoGroupName: z.string().default("AE MCP Batch").optional(),
+});
+
+// ---------- explore ----------
+export const GetProjectSummary = z.object({}).strict();
+export const FindLayers = z.object({
+  compId: z.number().optional(),
+  namePattern: z.string().optional(),
+  type: z.string().optional(),
+  hasEffectMatchName: z.string().optional(),
+});
+
+// ---------- raw ----------
+export const RunJsx = z.object({ code: z.string() });
+
+// ---------- jobs ----------
+export const AwaitJob = z.object({ jobId: z.string(), timeoutMs: z.number().int().positive().default(600_000).optional() });
+export const GetJob = z.object({ jobId: z.string() });
+export const CancelJob = z.object({ jobId: z.string() });
+
+/**
+ * Registry: op name -> zod schema. Used by MCP server to register tools and
+ * by the panel/ExtendScript dispatcher as authoritative op list.
+ */
+export const OpSchemas = {
+  // comps
+  list_comps: ListComps,
+  get_comp: GetComp,
+  get_comp_tree: GetCompTree,
+  create_comp: CreateComp,
+  set_comp: SetComp,
+  delete_comp: DeleteComp,
+  set_active_comp: SetActiveComp,
+  // layers
+  list_layers: ListLayers,
+  get_layer_full: GetLayerFull,
+  create_text_layer: CreateTextLayer,
+  create_shape_layer: CreateShapeLayer,
+  create_solid_layer: CreateSolidLayer,
+  create_null_layer: CreateNullLayer,
+  create_adjustment_layer: CreateAdjustmentLayer,
+  create_precomp_layer: CreatePrecompLayer,
+  create_camera_layer: CreateCameraLayer,
+  create_light_layer: CreateLightLayer,
+  duplicate_layer: DuplicateLayer,
+  delete_layer: DeleteLayer,
+  set_layer: SetLayer,
+  parent_layer: ParentLayer,
+  reorder_layer: ReorderLayer,
+  // transforms
+  set_transform: SetTransform,
+  // keyframes
+  add_keyframe: AddKeyframe,
+  remove_keyframe: RemoveKeyframe,
+  get_keyframes: GetKeyframes,
+  set_interpolation: SetInterpolation,
+  set_temporal_ease: SetTemporalEase,
+  set_spatial_tangents: SetSpatialTangents,
+  // expressions
+  get_expression: GetExpression,
+  set_expression: SetExpression,
+  toggle_expression: ToggleExpression,
+  clear_expression: ClearExpression,
+  // effects
+  list_effects: ListEffects,
+  add_effect: AddEffect,
+  remove_effect: RemoveEffect,
+  set_effect_param: SetEffectParam,
+  set_effect_enabled: SetEffectEnabled,
+  list_available_effects: ListAvailableEffects,
+  // text
+  set_text: SetText,
+  add_text_animator: AddTextAnimator,
+  // shapes
+  set_shape_path: SetShapePath,
+  add_shape_content: AddShapeContent,
+  set_shape_property: SetShapeProperty,
+  // masks
+  add_mask: AddMask,
+  set_mask: SetMask,
+  remove_mask: RemoveMask,
+  // markers
+  add_marker: AddMarker,
+  remove_marker: RemoveMarker,
+  // vision
+  screenshot_frame: ScreenshotFrame,
+  screenshot_layer: ScreenshotLayer,
+  // batch
+  run_batch: RunBatch,
+  // explore
+  get_project_summary: GetProjectSummary,
+  find_layers: FindLayers,
+  // raw
+  run_jsx: RunJsx,
+  // jobs
+  await_job: AwaitJob,
+  get_job: GetJob,
+  cancel_job: CancelJob,
+} as const;
+
+export type OpName = keyof typeof OpSchemas;
