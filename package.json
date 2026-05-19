@@ -1,0 +1,26 @@
+{
+  "name": "engine-room-ae-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/shared",
+    "packages/mcp-server",
+    "packages/ae-panel"
+  ],
+  "scripts": {
+    "build": "npm run -w @engineroom/shared build && npm run -w @engineroom/mcp-server build && node scripts/bundle-jsx.mjs",
+    "build:jsx": "node scripts/bundle-jsx.mjs",
+    "build:ts": "npm run -w @engineroom/shared build && npm run -w @engineroom/mcp-server build",
+    "watch:ts": "npm run -w @engineroom/mcp-server watch",
+    "enable:debug": "node scripts/enable-debug.mjs",
+    "install:panel": "node scripts/install-panel.mjs",
+    "uninstall:panel": "node scripts/uninstall-panel.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "start": "node packages/mcp-server/dist/index.js",
+    "inspect": "npx @modelcontextprotocol/inspector node packages/mcp-server/dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

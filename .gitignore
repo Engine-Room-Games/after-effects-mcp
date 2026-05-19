@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.env
+.env.*
+packages/ae-panel/jsx/bundle.jsx
+packages/ae-panel/node_modules/
+.bak-*
