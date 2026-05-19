@@ -2,25 +2,13 @@
 
 A high-fidelity Model Context Protocol (MCP) server for **Adobe After Effects 2026**. Built to let an LLM agent do *anything* animation-related in AE: comps, layers, transforms, keyframes (with interpolation/easing/tangents), expressions, effects, text, shapes, masks, markers, one-off screenshots, and bulk batched ops with live progress notifications. **58 tools**.
 
-## Why another AE MCP server
+## Highlights
 
-Existing AE MCP servers (Dakkshin, p10q, ishu86, TheLlamainator, Aodaruma) all share five flaws:
-
-1. **Slow file-based IPC** — write `commands.json`, poll for `response.json`. Round-trip is hundreds of ms.
-2. **Shallow tool responses** — the agent has to call 5 tools to learn what one tool should have returned.
-3. **No vision** — or only via the multi-second render queue.
-4. **No bulk** — every operation is a separate ExtendScript round-trip.
-5. **No progress signal** — long jobs are black boxes.
-
-This server fixes all five:
-
-| Problem | Fix |
-|---|---|
-| Slow IPC | A CEP panel inside AE runs a local **HTTP + WebSocket server**. No polling. |
-| Shallow responses | `get_layer_full` / `get_comp_tree` / `list_effects` return the entire object in one call — transform values + keyframes + expressions + effects with full param introspection + masks + markers + content-specific extras. |
-| Vision | `screenshot_frame` / `screenshot_layer` use `CompItem.saveFrameToPng` and return base64 PNG as MCP image content. Tool descriptions explicitly tell the agent these are **one-off diagnostic snapshots — never per-frame, never in a loop.** |
-| Bulk | `run_batch` runs many ops in a single ExtendScript pass under one undo step. >100 ops auto-chunk and stream progress. |
-| Progress | Long jobs return a `jobId` immediately and stream `notifications/progress` over the same WebSocket. A blocking `await_job(jobId)` tool exists for clients that don't render notifications. |
+- **CEP panel + HTTP/WebSocket bridge.** A panel inside AE runs a local server on `127.0.0.1:7777`; the MCP server connects out. No file polling.
+- **Deep one-shot reads.** `get_layer_full` / `get_comp_tree` / `list_effects` return the entire object in one call — transform values + keyframes + expressions + effects with full param introspection + masks + markers + content-specific extras.
+- **Vision.** `screenshot_frame` / `screenshot_layer` use `CompItem.saveFrameToPng` and return base64 PNG as MCP image content. Tool descriptions explicitly tell the agent these are **one-off diagnostic snapshots — never per-frame, never in a loop.**
+- **Bulk.** `run_batch` runs many ops in a single ExtendScript pass under one undo step. Batches over 100 ops auto-chunk and stream progress.
+- **Progress + completion signal.** Long jobs return a `jobId` immediately and stream `notifications/progress` over the WebSocket. A blocking `await_job(jobId)` tool exists for clients that don't render notifications.
 
 ## Architecture
 
