@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "packages", "ae-panel");
-const bundleId = "com.engineroom.ae-mcp";
+const bundleId = "games.engine-room.ae-mcp";
 
 if (process.platform !== "darwin") {
   console.error("This installer targets macOS. Adapt manually for Windows.");

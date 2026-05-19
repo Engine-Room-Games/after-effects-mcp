@@ -24,7 +24,7 @@ check("CEP PlayerDebugMode (12)", () => {
 });
 
 check("Panel installed", () => {
-  const p = path.join(os.homedir(), "Library", "Application Support", "Adobe", "CEP", "extensions", "com.engineroom.ae-mcp");
+  const p = path.join(os.homedir(), "Library", "Application Support", "Adobe", "CEP", "extensions", "games.engine-room.ae-mcp");
   if (!fs.existsSync(p)) return fail(`missing at ${p} — run npm run install:panel`);
   const manifest = path.join(p, "CSXS", "manifest.xml");
   if (!fs.existsSync(manifest)) return fail(`manifest missing at ${manifest}`);

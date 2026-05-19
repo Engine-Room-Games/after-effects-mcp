@@ -16,7 +16,7 @@ export class BridgeUnreachableError extends Error {
       "  3. Install the panel (one-time):",
       "       npm run install:panel",
       "     This symlinks packages/ae-panel into",
-      "     ~/Library/Application Support/Adobe/CEP/extensions/com.engineroom.ae-mcp/",
+      "     ~/Library/Application Support/Adobe/CEP/extensions/games.engine-room.ae-mcp/",
       "  4. The panel auto-loads on AE launch. To force-show for debugging:",
       "       Window > Extensions > AE MCP Bridge",
     ].filter(Boolean).join("\n");

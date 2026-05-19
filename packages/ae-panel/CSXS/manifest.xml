@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="11.0" ExtensionBundleId="com.engineroom.ae-mcp" ExtensionBundleVersion="0.1.0"
+<ExtensionManifest Version="11.0" ExtensionBundleId="games.engine-room.ae-mcp" ExtensionBundleVersion="0.1.0"
                    ExtensionBundleName="AE MCP Bridge" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.engineroom.ae-mcp.panel" Version="0.1.0" />
+    <Extension Id="games.engine-room.ae-mcp.panel" Version="0.1.0" />
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
@@ -16,7 +16,7 @@
     </RequiredRuntimeList>
   </ExecutionEnvironment>
   <DispatchInfoList>
-    <Extension Id="com.engineroom.ae-mcp.panel">
+    <Extension Id="games.engine-room.ae-mcp.panel">
       <DispatchInfo>
         <Resources>
           <MainPath>./client/index.html</MainPath>

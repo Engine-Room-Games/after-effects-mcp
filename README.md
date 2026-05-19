@@ -56,7 +56,7 @@ Install the panel into AE:
 npm run install:panel
 ```
 
-This copies `packages/ae-panel/` into `~/Library/Application Support/Adobe/CEP/extensions/com.engineroom.ae-mcp/` and also copies the `ws` Node module the panel needs at runtime. (Use `npm run install:panel -- --symlink` if you want live edits to flow through without re-running install.)
+This copies `packages/ae-panel/` into `~/Library/Application Support/Adobe/CEP/extensions/games.engine-room.ae-mcp/` and also copies the `ws` Node module the panel needs at runtime. (Use `npm run install:panel -- --symlink` if you want live edits to flow through without re-running install.)
 
 Launch After Effects 2026. The "AE MCP Bridge" panel auto-loads. Verify everything's green:
 

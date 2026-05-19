@@ -9,7 +9,7 @@ if (process.platform !== "darwin") {
 }
 
 const cepDir = path.join(os.homedir(), "Library", "Application Support", "Adobe", "CEP", "extensions");
-const targetPath = path.join(cepDir, "com.engineroom.ae-mcp");
+const targetPath = path.join(cepDir, "games.engine-room.ae-mcp");
 
 if (!fs.existsSync(targetPath) && !fs.lstatSync(targetPath, { throwIfNoEntry: false })) {
   console.log("Nothing to remove at " + targetPath);
