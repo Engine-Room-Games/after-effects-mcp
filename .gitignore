@@ -8,3 +8,4 @@ packages/ae-panel/jsx/bundle.jsx
 packages/ae-panel/node_modules/
 .bak-*
 .mcp.json
+.idea/
