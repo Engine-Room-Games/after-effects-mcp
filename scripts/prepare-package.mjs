@@ -50,6 +50,18 @@ if (!firstLine.startsWith("#!")) {
   console.error("Bundle lost its hashbang — the published bin would not be executable.");
   process.exit(1);
 }
+
+// npm's publish-time normalization silently DROPS bin entries whose path starts
+// with "./" — it only warns, so the package publishes without an executable and
+// `npx` breaks. `npm pack` does not apply the same rule, so a local tarball test
+// will not catch it. Keep bin paths bare.
+const manifest = JSON.parse(fs.readFileSync(path.join(serverPkg, "package.json"), "utf8"));
+for (const [name, target] of Object.entries(manifest.bin ?? {})) {
+  if (typeof target !== "string" || target.startsWith("./") || target.startsWith("../")) {
+    console.error(`bin["${name}"] is "${target}" — npm will strip it on publish. Use a bare path like "bin/server.js".`);
+    process.exit(1);
+  }
+}
 console.log(`Bundled ${path.relative(root, outFile)} (${(fs.statSync(outFile).size / 1024).toFixed(1)} KB)`);
 
 // Vendor the panel. node_modules is excluded: setup_panel re-vendors `ws` from

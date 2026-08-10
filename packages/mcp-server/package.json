@@ -25,7 +25,7 @@
     "claude"
   ],
   "bin": {
-    "after-effects-mcp": "./bin/server.js"
+    "after-effects-mcp": "bin/server.js"
   },
   "publishConfig": {
     "access": "public"

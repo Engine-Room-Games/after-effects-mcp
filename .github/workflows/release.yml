@@ -87,5 +87,18 @@ jobs:
               c.kill();process.exit(0);
             })();'
 
+      # npm only *warns* when it rewrites the manifest at publish time, and a
+      # dropped bin entry is invisible until someone's npx fails. Treat any
+      # auto-correction as a release blocker.
+      - name: Fail on manifest auto-correction
+        run: |
+          set -euo pipefail
+          out=$(npm publish -w @engine-room/after-effects-mcp --dry-run 2>&1)
+          echo "$out"
+          if grep -qE "invalid and removed|auto-corrected" <<<"$out"; then
+            echo "::error::npm rewrote the manifest on publish — fix package.json before releasing." >&2
+            exit 1
+          fi
+
       - name: Publish
         run: npm publish -w @engine-room/after-effects-mcp
