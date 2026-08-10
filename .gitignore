@@ -1,5 +1,11 @@
 node_modules/
 dist/
+# Generated at pack time by scripts/prepare-package.mjs
+packages/mcp-server/bin/
+packages/mcp-server/panel/
+packages/mcp-server/README.md
+packages/mcp-server/LICENSE
+*.tgz
 .DS_Store
 *.log
 .env
@@ -7,5 +13,7 @@ dist/
 packages/ae-panel/jsx/bundle.jsx
 packages/ae-panel/node_modules/
 .bak-*
-.mcp.json
+# Root-only: a developer's local client config. Anchored with a leading slash so
+# it does not swallow plugin/.mcp.json, which is a shipped part of the plugin.
+/.mcp.json
 .idea/

@@ -5,20 +5,12 @@ export class BridgeUnreachableError extends Error {
   }
   static message(port: number, cause?: Error): string {
     return [
-      `Cannot reach the After Effects MCP panel at http://127.0.0.1:${port}.`,
+      `Cannot reach the After Effects panel at http://127.0.0.1:${port}.`,
       cause ? `Underlying error: ${cause.message}` : "",
       "",
-      "Fix:",
-      "  1. Open After Effects 2026.",
-      "  2. Ensure PlayerDebugMode is on:",
-      "       defaults write com.adobe.CSXS.12 PlayerDebugMode 1",
-      "     (Restart AE after toggling — and reboot once if it doesn't take.)",
-      "  3. Install the panel (one-time):",
-      "       npm run install:panel",
-      "     This symlinks packages/ae-panel into",
-      "     ~/Library/Application Support/Adobe/CEP/extensions/games.engine-room.ae-mcp/",
-      "  4. The panel auto-loads on AE launch. To force-show for debugging:",
-      "       Window > Extensions > AE MCP Bridge",
+      "Call the check_setup tool to find out why, then relay its nextSteps to the user.",
+      "In most cases the fix is either running setup_panel (installs the panel) or",
+      "simply opening After Effects.",
     ].filter(Boolean).join("\n");
   }
 }

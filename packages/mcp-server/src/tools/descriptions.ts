@@ -61,7 +61,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- shapes ----------
   set_shape_path: "Replace a shape path with new vertices/tangents/closed.",
-  add_shape_content: "Add shape content (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group) under Contents or a sub-group.",
+  add_shape_content: "Add shape content under Contents or a sub-group. `content.type` picks the node (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group); the other keys set its properties by friendly name (e.g. rect: size/position/roundness; fill: color/opacity; stroke: color/width/lineCap; path: vertices/inTangents/outTangents/closed). Unknown or unsettable keys are NOT ignored — the whole node is rolled back and an error lists them, so trust a success result. Use get_layer_full to see exact property names.",
   set_shape_property: "Set a property on a shape content node. Optional keyframe at time.",
 
   // ---------- masks ----------
@@ -74,8 +74,8 @@ export const descriptions: Record<string, string> = {
   remove_marker: "Remove a marker by 1-based index.",
 
   // ---------- vision ----------
-  screenshot_frame: "ONE-OFF visual check of a comp at a time. Base64 PNG. Use only at key moments — never per-frame or in a loop. For motion, 2-3 snapshots + get_layer_full property values.",
-  screenshot_layer: "ONE-OFF visual check of a single layer (solo'd) at a time. Same one-off rule as screenshot_frame.",
+  screenshot_frame: "ONE-OFF visual check of a comp at a time. Base64 PNG. Use only at key moments — never per-frame or in a loop. For motion, 2-3 snapshots + get_layer_full property values. Set downsample:2 (or 3-4 on 4K comps) to keep the image small — full-res 4K frames are large enough to exhaust the context. The result reports the dimensions actually returned, and warns if a requested downsample could not be applied.",
+  screenshot_layer: "ONE-OFF visual check of a single layer (solo'd) at a time. Same one-off rule and same downsample guidance as screenshot_frame.",
 
   // ---------- batch ----------
   run_batch: "Many ops in one ExtendScript pass, one undo step. >500 ops returns a jobId + streams progress; use await_job. transactional:true (default) rolls back on first error.",
@@ -91,4 +91,8 @@ export const descriptions: Record<string, string> = {
   await_job: "Block until job is done. Default 10min timeout. Returns the same payload the tool would have.",
   get_job: "Non-blocking job status: progress/total/state/error.",
   cancel_job: "Set cancel flag; chunked loop stops at next boundary.",
+
+  // ---------- setup ----------
+  check_setup: "Diagnose the After Effects connection: panel installed, up to date, Adobe debug preference on, AE running, bridge answering. Read-only and safe to call any time. Call this FIRST whenever another tool reports it cannot reach After Effects, then relay `nextSteps` to the user in plain language.",
+  setup_panel: "Install or refresh the After Effects panel and enable the Adobe preference AE needs to load it. Run this when check_setup reports the panel is missing or out of date. It writes to the user's Adobe CEP extensions folder and sets a user-level Adobe preference — tell the user what it will do before calling it. Afterwards, AE must be restarted; if the preference was newly enabled, a one-time Mac reboot may also be needed.",
 };

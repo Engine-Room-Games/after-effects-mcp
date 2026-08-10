@@ -4,7 +4,9 @@ This file is for future Claude Code sessions working in this repo. Humans readin
 
 ## What this project is
 
-An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, one-off screenshots, bulk batches. ~58 tools. macOS-only for now.
+An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, one-off screenshots, bulk batches. 60 tools. macOS-only for now.
+
+It ships three ways: as an npm package (`npx engine-room-ae-mcp`), as a Claude Code plugin (this repo is also its marketplace), and as a git checkout for development.
 
 ## How the pieces talk
 
@@ -43,8 +45,13 @@ The MCP server is stateless except for an in-memory `JobManager`. The panel is t
 | `packages/mcp-server/src/tools/descriptions.ts` | All tool descriptions in one file — including the verbatim screenshot guidance. |
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. |
 | `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool. |
+| `packages/mcp-server/src/setup/{check,install,paths}.ts` | Backs `check_setup` / `setup_panel`. Never touches the bridge — it exists for the case where the panel isn't installed yet. |
+| `packages/mcp-server/src/cli/init.ts` | `engine-room-ae-mcp init <dir>` project scaffold. Templates are inline string constants so nothing extra has to be packaged. |
+| `plugin/` | The Claude Code plugin: `.mcp.json` + `skills/{after-effects,ae-setup}`. Skills carry tool knowledge only — never anyone's house style. |
+| `.claude-plugin/marketplace.json` | Marketplace catalog. Users add this repo, then install `after-effects@engine-room`. |
 | `scripts/bundle-jsx.mjs` | Concatenates `packages/jsx/*.jsx` in dependency order into `packages/ae-panel/jsx/bundle.jsx`. Run via `npm run build:jsx`. |
-| `scripts/install-panel.mjs` | Copies (or symlinks with `--symlink`) the panel into `~/Library/Application Support/Adobe/CEP/extensions/`, also copies `ws` into the destination's `node_modules`. |
+| `scripts/prepare-package.mjs` | `prepack` hook. esbuild-bundles the server to `bin/server.js` (inlining `@engineroom/shared`, which is never published separately) and vendors the panel to `panel/`. |
+| `scripts/install-panel.mjs` | Dev equivalent of `setup_panel`. Copies (or symlinks with `--symlink`) the panel into `~/Library/Application Support/Adobe/CEP/extensions/`. |
 
 ## The op pipeline (in detail)
 
@@ -62,7 +69,8 @@ The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring 
 
 - **Vision** (`screenshot_frame`, `screenshot_layer`): JSX returns `{path, width, height, time, compId, layerId?}`. Panel reads the PNG, base64-encodes, returns `{base64, bytes, ...}`. Server packages as MCP `image` content block.
 - **Long batch** (`run_batch` >100 ops): JSX returns `{jobId, async:true, total}`. Panel drives `_continue_job` in chunks of 25 in the background, broadcasting `progress` events on WS. Server forwards WS progress as `notifications/progress` keyed by the request's `progressToken`.
-- **Server-resident** (`await_job`, `get_job`, `cancel_job`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag).
+- **Server-resident** (`await_job`, `get_job`, `cancel_job`, `check_setup`, `setup_panel`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag). They're still listed in `OpSchemas` so `tools/list` picks them up — membership in `SERVER_OPS` is what stops the forwarding.
+- **Downsampled screenshots**: `downsample` is honoured in the *panel*, not the JSX — `saveFrameToPng` always writes full comp resolution, so `main.js` shrinks the file with `sips` after the write settles and reports the dimensions actually produced. If `sips` fails it returns the full-res frame plus a `warning`; it never silently ignores the request.
 
 ## Conventions
 
@@ -71,6 +79,7 @@ The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring 
 - **One undo step per request.** `dispatch()` wraps the handler in `app.beginUndoGroup`/`endUndoGroup`. Long batches manage their own undo manually (`run_batch.__meta.noUndo = true`).
 - **MCP server stdout is sacred.** All logs go to stderr via `util/logger.ts`. Touching `console.log` anywhere in mcp-server will corrupt the JSON-RPC stream.
 - **Tool descriptions are written for LLMs.** Tell the agent (a) what the tool does, (b) when to reach for it, (c) what to avoid. Screenshot descriptions especially must say "one-off, do NOT screenshot every frame."
+- **Never report success for work that didn't happen.** An agent can only correct a failure it's told about, so a swallowed error is worse than a thrown one. `add_shape_content` is the reference case: it resolves every key first, and if any is unresolvable it removes the node it created and throws with the offending keys named, rather than leaving a half-built shape behind an `{ok:true}`. Schemas that accept free-form objects must be `.strict()` for the same reason — zod's default is to strip unknown keys silently.
 
 ## Build + run
 
@@ -81,7 +90,11 @@ npm run build:jsx           # only rebuild bundle.jsx (fast iteration)
 npm run watch:ts            # tsc --watch for mcp-server
 npm run doctor              # sanity checks (debug mode, install, port, AE running)
 npm run inspect             # MCP Inspector UI against the server
+npm run new:project <dir>   # scaffold a designer project folder
+npm run pack:check          # build + `npm pack --dry-run` to preview the tarball
 ```
+
+Publishing: `npm publish -w engine-room-ae-mcp` (the `prepack` hook builds `bin/` and `panel/` first). The workspace root and `@engineroom/shared` stay private — `shared` is inlined into the bundle, so it is never published on its own. Verify a release by installing the tarball into an empty directory and running the binary; the published layout puts the panel at `<pkg>/panel`, which is a different path from the checkout's `packages/ae-panel`.
 
 `build:jsx` writes both the source bundle and, if the panel is installed, the installed bundle at `~/Library/.../<bundleId>/jsx/bundle.jsx`. So `/reload-jsx` always sees fresh content — no manual `cp` step. (If you installed with `--symlink`, the installed path *is* the source path; the sync is a no-op.)
 
@@ -104,6 +117,8 @@ npm run inspect             # MCP Inspector UI against the server
 - CEP panels installed without signing require `PlayerDebugMode=1`. The user does this once via `npm run enable:debug` and a reboot.
 - **Anthropic API requires JSON Schema draft 2020-12** for tool input schemas. `zod-to-json-schema` 3.x has no 2020-12 target — `openApi3` emits `nullable` (rejected) and `jsonSchema7` emits draft-07 tuple form `items:[...]` (rejected; 2020-12 wants `prefixItems`). `server.ts` uses `jsonSchema7` + `$refStrategy:"none"` + a `toDraft2020()` post-pass that rewrites tuples. Don't switch back to `openApi3`.
 - **`setTemporalEaseAtKey` on spatial properties takes a single-element array**, regardless of 2D/3D — for Position/Anchor Point, the ease is along the motion path. Non-spatial multi-dim (Scale, Color) need one entry per dimension. `keyframes.jsx` branches on `prop.isSpatial`. If you ever see "Value array does not have 1 elements", a spatial property is being fed N entries.
+- **`panelSourceDir()` must prefer the checkout over the vendored copy.** After any `npm pack`, a stale `packages/mcp-server/panel/` is left on disk (gitignored). If that were checked first, `setup_panel` in a dev checkout would install the stale copy instead of what you're editing. Order matters in `setup/paths.ts`.
+- **esbuild preserves the entry point's hashbang.** Adding a `banner` with `#!/usr/bin/env node` produces a second one on line 2 and the published binary dies with a syntax error. `prepare-package.mjs` asserts there is exactly one.
 - **`addText()` anchors point text at the bbox center**, not the baseline-left an agent would assume. `paragraphJustification: LEFT_JUSTIFY` doesn't move the anchor for point text. `create_text_layer` defaults `anchorAlign: "left"` so `position` semantically matches the visible left edge; pass `"center"`/`"right"`/`"none"` to override.
 
 ## Out of scope (v1)

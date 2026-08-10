@@ -243,11 +243,95 @@ export const SetShapePath = z.object({
   outTangents: z.array(Vec2).optional(),
   closed: z.boolean().default(true).optional(),
 });
+/**
+ * One closed variant per shape node type. These are `.strict()` on purpose: an
+ * unrecognised key must be a loud validation error, because zod's default
+ * behaviour is to strip unknown keys, which would let a typo reach ExtendScript
+ * as a silently-missing property and produce an empty shape that still reports
+ * success.
+ */
+const ShapeColor = z.union([Color, ColorRGBA]);
+
+export const ShapeContent = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("rect"),
+    name: z.string().optional(),
+    size: Vec2.optional(),
+    position: Vec2.optional(),
+    roundness: z.number().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("ellipse"),
+    name: z.string().optional(),
+    size: Vec2.optional(),
+    position: Vec2.optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("star"),
+    name: z.string().optional(),
+    starType: z.number().optional().describe("1 = star, 2 = polygon"),
+    points: z.number().optional().describe("Number of points/sides"),
+    position: Vec2.optional(),
+    rotation: z.number().optional(),
+    innerRadius: z.number().optional(),
+    outerRadius: z.number().optional(),
+    innerRoundness: z.number().optional(),
+    outerRoundness: z.number().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("path"),
+    name: z.string().optional(),
+    vertices: z.array(Vec2).optional().describe("Bezier vertices in layer space"),
+    inTangents: z.array(Vec2).optional(),
+    outTangents: z.array(Vec2).optional(),
+    closed: z.boolean().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("fill"),
+    name: z.string().optional(),
+    color: ShapeColor.optional(),
+    opacity: z.number().optional().describe("0..100"),
+    fillRule: z.number().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("stroke"),
+    name: z.string().optional(),
+    color: ShapeColor.optional(),
+    opacity: z.number().optional().describe("0..100"),
+    width: z.number().optional(),
+    lineCap: z.number().optional(),
+    lineJoin: z.number().optional(),
+    miterLimit: z.number().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("trim"),
+    name: z.string().optional(),
+    start: z.number().optional().describe("0..100"),
+    end: z.number().optional().describe("0..100"),
+    offset: z.number().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("repeater"),
+    name: z.string().optional(),
+    copies: z.number().optional(),
+    offset: z.number().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("merge"),
+    name: z.string().optional(),
+    mode: z.number().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("group"),
+    name: z.string().optional(),
+  }).strict(),
+]);
+
 export const AddShapeContent = z.object({
   compId: z.number(),
   layerId: z.number(),
   parentGroupPath: PropertyPath.optional(),
-  content: z.record(z.string(), z.unknown()),
+  content: ShapeContent,
 });
 export const SetShapeProperty = z.object({
   compId: z.number(),
@@ -336,6 +420,15 @@ export const FindLayers = z.object({
 export const RunJsx = z.object({ code: z.string() });
 
 // ---------- jobs ----------
+// ---------- setup (handled in the MCP server, never forwarded to the panel) ----------
+export const CheckSetup = z.object({}).strict();
+export const SetupPanel = z.object({
+  enableDebugMode: z.boolean().default(true).optional()
+    .describe("Also enable Adobe's PlayerDebugMode preference, which AE requires to load this unsigned panel. Default true."),
+  force: z.boolean().default(false).optional()
+    .describe("Replace an existing symlinked (development) install with a copy. Default false."),
+}).strict();
+
 export const AwaitJob = z.object({ jobId: z.string(), timeoutMs: z.number().int().positive().default(600_000).optional() });
 export const GetJob = z.object({ jobId: z.string() });
 export const CancelJob = z.object({ jobId: z.string() });
@@ -418,6 +511,9 @@ export const OpSchemas = {
   await_job: AwaitJob,
   get_job: GetJob,
   cancel_job: CancelJob,
+  // setup
+  check_setup: CheckSetup,
+  setup_panel: SetupPanel,
 } as const;
 
 export type OpName = keyof typeof OpSchemas;

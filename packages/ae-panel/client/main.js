@@ -10,6 +10,7 @@
   var fs = require("fs");
   var os = require("os");
   var http = require("http");
+  var execFileSync = require("child_process").execFileSync;
   var WebSocket;
   try { WebSocket = require("ws"); }
   catch (e) {
@@ -144,12 +145,46 @@
       })();
     });
   }
-  function readPngAsBase64(file) {
+  // Shrink the PNG in place with `sips` (macOS built-in, no npm dependency).
+  // saveFrameToPng always writes at full comp resolution, so this is the only
+  // place `downsample` can be honoured. Returns the dimensions actually
+  // produced — never claims a resize that did not happen.
+  function shrinkPng(file, width, height, factor) {
+    var outW = Math.max(1, Math.round(width / factor));
+    var outH = Math.max(1, Math.round(height / factor));
+    try {
+      // sips takes height then width.
+      execFileSync("sips", ["-z", String(outH), String(outW), file], { stdio: "ignore" });
+      return { width: outW, height: outH, downsample: factor };
+    } catch (e) {
+      log("warn", "downsample " + factor + "x failed, returning full resolution: " + e.message);
+      return {
+        width: width,
+        height: height,
+        downsample: 1,
+        warning: "downsample=" + factor + " was requested but `sips` failed (" + e.message +
+          "); returning the full-resolution frame instead.",
+      };
+    }
+  }
+
+  function readPngAsBase64(file, downsample, width, height) {
     return waitForPngFile(file, 5000).then(function () {
+      // Resize only after the file has finished being written.
+      var dims = (downsample && downsample > 1)
+        ? shrinkPng(file, width, height, downsample)
+        : { width: width, height: height, downsample: 1 };
       var buf = fs.readFileSync(file);
       var b64 = buf.toString("base64");
       try { fs.unlinkSync(file); } catch (e) {}
-      return { base64: b64, bytes: buf.length };
+      return {
+        base64: b64,
+        bytes: buf.length,
+        width: dims.width,
+        height: dims.height,
+        downsample: dims.downsample,
+        warning: dims.warning,
+      };
     });
   }
 
@@ -179,11 +214,15 @@
   function handleOp(op, args, progressToken) {
     // Vision ops: run JSX, then read PNG and base64-encode on Node side.
     if (op === "screenshot_frame" || op === "screenshot_layer") {
+      var factor = (args && args.downsample) ? Math.round(args.downsample) : 1;
       return runOp(op, args).then(function (info) {
-        return readPngAsBase64(info.path).then(function (img) {
-          return {
-            width: info.width,
-            height: info.height,
+        return readPngAsBase64(info.path, factor, info.width, info.height).then(function (img) {
+          var out = {
+            width: img.width,
+            height: img.height,
+            fullWidth: info.width,
+            fullHeight: info.height,
+            downsample: img.downsample,
             time: info.time,
             compId: info.compId,
             layerId: info.layerId,
@@ -191,6 +230,8 @@
             base64: img.base64,
             bytes: img.bytes,
           };
+          if (img.warning) out.warning = img.warning;
+          return out;
         });
       });
     }

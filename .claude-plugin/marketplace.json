@@ -1,0 +1,14 @@
+{
+  "name": "engine-room",
+  "owner": {
+    "name": "Engine Room",
+    "url": "https://github.com/Engine-Room-Games"
+  },
+  "plugins": [
+    {
+      "name": "after-effects",
+      "source": "./plugin",
+      "description": "Drive Adobe After Effects from Claude — 60 tools plus the craft knowledge to use them well. macOS, After Effects 2026."
+    }
+  ]
+}

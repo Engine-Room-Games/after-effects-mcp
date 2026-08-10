@@ -1,0 +1,20 @@
+{
+  "name": "after-effects",
+  "displayName": "After Effects",
+  "version": "0.1.0",
+  "description": "Drive Adobe After Effects from Claude — comps, layers, keyframes, expressions, effects, text, shapes and masks, plus the craft knowledge to use them well.",
+  "author": {
+    "name": "Engine Room",
+    "url": "https://github.com/Engine-Room-Games"
+  },
+  "homepage": "https://github.com/Engine-Room-Games/after-effects-mcp#readme",
+  "repository": "https://github.com/Engine-Room-Games/after-effects-mcp",
+  "license": "MIT",
+  "keywords": [
+    "after-effects",
+    "adobe",
+    "motion-graphics",
+    "animation",
+    "video"
+  ]
+}

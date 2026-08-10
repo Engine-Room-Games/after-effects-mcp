@@ -10,6 +10,8 @@ import { WsClient } from "./bridge/wsClient.js";
 import { JobManager } from "./jobs/manager.js";
 import { descriptions } from "./tools/descriptions.js";
 import { AeError, BridgeUnreachableError } from "./util/errors.js";
+import { checkSetup } from "./setup/check.js";
+import { installPanel } from "./setup/install.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
 import { z } from "zod";
@@ -20,8 +22,10 @@ const { OpSchemas } = schemas;
 const VISION_OPS = new Set(["screenshot_frame", "screenshot_layer"]);
 // Ops that may return an async jobId envelope from the panel.
 const ASYNC_OPS = new Set(["run_batch"]);
-// Jobs/await/etc. are handled in-server, not forwarded as-is.
-const SERVER_OPS = new Set(["await_job", "get_job", "cancel_job"]);
+// Jobs/await/etc. are handled in-server, not forwarded as-is. The setup ops
+// especially must never touch the bridge — they exist precisely for the case
+// where the panel is not installed yet.
+const SERVER_OPS = new Set(["await_job", "get_job", "cancel_job", "check_setup", "setup_panel"]);
 
 // Schema for await_job/get_job/cancel_job (defined inline in shared/schemas.ts).
 const AwaitJobSchema = schemas.AwaitJob;
@@ -91,6 +95,16 @@ export function createServer() {
           jobs.cancel(a.jobId);
           return textResult({ ok: true });
         }
+        if (name === "check_setup") {
+          return textResult(await checkSetup());
+        }
+        if (name === "setup_panel") {
+          const a = schemas.SetupPanel.parse(rawArgs);
+          const installed = await installPanel({ enableDebugMode: a.enableDebugMode, force: a.force });
+          // Re-run the diagnostic so the agent sees the resulting state rather
+          // than having to guess whether the install was sufficient.
+          return textResult({ ...installed, setup: await checkSetup() });
+        }
       } catch (e) {
         return errorResult((e as Error).message);
       }
@@ -125,9 +139,26 @@ export function createServer() {
 
       // Vision: package as MCP image content
       if (VISION_OPS.has(name) && isVisionResult(result)) {
-        const v = result as { width: number; height: number; time: number; compId: number; layerId?: number; base64: string; bytes: number };
+        const v = result as {
+          width: number; height: number; fullWidth?: number; fullHeight?: number;
+          downsample?: number; time: number; compId: number; layerId?: number;
+          base64: string; bytes: number; warning?: string;
+        };
         return imageContent(
-          { width: v.width, height: v.height, time: v.time, compId: v.compId, layerId: v.layerId, bytes: v.bytes },
+          {
+            width: v.width,
+            height: v.height,
+            fullWidth: v.fullWidth,
+            fullHeight: v.fullHeight,
+            downsample: v.downsample,
+            time: v.time,
+            compId: v.compId,
+            layerId: v.layerId,
+            bytes: v.bytes,
+            // Surfaced when a requested downsample could not be applied, so the
+            // agent knows it is looking at a full-resolution frame.
+            warning: v.warning,
+          },
           v.base64
         );
       }
