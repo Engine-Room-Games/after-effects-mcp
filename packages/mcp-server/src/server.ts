@@ -34,7 +34,7 @@ const CancelJobSchema = schemas.CancelJob;
 
 export function createServer() {
   const server = new Server(
-    { name: "after-effects-mcp", version: "0.1.0" },
+    { name: "after-effects-mcp", version: "0.1.1" },
     { capabilities: { tools: {}, logging: {} } }
   );
 

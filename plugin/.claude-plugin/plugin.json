@@ -1,7 +1,7 @@
 {
   "name": "after-effects",
   "displayName": "After Effects",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Control Adobe After Effects with AI — describe the animation you want and it gets built: layers, keyframes, effects, expressions and text, all editable afterwards.",
   "author": {
     "name": "Engine Room",
