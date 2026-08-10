@@ -2,7 +2,7 @@
   "name": "@engine-room/after-effects-mcp",
   "version": "0.1.0",
   "type": "module",
-  "description": "MCP server that lets an AI agent drive Adobe After Effects — comps, layers, keyframes, expressions, effects, text, shapes, masks and screenshots.",
+  "description": "Control Adobe After Effects with AI — describe the animation you want and it gets built: layers, keyframes, effects, expressions and text, all editable afterwards.",
   "license": "MIT",
   "author": "Engine Room",
   "homepage": "https://github.com/Engine-Room-Games/after-effects-mcp#readme",
@@ -15,14 +15,16 @@
     "url": "https://github.com/Engine-Room-Games/after-effects-mcp/issues"
   },
   "keywords": [
-    "mcp",
-    "model-context-protocol",
     "after-effects",
     "adobe",
+    "ai",
     "animation",
     "motion-graphics",
-    "extendscript",
-    "claude"
+    "video",
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "extendscript"
   ],
   "bin": {
     "after-effects-mcp": "bin/server.js"

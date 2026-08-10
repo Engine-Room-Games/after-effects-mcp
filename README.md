@@ -1,60 +1,40 @@
-# after-effects-mcp
+# After Effects MCP
 
-An MCP server for Adobe After Effects. It gives an AI agent 60 tools covering comps, layers, transforms, keyframes, expressions, effects, text, shapes, masks and markers, plus screenshots for visual checks.
+**Control Adobe After Effects with AI.** Describe the animation you want — a lower third, a logo reveal, an animated counter — and it gets built in your project: layers, keyframes, easing, effects, expressions and text, all editable afterwards like anything you would make by hand.
 
-Requires macOS or Windows, After Effects 2026, and [Node.js 20+](https://nodejs.org).
+Works with Claude and other MCP clients, on macOS and Windows.
+
+Requires After Effects 2026 and [Node.js 20+](https://nodejs.org).
 
 ## Getting started
 
-Setup has two parts. Steps 1 and 2 you do once on a machine. Step 3 you repeat for each video, client or series you work on.
+Four steps. Steps 2 and 3 are one-time setup for a machine; step 1 repeats for each new piece of work.
 
-**1. Install the tools.** In Claude Code:
+### 1. Create a project folder
 
-```
-/plugin marketplace add Engine-Room-Games/after-effects-mcp
-/plugin install after-effects@engine-room
-```
-
-Restart Claude Code. The agent now has the tools, but cannot reach After Effects yet.
-
-**2. Connect After Effects.** Open After Effects, then ask the agent:
-
-> Set up After Effects.
-
-It installs a panel inside After Effects and enables the Adobe setting that allows the panel to load. Quit and reopen After Effects when it tells you to. Ask it to check the setup again to confirm the connection is live.
-
-This is the step that makes the tools actually work. Until it is done, every tool reports that it cannot reach After Effects.
-
-**3. Create a project folder.** One per piece of work:
+Everything happens inside a folder — it holds your style settings and gives the AI somewhere to work. In a terminal:
 
 ```bash
 npx @engine-room/after-effects-mcp init my-video
+cd my-video
 ```
 
-Open that folder in Claude Code and fill in `.claude/skills/house-style/SKILL.md` with your colours, fonts and motion defaults.
+Then open that folder in Claude Code, or whichever MCP client you use.
 
-**4. Work.** With After Effects open and your project folder open in Claude Code, describe what you want:
+*Alternatively:* if you only want to try things out, any folder will do — you can create a project later.
 
-> Build a lower third that says Chapter One, sliding in from the left.
+### 2. Install the tools
 
-The agent reads the current state of your comp, builds the change, and can screenshot the result to check it.
-
-Day to day, you only repeat step 4. Step 3 comes back when you start a new project.
-
-## Installing
-
-### Claude Code
+**Claude Code** — in the session you just opened:
 
 ```
 /plugin marketplace add Engine-Room-Games/after-effects-mcp
 /plugin install after-effects@engine-room
 ```
 
-This installs the tools along with two skills: one on using the tools well, one on fixing setup problems.
+Restart Claude Code. This also installs guidance on using the tools well and on fixing setup problems.
 
-### Other MCP clients
-
-Add the server to the client's config. For Claude Desktop that is `~/Library/Application Support/Claude/claude_desktop_config.json`:
+**Any other MCP client** — add the server to its config. For Claude Desktop that is `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -67,21 +47,33 @@ Add the server to the client's config. For Claude Desktop that is `~/Library/App
 }
 ```
 
-Restart the client afterwards.
+Restart the client.
 
-## Connecting After Effects
+*Alternatively:* run step 1 as `init my-video --with-mcp` and the project folder comes with this config already in it.
 
-The tools reach After Effects through a small panel that runs inside it. Ask the agent to set up After Effects and it will:
+### 3. Connect After Effects
 
-1. Run `check_setup` and report what is missing.
-2. Run `setup_panel`, which copies the panel into your Adobe CEP extensions folder and enables the setting that permits unsigned panels — a preference on macOS, a registry value on Windows.
-3. Tell you to quit and reopen After Effects. The panel only loads at launch.
+The tools reach After Effects through a small panel that runs inside it. Open After Effects, then ask the AI:
 
-On macOS, if the panel still does not connect after restarting, reboot once; some builds cache that preference until a restart.
+> Set up After Effects.
 
-To see the panel yourself, use **Window → Extensions → AE MCP Bridge** in After Effects. It shows its status and a log.
+It installs the panel and enables the Adobe setting that allows it to load, then tells you to quit and reopen After Effects. Ask it to check the setup again to confirm.
 
-If something stops working later, ask the agent to check the After Effects setup.
+Until this step is done, every tool will report that it cannot reach After Effects.
+
+*Alternatively:* from a clone of this repository, run `npm run install:panel`.
+
+### 4. Start working
+
+With After Effects open and your project folder open in your client, describe what you want:
+
+> Build a lower third that says Chapter One, sliding in from the left.
+
+The AI reads the current state of your comp, makes the change, and can take a screenshot to check the result.
+
+Before you get far, fill in `.claude/skills/house-style/SKILL.md` in your project folder with your colours, fonts and motion defaults — everything built afterwards follows them.
+
+Day to day you only repeat step 4. Step 1 comes back when you start a new project.
 
 ## Projects
 
@@ -98,30 +90,42 @@ my-video/
 └── renders/
 ```
 
-`house-style/SKILL.md` holds your defaults — colours, fonts, motion. The agent reads it before building anything, so what it makes follows your style. Updating the tools never touches this file.
+`house-style/SKILL.md` holds your defaults. The AI reads it before building anything, so what it makes follows your style. Updating the tools never touches this file.
 
-A quick way to write it: build one piece the way you want it, then ask the agent to read that comp and write it up in the house-style skill.
+A quick way to write it: build one piece the way you want it, then ask the AI to read that comp and write it up in the house-style skill.
 
 Keep one folder per client or series. To apply the same style everywhere instead, put the skill in `~/.claude/skills/house-style/`.
 
-If you are not using the Claude Code plugin, run `init` with `--with-mcp` to add a project-level server config as well.
+## Connecting After Effects
+
+Asking the AI to set up After Effects runs three things:
+
+1. `check_setup` — reports what is missing.
+2. `setup_panel` — copies the panel into your Adobe CEP extensions folder and enables the setting that permits unsigned panels: a preference on macOS, a registry value on Windows.
+3. A prompt to quit and reopen After Effects. The panel only loads at launch.
+
+On macOS, if the panel still does not connect after restarting, reboot once; some builds cache that preference until a restart.
+
+To see the panel yourself, use **Window → Extensions → AE MCP Bridge** in After Effects. It shows its status and a log.
+
+If something stops working later, ask the AI to check the After Effects setup.
 
 ## Updating
 
-Update the plugin, then refresh the panel inside After Effects. Both are needed — the panel is installed into After Effects and does not update on its own.
+Update the tools, then refresh the panel inside After Effects. Both are needed — the panel does not update on its own.
 
 ```
 /plugin marketplace update engine-room
 /plugin update after-effects@engine-room
 ```
 
-Restart Claude Code. Then, with After Effects open, ask the agent:
+Restart Claude Code. Then, with After Effects open, ask the AI:
 
 > Update the After Effects panel.
 
 It runs `setup_panel` again and tells you to restart After Effects. Ask it to check the setup afterwards; `check_setup` reports whether the installed panel matches the current version.
 
-On other MCP clients, restarting the client picks up the new server version; the panel refresh is the same.
+On other MCP clients, restarting the client picks up the new server version. The panel refresh is the same.
 
 ## Tools
 
@@ -153,7 +157,7 @@ A few notes on the ones that behave differently from the rest:
 
 ## Troubleshooting
 
-Ask the agent to run `check_setup` first. It reports which part of the chain is broken and what to do about it.
+Ask the AI to run `check_setup` first. It reports which part of the chain is broken and what to do about it.
 
 | Symptom | Cause and fix |
 |---|---|
