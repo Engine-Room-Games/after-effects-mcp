@@ -30,6 +30,9 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      - name: Version strings agree
+        run: node scripts/sync-version.mjs --check
+
       - name: Server starts and lists its tools
         shell: bash
         run: |
