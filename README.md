@@ -33,7 +33,7 @@ Add this to your client's MCP config (for Claude Desktop, `~/Library/Application
   "mcpServers": {
     "after-effects": {
       "command": "npx",
-      "args": ["-y", "engine-room-ae-mcp"]
+      "args": ["-y", "@engine-room/after-effects-mcp"]
     }
   }
 }
@@ -57,7 +57,7 @@ Ask Claude to "check the After Effects setup" any time something stops working.
 ## Start a project
 
 ```bash
-npx engine-room-ae-mcp init my-video
+npx @engine-room/after-effects-mcp init my-video
 ```
 
 This creates a folder built around one idea — **the plugin knows the tool, you own the taste**:

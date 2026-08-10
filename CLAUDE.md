@@ -1,4 +1,4 @@
-# Claude development guide — engine-room-ae-mcp
+# Claude development guide — after-effects-mcp
 
 This file is for future Claude Code sessions working in this repo. Humans reading it: see `README.md` for the user-facing intro.
 
@@ -6,7 +6,7 @@ This file is for future Claude Code sessions working in this repo. Humans readin
 
 An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, one-off screenshots, bulk batches. 60 tools. macOS-only for now.
 
-It ships three ways: as an npm package (`npx engine-room-ae-mcp`), as a Claude Code plugin (this repo is also its marketplace), and as a git checkout for development.
+It ships three ways: as an npm package (`npx @engine-room/after-effects-mcp`), as a Claude Code plugin (this repo is also its marketplace), and as a git checkout for development.
 
 ## How the pieces talk
 
@@ -46,7 +46,7 @@ The MCP server is stateless except for an in-memory `JobManager`. The panel is t
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. |
 | `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool. |
 | `packages/mcp-server/src/setup/{check,install,paths}.ts` | Backs `check_setup` / `setup_panel`. Never touches the bridge — it exists for the case where the panel isn't installed yet. |
-| `packages/mcp-server/src/cli/init.ts` | `engine-room-ae-mcp init <dir>` project scaffold. Templates are inline string constants so nothing extra has to be packaged. |
+| `packages/mcp-server/src/cli/init.ts` | `npx @engine-room/after-effects-mcp init <dir>` project scaffold. Templates are inline string constants so nothing extra has to be packaged. |
 | `plugin/` | The Claude Code plugin: `.mcp.json` + `skills/{after-effects,ae-setup}`. Skills carry tool knowledge only — never anyone's house style. |
 | `.claude-plugin/marketplace.json` | Marketplace catalog. Users add this repo, then install `after-effects@engine-room`. |
 | `scripts/bundle-jsx.mjs` | Concatenates `packages/jsx/*.jsx` in dependency order into `packages/ae-panel/jsx/bundle.jsx`. Run via `npm run build:jsx`. |
@@ -94,7 +94,7 @@ npm run new:project <dir>   # scaffold a designer project folder
 npm run pack:check          # build + `npm pack --dry-run` to preview the tarball
 ```
 
-Publishing: `npm publish -w engine-room-ae-mcp` (the `prepack` hook builds `bin/` and `panel/` first). The workspace root and `@engineroom/shared` stay private — `shared` is inlined into the bundle, so it is never published on its own. Verify a release by installing the tarball into an empty directory and running the binary; the published layout puts the panel at `<pkg>/panel`, which is a different path from the checkout's `packages/ae-panel`.
+Publishing: `npm publish -w @engine-room/after-effects-mcp` (the `prepack` hook builds `bin/` and `panel/` first). The workspace root and `@engineroom/shared` stay private — `shared` is inlined into the bundle, so it is never published on its own. Verify a release by installing the tarball into an empty directory and running the binary; the published layout puts the panel at `<pkg>/panel`, which is a different path from the checkout's `packages/ae-panel`.
 
 `build:jsx` writes both the source bundle and, if the panel is installed, the installed bundle at `~/Library/.../<bundleId>/jsx/bundle.jsx`. So `/reload-jsx` always sees fresh content — no manual `cp` step. (If you installed with `--symlink`, the installed path *is* the source path; the sync is a no-op.)
 

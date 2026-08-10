@@ -4,7 +4,7 @@ import { runInit } from "./cli/init.js";
 import { createServer } from "./server.js";
 import { logger } from "./util/logger.js";
 
-const USAGE = `engine-room-ae-mcp — drive Adobe After Effects from an AI agent.
+const USAGE = `@engine-room/after-effects-mcp — drive Adobe After Effects from an AI agent.
 
 With no arguments it runs as an MCP server over stdio, which is how an MCP
 client (Claude Code, Claude Desktop, …) starts it. You do not normally run it

@@ -2,8 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
- * `engine-room-ae-mcp init <dir>` — scaffold a working folder for one video,
- * series or client.
+ * `npx @engine-room/after-effects-mcp init <dir>` — scaffold a working folder
+ * for one video, series or client.
  *
  * The point of the scaffold is the separation it encodes: the plugin ships
  * knowledge about *the tool* and is upgraded with it, while everything here is
@@ -96,7 +96,7 @@ const MCP_JSON = `{
   "mcpServers": {
     "after-effects": {
       "command": "npx",
-      "args": ["-y", "engine-room-ae-mcp"]
+      "args": ["-y", "@engine-room/after-effects-mcp"]
     }
   }
 }
@@ -120,7 +120,7 @@ export function parseInitArgs(argv: string[]): InitOptions | { error: string } {
 export function runInit(argv: string[]): number {
   const parsed = parseInitArgs(argv);
   if ("error" in parsed) {
-    process.stderr.write(`${parsed.error}\n\nUsage: engine-room-ae-mcp init <directory> [--with-mcp]\n`);
+    process.stderr.write(`${parsed.error}\n\nUsage: npx @engine-room/after-effects-mcp init <directory> [--with-mcp]\n`);
     return 1;
   }
 

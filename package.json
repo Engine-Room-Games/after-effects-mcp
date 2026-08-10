@@ -9,10 +9,10 @@
     "packages/ae-panel"
   ],
   "scripts": {
-    "build": "npm run -w @engineroom/shared build && npm run -w engine-room-ae-mcp build && node scripts/bundle-jsx.mjs",
+    "build": "npm run -w @engineroom/shared build && npm run -w @engine-room/after-effects-mcp build && node scripts/bundle-jsx.mjs",
     "build:jsx": "node scripts/bundle-jsx.mjs",
-    "build:ts": "npm run -w @engineroom/shared build && npm run -w engine-room-ae-mcp build",
-    "watch:ts": "npm run -w engine-room-ae-mcp watch",
+    "build:ts": "npm run -w @engineroom/shared build && npm run -w @engine-room/after-effects-mcp build",
+    "watch:ts": "npm run -w @engine-room/after-effects-mcp watch",
     "enable:debug": "node scripts/enable-debug.mjs",
     "install:panel": "node scripts/install-panel.mjs",
     "uninstall:panel": "node scripts/uninstall-panel.mjs",
@@ -20,7 +20,7 @@
     "new:project": "node packages/mcp-server/dist/index.js init",
     "start": "node packages/mcp-server/dist/index.js",
     "inspect": "npx @modelcontextprotocol/inspector node packages/mcp-server/dist/index.js",
-    "pack:check": "npm run build && npm pack -w engine-room-ae-mcp --dry-run"
+    "pack:check": "npm run build && npm pack -w @engine-room/after-effects-mcp --dry-run"
   },
   "engines": {
     "node": ">=20"

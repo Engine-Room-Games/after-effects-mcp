@@ -1,0 +1,91 @@
+name: Release
+
+# Publishes to npm when a v* tag is pushed.
+#
+# Authentication is OIDC trusted publishing: GitHub proves this workflow's
+# identity to npm directly and npm mints a short-lived credential for the job.
+# There is no NPM_TOKEN — nothing to rotate, nothing to leak. npm also attaches
+# a provenance attestation automatically, linking the published tarball to this
+# commit and workflow.
+#
+# One-time setup, in this order:
+#   1. `npm publish` once from a laptop to create the package
+#   2. npmjs.com -> the package -> Settings -> Trusted Publisher:
+#        repository  Engine-Room-Games/after-effects-mcp
+#        workflow    release.yml
+#   3. every release after that is `git tag v0.1.1 && git push --tags`
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: macos-latest # the package declares os:["darwin"]; build and verify where it runs
+    permissions:
+      id-token: write # required for OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      # OIDC trusted publishing needs npm >= 11.5; Node 24 is close but pin it
+      # explicitly so a runner image change cannot silently break publishing.
+      - run: npm install -g npm@latest
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify the tag matches the package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./packages/mcp-server/package.json').version")
+          if [ "$TAG" != "$PKG" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $PKG" >&2
+            exit 1
+          fi
+          echo "Publishing version $PKG"
+
+      - name: Verify the packed tarball actually runs
+        run: |
+          set -euo pipefail
+          npm pack -w @engine-room/after-effects-mcp --pack-destination /tmp
+          TARBALL=$(ls /tmp/engine-room-after-effects-mcp-*.tgz)
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y >/dev/null
+          npm install "$TARBALL" >/dev/null
+          # The panel must resolve from the published layout, not the checkout.
+          node -e '
+            const {spawn}=require("child_process");
+            const c=spawn("./node_modules/.bin/after-effects-mcp",[],{stdio:["pipe","pipe","inherit"]});
+            let buf="",id=0;const pend=new Map();
+            c.stdout.on("data",d=>{buf+=d;let i;while((i=buf.indexOf("\n"))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);
+              if(!l.trim())continue;try{const m=JSON.parse(l);if(m.id&&pend.has(m.id)){pend.get(m.id)(m);pend.delete(m.id);}}catch{}}});
+            const send=(method,params)=>new Promise(r=>{const my=++id;pend.set(my,r);
+              c.stdin.write(JSON.stringify({jsonrpc:"2.0",id:my,method,params})+"\n");});
+            (async()=>{
+              await send("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"ci",version:"1"}});
+              c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
+              const t=await send("tools/list",{});
+              const n=t.result.tools.length;
+              if(n<60){console.error(`expected >=60 tools, got ${n}`);process.exit(1);}
+              const r=await send("tools/call",{name:"check_setup",arguments:{}});
+              const rep=JSON.parse(r.result.content[0].text);
+              const assets=rep.checks.find(x=>x.name==="panelAssetsPresent");
+              if(!assets.ok){console.error("panel assets missing from tarball:",assets.detail);process.exit(1);}
+              console.log(`OK: ${n} tools, panel at ${assets.detail}`);
+              c.kill();process.exit(0);
+            })();'
+
+      - name: Publish
+        run: npm publish -w @engine-room/after-effects-mcp

@@ -1,5 +1,5 @@
 {
-  "name": "engine-room-ae-mcp",
+  "name": "@engine-room/after-effects-mcp",
   "version": "0.1.0",
   "type": "module",
   "description": "MCP server that lets an AI agent drive Adobe After Effects — comps, layers, keyframes, expressions, effects, text, shapes, masks and screenshots.",
@@ -25,7 +25,10 @@
     "claude"
   ],
   "bin": {
-    "engine-room-ae-mcp": "./bin/server.js"
+    "after-effects-mcp": "./bin/server.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "bin",
