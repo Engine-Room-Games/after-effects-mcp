@@ -1,12 +1,7 @@
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
-import { copyRecursive, installedPanelDir, panelSourceDir, wsModuleDir } from "./paths.js";
-
-const exec = promisify(execFile);
-
-const CSXS_VERSIONS = [12, 11, 10, 9];
+import { copyRecursive, installedPanelDir, isSupportedPlatform, panelSourceDir, wsModuleDir } from "./paths.js";
+import { debugModeLocation, enableDebugMode, isDebugModeOn } from "./platform.js";
 
 export interface InstallResult {
   ok: boolean;
@@ -15,31 +10,6 @@ export interface InstallResult {
   restartAfterEffects: boolean;
   rebootRecommended: boolean;
   notes: string[];
-}
-
-async function isDebugModeOn(): Promise<boolean> {
-  for (const v of CSXS_VERSIONS) {
-    try {
-      const { stdout } = await exec("defaults", ["read", `com.adobe.CSXS.${v}`, "PlayerDebugMode"]);
-      if (stdout.trim() === "1") return true;
-    } catch {
-      // Not set for this version.
-    }
-  }
-  return false;
-}
-
-async function enableDebugMode(): Promise<number[]> {
-  const enabled: number[] = [];
-  for (const v of CSXS_VERSIONS) {
-    try {
-      await exec("defaults", ["write", `com.adobe.CSXS.${v}`, "PlayerDebugMode", "1"]);
-      enabled.push(v);
-    } catch {
-      // Some CSXS versions are simply absent on this machine.
-    }
-  }
-  return enabled;
 }
 
 /**
@@ -53,8 +23,10 @@ export async function installPanel(opts: { enableDebugMode?: boolean; force?: bo
   const actions: string[] = [];
   const notes: string[] = [];
 
-  if (process.platform !== "darwin") {
-    throw new Error("setup_panel supports macOS only. On Windows the CEP extensions folder and the PlayerDebugMode registry key differ; install manually.");
+  if (!isSupportedPlatform()) {
+    throw new Error(
+      `After Effects runs only on macOS and Windows, so setup_panel cannot install anything on ${process.platform}.`
+    );
   }
 
   const source = panelSourceDir();
@@ -109,16 +81,18 @@ export async function installPanel(opts: { enableDebugMode?: boolean; force?: bo
 
   let rebootRecommended = false;
   if (opts.enableDebugMode !== false) {
-    const wasOn = await isDebugModeOn();
-    if (wasOn) {
-      actions.push("Adobe's PlayerDebugMode preference was already enabled.");
+    const existing = await isDebugModeOn();
+    if (existing.on) {
+      actions.push(`PlayerDebugMode was already enabled — ${existing.detail}.`);
     } else {
       const versions = await enableDebugMode();
       if (versions.length === 0) {
-        notes.push("Failed to set PlayerDebugMode. Without it After Effects will refuse to load this panel.");
+        notes.push(`Failed to set ${debugModeLocation()}. Without it After Effects will refuse to load this panel.`);
       } else {
         actions.push(`Enabled PlayerDebugMode for CSXS ${versions.join(", ")} so AE will load the unsigned panel.`);
-        rebootRecommended = true;
+        // Only macOS has the "preference cached until reboot" behaviour; on
+        // Windows AE re-reads the registry on launch.
+        rebootRecommended = process.platform === "darwin";
       }
     }
   }

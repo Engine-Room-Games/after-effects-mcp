@@ -4,7 +4,7 @@ This file is for future Claude Code sessions working in this repo. Humans readin
 
 ## What this project is
 
-An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, one-off screenshots, bulk batches. 60 tools. macOS-only for now.
+An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, one-off screenshots, bulk batches. 60 tools. macOS and Windows — the only two platforms AE runs on.
 
 It ships three ways: as an npm package (`npx @engine-room/after-effects-mcp`), as a Claude Code plugin (this repo is also its marketplace), and as a git checkout for development.
 
@@ -46,6 +46,8 @@ The MCP server is stateless except for an in-memory `JobManager`. The panel is t
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. |
 | `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool. |
 | `packages/mcp-server/src/setup/{check,install,paths}.ts` | Backs `check_setup` / `setup_panel`. Never touches the bridge — it exists for the case where the panel isn't installed yet. |
+| `packages/mcp-server/src/setup/platform.ts` | **The only place macOS and Windows diverge** (PlayerDebugMode storage, AE process detection). Plus `cepExtensionsDir()` in `paths.ts`. Keep platform branching here — do not scatter `process.platform` through the codebase. |
+| `scripts/lib/setup.mjs` | Loads the compiled setup module so the dev scripts (`doctor`, `install-panel`, `enable-debug`) reuse the same platform logic the MCP tools use instead of keeping a second copy. |
 | `packages/mcp-server/src/cli/init.ts` | `npx @engine-room/after-effects-mcp init <dir>` project scaffold. Templates are inline string constants so nothing extra has to be packaged. |
 | `plugin/` | The Claude Code plugin: `.mcp.json` + `skills/{after-effects,ae-setup}`. Skills carry tool knowledge only — never anyone's house style. |
 | `.claude-plugin/marketplace.json` | Marketplace catalog. Users add this repo, then install `after-effects@engine-room`. |
@@ -70,7 +72,7 @@ The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring 
 - **Vision** (`screenshot_frame`, `screenshot_layer`): JSX returns `{path, width, height, time, compId, layerId?}`. Panel reads the PNG, base64-encodes, returns `{base64, bytes, ...}`. Server packages as MCP `image` content block.
 - **Long batch** (`run_batch` >100 ops): JSX returns `{jobId, async:true, total}`. Panel drives `_continue_job` in chunks of 25 in the background, broadcasting `progress` events on WS. Server forwards WS progress as `notifications/progress` keyed by the request's `progressToken`.
 - **Server-resident** (`await_job`, `get_job`, `cancel_job`, `check_setup`, `setup_panel`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag). They're still listed in `OpSchemas` so `tools/list` picks them up — membership in `SERVER_OPS` is what stops the forwarding.
-- **Downsampled screenshots**: `downsample` is honoured in the *panel*, not the JSX — `saveFrameToPng` always writes full comp resolution, so `main.js` shrinks the file with `sips` after the write settles and reports the dimensions actually produced. If `sips` fails it returns the full-res frame plus a `warning`; it never silently ignores the request.
+- **Downsampled screenshots**: handled entirely in `vision.jsx`. `saveFrameToPng` *does* respect `CompItem.resolutionFactor` (measured: a 3840×2160 comp yields 1920×1080 at factor 2, 960×540 at factor 4), so `__saveFrameAt` sets the factor, renders, and restores it in a `finally`. That restore is not optional — a throw mid-render would otherwise leave the user's comp at reduced resolution. The panel reads the true dimensions out of the PNG's IHDR chunk rather than computing them, so reported size can never disagree with the image sent. An earlier version shelled out to `sips`; it was replaced because rendering smaller is faster than resampling and needs no external tool, which is what makes downsampling work on Windows.
 
 ## Conventions
 
@@ -117,9 +119,18 @@ Publishing: `npm publish -w @engine-room/after-effects-mcp` (the `prepack` hook 
 - CEP panels installed without signing require `PlayerDebugMode=1`. The user does this once via `npm run enable:debug` and a reboot.
 - **Anthropic API requires JSON Schema draft 2020-12** for tool input schemas. `zod-to-json-schema` 3.x has no 2020-12 target — `openApi3` emits `nullable` (rejected) and `jsonSchema7` emits draft-07 tuple form `items:[...]` (rejected; 2020-12 wants `prefixItems`). `server.ts` uses `jsonSchema7` + `$refStrategy:"none"` + a `toDraft2020()` post-pass that rewrites tuples. Don't switch back to `openApi3`.
 - **`setTemporalEaseAtKey` on spatial properties takes a single-element array**, regardless of 2D/3D — for Position/Anchor Point, the ease is along the motion path. Non-spatial multi-dim (Scale, Color) need one entry per dimension. `keyframes.jsx` branches on `prop.isSpatial`. If you ever see "Value array does not have 1 elements", a spatial property is being fed N entries.
+- **`saveFrameToPng` is asynchronous.** It returns before the file is on disk, so anything reading the PNG must poll until the size settles. A cold render of a heavy 4K comp was measured taking over 15 seconds; the panel's wait is 120s because the original 5s silently failed screenshots that were merely still rendering.
 - **`panelSourceDir()` must prefer the checkout over the vendored copy.** After any `npm pack`, a stale `packages/mcp-server/panel/` is left on disk (gitignored). If that were checked first, `setup_panel` in a dev checkout would install the stale copy instead of what you're editing. Order matters in `setup/paths.ts`.
 - **esbuild preserves the entry point's hashbang.** Adding a `banner` with `#!/usr/bin/env node` produces a second one on line 2 and the published binary dies with a syntax error. `prepare-package.mjs` asserts there is exactly one.
 - **`addText()` anchors point text at the bbox center**, not the baseline-left an agent would assume. `paragraphJustification: LEFT_JUSTIFY` doesn't move the anchor for point text. `create_text_layer` defaults `anchorAlign: "left"` so `position` semantically matches the visible left edge; pass `"center"`/`"right"`/`"none"` to override.
+
+## Platform notes
+
+Linux is impossible, not merely unimplemented — Adobe has never shipped AE for it.
+
+All `packages/jsx/*.jsx` is AE's own scripting API and is platform-neutral; never add platform branching there. Host differences are confined to `setup/platform.ts` (PlayerDebugMode via `defaults` vs `reg`, AE process via `pgrep` vs `tasklist`) and `cepExtensionsDir()` in `setup/paths.ts` (`~/Library/Application Support/...` vs `%APPDATA%\...`).
+
+CI (`.github/workflows/ci.yml`) builds and smoke-tests on macos-latest and windows-latest: server starts, ≥60 tools, `check_setup` resolves paths, scaffold writes files. It cannot exercise the CEP install — no AE on a runner — so the Windows install path is the least-proven part of the project. macOS is the daily-driven platform.
 
 ## Out of scope (v1)
 

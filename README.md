@@ -9,7 +9,7 @@ Built for motion designers, not just developers. Setup happens through conversat
  in my house style."
 ```
 
-**Requirements:** macOS · After Effects 2026 · [Node.js 20+](https://nodejs.org)
+**Requirements:** macOS or Windows · After Effects 2026 · [Node.js 20+](https://nodejs.org)
 
 ---
 
@@ -47,10 +47,10 @@ The tools talk to a small panel that runs **inside** After Effects. Installing i
 
 > **You:** Set up After Effects.
 
-Claude runs `check_setup`, tells you what's missing, asks before it changes anything, then runs `setup_panel` — which installs the panel and switches on the Adobe preference that allows it to load. Then:
+Claude runs `check_setup`, tells you what's missing, asks before it changes anything, then runs `setup_panel` — which installs the panel and switches on the Adobe setting that allows it to load (a preference on macOS, a registry value on Windows). Then:
 
 1. **Quit and reopen After Effects.** The panel only loads at launch.
-2. If it still doesn't connect, **reboot once**. On some macOS builds the Adobe preference only applies after a restart. One time only.
+2. On macOS only: if it still doesn't connect, **reboot once**. Some macOS builds cache that Adobe preference until a restart. One time only.
 
 Ask Claude to "check the After Effects setup" any time something stops working.
 
@@ -104,7 +104,7 @@ Keep a folder per client or series. Or put the file in `~/.claude/skills/house-s
 
 Three design decisions worth knowing about:
 
-- **Screenshots are diagnostics, not a feedback loop.** The tool descriptions tell the agent to take two or three, never to scrub frame by frame. Pass `downsample` on large comps — a full 4K frame is big enough to exhaust an agent's context in one call.
+- **Screenshots are diagnostics, not a feedback loop.** The tool descriptions tell the agent to take two or three, never to scrub frame by frame. Pass `downsample` on large comps — a full 4K frame is big enough to exhaust an agent's context in one call. Downsampling asks AE to render at reduced resolution rather than shrinking the image afterwards, so it is also faster: `downsample: 2` renders a quarter of the pixels.
 - **Bulk work is one undo step.** `run_batch` runs hundreds of operations in a single ExtendScript pass, so "undo that" does what you mean. Long batches stream progress.
 - **Failures are loud.** Tools that can't do what was asked return an error naming the problem rather than reporting success — an agent can only correct a mistake it's told about.
 
@@ -133,12 +133,26 @@ Ask Claude to run `check_setup` first — it reports exactly which link in the c
 |---|---|
 | "Cannot reach the After Effects panel" | AE isn't running, or the panel isn't installed. Run `setup_panel`, then restart AE. |
 | Tools worked before, now error inside AE | The server was upgraded but the panel wasn't. Run `setup_panel`, restart AE. |
-| Panel never loads, setup looks correct | Reboot the Mac once — the Adobe preference sometimes needs it. |
+| Panel never loads, setup looks correct | On macOS, reboot once — the Adobe preference sometimes needs it. |
+| A panel answers but `check_setup` says none is installed | An older install under a previous bundle id is serving. Remove it from the CEP extensions folder, run `setup_panel`, restart AE. |
 | Want to see the panel's own log | In AE: **Window > Extensions > AE MCP Bridge**. |
+
+## Platform support
+
+**macOS and Windows** — the two platforms After Effects itself runs on. Linux is not possible: Adobe has never shipped After Effects for it, so there is no host to drive.
+
+The ExtendScript layer behind all 60 tools is AE's own scripting API and is identical on both. Only three things differ, and they are handled for you:
+
+| | macOS | Windows |
+|---|---|---|
+| Panel location | `~/Library/Application Support/Adobe/CEP/extensions` | `%APPDATA%\Adobe\CEP\extensions` |
+| Unsigned-panel setting | `defaults` preference | `HKCU\Software\Adobe\CSXS.*` registry value |
+| Reboot sometimes needed | yes | no |
+
+macOS is the more heavily exercised of the two; Windows path handling and startup are covered by CI, but the CEP install has had less real-world use. [Issue reports](https://github.com/Engine-Room-Games/after-effects-mcp/issues) welcome.
 
 ## Limitations
 
-- **macOS only.** Windows uses a different CEP location and a registry key; not implemented.
 - **Unsigned panel.** Loading it requires Adobe's `PlayerDebugMode`, which `setup_panel` enables. This is Adobe's documented path for unsigned extensions.
 - **`saveFrameToPng` is community-known**, not officially documented by Adobe. It works, but alpha edges can be imperfect on some comps.
 - **Long `run_jsx` loops freeze AE's UI**, because ExtendScript is single-threaded. Use `run_batch` for bulk work.

@@ -7,14 +7,47 @@ function __tmpPngPath() {
   return folder.fsName + "/" + name;
 }
 
+function __clampDownsample(v) {
+  if (v === undefined || v === null) return 1;
+  var n = Math.round(v);
+  if (!(n > 1)) return 1;
+  return n > 8 ? 8 : n;
+}
+
+// saveFrameToPng honours the comp's resolutionFactor, so AE can render the
+// reduced frame directly instead of writing full size and resampling
+// afterwards. That is faster (a quarter of the pixels at factor 2) and needs no
+// external image tool, which is what makes it work off macOS.
+function __saveFrameAt(comp, time, file, factor) {
+  if (factor <= 1) {
+    comp.saveFrameToPng(time, file);
+    return;
+  }
+  var previous = comp.resolutionFactor;
+  try {
+    comp.resolutionFactor = [factor, factor];
+    comp.saveFrameToPng(time, file);
+  } finally {
+    // Restore unconditionally — a failed render must never leave the user
+    // looking at a half-resolution comp.
+    comp.resolutionFactor = previous;
+  }
+}
+
 OPS.screenshot_frame = noUndo(function (args) {
   var c = getCompById(args.compId);
   var t = (args.time !== undefined && args.time !== null) ? args.time : c.time;
+  var ds = __clampDownsample(args.downsample);
   var path = __tmpPngPath();
   var f = new File(path);
   // saveFrameToPng is async-ish; the panel polls the file's existence/size.
-  c.saveFrameToPng(t, f);
-  return { path: path, width: c.width, height: c.height, time: t, compId: c.id };
+  __saveFrameAt(c, t, f, ds);
+  return {
+    path: path,
+    width: c.width, height: c.height,
+    downsample: ds,
+    time: t, compId: c.id
+  };
 });
 
 OPS.screenshot_layer = noUndo(function (args) {
@@ -29,10 +62,11 @@ OPS.screenshot_layer = noUndo(function (args) {
     ll.solo = false;
   }
   l.solo = true;
+  var ds = __clampDownsample(args.downsample);
   var path = __tmpPngPath();
   var f = new File(path);
   try {
-    c.saveFrameToPng(t, f);
+    __saveFrameAt(c, t, f, ds);
   } finally {
     // restore
     l.solo = false;
@@ -40,5 +74,10 @@ OPS.screenshot_layer = noUndo(function (args) {
       try { c.layer(prevSolo[j].idx).solo = prevSolo[j].solo; } catch (e) {}
     }
   }
-  return { path: path, width: c.width, height: c.height, time: t, compId: c.id, layerId: l.id };
+  return {
+    path: path,
+    width: c.width, height: c.height,
+    downsample: ds,
+    time: t, compId: c.id, layerId: l.id
+  };
 });

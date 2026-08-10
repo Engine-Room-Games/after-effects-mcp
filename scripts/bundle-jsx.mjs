@@ -51,12 +51,11 @@ console.log(`Wrote ${outFile} (${parts.length - 2} modules concatenated)`);
 // Sync the bundle into the installed panel (mac copy installs only — symlink
 // installs already point at outFile). Without this, `/reload-jsx` would
 // re-evaluate the stale installed bundle and silently no-op the JSX change.
-if (process.platform === "darwin") {
-  const installedBundle = path.join(
-    os.homedir(),
-    "Library", "Application Support", "Adobe", "CEP", "extensions",
-    BUNDLE_ID, "jsx", "bundle.jsx"
-  );
+if (process.platform === "darwin" || process.platform === "win32") {
+  const extensionsDir = process.platform === "win32"
+    ? path.join(process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"), "Adobe", "CEP", "extensions")
+    : path.join(os.homedir(), "Library", "Application Support", "Adobe", "CEP", "extensions");
+  const installedBundle = path.join(extensionsDir, BUNDLE_ID, "jsx", "bundle.jsx");
   if (fs.existsSync(path.dirname(installedBundle))) {
     try {
       const installedStat = fs.lstatSync(path.dirname(path.dirname(installedBundle)));

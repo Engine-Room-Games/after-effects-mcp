@@ -1,0 +1,74 @@
+name: CI
+
+# Builds and smoke-tests on both hosts After Effects runs on. The CEP install
+# path cannot be tested here (no AE on a runner), but this does catch the things
+# that actually break a port: platform-specific path handling, module
+# resolution, and the server failing to start.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Server starts and lists its tools
+        shell: bash
+        run: |
+          node -e '
+            const {spawn}=require("child_process");
+            const c=spawn(process.execPath,["packages/mcp-server/dist/index.js"],{stdio:["pipe","pipe","inherit"]});
+            let buf="",id=0;const pend=new Map();
+            c.stdout.on("data",d=>{buf+=d;let i;while((i=buf.indexOf("\n"))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);
+              if(!l.trim())continue;try{const m=JSON.parse(l);if(m.id&&pend.has(m.id)){pend.get(m.id)(m);pend.delete(m.id);}}catch{}}});
+            const send=(m,p)=>new Promise(r=>{const my=++id;pend.set(my,r);c.stdin.write(JSON.stringify({jsonrpc:"2.0",id:my,method:m,params:p})+"\n");});
+            (async()=>{
+              await send("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"ci",version:"1"}});
+              c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
+              const t=await send("tools/list",{});
+              const n=t.result.tools.length;
+              if(n<60){console.error(`expected >=60 tools, got ${n}`);process.exit(1);}
+              console.log(`${n} tools on ${process.platform}`);
+              c.kill();process.exit(0);
+            })();'
+
+      - name: check_setup resolves platform paths without throwing
+        shell: bash
+        run: |
+          node -e '
+            import("./packages/mcp-server/dist/setup/check.js").then(async m=>{
+              const r=await m.checkSetup();
+              const platform=r.checks.find(c=>c.name==="platform");
+              const assets=r.checks.find(c=>c.name==="panelAssetsPresent");
+              console.log(`platform ok=${platform.ok} (${platform.detail})`);
+              console.log(`panel assets ok=${assets.ok}`);
+              // AE is not installed on a runner, so only these two must hold.
+              if(!platform.ok||!assets.ok) process.exit(1);
+            }).catch(e=>{console.error(e);process.exit(1);});'
+
+      - name: Scaffold works
+        shell: bash
+        run: |
+          node packages/mcp-server/dist/index.js init ci-project --with-mcp
+          test -f ci-project/CLAUDE.md
+          test -f ci-project/.claude/skills/house-style/SKILL.md
+          test -f ci-project/.mcp.json
+          echo "scaffold ok"

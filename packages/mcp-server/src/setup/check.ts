@@ -1,12 +1,9 @@
-import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 import { discoverPort } from "../bridge/discovery.js";
-import { installedPanelDir, panelSourceDir } from "./paths.js";
-
-const exec = promisify(execFile);
+import { cepExtensionsDir, installedPanelDir, isSupportedPlatform, panelSourceDir } from "./paths.js";
+import { debugModeLocation, isAfterEffectsRunning, isDebugModeOn } from "./platform.js";
 
 export interface Check {
   name: string;
@@ -20,30 +17,6 @@ export interface SetupReport {
   ready: boolean;
   checks: Check[];
   nextSteps: string[];
-}
-
-/** CEP major versions AE 2026 may look at, newest first. */
-const CSXS_VERSIONS = [12, 11, 10, 9];
-
-async function playerDebugMode(): Promise<{ on: boolean; detail: string }> {
-  for (const v of CSXS_VERSIONS) {
-    try {
-      const { stdout } = await exec("defaults", ["read", `com.adobe.CSXS.${v}`, "PlayerDebugMode"]);
-      if (stdout.trim() === "1") return { on: true, detail: `enabled (CSXS.${v})` };
-    } catch {
-      // Key absent for this version — keep looking.
-    }
-  }
-  return { on: false, detail: "not enabled for any CSXS version" };
-}
-
-async function aeRunning(): Promise<boolean> {
-  try {
-    const { stdout } = await exec("pgrep", ["-f", "Adobe After Effects"]);
-    return stdout.trim().length > 0;
-  } catch {
-    return false;
-  }
 }
 
 function sha256(file: string): string | null {
@@ -67,12 +40,12 @@ async function bridgeReachable(port: number): Promise<{ ok: boolean; detail: str
 export async function checkSetup(): Promise<SetupReport> {
   const checks: Check[] = [];
 
-  const isMac = process.platform === "darwin";
+  const supported = isSupportedPlatform();
   checks.push({
     name: "platform",
-    ok: isMac,
+    ok: supported,
     detail: process.platform,
-    fix: isMac ? undefined : "This server currently supports macOS only. Windows needs a different CEP install path and a registry edit.",
+    fix: supported ? undefined : "After Effects runs only on macOS and Windows, so this server supports only those two.",
   });
 
   const source = panelSourceDir();
@@ -83,12 +56,14 @@ export async function checkSetup(): Promise<SetupReport> {
     fix: source ? undefined : "The package is missing its CEP panel assets — reinstall the server.",
   });
 
-  const debugMode = await playerDebugMode();
+  const debugMode = await isDebugModeOn();
   checks.push({
     name: "cepDebugMode",
     ok: debugMode.on,
     detail: debugMode.detail,
-    fix: debugMode.on ? undefined : "Run the setup_panel tool. After Effects only loads unsigned panels when this Adobe preference is set.",
+    fix: debugMode.on
+      ? undefined
+      : `Run the setup_panel tool. After Effects only loads unsigned panels when ${debugModeLocation()} is set.`,
   });
 
   const installed = installedPanelDir();
@@ -114,7 +89,7 @@ export async function checkSetup(): Promise<SetupReport> {
     });
   }
 
-  const running = await aeRunning();
+  const running = await isAfterEffectsRunning();
   checks.push({
     name: "afterEffectsRunning",
     ok: running,
@@ -130,6 +105,19 @@ export async function checkSetup(): Promise<SetupReport> {
     detail: bridge.detail,
     fix: bridge.ok ? undefined : "If the other checks pass, restart After Effects so the panel reloads.",
   });
+
+  // A live bridge with no panel at the expected path means some older build is
+  // serving — most often one installed under a previous bundle id. Everything
+  // works right now, but an upgrade will not reach the running panel, and the
+  // two checks contradict each other unless we say so explicitly.
+  if (bridge.ok && !isInstalled) {
+    checks.push({
+      name: "panelIdentity",
+      ok: false,
+      detail: `a panel is answering on port ${port}, but not the one at ${installed}`,
+      fix: `An older install is serving the bridge. Look in ${cepExtensionsDir()} for a differently named folder, remove it, then run setup_panel and restart After Effects.`,
+    });
+  }
 
   const ready = checks.every((c) => c.ok);
   return { ready, checks, nextSteps: buildNextSteps(checks, ready) };
@@ -155,7 +143,15 @@ function buildNextSteps(checks: Check[], ready: boolean): string[] {
     steps.push("Run the setup_panel tool — it installs the After Effects panel and enables the Adobe preference that lets AE load it.");
   }
   if (needsDebug) {
-    steps.push("Quit and reopen After Effects. If the panel still does not connect, restart the Mac once — the Adobe preference sometimes only takes effect after a reboot.");
+    steps.push(
+      process.platform === "win32"
+        ? "Quit and reopen After Effects so it re-reads the registry."
+        : "Quit and reopen After Effects. If the panel still does not connect, restart the Mac once — the Adobe preference sometimes only takes effect after a reboot."
+    );
+  }
+  const identity = by("panelIdentity");
+  if (identity && identity.ok === false) {
+    steps.push(identity.fix!);
   }
   if (by("afterEffectsRunning")?.ok === false) {
     steps.push("Open After Effects 2026.");

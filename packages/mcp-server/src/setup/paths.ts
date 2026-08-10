@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 
 export const BUNDLE_ID = "games.engine-room.ae-mcp";
 
+export type SupportedPlatform = "darwin" | "win32";
+
+export function isSupportedPlatform(): boolean {
+  return process.platform === "darwin" || process.platform === "win32";
+}
+
 /**
  * Walk up to the nearest directory containing a package.json. The depth differs
  * between layouts — `<package>/dist/setup/paths.js` in a checkout versus
@@ -42,7 +48,16 @@ export function panelSourceDir(): string | null {
   return null;
 }
 
+/**
+ * Per-user CEP extensions directory.
+ *   macOS:   ~/Library/Application Support/Adobe/CEP/extensions
+ *   Windows: %APPDATA%\Adobe\CEP\extensions
+ */
 export function cepExtensionsDir(): string {
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming");
+    return path.join(appData, "Adobe", "CEP", "extensions");
+  }
   return path.join(os.homedir(), "Library", "Application Support", "Adobe", "CEP", "extensions");
 }
 

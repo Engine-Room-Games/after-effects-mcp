@@ -1,76 +1,39 @@
 #!/usr/bin/env node
-import { execSync } from "node:child_process";
+// Same diagnosis the check_setup tool performs, printed for a human.
+
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { loadSetup } from "./lib/setup.mjs";
 
-const checks = [];
-function check(name, fn) { checks.push({ name, fn }); }
-function ok(msg) { return { ok: true, msg }; }
-function fail(msg) { return { ok: false, msg }; }
+const { checkSetup } = await loadSetup();
+const report = await checkSetup();
 
-check("Node >= 20", () => {
-  const major = parseInt(process.versions.node.split(".")[0], 10);
-  return major >= 20 ? ok(`v${process.versions.node}`) : fail(`v${process.versions.node} — upgrade to >= 20`);
-});
+console.log("AE MCP doctor\n");
 
-check("CEP PlayerDebugMode (12)", () => {
-  try {
-    const v = execSync("defaults read com.adobe.CSXS.12 PlayerDebugMode 2>/dev/null", { encoding: "utf8" }).trim();
-    return v === "1" ? ok("on (CSXS.12)") : fail(`value is "${v}" — run npm run enable:debug`);
-  } catch {
-    return fail("not set — run npm run enable:debug");
-  }
-});
+const major = parseInt(process.versions.node.split(".")[0], 10);
+line(major >= 20, "Node >= 20", `v${process.versions.node}`, "Upgrade to Node 20 or newer.");
 
-check("Panel installed", () => {
-  const p = path.join(os.homedir(), "Library", "Application Support", "Adobe", "CEP", "extensions", "games.engine-room.ae-mcp");
-  if (!fs.existsSync(p)) return fail(`missing at ${p} — run npm run install:panel`);
-  const manifest = path.join(p, "CSXS", "manifest.xml");
-  if (!fs.existsSync(manifest)) return fail(`manifest missing at ${manifest}`);
-  return ok(p);
-});
+for (const c of report.checks) {
+  line(c.ok, c.name, c.detail, c.fix);
+}
 
-check("bundle.jsx built", () => {
-  const p = path.resolve("packages/ae-panel/jsx/bundle.jsx");
-  return fs.existsSync(p) ? ok(p) : fail(`missing at ${p} — run npm run build:jsx`);
-});
+// Build artefacts are a developer concern, so they live here rather than in the
+// shared check used by the MCP tool.
+const bundle = path.resolve("packages/ae-panel/jsx/bundle.jsx");
+line(fs.existsSync(bundle), "bundle.jsx built", bundle, "Run `npm run build:jsx`.");
+const dist = path.resolve("packages/mcp-server/dist/index.js");
+line(fs.existsSync(dist), "MCP server built", dist, "Run `npm run build`.");
 
-check("MCP server built", () => {
-  const p = path.resolve("packages/mcp-server/dist/index.js");
-  return fs.existsSync(p) ? ok(p) : fail(`missing at ${p} — run npm run build`);
-});
+if (report.nextSteps.length > 0) {
+  console.log("\nNext steps:");
+  for (const s of report.nextSteps) console.log(`  - ${s}`);
+}
 
-check("AE process running", () => {
-  try {
-    const out = execSync("pgrep -lf 'After Effects' || true", { encoding: "utf8" }).trim();
-    return out ? ok(out.split("\n")[0]) : fail("After Effects is not running — launch AE 2026");
-  } catch { return fail("could not check"); }
-});
+const allOk = report.ready && fs.existsSync(bundle) && fs.existsSync(dist) && major >= 20;
+console.log("\n" + (allOk ? "All green." : "Some checks failed."));
+process.exit(allOk ? 0 : 1);
 
-check("Bridge port reachable", async () => {
-  const portFile = path.join(os.homedir(), ".engineroom-ae-mcp", "port");
-  let port = 7777;
-  if (fs.existsSync(portFile)) { try { port = parseInt(fs.readFileSync(portFile, "utf8"), 10); } catch {} }
-  try {
-    const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) });
-    if (!r.ok) return fail(`port ${port}: HTTP ${r.status}`);
-    const body = await r.json();
-    return ok(`port ${port}: ${JSON.stringify(body)}`);
-  } catch (e) {
-    return fail(`port ${port}: ${e.message} — start AE with panel installed`);
-  }
-});
-
-(async () => {
-  console.log("AE MCP doctor\n");
-  let allOk = true;
-  for (const c of checks) {
-    const res = await c.fn();
-    const tag = res.ok ? "OK " : "FAIL";
-    console.log(`  [${tag}] ${c.name}: ${res.msg}`);
-    if (!res.ok) allOk = false;
-  }
-  console.log("\n" + (allOk ? "All green." : "Some checks failed — fix the FAIL lines above."));
-  process.exit(allOk ? 0 : 1);
-})();
+function line(ok, name, detail, fix) {
+  console.log(`  [${ok ? "OK  " : "FAIL"}] ${name}: ${detail}`);
+  if (!ok && fix) console.log(`         ${fix}`);
+}

@@ -1,22 +1,32 @@
 #!/usr/bin/env node
-// Toggles CEP PlayerDebugMode so unsigned panels can load. Restart AE (and
-// sometimes the OS) for the change to take effect.
+// Allows After Effects to load unsigned CEP panels.
+//   macOS:   defaults write com.adobe.CSXS.N PlayerDebugMode 1
+//   Windows: HKCU\Software\Adobe\CSXS.N\PlayerDebugMode = "1"
+// Restart AE afterwards (and, on some macOS builds, reboot once).
 
-import { execSync } from "node:child_process";
+import { loadSetup } from "./lib/setup.mjs";
 
-if (process.platform !== "darwin") {
-  console.error("Only macOS supported by this script. On Windows: regedit -> HKEY_CURRENT_USER\\Software\\Adobe\\CSXS.12 -> PlayerDebugMode = \"1\"");
+const { enableDebugMode, isDebugModeOn, isSupportedPlatform } = await loadSetup();
+
+if (!isSupportedPlatform()) {
+  console.error(`After Effects does not run on ${process.platform}; nothing to enable.`);
   process.exit(1);
 }
 
-const domains = ["com.adobe.CSXS.12", "com.adobe.CSXS.11", "com.adobe.CSXS.10", "com.adobe.CSXS.9"];
-for (const d of domains) {
-  try {
-    execSync(`defaults write ${d} PlayerDebugMode 1`, { stdio: "pipe" });
-    console.log(`PlayerDebugMode=1 set on ${d}`);
-  } catch (e) {
-    console.error(`Failed for ${d}: ${e.message}`);
-  }
+const before = await isDebugModeOn();
+if (before.on) {
+  console.log(`Already enabled — ${before.detail}. Nothing to do.`);
+  process.exit(0);
 }
 
-console.log("\nDone. Restart After Effects. If unsigned panels still don't load, reboot the Mac once.");
+const versions = await enableDebugMode();
+if (versions.length === 0) {
+  console.error("Could not set PlayerDebugMode for any CEP version.");
+  process.exit(1);
+}
+
+console.log(`PlayerDebugMode=1 set for CSXS ${versions.join(", ")}.`);
+console.log("\nRestart After Effects.");
+if (process.platform === "darwin") {
+  console.log("If unsigned panels still do not load, reboot the Mac once.");
+}
