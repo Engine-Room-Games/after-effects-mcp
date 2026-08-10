@@ -68,14 +68,14 @@ description: The visual and motion style for this project — palette, type, tim
 
 const CLAUDE_MD = `# {{NAME}}
 
-After Effects project folder. Claude drives After Effects directly from here.
+After Effects project folder. The tools drive After Effects directly from here.
 
 ## How to work in this folder
 
 1. Open After Effects with the project you want to work on.
 2. Describe what you want in plain language — "build a lower third that says
    Chapter One and slides in from the left".
-3. Claude reads the current state of the comp, builds it, and shows you.
+3. The current state of the comp is read, the change is made, and you see it.
 
 ## Style
 
@@ -107,10 +107,14 @@ export interface InitOptions {
   withMcp: boolean;
 }
 
+const KNOWN_FLAGS = ["--no-mcp", "--with-mcp"];
+
 export function parseInitArgs(argv: string[]): InitOptions | { error: string } {
   const positional = argv.filter((a) => !a.startsWith("-"));
-  const withMcp = argv.includes("--with-mcp");
-  const unknown = argv.filter((a) => a.startsWith("-") && a !== "--with-mcp");
+  // The config is written by default; --no-mcp is for clients that already
+  // provide the server some other way.
+  const withMcp = !argv.includes("--no-mcp");
+  const unknown = argv.filter((a) => a.startsWith("-") && !KNOWN_FLAGS.includes(a));
   if (unknown.length > 0) return { error: `Unknown option: ${unknown[0]}` };
   if (positional.length === 0) return { error: "Missing target directory." };
   if (positional.length > 1) return { error: `Expected one directory, got ${positional.length}.` };
@@ -120,7 +124,7 @@ export function parseInitArgs(argv: string[]): InitOptions | { error: string } {
 export function runInit(argv: string[]): number {
   const parsed = parseInitArgs(argv);
   if ("error" in parsed) {
-    process.stderr.write(`${parsed.error}\n\nUsage: npx @engine-room/after-effects-mcp init <directory> [--with-mcp]\n`);
+    process.stderr.write(`${parsed.error}\n\nUsage: npx @engine-room/after-effects-mcp init <directory> [--no-mcp]\n`);
     return 1;
   }
 
@@ -158,19 +162,18 @@ export function runInit(argv: string[]): number {
     `  CLAUDE.md                                what this project is`,
     `  .claude/skills/house-style/SKILL.md      your look — edit this first`,
     `  renders/                                 exports land here`,
-    ...(parsed.withMcp ? [`  .mcp.json                                connects Claude to After Effects`] : []),
+    ...(parsed.withMcp ? [`  .mcp.json                                connects your client to After Effects`] : []),
     ``,
     `Next:`,
-    `  1. Open the folder in Claude Code:  claude ${parsed.dir}`,
-    `  2. Fill in .claude/skills/house-style/SKILL.md with your palette, type and timing.`,
-    `  3. Open After Effects, then ask for what you want.`,
+    `  1. Open the folder in your MCP client:  cd ${parsed.dir}`,
+    `  2. Open After Effects, then ask it to set up After Effects.`,
+    `  3. Fill in .claude/skills/house-style/SKILL.md with your palette, type and timing.`,
     ...(parsed.withMcp
       ? []
       : [
           ``,
-          `This folder has no .mcp.json — it assumes you installed the Claude Code`,
-          `plugin, which already provides the After Effects tools. If you did not,`,
-          `re-run with --with-mcp to add a project-level connection instead.`,
+          `This folder has no .mcp.json, so your client must already provide the`,
+          `After Effects tools some other way.`,
         ]),
     ``,
   ].join("\n");

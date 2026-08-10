@@ -11,11 +11,12 @@ client (Claude Code, Claude Desktop, …) starts it. You do not normally run it
 by hand.
 
 Commands:
-  init <directory> [--with-mcp]   Create a project folder with a house-style
-                                  skill you can edit. Pass --with-mcp if you
-                                  did not install the Claude Code plugin.
-  --help                          Show this message.
-  --version                       Print the version.
+  init <directory> [--no-mcp]   Create a project folder containing the client
+                                configuration and a house-style skill you can
+                                edit. Pass --no-mcp if your client already
+                                provides these tools.
+  --help                        Show this message.
+  --version                     Print the version.
 `;
 
 async function main() {

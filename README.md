@@ -8,33 +8,18 @@ Requires After Effects 2026 and [Node.js 20+](https://nodejs.org).
 
 ## Getting started
 
-Four steps. Steps 2 and 3 are one-time setup for a machine; step 1 repeats for each new piece of work.
-
 ### 1. Create a project folder
 
-Everything happens inside a folder — it holds your style settings and gives the AI somewhere to work. In a terminal:
+In a terminal:
 
 ```bash
 npx @engine-room/after-effects-mcp init my-video
 cd my-video
 ```
 
-Then open that folder in Claude Code, or whichever MCP client you use.
+Open that folder in your AI client. It contains everything the client needs to find the tools.
 
-*Alternatively:* if you only want to try things out, any folder will do — you can create a project later.
-
-### 2. Install the tools
-
-**Claude Code** — in the session you just opened:
-
-```
-/plugin marketplace add Engine-Room-Games/after-effects-mcp
-/plugin install after-effects@engine-room
-```
-
-Restart Claude Code. This also installs guidance on using the tools well and on fixing setup problems.
-
-**Any other MCP client** — add the server to its config. For Claude Desktop that is `~/Library/Application Support/Claude/claude_desktop_config.json`:
+*If your client uses one global configuration file rather than per-folder settings* — Claude Desktop, for example — add this to it instead. On macOS it is `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -47,23 +32,19 @@ Restart Claude Code. This also installs guidance on using the tools well and on 
 }
 ```
 
-Restart the client.
+Restart the client afterwards.
 
-*Alternatively:* run step 1 as `init my-video --with-mcp` and the project folder comes with this config already in it.
+### 2. Connect After Effects
 
-### 3. Connect After Effects
-
-The tools reach After Effects through a small panel that runs inside it. Open After Effects, then ask the AI:
+Open After Effects, then ask the AI:
 
 > Set up After Effects.
 
-It installs the panel and enables the Adobe setting that allows it to load, then tells you to quit and reopen After Effects. Ask it to check the setup again to confirm.
+It installs a small panel inside After Effects, then tells you to quit and reopen it. Ask it to check the setup again to confirm.
 
-Until this step is done, every tool will report that it cannot reach After Effects.
+This is a one-time step per machine. Until it is done, every tool reports that it cannot reach After Effects.
 
-*Alternatively:* from a clone of this repository, run `npm run install:panel`.
-
-### 4. Start working
+### 3. Start working
 
 With After Effects open and your project folder open in your client, describe what you want:
 
@@ -71,61 +52,27 @@ With After Effects open and your project folder open in your client, describe wh
 
 The AI reads the current state of your comp, makes the change, and can take a screenshot to check the result.
 
-Before you get far, fill in `.claude/skills/house-style/SKILL.md` in your project folder with your colours, fonts and motion defaults — everything built afterwards follows them.
+Day to day, this is the only step you repeat. Create a new folder when you start a new project.
 
-Day to day you only repeat step 4. Step 1 comes back when you start a new project.
+## Your house style
 
-## Projects
-
-```bash
-npx @engine-room/after-effects-mcp init my-video
-```
-
-Creates:
-
-```
-my-video/
-├── .claude/skills/house-style/SKILL.md   your palette, type and timing
-├── CLAUDE.md                             what this project is
-└── renders/
-```
-
-`house-style/SKILL.md` holds your defaults. The AI reads it before building anything, so what it makes follows your style. Updating the tools never touches this file.
+Each project folder contains `.claude/skills/house-style/SKILL.md`. Fill it in with your colours, fonts and motion defaults, and everything built afterwards follows them.
 
 A quick way to write it: build one piece the way you want it, then ask the AI to read that comp and write it up in the house-style skill.
 
 Keep one folder per client or series. To apply the same style everywhere instead, put the skill in `~/.claude/skills/house-style/`.
 
-## Connecting After Effects
-
-Asking the AI to set up After Effects runs three things:
-
-1. `check_setup` — reports what is missing.
-2. `setup_panel` — copies the panel into your Adobe CEP extensions folder and enables the setting that permits unsigned panels: a preference on macOS, a registry value on Windows.
-3. A prompt to quit and reopen After Effects. The panel only loads at launch.
-
-On macOS, if the panel still does not connect after restarting, reboot once; some builds cache that preference until a restart.
-
-To see the panel yourself, use **Window → Extensions → AE MCP Bridge** in After Effects. It shows its status and a log.
-
-If something stops working later, ask the AI to check the After Effects setup.
+Updating the tools never touches this file.
 
 ## Updating
 
-Update the tools, then refresh the panel inside After Effects. Both are needed — the panel does not update on its own.
+Two things to update: the tools, and the panel inside After Effects. The panel does not update on its own.
 
-```
-/plugin marketplace update engine-room
-/plugin update after-effects@engine-room
-```
-
-Restart Claude Code. Then, with After Effects open, ask the AI:
+Restart your AI client — it picks up the current version of the tools. Then, with After Effects open, ask:
 
 > Update the After Effects panel.
 
-It runs `setup_panel` again and tells you to restart After Effects. Ask it to check the setup afterwards; `check_setup` reports whether the installed panel matches the current version.
-
-On other MCP clients, restarting the client picks up the new server version. The panel refresh is the same.
+It reinstalls the panel and tells you to restart After Effects. Ask it to check the setup afterwards, which reports whether the panel matches the current version.
 
 ## Tools
 
@@ -157,14 +104,14 @@ A few notes on the ones that behave differently from the rest:
 
 ## Troubleshooting
 
-Ask the AI to run `check_setup` first. It reports which part of the chain is broken and what to do about it.
+Ask the AI to check the After Effects setup. It reports which part is broken and what to do about it.
 
 | Symptom | Cause and fix |
 |---|---|
-| "Cannot reach the After Effects panel" | AE is not running, or the panel is not installed. Run `setup_panel`, then restart AE. |
-| Tools worked before, now fail inside AE | The tools were updated but the panel was not. Run `setup_panel`, restart AE. |
-| Panel never loads, setup looks correct | On macOS, reboot once. |
-| A panel answers but `check_setup` reports none installed | An older install under a previous bundle id is serving. Remove it from the CEP extensions folder, run `setup_panel`, restart AE. |
+| "Cannot reach the After Effects panel" | AE is not running, or the panel is not installed. Ask the AI to set up After Effects, then restart AE. |
+| Tools worked before, now fail inside AE | The tools were updated but the panel was not. Ask the AI to update the panel, then restart AE. |
+| Panel never loads, setup looks correct | On macOS, reboot once. Some builds cache the Adobe setting until a restart. |
+| A panel answers but the setup check reports none installed | An older install is still serving. Remove it from the CEP extensions folder, reinstall the panel, restart AE. |
 | Need the panel's own log | In AE: Window → Extensions → AE MCP Bridge. |
 
 ## Platforms
@@ -180,7 +127,7 @@ macOS is the more exercised of the two; [issue reports](https://github.com/Engin
 
 ## Limitations
 
-- The panel is unsigned, so loading it requires Adobe's `PlayerDebugMode`. `setup_panel` enables it. This is Adobe's documented path for unsigned extensions.
+- The panel is unsigned, so loading it requires Adobe's `PlayerDebugMode`, which the setup step enables. This is Adobe's documented path for unsigned extensions.
 - `saveFrameToPng` is community-known rather than officially documented. It works, but alpha edges can be imperfect on some comps.
 - A long synchronous loop in `run_jsx` will freeze the After Effects UI. Use `run_batch` for bulk work.
 - Not covered: the render queue, footage import and replacement, and application preferences.
