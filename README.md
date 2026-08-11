@@ -4,7 +4,7 @@
 
 Works with Claude and other MCP clients, on macOS and Windows.
 
-Requires After Effects 2026 and [Node.js 20+](https://nodejs.org).
+Requires After Effects 2026 and [Node.js 22+](https://nodejs.org).
 
 ## Getting started
 

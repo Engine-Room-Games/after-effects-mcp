@@ -36,7 +36,9 @@ await build({
   outfile: outFile,
   bundle: true,
   platform: "node",
-  target: "node20",
+  // Match the `engines` floor, not the version that happens to be building:
+  // this is the oldest runtime the published bundle has to parse on.
+  target: "node22",
   format: "esm",
   external,
   // No `banner` here: esbuild preserves the entry point's own hashbang, and
