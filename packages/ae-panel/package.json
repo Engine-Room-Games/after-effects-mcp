@@ -4,6 +4,6 @@
   "private": true,
   "description": "Invisible CEP extension hosting an HTTP+WS bridge inside After Effects.",
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.21.3"
   }
 }
