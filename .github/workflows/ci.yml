@@ -85,6 +85,7 @@ jobs:
           AE_MCP_HOME: ${{ runner.temp }}/ae-mcp-home
         run: |
           node -e '
+            const fs=require("fs"),path=require("path");
             import("./packages/mcp-server/dist/issues/journal.js").then(j=>{
               const first=j.logIssue({title:"Example: a tool failed oddly",symptom:"boom",workaround:"do it the other way",cause:"because",tools:["run_jsx"]});
               if(first.previouslyLogged||first.occurrences!==1) throw new Error("first log should be new");
@@ -96,5 +97,8 @@ jobs:
               const all=j.listIssues("all"), open=j.listIssues("unreported");
               if(all.count!==1||open.count!==0) throw new Error(`status filter wrong: ${all.count}/${open.count}`);
               if(all.issues[0].cause!=="because") throw new Error("a known cause must survive a sighting logged without one");
-              console.log(`journal ok at ${all.dir}`);
+              // Untracked by construction, not by asking the project to ignore it.
+              const ignore=path.join(all.dir,"..",".gitignore");
+              if(fs.readFileSync(ignore,"utf8").trim()!=="*") throw new Error(`journal must ignore itself: ${ignore}`);
+              console.log(`journal ok at ${all.dir} (scope ${all.scope})`);
             }).catch(e=>{console.error(e);process.exit(1);});'

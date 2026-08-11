@@ -11,11 +11,11 @@ import { packageVersion } from "../setup/paths.js";
  * discovering that a spatial property wants exactly one ease entry should be the
  * last one to spend it. The next session reads the entry instead.
  *
- * It lives in the user's home directory rather than in whatever project folder
- * happens to be open, for two reasons: the knowledge is about the tools, not
- * about one video, so it should follow the user across projects; and a home
- * directory is untracked by construction — nothing here is ever committed by
- * accident, and no .gitignore has to be maintained to keep it that way.
+ * It lives in `.ae-mcp/` inside the project folder, so it sits next to the work
+ * it came out of and travels with it. Untracked, but not by accident: the folder
+ * ignores itself (see `ensureJournalDir`) rather than relying on the project
+ * keeping a .gitignore rule, since most of these folders are not repositories at
+ * all and the ones that are should not carry these notes into a commit.
  */
 
 /** Where reports go. Read by the reporting command, not hardcoded in it. */
@@ -60,10 +60,54 @@ export interface LogIssueResult {
   issueUrl?: string;
 }
 
-export function journalDir(): string {
+/** Where the journal ended up — reported so the agent can always say where its notes live. */
+export type JournalScope = "project" | "home";
+
+/**
+ * The project folder is the working directory the client started this server in,
+ * which is what "the folder the user has open" means for every client that has
+ * such a concept.
+ *
+ * Some do not: Claude Desktop spawns servers from the filesystem root. Writing a
+ * project journal to `/` would be wrong even where it is permitted, so an
+ * unusable working directory falls back to the user's home rather than failing
+ * the tool. `list_known_issues` reports the scope it resolved to, so the fallback
+ * is visible rather than silent.
+ */
+export function journalRoot(): { dir: string; scope: JournalScope } {
   const override = process.env.AE_MCP_HOME?.trim();
-  const home = override && override.length > 0 ? override : path.join(os.homedir(), ".after-effects-mcp");
-  return path.join(home, "issues");
+  if (override && override.length > 0) return { dir: override, scope: "project" };
+
+  const cwd = process.cwd();
+  const unusable = cwd === path.parse(cwd).root || cwd === os.homedir();
+  if (!unusable) {
+    try {
+      fs.accessSync(cwd, fs.constants.W_OK);
+      return { dir: path.join(cwd, ".ae-mcp"), scope: "project" };
+    } catch {
+      // Read-only working directory — fall through.
+    }
+  }
+  return { dir: path.join(os.homedir(), ".after-effects-mcp"), scope: "home" };
+}
+
+export function journalDir(): string {
+  return path.join(journalRoot().dir, "issues");
+}
+
+/**
+ * Create the journal and make it invisible to git in one step. A `.gitignore`
+ * of `*` inside the folder ignores the folder's whole contents — including
+ * itself — without touching a rule the user maintains, and works the same in a
+ * repository, a folder that becomes one later, and one that never does.
+ */
+function ensureJournalDir(): string {
+  const { dir } = journalRoot();
+  const issues = path.join(dir, "issues");
+  fs.mkdirSync(issues, { recursive: true });
+  const ignore = path.join(dir, ".gitignore");
+  if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, "*\n", "utf8");
+  return issues;
 }
 
 /**
@@ -218,7 +262,7 @@ export function logIssue(input: LogIssueInput): LogIssueResult {
     workaround: input.workaround,
   };
 
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  ensureJournalDir();
   fs.writeFileSync(file, render(entry), "utf8");
 
   return {
@@ -235,6 +279,8 @@ export type IssueStatus = "all" | "unreported" | "reported";
 
 export interface IssueListing {
   dir: string;
+  /** "project" for this folder's own journal; "home" when there was no usable working directory. */
+  scope: JournalScope;
   repo: string;
   newIssueUrl: string;
   serverVersion: string;
@@ -244,6 +290,7 @@ export interface IssueListing {
 }
 
 export function listIssues(status: IssueStatus = "all", tool?: string): IssueListing {
+  const { scope } = journalRoot();
   const dir = journalDir();
   let entries: IssueEntry[] = [];
   try {
@@ -270,6 +317,7 @@ export function listIssues(status: IssueStatus = "all", tool?: string): IssueLis
 
   return {
     dir,
+    scope,
     repo: REPO,
     newIssueUrl: NEW_ISSUE_URL,
     serverVersion: packageVersion(),

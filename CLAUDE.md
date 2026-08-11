@@ -45,7 +45,7 @@ The MCP server is stateless except for an in-memory `JobManager`. The panel is t
 | `packages/mcp-server/src/tools/descriptions.ts` | All tool descriptions in one file — including the verbatim screenshot guidance. |
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. |
 | `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool. |
-| `packages/mcp-server/src/issues/journal.ts` | The cross-session issue journal at `~/.after-effects-mcp/issues/`. Backs `log_issue` / `list_known_issues` / `mark_issue_reported`. Home directory, not the project folder: the knowledge is about the tools, so it should follow the user across projects, and a home directory is untracked by construction. `AE_MCP_HOME` overrides the root (used by the CI check). |
+| `packages/mcp-server/src/issues/journal.ts` | The cross-session issue journal at `<project>/.ae-mcp/issues/`. Backs `log_issue` / `list_known_issues` / `mark_issue_reported`. The project folder is `process.cwd()`; a client that gives no usable one (Claude Desktop starts servers at `/`) falls back to `~/.after-effects-mcp`, reported as `scope: "home"` so the fallback is never silent. `AE_MCP_HOME` overrides the root (used by the CI check). |
 | `packages/mcp-server/src/setup/{check,install,paths}.ts` | Backs `check_setup` / `setup_panel`. Never touches the bridge — it exists for the case where the panel isn't installed yet. |
 | `packages/mcp-server/src/setup/platform.ts` | **The only place macOS and Windows diverge** (PlayerDebugMode storage, AE process detection). Plus `cepExtensionsDir()` in `paths.ts`. Keep platform branching here — do not scatter `process.platform` through the codebase. |
 | `scripts/lib/setup.mjs` | Loads the compiled setup module so the dev scripts (`doctor`, `install-panel`, `enable-debug`) reuse the same platform logic the MCP tools use instead of keeping a second copy. |
@@ -115,7 +115,9 @@ Publishing: `npm publish -w @engine-room/after-effects-mcp` (the `prepack` hook 
 
 ## The issue journal
 
-`log_issue` is how one session hands a hard-won workaround to the next. Three properties matter, and all three are things it would be easy to get wrong:
+`log_issue` is how one session hands a hard-won workaround to the next, in the folder the work happened in. Four properties matter, and all four are things it would be easy to get wrong:
+
+- **The folder ignores itself.** `ensureJournalDir` writes `.ae-mcp/.gitignore` containing `*` on first use. That is what keeps the journal untracked — not a rule in the project's `.gitignore`, which most of these folders do not have, and which the ones that do would have to remember to add.
 
 - **The title is the identity.** It is slugified into the filename, so re-logging under the same title extends the entry rather than adding a near-duplicate. Agents are told to `list_known_issues` first for exactly this reason.
 - **Reporting state belongs to the entry, not the sighting.** Re-logging a known problem preserves `reported`, `issueUrl` and `firstSeen`, and a `cause` worked out once survives a later sighting logged without one. Otherwise the user gets asked to report the same thing repeatedly, which is the fastest way to make them stop reading the offer.

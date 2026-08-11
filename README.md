@@ -107,10 +107,13 @@ A few notes on the ones that behave differently from the rest:
 ## When something goes wrong
 
 These tools have rough edges. When the AI hits one and works out a way around
-it, it writes the problem and the fix into a notebook at
-`~/.after-effects-mcp/issues/` — plain text files you can read or delete. The
-next session reads that notebook before guessing, so the same twenty minutes are
-never spent twice, in this project or any other.
+it, it writes the problem and the fix into a notebook in your project folder, at
+`.ae-mcp/issues/` — plain text files you can read or delete. The next session
+reads that notebook before guessing, so the same twenty minutes are never spent
+twice on the same project.
+
+The folder ignores itself, so it stays out of version control without you doing
+anything.
 
 If the problem looks like ours rather than yours, the AI will say so at the end
 of its reply and offer to pass it on. You can also start that yourself:
