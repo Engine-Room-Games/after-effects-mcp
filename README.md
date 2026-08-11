@@ -6,13 +6,88 @@
 
 **Control Adobe After Effects with AI.** Describe the animation you want — a lower third, a logo reveal, an animated counter — and it gets built in your project: layers, keyframes, easing, effects, expressions and text, all editable afterwards like anything you would make by hand.
 
-Works with Claude and other MCP clients, on macOS and Windows.
+Works with Claude, Cursor, VS Code, Codex, Windsurf and any other MCP client, on macOS and Windows. Requires After Effects 2026.
 
-Requires After Effects 2026 and [Node.js 22+](https://nodejs.org).
+## Install
+
+**Claude Desktop — download [the latest `.mcpb`](https://github.com/Engine-Room-Games/after-effects-mcp/releases/latest) and open it.** That is the whole install. Nothing else to download, no terminal, no Node.
+
+Then open After Effects and ask:
+
+> Set up After Effects.
+
+It installs a small panel into After Effects and tells you to restart it. One time per machine.
+
+<details>
+<summary><b>Other clients — Cursor, VS Code, Claude Code, Codex, Windsurf, anything else</b></summary>
+
+<br>
+
+**If you have [Node 22+](https://nodejs.org)**, add this to your client's MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "after-effects": {
+      "command": "npx",
+      "args": ["-y", "@engine-room/after-effects-mcp"]
+    }
+  }
+}
+```
+
+VS Code uses a slightly different shape — `{"servers": {"after-effects": {"type": "stdio", …}}}` in `.vscode/mcp.json`.
+
+**If you do not have Node**, download the standalone build for your machine from [the latest release](https://github.com/Engine-Room-Games/after-effects-mcp/releases/latest), unzip it anywhere, and point your client at the executable inside:
+
+```json
+{
+  "mcpServers": {
+    "after-effects": {
+      "command": "/Users/you/Applications/after-effects-mcp/after-effects-mcp"
+    }
+  }
+}
+```
+
+Keep that folder together — the After Effects panel ships next to the executable.
+
+Restart your client, then ask it to set up After Effects.
+
+</details>
+
+<details>
+<summary><b>Claude Code plugin</b></summary>
+
+<br>
+
+This repository is also a plugin marketplace, which adds the skills and `/`-commands on top of the tools:
+
+```
+/plugin marketplace add Engine-Room-Games/after-effects-mcp
+/plugin install after-effects@engine-room
+```
+
+</details>
+
+## Start working
+
+Open the After Effects project you want to work on, then say what you want:
+
+> Build a lower third that says Chapter One, sliding in from the left.
+
+Your assistant reads the current state of your comp, makes the change, and can screenshot the result to check it. Everything it builds is ordinary editable After Effects work.
+
+Two commands worth knowing, both available in any client that supports MCP prompts:
+
+| | |
+|---|---|
+| `/init-after-effects` | Walks you through the whole setup and offers to capture your style |
+| `/create-style-guide` | Teaches it what your work should look like |
 
 ## What it builds
 
-Six scenes from one quarterly-report sequence, each in a different visual style. Every layer, keyframe and effect below was built through these tools, and all of it opens in After Effects as ordinary editable work.
+Six scenes from one quarterly-report sequence, each in a different visual style. Every layer, keyframe and effect below was built through these tools.
 
 <table>
   <tr>
@@ -47,75 +122,41 @@ Six scenes from one quarterly-report sequence, each in a different visual style.
   </tr>
 </table>
 
-## Getting started
-
-### 1. Create a project folder
-
-In a terminal:
-
-```bash
-npx @engine-room/after-effects-mcp init my-video
-cd my-video
-```
-
-Open that folder in your AI client. It contains everything the client needs to find the tools.
-
-*If your client uses one global configuration file rather than per-folder settings* — Claude Desktop, for example — add this to it instead. On macOS it is `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "after-effects": {
-      "command": "npx",
-      "args": ["-y", "@engine-room/after-effects-mcp"]
-    }
-  }
-}
-```
-
-Restart the client afterwards.
-
-### 2. Connect After Effects
-
-Open After Effects, then ask the AI:
-
-> Set up After Effects.
-
-It installs a small panel inside After Effects, then tells you to quit and reopen it. Ask it to check the setup again to confirm.
-
-This is a one-time step per machine. Until it is done, every tool reports that it cannot reach After Effects.
-
-### 3. Start working
-
-With After Effects open and your project folder open in your client, describe what you want:
-
-> Build a lower third that says Chapter One, sliding in from the left.
-
-The AI reads the current state of your comp, makes the change, and can take a screenshot to check the result.
-
-Day to day, this is the only step you repeat. Create a new folder when you start a new project.
-
 ## Your house style
 
-Each project folder contains `.claude/skills/house-style/SKILL.md`. Fill it in with your colours, fonts and motion defaults, and everything built afterwards follows them.
+Ask for a style guide and point at a comp you already like. Your colours, fonts, sizes and timing get read off it and saved as `house-style.md` **next to your After Effects project**, and everything built afterwards follows them.
 
-A quick way to write it: build one piece the way you want it, then ask the AI to read that comp and write it up in the house-style skill.
+Because it lives beside the `.aep`, it travels with the project and works in every client — including ones that cannot read files at all. It is plain markdown; edit it in any text editor.
 
-Keep one folder per client or series. To apply the same style everywhere instead, put the skill in `~/.claude/skills/house-style/`.
+> Your project has to have been saved at least once, or there is no folder to put it in.
 
-Updating the tools never touches this file.
+<details>
+<summary><b>Details — what goes in it, and project folders</b></summary>
+
+<br>
+
+A guide that works is specific: `#131521 at 92% opacity`, not "dark and clean". The most useful lines are the prohibitions — "never put text directly on footage", "keep total runtime under 8 seconds". Ask for a style guide and you will be walked through it.
+
+Separately, `init_project` (or "set up a project folder for me") creates a folder for one video, series or client, with a brief your assistant reads and a `renders/` directory. It writes whichever rules file your client actually reads — `AGENTS.md`, `CLAUDE.md`, `.cursor/rules/`, and so on. From a terminal, the same thing is `npx @engine-room/after-effects-mcp init my-video`.
+
+Updating the tools never touches either file.
+
+</details>
 
 ## Updating
 
-Two things to update: the tools, and the panel inside After Effects. The panel does not update on its own.
+Two things update separately: the tools, and the panel inside After Effects.
 
-Restart your AI client — it picks up the current version of the tools. Then, with After Effects open, ask:
+For the tools — reinstall the `.mcpb`, or restart your client if you use `npx`, or download the new build. Then, with After Effects open:
 
 > Update the After Effects panel.
 
-It reinstalls the panel and tells you to restart After Effects. Ask it to check the setup afterwards, which reports whether the panel matches the current version.
+Ask it to check the setup afterwards; it reports whether the panel matches the tools.
 
-## Tools
+<details>
+<summary><b>Tools — all 67</b></summary>
+
+<br>
 
 | Group | Tools |
 |---|---|
@@ -133,56 +174,55 @@ It reinstalls the panel and tells you to restart After Effects. Ask it to check 
 | Batch (1) | `run_batch` |
 | Explore (2) | `get_project_summary`, `find_layers` |
 | Raw (1) | `run_jsx` |
+| House style (2) | `get_house_style`, `set_house_style` |
 | Jobs (3) | `await_job`, `get_job`, `cancel_job` |
-| Setup (2) | `check_setup`, `setup_panel` |
+| Setup (3) | `check_setup`, `setup_panel`, `init_project` |
+| Guidance (1) | `ae_guide` |
 | Issues (3) | `list_known_issues`, `log_issue`, `mark_issue_reported` |
 
-A few notes on the ones that behave differently from the rest:
+A few behave differently from the rest:
 
 - `get_layer_full` returns a layer's transforms with their keyframes and expressions, every effect with every parameter, masks, markers and visible bounds — in one call.
 - `run_batch` runs many operations in a single pass and counts as one undo step. Long batches stream progress.
-- `screenshot_frame` and `screenshot_layer` are for occasional checks, not for reviewing motion frame by frame. On large comps, `downsample: 2` renders at half resolution, which is faster and keeps the image small.
+- `screenshot_frame` and `screenshot_layer` are for occasional checks, not for reviewing motion frame by frame. On large comps, `downsample: 2` renders at half resolution.
 - `run_jsx` runs arbitrary ExtendScript for anything the other tools do not cover.
-- `log_issue` and `list_known_issues` are the notebook described below.
+- `ae_guide` is how the assistant reads its own working guidance — the same text this server also publishes as MCP resources, and ships to Claude Code as skills.
 
-## When something goes wrong
+</details>
 
-These tools have rough edges. When the AI hits one and works out a way around
-it, it writes the problem and the fix into a notebook in your project folder, at
-`.ae-mcp/issues/` — plain text files you can read or delete. The next session
-reads that notebook before guessing, so the same twenty minutes are never spent
-twice on the same project.
+<details>
+<summary><b>When something goes wrong</b></summary>
 
-The folder ignores itself, so it stays out of version control without you doing
-anything.
+<br>
 
-If the problem looks like ours rather than yours, the AI will say so at the end
-of its reply and offer to pass it on. You can also start that yourself:
+These tools have rough edges. When your assistant hits one and works out a way around it, it writes the problem and the fix into a notebook in your project folder, at `.ae-mcp/issues/` — plain text files you can read or delete. The next session reads that notebook before guessing, so the same twenty minutes are never spent twice.
 
-```
-/report-ae-issue
-```
+The folder ignores itself, so it stays out of version control without you doing anything.
 
-It writes the report, shows it to you, and only sends it once you say yes.
-Nothing about your own work — comp names, file paths, clients — goes into it.
-Sending needs the [GitHub CLI](https://cli.github.com); without it you get a
-prefilled link to click instead.
+If the problem looks like ours rather than yours, you will be offered the chance to pass it on. You can also start that yourself with `/report-ae-issue`. It writes the report, shows it to you, and only sends it once you say yes. Nothing about your own work — comp names, file paths, clients — goes into it. Sending needs the [GitHub CLI](https://cli.github.com); without it you get a prefilled link to click.
 
-## Troubleshooting
+### Troubleshooting
 
-Ask the AI to check the After Effects setup. It reports which part is broken and what to do about it.
+Ask your assistant to check the After Effects setup. It reports which part is broken and what to do.
 
 | Symptom | Cause and fix |
 |---|---|
-| "Cannot reach the After Effects panel" | AE is not running, or the panel is not installed. Ask the AI to set up After Effects, then restart AE. |
-| Tools worked before, now fail inside AE | The tools were updated but the panel was not. Ask the AI to update the panel, then restart AE. |
+| "Cannot reach the After Effects panel" | AE is not running, or the panel is not installed. Ask it to set up After Effects, then restart AE. |
+| Tools worked before, now fail inside AE | The tools were updated but the panel was not. Ask it to update the panel, then restart AE. |
 | Panel never loads, setup looks correct | On macOS, reboot once. Some builds cache the Adobe setting until a restart. |
-| A panel answers but the setup check reports none installed | An older install is still serving. Remove it from the CEP extensions folder, reinstall the panel, restart AE. |
+| A panel answers but the setup check reports none installed | An older install is still serving. Remove it from the CEP extensions folder, reinstall, restart AE. |
+| "No project folder to write to" | Your client did not tell the server where it is working. Say which folder you want. |
+| Style guide cannot be saved | The After Effects project has never been saved. Save it, then try again. |
 | Need the panel's own log | In AE: Window → Extensions → AE MCP Bridge. |
 
-## Platforms
+</details>
 
-macOS and Windows. Two things differ, and are handled for you:
+<details>
+<summary><b>Platforms, limitations and security</b></summary>
+
+<br>
+
+macOS and Windows — the only two platforms After Effects runs on. Two things differ, and are handled for you:
 
 | | macOS | Windows |
 |---|---|---|
@@ -191,14 +231,21 @@ macOS and Windows. Two things differ, and are handled for you:
 
 macOS is the more exercised of the two; [issue reports](https://github.com/Engine-Room-Games/after-effects-mcp/issues) are welcome.
 
-## Limitations
+**Signing.** The macOS binaries in each release are signed and notarized by Engine Room, so they run without warnings. The Windows binary is unsigned — SmartScreen may warn on first run — because that needs a separate certificate. If you fork this project and build your own binaries, they will be unsigned and Gatekeeper will refuse to launch them until you sign with your own Developer ID; the `npx` path has no such constraint.
 
-- The panel is unsigned, so loading it requires Adobe's `PlayerDebugMode`, which the setup step enables. This is Adobe's documented path for unsigned extensions.
+**Limitations.**
+
+- The After Effects panel is unsigned, so loading it requires Adobe's `PlayerDebugMode`, which the setup step enables. This is Adobe's documented path for unsigned extensions.
 - `saveFrameToPng` is community-known rather than officially documented. It works, but alpha edges can be imperfect on some comps.
 - A long synchronous loop in `run_jsx` will freeze the After Effects UI. Use `run_batch` for bulk work.
 - Not covered: the render queue, footage import and replacement, and application preferences.
 
-## Development
+</details>
+
+<details>
+<summary><b>Development</b></summary>
+
+<br>
 
 ```bash
 git clone https://github.com/Engine-Room-Games/after-effects-mcp.git
@@ -210,17 +257,22 @@ npm run doctor
 
 | Command | Purpose |
 |---|---|
-| `make build` | Compile TypeScript and the ExtendScript bundle |
+| `make build` | Compile TypeScript, the guides and the ExtendScript bundle |
 | `make jsx` | Rebuild `bundle.jsx` and hot-reload it into a running After Effects |
 | `make watch` | TypeScript watch mode |
 | `make doctor` | Diagnose the install |
-| `make verify` | Build, check version strings agree, dry-run the package |
-| `make release` | Bump the patch version, tag, and publish |
-| `make release 1.1.0` | Set an explicit version, tag, and publish |
+| `make verify` | Build, check version strings and generated files agree, dry-run the package |
+| `make artifacts` | Build the `.mcpb` and standalone binaries without releasing |
+| `make release` | Bump the patch version, build and sign every artifact, tag, and publish |
+| `make release 1.1.0` | The same with an explicit version |
 
 Adding a tool takes three edits: a zod schema in `packages/shared/src/schemas.ts`, a handler in the matching `packages/jsx/*.jsx` module, and a description in `packages/mcp-server/src/tools/descriptions.ts`. Registration is automatic.
 
-See [CLAUDE.md](CLAUDE.md) for the architecture, the ExtendScript conventions, and the known-fragile areas.
+Guidance prose is written once in `packages/mcp-server/src/{guides,prompts}/*.md` and generated into the MCP resources, the `ae_guide` tool, the server's `instructions`, and the Claude Code skills and commands. Never edit the generated copies.
+
+Releases are cut from a Mac with a Developer ID certificate; see `scripts/sign-and-notarize.sh` for the environment it expects. See [CLAUDE.md](CLAUDE.md) for the architecture, the ExtendScript conventions, and the known-fragile areas.
+
+</details>
 
 ## License
 

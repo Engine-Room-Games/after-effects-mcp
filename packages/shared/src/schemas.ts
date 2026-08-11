@@ -419,6 +419,16 @@ export const FindLayers = z.object({
 // ---------- raw ----------
 export const RunJsx = z.object({ code: z.string() });
 
+// ---------- house style (a markdown file beside the .aep, read over the bridge) ----------
+export const GetHouseStyle = z.object({}).strict();
+export const SetHouseStyle = z
+  .object({
+    content: z.string().min(1).describe("The complete style guide as markdown. Replaces the file, so send the whole document."),
+    overwrite: z.boolean().default(false).optional()
+      .describe("Required to replace an existing guide. Read it with get_house_style and merge first — this is not a patch."),
+  })
+  .strict();
+
 // ---------- jobs ----------
 // ---------- setup (handled in the MCP server, never forwarded to the panel) ----------
 export const CheckSetup = z.object({}).strict();
@@ -428,6 +438,34 @@ export const SetupPanel = z.object({
   force: z.boolean().default(false).optional()
     .describe("Replace an existing symlinked (development) install with a copy. Default false."),
 }).strict();
+
+/**
+ * Guide topics. The prose lives in `packages/mcp-server/src/guides/*.md`, but the
+ * names are part of the tool contract, so they are declared here and
+ * `scripts/build-guides.mjs` fails the build if the two ever disagree.
+ */
+export const GUIDE_TOPICS = ["ae-setup", "after-effects", "style-guide"] as const;
+export const AeGuide = z
+  .object({
+    topic: z.enum(GUIDE_TOPICS).describe(
+      "after-effects: building, animating, easing, expressions, the traps. style-guide: capturing the user's look. ae-setup: connecting to AE when a tool cannot reach it."
+    ),
+  })
+  .strict();
+
+// ---------- project scaffold (handled in the MCP server, never forwarded to the panel) ----------
+export const InitProject = z
+  .object({
+    dir: z.string().optional()
+      .describe("Folder to create or fill, absolute or relative to the server's working directory. Ask the user if you do not know; do not invent one."),
+    name: z.string().optional().describe("Project name for the generated docs. Defaults to the folder name."),
+    client: z.enum(["auto", "claude-code", "claude-desktop", "cursor", "vscode", "windsurf", "codex", "generic"])
+      .default("auto").optional()
+      .describe("Which client's layout to write. 'auto' detects it from the MCP handshake — leave it alone unless the user says otherwise."),
+    withMcpConfig: z.boolean().default(false).optional()
+      .describe("Also write a client MCP config pointing at this server. Default false: you are already connected, so the user does not need one."),
+  })
+  .strict();
 
 // ---------- issue journal (handled in the MCP server, never forwarded to the panel) ----------
 export const LogIssue = z
@@ -530,6 +568,9 @@ export const OpSchemas = {
   find_layers: FindLayers,
   // raw
   run_jsx: RunJsx,
+  // house style
+  get_house_style: GetHouseStyle,
+  set_house_style: SetHouseStyle,
   // jobs
   await_job: AwaitJob,
   get_job: GetJob,
@@ -537,6 +578,9 @@ export const OpSchemas = {
   // setup
   check_setup: CheckSetup,
   setup_panel: SetupPanel,
+  init_project: InitProject,
+  // guidance
+  ae_guide: AeGuide,
   // issue journal
   log_issue: LogIssue,
   list_known_issues: ListKnownIssues,

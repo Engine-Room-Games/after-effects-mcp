@@ -6,6 +6,8 @@ packages/mcp-server/panel/
 packages/mcp-server/README.md
 packages/mcp-server/LICENSE
 *.tgz
+# Release artifacts: binaries, the .mcpb bundle and the zips uploaded to GitHub.
+dist-release/
 .DS_Store
 *.log
 .env

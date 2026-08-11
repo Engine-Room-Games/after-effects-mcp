@@ -36,6 +36,12 @@ jobs:
       - name: Version strings agree
         run: node scripts/sync-version.mjs --check
 
+      # The skills and commands under plugin/ are generated from the guide and
+      # prompt sources. A hand-edit there would be silently overwritten by the
+      # next build, so it has to fail here instead.
+      - name: Generated guides and prompts are in sync
+        run: node scripts/build-guides.mjs --check
+
       - name: Server starts and lists its tools
         shell: bash
         run: |
@@ -51,8 +57,41 @@ jobs:
               c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
               const t=await send("tools/list",{});
               const n=t.result.tools.length;
-              if(n<63){console.error(`expected >=63 tools, got ${n}`);process.exit(1);}
+              if(n<67){console.error(`expected >=67 tools, got ${n}`);process.exit(1);}
               console.log(`${n} tools on ${process.platform}`);
+              c.kill();process.exit(0);
+            })();'
+
+      # The carriers that reach non-Claude clients: without these, everyone
+      # outside Claude Code gets the tools and none of the guidance.
+      - name: Instructions, prompts and resources are served
+        shell: bash
+        run: |
+          node -e '
+            const {spawn}=require("child_process");
+            const c=spawn(process.execPath,["packages/mcp-server/dist/index.js"],{stdio:["pipe","pipe","inherit"]});
+            let buf="",id=0;const pend=new Map();
+            c.stdout.on("data",d=>{buf+=d;let i;while((i=buf.indexOf("\n"))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);
+              if(!l.trim())continue;try{const m=JSON.parse(l);if(m.id&&pend.has(m.id)){pend.get(m.id)(m);pend.delete(m.id);}}catch{}}});
+            const send=(m,p)=>new Promise(r=>{const my=++id;pend.set(my,r);c.stdin.write(JSON.stringify({jsonrpc:"2.0",id:my,method:m,params:p})+"\n");});
+            const fail=m=>{console.error(m);process.exit(1);};
+            (async()=>{
+              const init=await send("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"ci",version:"1"}});
+              c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
+              if(!init.result.instructions?.includes("get_house_style")) fail("initialize did not carry instructions");
+              for(const k of ["prompts","resources"]) if(!init.result.capabilities[k]) fail(`capability ${k} missing`);
+              const prompts=(await send("prompts/list",{})).result.prompts;
+              if(prompts.length<3) fail(`expected 3 prompts, got ${prompts.length}`);
+              const got=await send("prompts/get",{name:"report-ae-issue",arguments:{arguments:"xyzzy"}});
+              const text=got.result.messages[0].content.text;
+              if(text.includes("$ARGUMENTS")||!text.includes("xyzzy")) fail("prompt arguments were not substituted");
+              const res=(await send("resources/list",{})).result.resources;
+              if(res.length<3) fail(`expected 3 resources, got ${res.length}`);
+              const read=await send("resources/read",{uri:"ae://guide/after-effects"});
+              if(!read.result.contents[0].text.startsWith("# Driving After Effects")) fail("resource body wrong");
+              const guide=await send("tools/call",{name:"ae_guide",arguments:{topic:"style-guide"}});
+              if(guide.result.isError) fail("ae_guide errored");
+              console.log(`instructions ${init.result.instructions.length} chars, ${prompts.length} prompts, ${res.length} resources`);
               c.kill();process.exit(0);
             })();'
 
@@ -70,15 +109,49 @@ jobs:
               if(!platform.ok||!assets.ok) process.exit(1);
             }).catch(e=>{console.error(e);process.exit(1);});'
 
-      - name: Scaffold works
+      # Both entry points into the same scaffold: the terminal one, and the
+      # init_project tool that clients without filesystem access rely on.
+      - name: Scaffold works from the CLI
         shell: bash
         run: |
           node packages/mcp-server/dist/index.js init ci-project --with-mcp
+          test -f ci-project/AGENTS.md
           test -f ci-project/CLAUDE.md
-          test -f ci-project/.claude/skills/house-style/SKILL.md
-          test -f ci-project/.claude/commands/report-ae-issue.md
           test -f ci-project/.mcp.json
+          test -f ci-project/renders/.gitkeep
+          node packages/mcp-server/dist/index.js init ci-cursor --client cursor --with-mcp
+          test -f ci-cursor/.cursor/rules/after-effects.mdc
+          test -f ci-cursor/.cursor/mcp.json
           echo "scaffold ok"
+
+      - name: Scaffold works from the tool, and refuses to clobber
+        shell: bash
+        run: |
+          mkdir -p ci-tool-project
+          node -e '
+            const {spawn}=require("child_process");
+            const path=require("path"),fs=require("fs");
+            const entry=path.resolve("packages/mcp-server/dist/index.js");
+            const cwd=path.resolve("ci-tool-project");
+            const c=spawn(process.execPath,[entry],{stdio:["pipe","pipe","inherit"],cwd});
+            let buf="",id=0;const pend=new Map();
+            c.stdout.on("data",d=>{buf+=d;let i;while((i=buf.indexOf("\n"))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);
+              if(!l.trim())continue;try{const m=JSON.parse(l);if(m.id&&pend.has(m.id)){pend.get(m.id)(m);pend.delete(m.id);}}catch{}}});
+            const send=(m,p)=>new Promise(r=>{const my=++id;pend.set(my,r);c.stdin.write(JSON.stringify({jsonrpc:"2.0",id:my,method:m,params:p})+"\n");});
+            const fail=m=>{console.error(m);process.exit(1);};
+            (async()=>{
+              await send("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"cursor",version:"1"}});
+              c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
+              const first=await send("tools/call",{name:"init_project",arguments:{}});
+              if(first.result.isError) fail(`init_project failed: ${first.result.content[0].text}`);
+              const r=JSON.parse(first.result.content[0].text);
+              if(r.client!=="cursor") fail(`client detection wrong: ${r.client}`);
+              for(const rel of r.written) if(!fs.existsSync(path.join(r.dir,rel))) fail(`claimed ${rel} but it is missing`);
+              const again=await send("tools/call",{name:"init_project",arguments:{}});
+              if(!again.result.isError) fail("a second init_project must refuse rather than overwrite");
+              console.log(`init_project wrote ${r.written.join(", ")} for ${r.client}`);
+              c.kill();process.exit(0);
+            })();'
 
       # The journal is the one piece of state this server owns, and its round
       # trip has to survive a Windows path and a hand-edited file.

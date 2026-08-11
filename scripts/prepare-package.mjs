@@ -10,6 +10,7 @@
 // Runs from `prepack`, so `npm publish` and `npm pack` pick it up automatically.
 
 import { build } from "esbuild";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +31,13 @@ if (!fs.existsSync(bundleJsx)) {
   console.error(`Missing ${bundleJsx}. Run \`npm run build:jsx\` first.`);
   process.exit(1);
 }
+
+// The guidance the agent reads is compiled in from generated/content.ts. Packing
+// a stale copy would ship tool guidance that disagrees with the tools, silently
+// — so check here as well as in CI, since `npm publish` can be run by hand.
+execFileSync(process.execPath, [path.join(root, "scripts", "build-guides.mjs"), "--check"], {
+  stdio: "inherit",
+});
 
 await build({
   entryPoints: [path.join(serverPkg, "src", "index.ts")],

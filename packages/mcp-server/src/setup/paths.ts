@@ -30,17 +30,36 @@ function packageRoot(): string {
 }
 
 /**
+ * The directory the executable sits in.
+ *
+ * In a compiled single-file build there is no `packageRoot()` to find: the
+ * module paths point inside the executable's virtual filesystem, so nothing
+ * resolves relative to them. Those builds ship the panel, `ws` and a package.json
+ * as real files beside the binary instead, and this is how they are found.
+ *
+ * Harmless under plain Node, where it resolves to whatever directory the `node`
+ * binary lives in and none of the candidates exist there — so it is always
+ * consulted last rather than being gated on detecting the build type.
+ */
+function executableDir(): string {
+  return path.dirname(process.execPath);
+}
+
+/**
  * The version of the published package, read at runtime rather than compiled in
  * so that it cannot drift from what the user actually installed. Used when a
  * problem report needs to say which build hit it.
  */
 export function packageVersion(): string {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot(), "package.json"), "utf8"));
-    return typeof pkg.version === "string" ? pkg.version : "unknown";
-  } catch {
-    return "unknown";
+  for (const dir of [packageRoot(), executableDir()]) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+      if (typeof pkg.version === "string") return pkg.version;
+    } catch {
+      // Try the next layout.
+    }
   }
+  return "unknown";
 }
 
 /**
@@ -55,6 +74,8 @@ export function panelSourceDir(): string | null {
     // a previous `npm pack`. Only the second path exists in the tarball.
     path.resolve(packageRoot(), "..", "ae-panel"),
     path.join(packageRoot(), "panel"),
+    // Compiled single-file build: the panel ships beside the executable.
+    path.join(executableDir(), "panel"),
   ];
   for (const dir of candidates) {
     if (fs.existsSync(path.join(dir, "CSXS", "manifest.xml"))) return dir;
@@ -93,7 +114,11 @@ export function wsModuleDir(): string | null {
     if (idx >= 0) return entry.slice(0, idx + marker.length - 1);
     return path.dirname(entry);
   } catch {
-    return null;
+    // Compiled build: `ws` is inlined into the executable, so it cannot be
+    // resolved as a module — but a copyable directory ships beside the binary
+    // precisely because the panel needs one.
+    const beside = path.join(executableDir(), "node_modules", "ws");
+    return fs.existsSync(beside) ? beside : null;
   }
 }
 

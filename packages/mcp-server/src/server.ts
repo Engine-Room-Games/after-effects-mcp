@@ -1,7 +1,11 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
+  ListResourcesRequestSchema,
   ListToolsRequestSchema,
+  ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { schemas } from "@engineroom/shared";
@@ -12,9 +16,12 @@ import { descriptions } from "./tools/descriptions.js";
 import { AeError, BridgeUnreachableError } from "./util/errors.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
+import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
+import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./generated/content.js";
 import { listIssues, logIssue, markReported } from "./issues/journal.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 const { OpSchemas } = schemas;
@@ -33,10 +40,22 @@ const SERVER_OPS = new Set([
   "cancel_job",
   "check_setup",
   "setup_panel",
+  "init_project",
+  "ae_guide",
   "log_issue",
   "list_known_issues",
   "mark_issue_reported",
 ]);
+
+/**
+ * `ae_guide` exists because the two better carriers are not universal. The
+ * condensed core goes out in `instructions`, which some clients drop on the
+ * floor; the full text is exposed as resources, which fewer clients support
+ * still. Tools are the one thing every MCP client can reach, so the guidance has
+ * to be available as one — otherwise a Cursor or Codex user gets 60-odd tools
+ * and none of the knowledge that stops them being misused.
+ */
+const GUIDE_URI_PREFIX = "ae://guide/";
 
 // Schema for await_job/get_job/cancel_job (defined inline in shared/schemas.ts).
 const AwaitJobSchema = schemas.AwaitJob;
@@ -46,7 +65,13 @@ const CancelJobSchema = schemas.CancelJob;
 export function createServer() {
   const server = new Server(
     { name: "after-effects-mcp", version: "0.1.2" },
-    { capabilities: { tools: {}, logging: {} } }
+    {
+      capabilities: { tools: {}, logging: {}, prompts: {}, resources: {} },
+      // Clients that honour this fold it into the system prompt, which is the
+      // only way non-Claude clients get the cross-cutting guidance at all —
+      // skills and slash commands do not exist outside Claude's own clients.
+      instructions: SERVER_INSTRUCTIONS,
+    }
   );
 
   const bridge = new HttpClient();
@@ -75,6 +100,54 @@ export function createServer() {
       };
     });
     return { tools };
+  });
+
+  // ---------- prompts ----------
+  // The portable form of a slash command. Claude Code gets the same three as
+  // plugin commands; everywhere else this is the only way a user can invoke a
+  // named flow, so the bodies live in one place and are generated into both.
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+    prompts: PROMPTS.map((p) => ({
+      name: p.name,
+      description: p.description,
+      arguments: p.argumentHint
+        ? [{ name: "arguments", description: p.argumentHint, required: false }]
+        : [],
+    })),
+  }));
+
+  server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+    const prompt = getPrompt(req.params.name);
+    if (!prompt) throw new Error(`Unknown prompt: ${req.params.name}`);
+    const given = (req.params.arguments?.arguments as string | undefined) ?? "";
+    return {
+      description: prompt.description,
+      messages: [
+        {
+          role: "user" as const,
+          content: { type: "text" as const, text: prompt.body.replaceAll("$ARGUMENTS", given) },
+        },
+      ],
+    };
+  });
+
+  // ---------- resources ----------
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+    resources: GUIDES.map((g) => ({
+      uri: `${GUIDE_URI_PREFIX}${g.name}`,
+      name: g.name,
+      description: g.description,
+      mimeType: "text/markdown",
+    })),
+  }));
+
+  server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+    const uri = req.params.uri;
+    const guide = uri.startsWith(GUIDE_URI_PREFIX)
+      ? getGuide(uri.slice(GUIDE_URI_PREFIX.length))
+      : undefined;
+    if (!guide) throw new Error(`Unknown resource: ${uri}`);
+    return { contents: [{ uri, mimeType: "text/markdown", text: guide.body }] };
   });
 
   // ---------- tools/call ----------
@@ -115,6 +188,30 @@ export function createServer() {
           // Re-run the diagnostic so the agent sees the resulting state rather
           // than having to guess whether the install was sufficient.
           return textResult({ ...installed, setup: await checkSetup() });
+        }
+        if (name === "init_project") {
+          const a = schemas.InitProject.parse(rawArgs);
+          const client: ClientKind =
+            !a.client || a.client === "auto"
+              ? detectClient(server.getClientVersion()?.name)
+              : (a.client as ClientKind);
+          return textResult(
+            scaffold({
+              dir: a.dir,
+              name: a.name,
+              client,
+              withMcpConfig: a.withMcpConfig ?? false,
+              roots: a.dir ? undefined : await clientRoots(server),
+            })
+          );
+        }
+        if (name === "ae_guide") {
+          const a = schemas.AeGuide.parse(rawArgs);
+          const guide = getGuide(a.topic);
+          if (!guide) return errorResult(`Unknown guide topic: ${a.topic}`);
+          // Markdown, not JSON: this is prose to be read, and JSON-escaping it
+          // would hand the model a wall of \n.
+          return { content: [{ type: "text" as const, text: guide.body }] };
         }
         if (name === "log_issue") {
           const a = schemas.LogIssue.parse(rawArgs);
@@ -196,6 +293,28 @@ export function createServer() {
   });
 
   return server;
+}
+
+/**
+ * Folders the client says it is working in, best first.
+ *
+ * Only some clients declare the `roots` capability, and asking one that has not
+ * declared it is a protocol error rather than an empty answer — so check first,
+ * and treat any failure as "no roots" instead of failing the scaffold. The
+ * caller has a further fallback after this one.
+ */
+async function clientRoots(server: Server): Promise<string[] | undefined> {
+  if (!server.getClientCapabilities()?.roots) return undefined;
+  try {
+    const { roots } = await server.listRoots();
+    return roots
+      .map((r) => r.uri)
+      .filter((uri) => uri.startsWith("file://"))
+      .map((uri) => fileURLToPath(uri));
+  } catch (e) {
+    logger.warn(`Client advertised roots but listing them failed: ${(e as Error).message}`);
+    return undefined;
+  }
 }
 
 function textResult(value: unknown) {
