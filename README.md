@@ -6,6 +6,14 @@ Works with Claude and other MCP clients, on macOS and Windows.
 
 Requires After Effects 2026 and [Node.js 20+](https://nodejs.org).
 
+## See it work
+
+One prompt — a YouTube channel card flying in on a 3D arc, logo and name lifting off the surface, then returning — built end to end in After Effects.
+
+<video src="https://github.com/Engine-Room-Games/after-effects-mcp/raw/main/demos/channel-reveal.mp4" poster="https://raw.githubusercontent.com/Engine-Room-Games/after-effects-mcp/main/demos/channel-reveal-poster.jpg" controls muted playsinline width="100%">
+  <a href="https://github.com/Engine-Room-Games/after-effects-mcp/blob/main/demos/channel-reveal.mp4"><img src="https://raw.githubusercontent.com/Engine-Room-Games/after-effects-mcp/main/demos/channel-reveal-poster.jpg" alt="After Effects being driven from a Claude session — watch the demo" width="100%"></a>
+</video>
+
 ## Getting started
 
 ### 1. Create a project folder
