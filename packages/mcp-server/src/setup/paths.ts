@@ -30,6 +30,20 @@ function packageRoot(): string {
 }
 
 /**
+ * The version of the published package, read at runtime rather than compiled in
+ * so that it cannot drift from what the user actually installed. Used when a
+ * problem report needs to say which build hit it.
+ */
+export function packageVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot(), "package.json"), "utf8"));
+    return typeof pkg.version === "string" ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
  * The CEP panel lives in a different place depending on how the server was
  * obtained: inside the published tarball it is vendored at `<package>/panel`,
  * while in the git checkout it is a sibling workspace.

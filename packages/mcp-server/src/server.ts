@@ -12,6 +12,7 @@ import { descriptions } from "./tools/descriptions.js";
 import { AeError, BridgeUnreachableError } from "./util/errors.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
+import { listIssues, logIssue, markReported } from "./issues/journal.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
 import { z } from "zod";
@@ -24,8 +25,18 @@ const VISION_OPS = new Set(["screenshot_frame", "screenshot_layer"]);
 const ASYNC_OPS = new Set(["run_batch"]);
 // Jobs/await/etc. are handled in-server, not forwarded as-is. The setup ops
 // especially must never touch the bridge — they exist precisely for the case
-// where the panel is not installed yet.
-const SERVER_OPS = new Set(["await_job", "get_job", "cancel_job", "check_setup", "setup_panel"]);
+// where the panel is not installed yet, which is also when the issue journal is
+// most likely to be written to.
+const SERVER_OPS = new Set([
+  "await_job",
+  "get_job",
+  "cancel_job",
+  "check_setup",
+  "setup_panel",
+  "log_issue",
+  "list_known_issues",
+  "mark_issue_reported",
+]);
 
 // Schema for await_job/get_job/cancel_job (defined inline in shared/schemas.ts).
 const AwaitJobSchema = schemas.AwaitJob;
@@ -104,6 +115,19 @@ export function createServer() {
           // Re-run the diagnostic so the agent sees the resulting state rather
           // than having to guess whether the install was sufficient.
           return textResult({ ...installed, setup: await checkSetup() });
+        }
+        if (name === "log_issue") {
+          const a = schemas.LogIssue.parse(rawArgs);
+          return textResult(logIssue(a));
+        }
+        if (name === "list_known_issues") {
+          const a = schemas.ListKnownIssues.parse(rawArgs);
+          return textResult(listIssues(a.status ?? "all", a.tool));
+        }
+        if (name === "mark_issue_reported") {
+          const a = schemas.MarkIssueReported.parse(rawArgs);
+          const entry = markReported(a.id, a.url);
+          return textResult({ ok: true, id: entry.id, reported: true, issueUrl: entry.issueUrl });
         }
       } catch (e) {
         return errorResult((e as Error).message);

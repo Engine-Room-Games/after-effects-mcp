@@ -429,6 +429,29 @@ export const SetupPanel = z.object({
     .describe("Replace an existing symlinked (development) install with a copy. Default false."),
 }).strict();
 
+// ---------- issue journal (handled in the MCP server, never forwarded to the panel) ----------
+export const LogIssue = z
+  .object({
+    title: z.string().min(3).describe("One line naming the problem, specific enough to recognise again. Becomes the entry's id."),
+    symptom: z.string().min(3).describe("What went wrong, including the exact error text and the call that produced it."),
+    workaround: z.string().min(3).describe("What actually worked — concrete enough for the next session to apply without rediscovering it."),
+    cause: z.string().optional().describe("Why it happens, if you worked it out."),
+    tools: z.array(z.string()).optional().describe("Tool names involved, e.g. ['set_temporal_ease']."),
+  })
+  .strict();
+export const ListKnownIssues = z
+  .object({
+    status: z.enum(["all", "unreported", "reported"]).default("all").optional(),
+    tool: z.string().optional().describe("Only entries about this tool, e.g. 'set_temporal_ease'. Omit for everything."),
+  })
+  .strict();
+export const MarkIssueReported = z
+  .object({
+    id: z.string().describe("The entry id returned by log_issue or list_known_issues."),
+    url: z.string().optional().describe("Link to the issue that was opened."),
+  })
+  .strict();
+
 export const AwaitJob = z.object({ jobId: z.string(), timeoutMs: z.number().int().positive().default(600_000).optional() });
 export const GetJob = z.object({ jobId: z.string() });
 export const CancelJob = z.object({ jobId: z.string() });
@@ -514,6 +537,10 @@ export const OpSchemas = {
   // setup
   check_setup: CheckSetup,
   setup_panel: SetupPanel,
+  // issue journal
+  log_issue: LogIssue,
+  list_known_issues: ListKnownIssues,
+  mark_issue_reported: MarkIssueReported,
 } as const;
 
 export type OpName = keyof typeof OpSchemas;

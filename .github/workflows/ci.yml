@@ -48,7 +48,7 @@ jobs:
               c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
               const t=await send("tools/list",{});
               const n=t.result.tools.length;
-              if(n<60){console.error(`expected >=60 tools, got ${n}`);process.exit(1);}
+              if(n<63){console.error(`expected >=63 tools, got ${n}`);process.exit(1);}
               console.log(`${n} tools on ${process.platform}`);
               c.kill();process.exit(0);
             })();'
@@ -73,5 +73,28 @@ jobs:
           node packages/mcp-server/dist/index.js init ci-project --with-mcp
           test -f ci-project/CLAUDE.md
           test -f ci-project/.claude/skills/house-style/SKILL.md
+          test -f ci-project/.claude/commands/report-ae-issue.md
           test -f ci-project/.mcp.json
           echo "scaffold ok"
+
+      # The journal is the one piece of state this server owns, and its round
+      # trip has to survive a Windows path and a hand-edited file.
+      - name: Issue journal round-trips
+        shell: bash
+        env:
+          AE_MCP_HOME: ${{ runner.temp }}/ae-mcp-home
+        run: |
+          node -e '
+            import("./packages/mcp-server/dist/issues/journal.js").then(j=>{
+              const first=j.logIssue({title:"Example: a tool failed oddly",symptom:"boom",workaround:"do it the other way",cause:"because",tools:["run_jsx"]});
+              if(first.previouslyLogged||first.occurrences!==1) throw new Error("first log should be new");
+              j.markReported(first.id,"https://example.invalid/1");
+              const again=j.logIssue({title:"Example: A TOOL FAILED ODDLY!",symptom:"boom again",workaround:"same"});
+              if(again.id!==first.id) throw new Error(`title should map to one id: ${again.id} vs ${first.id}`);
+              if(again.occurrences!==2) throw new Error("re-log should count the sighting");
+              if(!again.reported) throw new Error("a new sighting must not un-report an entry");
+              const all=j.listIssues("all"), open=j.listIssues("unreported");
+              if(all.count!==1||open.count!==0) throw new Error(`status filter wrong: ${all.count}/${open.count}`);
+              if(all.issues[0].cause!=="because") throw new Error("a known cause must survive a sighting logged without one");
+              console.log(`journal ok at ${all.dir}`);
+            }).catch(e=>{console.error(e);process.exit(1);});'

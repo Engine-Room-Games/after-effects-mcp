@@ -66,6 +66,46 @@ description: The visual and motion style for this project — palette, type, tim
   footage — always on a rounded chip", "keep total runtime under 8 seconds"._
 `;
 
+/**
+ * Condensed twin of `plugin/commands/report-ae-issue.md`, which is the canonical
+ * version. Users who install the plugin get that one; users who only ran `init`
+ * get this. They do not have to match word for word — both have to work on their
+ * own — but a change to the reporting flow belongs in both.
+ */
+const REPORT_COMMAND = `---
+description: Send a problem you hit with the After Effects tools to the people who maintain them
+argument-hint: "[what went wrong, in your own words]"
+---
+
+# Report a problem with the After Effects tools
+
+Assume the person you are helping is a motion designer, not a developer, and may
+never have used GitHub. Do the technical part for them.
+
+1. **Find what to report.** Call \`list_known_issues\` with \`status: "unreported"\`.
+   It returns what earlier sessions wrote down, plus \`repo\`, \`newIssueUrl\`,
+   \`serverVersion\` and \`platform\`. List the entries in plain sentences — not raw
+   titles — and ask which to send. If there is nothing recorded but \`$ARGUMENTS\`
+   describes a problem, ask what they were doing and what happened, then
+   \`log_issue\` it first. If there is nothing at all, say so and stop.
+
+2. **Draft it short.** Title: one concrete line. Body: **What happens** (the
+   failing call and exact error), **Why** if known, **Workaround**, and
+   **Environment** (\`after-effects-mcp <serverVersion> · <platform> · After
+   Effects 2026\`). Leave out their own work — comp names, file paths, client
+   names, anything about the video.
+
+3. **Show it and ask.** This posts publicly, so get a real yes.
+
+4. **Send it.** \`gh issue create --repo <repo> --title "..." --body "..."\`. If
+   \`gh\` is missing or not logged in, do not install it — build a prefilled link
+   instead by URL-encoding the title and body onto \`<newIssueUrl>\` as
+   \`?title=…&body=…\`, and tell them to open it and press the green button.
+
+5. **Close the loop.** On success call \`mark_issue_reported\` with the entry id
+   and URL, then give them the link. If they decline, leave the entry unreported.
+`;
+
 const CLAUDE_MD = `# {{NAME}}
 
 After Effects project folder. The tools drive After Effects directly from here.
@@ -82,6 +122,14 @@ After Effects project folder. The tools drive After Effects directly from here.
 The look of everything built here is defined in
 \`.claude/skills/house-style/SKILL.md\`. Edit that file to change the defaults —
 palette, type, timing, layout. It is read automatically.
+
+## When a tool misbehaves
+
+Check \`list_known_issues\` before guessing — an earlier session may already have
+solved it. When you work out a fix for something that cost real time and was the
+tool's fault rather than yours, record it with \`log_issue\` so the next session
+does not pay for it again, and offer at the end of your reply to pass it on.
+\`/report-ae-issue\` sends it to the maintainers.
 
 ## Conventions for this project
 
@@ -134,6 +182,7 @@ export function runInit(argv: string[]): number {
   const files: Array<[string, string]> = [
     ["CLAUDE.md", CLAUDE_MD.replace("{{NAME}}", name)],
     [path.join(".claude", "skills", "house-style", "SKILL.md"), HOUSE_STYLE],
+    [path.join(".claude", "commands", "report-ae-issue.md"), REPORT_COMMAND],
     [path.join("renders", ".gitkeep"), ""],
   ];
   if (parsed.withMcp) files.push([".mcp.json", MCP_JSON]);
@@ -161,6 +210,7 @@ export function runInit(argv: string[]): number {
     ``,
     `  CLAUDE.md                                what this project is`,
     `  .claude/skills/house-style/SKILL.md      your look — edit this first`,
+    `  .claude/commands/report-ae-issue.md      /report-ae-issue — tell the maintainers something broke`,
     `  renders/                                 exports land here`,
     ...(parsed.withMcp ? [`  .mcp.json                                connects your client to After Effects`] : []),
     ``,

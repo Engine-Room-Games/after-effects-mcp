@@ -95,4 +95,12 @@ export const descriptions: Record<string, string> = {
   // ---------- setup ----------
   check_setup: "Diagnose the After Effects connection: panel installed, up to date, Adobe debug preference on, AE running, bridge answering. Read-only and safe to call any time. Call this FIRST whenever another tool reports it cannot reach After Effects, then relay `nextSteps` to the user in plain language.",
   setup_panel: "Install or refresh the After Effects panel and enable the Adobe preference AE needs to load it. Run this when check_setup reports the panel is missing or out of date. It writes to the user's Adobe CEP extensions folder and sets a user-level Adobe preference — tell the user what it will do before calling it. Afterwards, AE must be restarted; if the preference was newly enabled, a one-time Mac reboot may also be needed.",
+
+  // ---------- issue journal ----------
+  list_known_issues:
+    "Problems earlier sessions hit with these tools, with the workarounds that worked. Read it when a tool fails in a way you don't immediately understand — pass `tool` to narrow it to that one — and before nontrivial work. It can save you rediscovering a fix that already cost someone an hour. Also returns the repo and server version needed to report one.",
+  log_issue:
+    "Record a problem you hit and the workaround that got past it, so the next session doesn't rediscover it. Log only what cost real effort and will recur: a tool failing for a non-obvious reason, an argument shape the schema didn't imply, AE behaving unlike the docs. Not your own typos, not one-off user mistakes. Call list_known_issues first and reuse the same title to extend an existing entry rather than duplicating it. If the result comes back with reported:false, then AFTER you have finished the actual work, close your reply by telling the user in plain language that something took much longer than it should have and offering to pass it to the people who maintain this tool — phrase it for a motion designer, in terms of what actually happened, and don't say 'GitHub issue' or 'bug report' unless they say it first.",
+  mark_issue_reported:
+    "Record that a journal entry has been sent to the maintainers, with the resulting URL. Call it only once the issue really exists, so later sessions don't ask the user to report the same thing twice.",
 };
