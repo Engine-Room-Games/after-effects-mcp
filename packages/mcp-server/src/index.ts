@@ -46,7 +46,7 @@ async function main() {
   logger.info("MCP server running on stdio");
 }
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 
 main().catch((e) => {
   logger.error("fatal", (e as Error).message);
