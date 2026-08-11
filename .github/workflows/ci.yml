@@ -20,12 +20,15 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
+        # Both LTS lines that are still supported. 20 went EOL 2026-04-30;
+        # release.yml builds on 24, so 24 must stay in here.
+        node: ["22", "24"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: ${{ matrix.node }}
 
       - run: npm ci
       - run: npm run build
