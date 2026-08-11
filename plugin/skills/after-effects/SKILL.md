@@ -94,6 +94,51 @@ For a custom path, use `{type: "path", vertices: [[x,y], …], closed: true}`. T
 
 Two warnings: ExtendScript is **single-threaded**, so a long synchronous loop freezes the user's AE UI; and returned objects are flattened, so return a string you have assembled yourself rather than a nested object.
 
+## When something costs you real time
+
+These tools have rough edges, and the same ones catch every session. Two tools
+exist so that each one is only paid for once.
+
+**`list_known_issues`** — what earlier sessions hit and how they got past it.
+Read it when a tool fails in a way you do not immediately understand, before you
+start guessing. The answer is often already there.
+
+**`log_issue`** — write down what you worked out, the moment you work it out.
+
+Log something when all three are true: it cost real effort, it was the tool's
+fault rather than yours, and the next session would hit it too. A schema that
+accepts an argument AE then rejects, an error message that names the wrong
+thing, a property whose real name is nothing like its display name. Not your own
+typos. Not "I forgot the layer was 3D".
+
+Write the entry for someone who has not seen the failure: the exact error text,
+the call that produced it, and a workaround concrete enough to apply directly.
+Reuse the existing title when you are extending an entry — that keeps one good
+record instead of five thin ones.
+
+### Then offer to pass it on
+
+If `log_issue` comes back with `reported: false`, mention it to the user — but
+finish the actual work first, and put it at the very end, after you have told
+them what you built. It is a footnote, not the headline.
+
+Say it the way you would to a colleague who does not write code. What you were
+trying to do, that it fought back, that you got there anyway, and that you can
+send it to the people who maintain the tool so the next person does not lose the
+same time. Something like:
+
+> Done — the lower third is in. One thing worth mentioning: getting the ease
+> onto that position keyframe took a lot longer than it should have, because the
+> tool kept rejecting a value it had just asked for. I found a way around it and
+> made a note. Want me to send it to the people who maintain this so they can
+> fix it properly?
+
+Do not say "GitHub issue", "file a bug" or "open a ticket" unless they say it
+first. If they say yes, run `/report-ae-issue` — it handles the rest. If they say
+no, drop it; the note stays and can be offered again another time.
+
+Never claim you have reported something you have not.
+
 ## When something is not connected
 
 If a tool reports it cannot reach After Effects, call `check_setup` and relay its `nextSteps` to the user in plain language. Do not try to diagnose CEP by hand.
