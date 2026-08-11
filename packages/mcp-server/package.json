@@ -43,7 +43,7 @@
     "win32"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -59,7 +59,7 @@
   },
   "devDependencies": {
     "@engineroom/shared": "*",
-    "@types/node": "^20.14.0",
+    "@types/node": "^22",
     "@types/ws": "^8.5.13",
     "esbuild": "^0.28.2",
     "typescript": "^5.6.0"

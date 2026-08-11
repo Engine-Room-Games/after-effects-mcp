@@ -23,6 +23,6 @@
     "pack:check": "npm run build && npm pack -w @engine-room/after-effects-mcp --dry-run"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }
