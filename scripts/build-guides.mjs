@@ -61,6 +61,14 @@ Call \`ae_guide\` for the full guidance on any of this — topics: __TOPICS__.
 If a tool reports it cannot reach After Effects, call \`check_setup\` and relay
 its \`nextSteps\` verbatim; do not diagnose CEP by hand.`;
 
+/**
+ * Line endings are normalised everywhere in this script — on read, on write and
+ * on both sides of `--check`. A Windows checkout with `core.autocrlf` gives you
+ * CRLF sources, which would otherwise miss the frontmatter fence entirely and
+ * make the generated files differ from the committed ones on that host alone.
+ */
+const lf = (text) => text.replace(/\r\n/g, "\n");
+
 /** Split `---\nkey: value\n---\nbody` into its parts. */
 function parse(file, text, required) {
   const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
@@ -86,7 +94,7 @@ function load(dir, required) {
     process.exit(1);
   }
   return files.map((f) => {
-    const { meta, body, raw } = parse(f, fs.readFileSync(path.join(dir, f), "utf8"), required);
+    const { meta, body, raw } = parse(f, lf(fs.readFileSync(path.join(dir, f), "utf8")), required);
     if (meta.name !== path.basename(f, ".md")) {
       throw new Error(`${f}: frontmatter name "${meta.name}" must match the filename`);
     }
@@ -205,7 +213,7 @@ function orphansIn(dir, expected) {
 
 if (check) {
   const stale = [...outputs].filter(
-    ([file, content]) => !fs.existsSync(file) || fs.readFileSync(file, "utf8") !== content
+    ([file, content]) => !fs.existsSync(file) || lf(fs.readFileSync(file, "utf8")) !== lf(content)
   );
   const orphans = owned.flatMap(([dir, expected]) =>
     orphansIn(dir, expected).map((e) => path.join(path.relative(root, dir), e))
