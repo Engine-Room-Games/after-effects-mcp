@@ -1,10 +1,51 @@
 # After Effects MCP
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Engine-Room-Games/after-effects-mcp/main/demo/engine-room-title.gif" alt="Engine Room — After Effects MCP" width="720">
+</p>
+
 **Control Adobe After Effects with AI.** Describe the animation you want — a lower third, a logo reveal, an animated counter — and it gets built in your project: layers, keyframes, easing, effects, expressions and text, all editable afterwards like anything you would make by hand.
 
 Works with Claude and other MCP clients, on macOS and Windows.
 
 Requires After Effects 2026 and [Node.js 22+](https://nodejs.org).
+
+## What it builds
+
+Six scenes from one quarterly-report sequence, each in a different visual style. Every layer, keyframe and effect below was built through these tools, and all of it opens in After Effects as ordinary editable work.
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="https://raw.githubusercontent.com/Engine-Room-Games/after-effects-mcp/main/demo/sc01-title.gif" width="100%" alt="Dark title card: Global Macro Fund, Q3 FY2026 performance review, with a rule that draws in under the heading">
+      <br><sub><b>Title card</b> — engine dark</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="https://raw.githubusercontent.com/Engine-Room-Games/after-effects-mcp/main/demo/sc02-kpi-grid.gif" width="100%" alt="Editorial KPI grid: four figures counting up, with a risk-budget bar filling to 68 percent">
+      <br><sub><b>KPI grid</b> — editorial</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="https://raw.githubusercontent.com/Engine-Room-Games/after-effects-mcp/main/demo/sc03-nav-curve.gif" width="100%" alt="Amber CRT terminal: a NAV curve drawing on across twelve months with a typed command line above it">
+      <br><sub><b>NAV curve</b> — CRT terminal</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="https://raw.githubusercontent.com/Engine-Room-Games/after-effects-mcp/main/demo/sc04-allocation.gif" width="100%" alt="Brutalist allocation breakdown: a stacked colour bar splitting into six labelled sector cards">
+      <br><sub><b>Allocation</b> — brutalist</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="https://raw.githubusercontent.com/Engine-Room-Games/after-effects-mcp/main/demo/sc05-monthly-pl.gif" width="100%" alt="Aurora glass monthly profit and loss: twelve bars growing from a zero line over a soft gradient background">
+      <br><sub><b>Monthly P&amp;L</b> — aurora glass</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="https://raw.githubusercontent.com/Engine-Room-Games/after-effects-mcp/main/demo/sc06-outro.gif" width="100%" alt="Minimal print outro on off-white: a single large net return figure resolving into place">
+      <br><sub><b>Outro</b> — minimal print</sub>
+    </td>
+  </tr>
+</table>
 
 ## Getting started
 
