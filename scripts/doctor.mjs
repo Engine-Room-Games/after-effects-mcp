@@ -11,7 +11,7 @@ const report = await checkSetup();
 console.log("AE MCP doctor\n");
 
 const major = parseInt(process.versions.node.split(".")[0], 10);
-line(major >= 20, "Node >= 20", `v${process.versions.node}`, "Upgrade to Node 20 or newer.");
+line(major >= 22, "Node >= 22", `v${process.versions.node}`, "Upgrade to Node 22 or newer.");
 
 for (const c of report.checks) {
   line(c.ok, c.name, c.detail, c.fix);
