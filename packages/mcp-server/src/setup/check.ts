@@ -2,7 +2,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { discoverPort } from "../bridge/discovery.js";
-import { cepExtensionsDir, installedPanelDir, isSupportedPlatform, panelSourceDir } from "./paths.js";
+import {
+  cepExtensionsDir,
+  installedPanelDir,
+  isSupportedPlatform,
+  isWsModuleDir,
+  panelInstallDiff,
+  panelSourceDir,
+} from "./paths.js";
 import { assessPanel } from "./panelVersion.js";
 import { debugModeLocation, isAfterEffectsRunning, isDebugModeOn } from "./platform.js";
 
@@ -79,17 +86,42 @@ export async function checkSetup(): Promise<SetupReport> {
     fix: isInstalled ? undefined : "Run the setup_panel tool to install it.",
   });
 
-  // A stale bundle.jsx is the usual cause of "the tool exists but errors in AE"
-  // after upgrading the server, so compare against the shipped copy.
+  // Every shipped file, not just bundle.jsx. Checking the bundle alone passed a
+  // half-updated install as current, which sent the user round a restart loop
+  // that could not terminate — the client files were still the old version and
+  // no restart was ever going to change that.
+  let installComplete = true;
   if (isInstalled && source) {
-    const installedHash = sha256(path.join(installed, "jsx", "bundle.jsx"));
-    const sourceHash = sha256(path.join(source, "jsx", "bundle.jsx"));
-    const upToDate = installedHash !== null && installedHash === sourceHash;
+    const differing = panelInstallDiff(source, installed);
+    installComplete = differing.length === 0;
+    const shown = differing.slice(0, 4).join(", ");
     checks.push({
       name: "panelUpToDate",
-      ok: upToDate,
-      detail: upToDate ? "installed panel matches this server version" : "installed panel differs from the version shipped with this server",
-      fix: upToDate ? undefined : "Run setup_panel to refresh it, then restart After Effects.",
+      ok: installComplete,
+      detail: installComplete
+        ? "all installed panel files match the version shipped with this server"
+        : `${differing.length} file(s) differ from the version shipped with this server: ${shown}${differing.length > 4 ? ", …" : ""}`,
+      fix: installComplete
+        ? undefined
+        : "Quit After Effects completely, then run setup_panel, then reopen it. Installing while AE is open can leave some files updated and others not, which is what this is — restarting alone will not fix it.",
+    });
+  }
+
+  // The panel's `require('ws')` runs before it can display anything, so a
+  // missing or truncated copy shows up only as silence on the port. Naming it
+  // here turns "no response on port 7777" into something actionable.
+  if (isInstalled) {
+    const panelWs = path.join(installed, "node_modules", "ws");
+    const wsOk = isWsModuleDir(panelWs);
+    checks.push({
+      name: "panelDependencies",
+      ok: wsOk,
+      detail: wsOk
+        ? "the panel's `ws` module is present and complete"
+        : `the panel's \`ws\` module is missing or incomplete at ${panelWs}`,
+      fix: wsOk
+        ? undefined
+        : "Quit After Effects completely, then run setup_panel, then reopen it. Without `ws` the panel cannot finish starting, so it never answers on its port.",
     });
   }
 
@@ -115,18 +147,22 @@ export async function checkSetup(): Promise<SetupReport> {
   // restarts. This is the check that notices that window, and it is the one that
   // predicts whether calls will actually work.
   if (bridge.ok && source) {
-    const assessment = assessPanel(bridge.bundleHash, sha256(path.join(installed, "jsx", "bundle.jsx")));
+    const assessment = assessPanel(bridge.bundleHash, sha256(path.join(installed, "jsx", "bundle.jsx")), {
+      installComplete,
+    });
     const ok = assessment.state === "current";
     checks.push({
       name: "panelRunningCurrent",
       ok,
       detail: ok
         ? "After Effects is running the panel that ships with these tools"
-        : assessment.state === "restart-needed"
-          ? "After Effects is still running the previous panel — the update needs a restart to take effect"
-          : assessment.state === "unknown"
-            ? "the running panel is too old to report its version"
-            : "After Effects is running a panel older than these tools",
+        : assessment.state === "partial-install"
+          ? "the installed panel files are a mix of versions — a restart cannot resolve this"
+          : assessment.state === "restart-needed"
+            ? "After Effects is still running the previous panel — the update needs a restart to take effect"
+            : assessment.state === "unknown"
+              ? "the running panel is too old to report its version"
+              : "After Effects is running a panel older than these tools",
       fix: ok ? undefined : assessment.message,
     });
   }
@@ -161,29 +197,38 @@ function buildNextSteps(checks: Check[], ready: boolean): string[] {
   if (by("platform")?.ok === false) return [by("platform")!.fix!];
   if (by("panelAssetsPresent")?.ok === false) return [by("panelAssetsPresent")!.fix!];
 
-  const needsInstall = by("panelInstalled")?.ok === false || by("panelUpToDate")?.ok === false;
+  // A half-updated install or a missing dependency is not fixed by restarting;
+  // both are fixed by reinstalling, and reinstalling only works with AE closed.
+  const brokenInstall = by("panelUpToDate")?.ok === false || by("panelDependencies")?.ok === false;
+  const needsInstall = by("panelInstalled")?.ok === false || brokenInstall;
   const needsDebug = by("cepDebugMode")?.ok === false;
+  const aeRunning = by("afterEffectsRunning")?.ok === true;
 
+  // Closing AE first is part of the remedy, not an afterthought: installing
+  // while it holds the panel's files open is what produces this state.
+  if (brokenInstall && aeRunning) {
+    steps.push("Quit After Effects completely — installing while it is open is what leaves the panel half-updated.");
+  }
   if (needsDebug || needsInstall) {
     steps.push("Run the setup_panel tool — it installs the After Effects panel and enables the Adobe preference that lets AE load it.");
-  }
-  if (needsDebug) {
-    steps.push(
-      process.platform === "win32"
-        ? "Quit and reopen After Effects so it re-reads the registry."
-        : "Quit and reopen After Effects. If the panel still does not connect, restart the Mac once — the Adobe preference sometimes only takes effect after a reboot."
-    );
   }
   const identity = by("panelIdentity");
   if (identity && identity.ok === false) {
     steps.push(identity.fix!);
   }
-  if (by("afterEffectsRunning")?.ok === false) {
+  if (!aeRunning) {
     // Installing before AE is open is the cheaper order: the panel is simply
     // there when it launches, with no restart to ask for.
     steps.push(needsInstall ? "Open After Effects 2026 — the panel loads with it." : "Open After Effects 2026.");
   } else if (needsInstall || by("panelRunningCurrent")?.ok === false) {
-    steps.push("Quit and reopen After Effects so it picks up the panel.");
+    steps.push(brokenInstall ? "Reopen After Effects." : "Quit and reopen After Effects so it picks up the panel.");
+  }
+  if (needsDebug) {
+    steps.push(
+      process.platform === "win32"
+        ? "After Effects re-reads the registry when it launches, so the preference takes effect then."
+        : "If the panel still does not connect after reopening, restart the Mac once — the Adobe preference sometimes only takes effect after a reboot."
+    );
   }
   if (steps.length === 0 && by("bridgeReachable")?.ok === false) {
     steps.push("Everything is installed but the panel is not answering. Quit and reopen After Effects.");

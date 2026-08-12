@@ -11,14 +11,12 @@
   var os = require("os");
   var http = require("http");
   var crypto = require("crypto");
-  var WebSocket;
-  try { WebSocket = require("ws"); }
-  catch (e) {
-    // ws is bundled in packages/ae-panel/node_modules; resolve manually if normal require fails.
-    var alt = path.join(__dirname, "..", "node_modules", "ws");
-    WebSocket = require(alt);
-  }
 
+  // The DOM handles and the logger come first so that everything below is able
+  // to report its own failure. `require("ws")` used to run before this point,
+  // so when it threw the exception escaped this whole function before a single
+  // line could be written — the panel sat on "starting…" indefinitely with the
+  // reason nowhere to be seen.
   var $status = document.getElementById("status");
   var $port = document.getElementById("port");
   var $ae = document.getElementById("ae");
@@ -39,6 +37,24 @@
     $log.insertBefore(d, $log.firstChild);
     // Trim
     while ($log.childNodes.length > 80) $log.removeChild($log.lastChild);
+  }
+
+  var WebSocket;
+  try { WebSocket = require("ws"); }
+  catch (primary) {
+    // ws is bundled in packages/ae-panel/node_modules; resolve manually if normal require fails.
+    var alt = path.join(__dirname, "..", "node_modules", "ws");
+    try { WebSocket = require(alt); }
+    catch (fallback) {
+      // Nothing below can be built without ws, so this stops here — but it
+      // stops saying why, and naming the fix, rather than looking like a panel
+      // that is still starting up.
+      setStatus("cannot start — the ws module is missing", "err");
+      log("error", "require('ws') failed: " + primary.message);
+      log("error", "and " + alt + ": " + fallback.message);
+      log("error", "Quit After Effects, run the setup_panel tool, then reopen it.");
+      return;
+    }
   }
 
   var cs = new CSInterface();

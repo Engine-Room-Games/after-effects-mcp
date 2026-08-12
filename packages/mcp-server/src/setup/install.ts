@@ -1,6 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import { copyRecursive, installedPanelDir, isSupportedPlatform, panelSourceDir, wsModuleDir } from "./paths.js";
+import {
+  copyRecursive,
+  installedPanelDir,
+  isSupportedPlatform,
+  isWsModuleDir,
+  panelSourceDir,
+  wsModuleDir,
+} from "./paths.js";
 import { debugModeLocation, enableDebugMode, isDebugModeOn } from "./platform.js";
 
 export interface InstallResult {
@@ -37,6 +44,20 @@ export async function installPanel(opts: { enableDebugMode?: boolean; force?: bo
     throw new Error(`The panel at ${source} has no jsx/bundle.jsx. In a git checkout, run \`npm run build:jsx\` first.`);
   }
 
+  // Resolved before anything is removed. The panel cannot finish starting
+  // without `ws`, so an install that cannot supply it must fail while the
+  // previous, working install is still on disk — v0.2.0 deleted a good copy and
+  // then replaced it with an empty directory, leaving the panel permanently
+  // stuck at "starting…".
+  const ws = wsModuleDir();
+  if (!ws) {
+    throw new Error(
+      "Could not find the `ws` module this server ships. The After Effects panel cannot start without it, so " +
+        "nothing has been changed. Reinstall the server, and please report this with your platform and how you " +
+        "installed it."
+    );
+  }
+
   const target = installedPanelDir();
 
   // A symlinked install is somebody's live dev setup; replacing it with a copy
@@ -68,16 +89,21 @@ export async function installPanel(opts: { enableDebugMode?: boolean; force?: bo
 
   // The panel's CEF process resolves modules relative to itself, so `ws` has to
   // sit inside the installed extension rather than in this package.
-  const ws = wsModuleDir();
-  if (ws) {
-    const dest = path.join(target, "node_modules", "ws");
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.rmSync(dest, { recursive: true, force: true });
-    copyRecursive(ws, dest);
-    actions.push("Copied the `ws` module the panel needs at runtime.");
-  } else {
-    notes.push("Could not locate the `ws` module — the panel's WebSocket events may not work. Reinstall the package if progress notifications fail.");
+  const dest = path.join(target, "node_modules", "ws");
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.rmSync(dest, { recursive: true, force: true });
+  copyRecursive(ws, dest);
+  // Confirmed rather than assumed. A panel whose `require('ws')` fails hangs at
+  // "starting…" and never binds its port, which surfaces only as "no response
+  // on port 7777" — so reporting this step as done without checking it turns a
+  // precise fault into an unrecognisable one.
+  if (!isWsModuleDir(dest)) {
+    throw new Error(
+      `Copying \`ws\` from ${ws} to ${dest} did not produce a usable copy. The panel cannot start without it. ` +
+        "The panel files are installed but the extension is not yet working — please report this."
+    );
   }
+  actions.push("Copied the `ws` module the panel needs at runtime.");
 
   let rebootRecommended = false;
   if (opts.enableDebugMode !== false) {

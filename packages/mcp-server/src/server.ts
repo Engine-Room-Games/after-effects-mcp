@@ -18,7 +18,7 @@ import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
 import { assessPanel, installedBundleHash, unknownOpMessage } from "./setup/panelVersion.js";
-import { installedPanelDir } from "./setup/paths.js";
+import { installedPanelDir, panelInstallDiff, panelSourceDir } from "./setup/paths.js";
 import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./generated/content.js";
 import { listIssues, logIssue, markReported } from "./issues/journal.js";
 import { imageContent } from "./util/pngImage.js";
@@ -338,7 +338,15 @@ function createPanelGate(bridge: HttpClient) {
       if (Date.now() - checkedAt < RECHECK_MS) return null;
       try {
         const health = await bridge.health();
-        const assessment = assessPanel(health.bundleHash, installedBundleHash(installedPanelDir()));
+        // The gate is what every failed call quotes, so it has to know whether
+        // the files on disk are internally consistent. Without this it tells the
+        // user to restart After Effects for a half-updated install, which no
+        // number of restarts can resolve.
+        const installed = installedPanelDir();
+        const source = panelSourceDir();
+        const assessment = assessPanel(health.bundleHash, installedBundleHash(installed), {
+          installComplete: source ? panelInstallDiff(source, installed).length === 0 : undefined,
+        });
         checkedAt = Date.now();
         verdict = assessment.state === "current" || assessment.state === "unknown" ? null : assessment.message;
         // "unknown" covers a panel too old to report a hash. Its message is a

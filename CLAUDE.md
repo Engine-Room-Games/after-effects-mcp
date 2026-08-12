@@ -150,9 +150,15 @@ tells an agent nothing and usually got retried.
 
 They diverge for the entire window between `setup_panel` and restarting AE,
 which is exactly when calls break. **Only the running hash is worth gating on.**
-`setup/panelVersion.ts` maps the pair onto four states, and the distinction that
+`setup/panelVersion.ts` maps the pair onto five states, and the distinction that
 matters most to a user is `restart-needed` — telling someone to run
 `setup_panel` again there wastes their time, so the message says so explicitly.
+
+The fifth state, `partial-install`, is checked *before* any of the others,
+because all of them reason from `bundle.jsx` alone and a current bundle says
+nothing about the client files beside it. Callers pass `installComplete` from
+`panelInstallDiff()`; it defaults to `true` so a caller that has not looked
+keeps the old behaviour rather than quietly asserting the install is sound.
 
 Three enforcement points, in order of preference:
 
@@ -256,6 +262,9 @@ Publishing: `npm publish -w @engine-room/after-effects-mcp` (the `prepack` hook 
 10. `get_house_style` on an **unsaved** project → `{found:false, projectSaved:false}` with a readable reason, not a throw. Save the project, `set_house_style({content})` → file appears next to the .aep. Call it again without `overwrite` → refuses and names the path. With `overwrite:true` → replaces. Non-ASCII (curly quotes, accented font names) survives the round trip — that is the UTF-8 encoding, and it fails silently if dropped.
 11. `init_project` with no `dir` from a client that advertises `roots` → writes into the client's folder, `resolvedFrom: "client-root"`. From Claude Desktop (cwd `/`) → refuses with a message telling the agent to ask.
 12. Version gate, with AE running an older panel: any forwarded op → the remediation message, not `Unknown op`. `setup_panel` then the same op → "still running the previous version", naming the restart as the only fix. Restart AE → works. (`tests/unit/panel-version.mjs` covers the decision table; this recipe covers the wiring.)
+13. Partial install: with AE **open**, overwrite a client file in the installed panel (`echo x >> …/client/main.js`). `check_setup` → `panelUpToDate` FAIL naming `client/main.js`, and the next steps lead with "quit After Effects" — never "restart and try again". Restore it → green.
+14. Missing dependency: `rm -rf …/games.engine-room.ae-mcp/node_modules/ws`, restart AE. The panel shows "cannot start — the ws module is missing" with the fix in its log, rather than "starting…". `check_setup` → `panelDependencies` FAIL naming the path, not just `bridgeReachable` FAIL.
+15. Compiled binary, the one no unit test reaches: run the built binary from an empty directory *and* from `/`, and confirm `setup_panel` installs a populated `node_modules/ws`. Under `bun --compile` the module resolver returns a bare specifier rather than throwing, so this path cannot be exercised under plain Node — see the `require.resolve` note in Known fragile areas.
 
 ## The issue journal
 
@@ -281,7 +290,10 @@ The user-facing half is the offer to report. It now lives in exactly two places:
 - **`panelSourceDir()` must prefer the checkout over the vendored copy.** After any `npm pack`, a stale `packages/mcp-server/panel/` is left on disk (gitignored). If that were checked first, `setup_panel` in a dev checkout would install the stale copy instead of what you're editing. Order matters in `setup/paths.ts`.
 - **esbuild preserves the entry point's hashbang.** Adding a `banner` with `#!/usr/bin/env node` produces a second one on line 2 and the published binary dies with a syntax error. `prepare-package.mjs` asserts there is exactly one.
 - **`addText()` anchors point text at the bbox center**, not the baseline-left an agent would assume. `paragraphJustification: LEFT_JUSTIFY` doesn't move the anchor for point text. `create_text_layer` defaults `anchorAlign: "left"` so `position` semantically matches the visible left edge; pass `"center"`/`"right"`/`"none"` to override.
-- **A compiled binary has no module paths.** `import.meta.url` inside a `bun --compile` build points into the executable's virtual filesystem, so `packageRoot()` finds nothing and `require.resolve("ws")` throws. `setup/paths.ts` falls back to `executableDir()` — the panel, `package.json` and a real `node_modules/ws` ship *beside* the binary, which is why every binary target is a folder and not a single file. Shipping the bare executable would break `setup_panel` with no obvious cause.
+- **A compiled binary has no module paths.** `import.meta.url` inside a `bun --compile` build points into the executable's virtual filesystem, so `packageRoot()` finds nothing. `setup/paths.ts` falls back to `executableDir()` — the panel, `package.json` and a real `node_modules/ws` ship *beside* the binary, which is why every binary target is a folder and not a single file. Shipping the bare executable would break `setup_panel` with no obvious cause.
+- **`require.resolve` does not throw in a compiled binary — it returns the bare specifier.** `require.resolve("ws")` gives back `"ws"`, not a path and not an exception. Anything that treats a failed resolve as a throw is therefore dead code there, and `path.dirname("ws")` is `"."` — the *working directory*. v0.2.0 copied that into the CEP extension folder, which produced an empty `node_modules/ws` for a server started somewhere empty, and would have attempted to copy the entire filesystem for one started at `/`. `wsModuleDir()` now requires `path.isAbsolute` before believing the resolver and confirms every candidate with `isWsModuleDir()`. **Validate resolver output by its contents, never by `existsSync`.**
+- **The panel cannot start without `ws`, and cannot say so.** `main.js` requires it at boot; before this was fixed, a failed require threw out of the top-level IIFE before the DOM handles existed, so the panel sat on "starting…" for ever and the only symptom was silence on port 7777. The require now runs *after* the logger is set up and bails out visibly. Keep it in that order.
+- **A panel install can be half-written, and it looks fine.** Installing while AE holds the client files open updates `jsx/bundle.jsx` and fails on the rest. `panelUpToDate` used to hash only the bundle, so it went green on a mix of two versions while every call failed — and because the bundle *was* current, `assessPanel` concluded `restart-needed` and sent the user round a loop no restart could end. `panelInstallDiff()` compares every shipped file, and `installComplete: false` outranks the restart verdict. Reported as issue #20.
 - **`ws` can never be inlined.** `setup_panel` copies the directory into the CEP extension, because AE's CEF process cannot resolve modules out of this package. Every packaging path (`prepare-package.mjs`, `build-mcpb.mjs`, `build-binaries.mjs`) has to keep it as a real directory on disk.
 - **Bare Mach-O binaries cannot be stapled.** `xcrun stapler` only writes tickets into bundle formats (.app/.pkg/.dmg). The release notarizes the *zip* and lets Gatekeeper verify online on first launch. Do not add a `stapler staple` call expecting it to work.
 - **The hardened runtime blocks JIT.** Bun embeds JavaScriptCore, so `scripts/entitlements.plist` must grant `allow-jit` and `allow-unsigned-executable-memory`. Without them the binary signs and verifies fine and then refuses to launch — on someone else's machine, not yours.

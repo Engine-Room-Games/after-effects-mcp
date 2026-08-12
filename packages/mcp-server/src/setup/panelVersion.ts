@@ -29,6 +29,8 @@ export type PanelState =
   | "restart-needed"
   /** The installed panel predates this server; setup_panel then restart. */
   | "update-needed"
+  /** Files on disk are a mix of versions; no restart can resolve it. */
+  | "partial-install"
   /** A panel too old to report its hash, or no source to compare against. */
   | "unknown";
 
@@ -66,19 +68,37 @@ const STALE_PANEL_ADVICE =
   "understand everything they can do now. Run setup_panel, then ask them to quit and reopen After Effects. " +
   "Do not retry the failed call until they confirm it has restarted.";
 
+const PARTIAL_INSTALL_ADVICE =
+  "The installed After Effects panel is a mix of two versions — some files were updated and others were not, which " +
+  "happens when it is installed while After Effects is open and holding them. Restarting will not fix this. Tell the " +
+  "user to quit After Effects completely, then run setup_panel, then reopen it.";
+
 /**
  * @param runningHash  `bundleHash` from the panel's /health, or null/undefined
  *                     from a panel too old to report one.
  * @param installedHash Hash of the extension folder's bundle, when known.
+ * @param opts.installComplete `false` when the files on disk are known to be a
+ *   mix of versions. Defaults to `true` — callers that have not checked keep the
+ *   old behaviour rather than silently claiming an install is sound.
  */
 export function assessPanel(
   runningHash: string | null | undefined,
-  installedHash: string | null
+  installedHash: string | null,
+  opts: { installComplete?: boolean } = {}
 ): PanelAssessment {
   const shipped = sourceBundleHash();
   if (!shipped) return { state: "unknown", message: "" };
 
   if (runningHash === shipped) return { state: "current", message: "" };
+
+  // Checked before anything else that could recommend a restart. Every branch
+  // below reasons from bundle.jsx alone, and bundle.jsx being current says
+  // nothing about the client files beside it — so a half-updated install would
+  // otherwise be told to restart, which cannot possibly resolve it. That loop is
+  // not theoretical: it is what v0.2.0 did, three restarts running.
+  if (opts.installComplete === false) {
+    return { state: "partial-install", message: PARTIAL_INSTALL_ADVICE };
+  }
 
   if (typeof runningHash !== "string" || runningHash.length === 0) {
     // Panels from before /health reported a hash. That alone means it predates

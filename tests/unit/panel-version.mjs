@@ -53,6 +53,28 @@ for (const missing of [undefined, null, ""]) {
   check(`no hash (${JSON.stringify(missing)}), fresh disk`, assessPanel(missing, SHIPPED).state, "restart-needed");
 }
 
+// A half-updated install. bundle.jsx on disk is current, so every branch above
+// reasons its way to "restart-needed" — and a restart cannot fix files that were
+// never written. This is the state that cost three restarts in issue #20, so it
+// outranks the restart verdict rather than being a special case after it.
+const partial = assessPanel(OLD, SHIPPED, { installComplete: false });
+check("bundle current but install incomplete", partial.state, "partial-install");
+assert.match(partial.message, /will not fix|not fix this/i, "must say a restart is not the remedy");
+assert.match(partial.message, /quit after effects/i, "must say to close AE before reinstalling");
+assert.match(partial.message, /setup_panel/, "must name the tool that reinstalls");
+passed += 3;
+
+// The same incomplete install, from a panel too old to report a hash.
+check("no hash, install incomplete", assessPanel(undefined, SHIPPED, { installComplete: false }).state, "partial-install");
+check("stale disk, install incomplete", assessPanel(OLD, OLD, { installComplete: false }).state, "partial-install");
+
+// A complete install must be unaffected, whether stated explicitly or left out.
+check("explicitly complete", assessPanel(OLD, SHIPPED, { installComplete: true }).state, "restart-needed");
+check("unstated defaults to complete", assessPanel(OLD, SHIPPED, {}).state, "restart-needed");
+// A running panel that already matches is current regardless — there is nothing
+// to reinstall when the code answering calls is the code we ship.
+check("running current beats an incomplete disk", assessPanel(SHIPPED, SHIPPED, { installComplete: false }).state, "current");
+
 // Unknown-op is always a version mismatch: server.ts rejects unknown tool names
 // before forwarding, so anything the panel rejects is an op this server defines.
 const unknown = unknownOpMessage("get_house_style");
