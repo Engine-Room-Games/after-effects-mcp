@@ -286,6 +286,7 @@ The user-facing half is the offer to report. It now lives in exactly two places:
 - **Bare Mach-O binaries cannot be stapled.** `xcrun stapler` only writes tickets into bundle formats (.app/.pkg/.dmg). The release notarizes the *zip* and lets Gatekeeper verify online on first launch. Do not add a `stapler staple` call expecting it to work.
 - **The hardened runtime blocks JIT.** Bun embeds JavaScriptCore, so `scripts/entitlements.plist` must grant `allow-jit` and `allow-unsigned-executable-memory`. Without them the binary signs and verifies fine and then refuses to launch — on someone else's machine, not yours.
 - **Generated files under `plugin/` will be overwritten.** `plugin/skills/**` and `plugin/commands/**` come from `src/{guides,prompts}/*.md`. Hand-edits survive until the next `npm run build`. CI runs `build-guides.mjs --check` to catch this at review time rather than in a release.
+- **CEP returns a file URL, not a path.** `getSystemPath` gives `file:///C:/Users/…` on Windows, so stripping only the scheme leaves `/C:/…`; `path.join` then reads it as root-relative and produces `\C:\…\bundle.jsx`, and the panel reports the bundle missing while it sits at that exact location. `client/csinterface.js` strips the slash before a drive letter — do that there, not at call sites, since it is the one place a URL becomes a native path. `tests/unit/panel-paths.mjs` covers it; there is no AE on a runner, so nothing else does.
 
 ## Platform notes
 
