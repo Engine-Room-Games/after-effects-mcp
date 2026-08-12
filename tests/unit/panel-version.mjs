@@ -8,11 +8,13 @@
 
 import assert from "node:assert/strict";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+// pathToFileURL, not the bare path: on Windows an absolute path starts with a
+// drive letter, which the ESM loader reads as an unsupported URL scheme.
 const { assessPanel, sourceBundleHash, unknownOpMessage } = await import(
-  path.join(root, "packages", "mcp-server", "dist", "setup", "panelVersion.js")
+  pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "setup", "panelVersion.js")).href
 );
 
 const SHIPPED = sourceBundleHash();

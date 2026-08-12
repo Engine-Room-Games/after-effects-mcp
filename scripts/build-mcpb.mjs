@@ -22,7 +22,7 @@ import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serverPkg = path.join(root, "packages", "mcp-server");
@@ -98,8 +98,11 @@ copy(panelSrc, path.join(staging, "panel"));
 // -------------------------------------------------------------- manifest
 const { schemas } = await import("@engineroom/shared");
 const { OpSchemas } = schemas;
-const { descriptions } = await import(path.join(serverPkg, "dist", "tools", "descriptions.js"));
-const { PROMPTS } = await import(path.join(serverPkg, "dist", "generated", "content.js"));
+// pathToFileURL: a bare Windows absolute path is an unsupported URL scheme to
+// the ESM loader.
+const dist = (...parts) => pathToFileURL(path.join(serverPkg, "dist", ...parts)).href;
+const { descriptions } = await import(dist("tools", "descriptions.js"));
+const { PROMPTS } = await import(dist("generated", "content.js"));
 
 const manifest = {
   manifest_version: "0.2",
