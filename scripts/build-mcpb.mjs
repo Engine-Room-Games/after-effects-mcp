@@ -18,6 +18,7 @@
 //
 // Usage: node scripts/build-mcpb.mjs [--out <dir>]
 
+import Ajv from "ajv";
 import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -133,12 +134,47 @@ const manifest = {
     name,
     description: (descriptions[name] ?? `AE op: ${name}`).split(". ")[0] + ".",
   })),
-  prompts: PROMPTS.map((p) => ({ name: p.name, description: p.description, arguments: ["arguments"] })),
+  // `text` is required — MANIFEST.md's prose calls it optional, but the schema
+  // Claude Desktop validates against lists it alongside `name`, and a bundle
+  // missing it fails to install with "Invalid manifest: prompts: Required".
+  // The body is the real prompt, so it goes in verbatim with the placeholder
+  // rewritten from the server's `$ARGUMENTS` to the manifest's
+  // `${arguments.<name>}` form. The argument is named "arguments" because that
+  // is the name server.ts declares for it over MCP; the two have to agree.
+  // The replacer is a function so `$` in the replacement stays literal —
+  // the string form would read `$…` as a substitution pattern.
+  prompts: PROMPTS.map((p) => ({
+    name: p.name,
+    description: p.description,
+    ...(p.argumentHint ? { arguments: ["arguments"] } : {}),
+    text: p.body.replaceAll("$ARGUMENTS", () => "${arguments.arguments}"),
+  })),
   compatibility: {
     platforms: ["darwin", "win32"],
     runtimes: { node: ">=22.0.0" },
   },
 };
+// Claude Desktop validates this on install, so an invalid manifest is not
+// discovered until someone double-clicks the .mcpb — which is to say, after the
+// release is public. v0.2.0 shipped with `text` missing from every prompt and
+// installed as "Invalid manifest: prompts: Required, Required, Required".
+// Checking here turns that into a failed build. The schema is the frozen v0.2
+// copy from anthropics/mcpb matching `manifest_version` above, so it cannot
+// drift underneath us; bump both together. Note that MANIFEST.md's prose
+// disagrees with the schema on which prompt fields are required — the schema is
+// what actually runs.
+// strict:false: the schema uses `format` keywords ajv does not load by default,
+// and an unrecognised format must not fail the build.
+const schema = JSON.parse(
+  fs.readFileSync(path.join(root, "scripts", "schemas", "mcpb-manifest-v0.2.schema.json"), "utf8")
+);
+const ajv = new Ajv({ allErrors: true, strict: false, logger: false });
+if (!ajv.validate(schema, manifest)) {
+  console.error("The generated manifest does not satisfy the MCPB v0.2 schema:");
+  for (const e of ajv.errors) console.error(`  ${e.instancePath || "(root)"} ${e.message}`);
+  process.exit(1);
+}
+
 fs.writeFileSync(path.join(staging, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 
 // ------------------------------------------------------------------- zip

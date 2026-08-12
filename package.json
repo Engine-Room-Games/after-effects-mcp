@@ -26,6 +26,9 @@
     "inspect": "npx @modelcontextprotocol/inspector node packages/mcp-server/dist/index.js",
     "pack:check": "npm run build && npm pack -w @engine-room/after-effects-mcp --dry-run"
   },
+  "devDependencies": {
+    "ajv": "^8.17.1"
+  },
   "engines": {
     "node": ">=22"
   }
