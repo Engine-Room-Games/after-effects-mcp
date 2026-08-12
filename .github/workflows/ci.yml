@@ -100,6 +100,11 @@ jobs:
       - name: Panel version mismatches are diagnosed correctly
         run: node tests/unit/panel-version.mjs
 
+      # No AE on a runner means nothing else here loads the panel's client code,
+      # and the Windows form of this bug reads as a missing bundle.jsx.
+      - name: Panel resolves the extension path CEP hands it
+        run: node tests/unit/panel-paths.mjs
+
       - name: check_setup resolves platform paths without throwing
         shell: bash
         run: |

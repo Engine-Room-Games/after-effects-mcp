@@ -11,6 +11,13 @@ CSInterface.prototype.evalScript = function (script, callback) {
 CSInterface.prototype.getSystemPath = function (pathType) {
   var path = window.__adobe_cep__.getSystemPath(pathType);
   if (path && path.indexOf("file://") === 0) path = decodeURIComponent(path.substring(7));
+  // CEP hands back a file URL, so on Windows the drive letter arrives still
+  // carrying the URL's leading slash: /C:/Users/... Node reads that as
+  // root-relative — path.join turns it into \C:\...\jsx\bundle.jsx, which no
+  // fs call can open, and the panel reports the bundle missing when it is
+  // sitting right there. Strip it here rather than at each call site: this is
+  // the one place a URL becomes a native path.
+  if (path) path = path.replace(/^\/([A-Za-z]:)/, "$1");
   return path;
 };
 
