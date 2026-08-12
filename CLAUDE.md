@@ -134,6 +134,49 @@ Two rules that keep this honest:
   clients drop `instructions`; fewer support resources. Tools are the floor
   every client reaches, so the guidance has to be available as one.
 
+## Panel version gating
+
+The panel does not update itself, and it ships inside every distribution — so
+"tools newer than panel" is the normal state after any upgrade, not an edge
+case. Before this existed it surfaced as `Unknown op: get_house_style`, which
+tells an agent nothing and usually got retried.
+
+**Two hashes, and they are not interchangeable:**
+
+| | What it is | Where from |
+|---|---|---|
+| installed | the bundle in the CEP extension folder — what AE loads *next* launch | `sha256` on disk |
+| running | the bundle the panel actually `$.evalFile`d — what answers *now* | `bundleHash` on `/health` |
+
+They diverge for the entire window between `setup_panel` and restarting AE,
+which is exactly when calls break. **Only the running hash is worth gating on.**
+`setup/panelVersion.ts` maps the pair onto four states, and the distinction that
+matters most to a user is `restart-needed` — telling someone to run
+`setup_panel` again there wastes their time, so the message says so explicitly.
+
+Three enforcement points, in order of preference:
+
+1. **The gate in `server.ts`** — one `/health` per session, cached; refuses to
+   forward and returns the remediation. `panelGate.invalidate()` after
+   `setup_panel`, because the disk half of the comparison just changed.
+2. **The `Unknown op:` backstop** — for panels too old to report a hash at all.
+   This is never a false positive: `server.ts` validates tool names against
+   `OpSchemas` before forwarding, so any op the panel rejects is one this server
+   defines.
+3. **`check_setup`'s `panelRunningCurrent`** — the truthful version of
+   `panelUpToDate`, which compares files and therefore goes green the instant
+   `setup_panel` runs, while AE carries on running the old code.
+
+`tests/unit/panel-version.mjs` covers the decision table; CI runs it. Old panels
+predate `bundleHash` entirely, so `undefined` must always mean "too old to say",
+never "matches".
+
+**Install before AE is open.** The panel loads at launch and only at launch, so
+installing while AE is closed costs no restart. `check_setup` reports
+`afterEffectsRunning`, and the guides, the `init-after-effects` prompt and
+`setup_panel`'s description all branch on it. When changing that advice, change
+all four.
+
 ## The project scaffold
 
 `init_project` and `npx … init` both call `scaffold()` in `setup/scaffold.ts`.
@@ -212,6 +255,7 @@ Publishing: `npm publish -w @engine-room/after-effects-mcp` (the `prepack` hook 
 9. `log_issue` twice with the same title → one file, `occurrences: 2`, `previouslyLogged: true`. `mark_issue_reported` then `log_issue` again → still `reported: true` (a new sighting must not un-report an entry).
 10. `get_house_style` on an **unsaved** project → `{found:false, projectSaved:false}` with a readable reason, not a throw. Save the project, `set_house_style({content})` → file appears next to the .aep. Call it again without `overwrite` → refuses and names the path. With `overwrite:true` → replaces. Non-ASCII (curly quotes, accented font names) survives the round trip — that is the UTF-8 encoding, and it fails silently if dropped.
 11. `init_project` with no `dir` from a client that advertises `roots` → writes into the client's folder, `resolvedFrom: "client-root"`. From Claude Desktop (cwd `/`) → refuses with a message telling the agent to ask.
+12. Version gate, with AE running an older panel: any forwarded op → the remediation message, not `Unknown op`. `setup_panel` then the same op → "still running the previous version", naming the restart as the only fix. Restart AE → works. (`tests/unit/panel-version.mjs` covers the decision table; this recipe covers the wiring.)
 
 ## The issue journal
 

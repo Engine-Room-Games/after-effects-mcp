@@ -17,6 +17,8 @@ import { AeError, BridgeUnreachableError } from "./util/errors.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
+import { assessPanel, installedBundleHash, unknownOpMessage } from "./setup/panelVersion.js";
+import { installedPanelDir } from "./setup/paths.js";
 import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./generated/content.js";
 import { listIssues, logIssue, markReported } from "./issues/journal.js";
 import { imageContent } from "./util/pngImage.js";
@@ -78,6 +80,7 @@ export function createServer() {
   const jobs = new JobManager();
   const ws = new WsClient(bridge.port, jobs);
   ws.start();
+  const panelGate = createPanelGate(bridge);
 
   // Best-effort health probe; non-fatal.
   bridge.health().then(
@@ -185,6 +188,9 @@ export function createServer() {
         if (name === "setup_panel") {
           const a = schemas.SetupPanel.parse(rawArgs);
           const installed = await installPanel({ enableDebugMode: a.enableDebugMode, force: a.force });
+          // The panel on disk just changed; whatever was cached about the
+          // running one is now the wrong half of the comparison.
+          panelGate.invalidate();
           // Re-run the diagnostic so the agent sees the resulting state rather
           // than having to guess whether the install was sufficient.
           return textResult({ ...installed, setup: await checkSetup() });
@@ -239,6 +245,12 @@ export function createServer() {
       return errorResult(`Invalid arguments for ${name}: ${(e as Error).message}`);
     }
 
+    // Refuse to forward to a panel that predates this server. Without this the
+    // agent gets `Unknown op: …` for anything added since the panel was
+    // installed and has no way to know an update is the fix.
+    const staleness = await panelGate.check();
+    if (staleness) return errorResult(staleness);
+
     // Forward to panel.
     try {
       const result = await bridge.runOp(name, args, progressToken);
@@ -287,12 +299,62 @@ export function createServer() {
       return textResult(result);
     } catch (e) {
       if (e instanceof BridgeUnreachableError) return errorResult(e.message);
-      if (e instanceof AeError) return errorResult(`AE: ${e.message}${e.line ? ` (line ${e.line})` : ""}`);
+      if (e instanceof AeError) {
+        // The gate above should have caught this, but it depends on /health
+        // reporting a hash. On a panel too old to do that, this is the backstop
+        // — and it is unambiguous, since unknown tool names never get this far.
+        if (/^Unknown op: /.test(e.message)) {
+          panelGate.invalidate();
+          return errorResult(unknownOpMessage(name));
+        }
+        return errorResult(`AE: ${e.message}${e.line ? ` (line ${e.line})` : ""}`);
+      }
       return errorResult((e as Error).message);
     }
   });
 
   return server;
+}
+
+/**
+ * Caches the panel-version verdict so it costs one /health per session rather
+ * than one per tool call.
+ *
+ * Only a *stale* verdict is remembered indefinitely — that state cannot resolve
+ * itself without a restart of After Effects, which drops the bridge and clears
+ * the cache anyway. A healthy verdict is re-checked periodically so a panel that
+ * gets replaced mid-session is noticed. An unreachable bridge caches nothing:
+ * that is `runOp`'s error to report, with a much better message than this.
+ */
+function createPanelGate(bridge: HttpClient) {
+  const RECHECK_MS = 60_000;
+  let verdict: string | null = null;
+  let checkedAt = 0;
+
+  return {
+    /** The message to return instead of forwarding, or null to proceed. */
+    async check(): Promise<string | null> {
+      if (verdict !== null) return verdict;
+      if (Date.now() - checkedAt < RECHECK_MS) return null;
+      try {
+        const health = await bridge.health();
+        const assessment = assessPanel(health.bundleHash, installedBundleHash(installedPanelDir()));
+        checkedAt = Date.now();
+        verdict = assessment.state === "current" || assessment.state === "unknown" ? null : assessment.message;
+        // "unknown" covers a panel too old to report a hash. Its message is a
+        // warning rather than a certainty, so it is logged, not enforced — the
+        // Unknown-op backstop catches it the moment it actually matters.
+        if (assessment.state === "unknown" && assessment.message) logger.warn(assessment.message);
+        return verdict;
+      } catch {
+        return null;
+      }
+    },
+    invalidate() {
+      verdict = null;
+      checkedAt = 0;
+    },
+  };
 }
 
 /**

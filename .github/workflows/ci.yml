@@ -95,6 +95,11 @@ jobs:
               c.kill();process.exit(0);
             })();'
 
+      # Every branch here is a different sentence said to a user mid-upgrade,
+      # and none of them are reachable from a normal green-path run.
+      - name: Panel version mismatches are diagnosed correctly
+        run: node tests/unit/panel-version.mjs
+
       - name: check_setup resolves platform paths without throwing
         shell: bash
         run: |

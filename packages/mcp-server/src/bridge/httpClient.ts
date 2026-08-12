@@ -15,11 +15,13 @@ export class HttpClient {
     this.base = `http://127.0.0.1:${this.port}`;
   }
 
-  async health(): Promise<{ ok: boolean; port: number; bundleLoaded?: boolean }> {
+  // `bundleHash` is absent on panels installed before it was added; callers must
+  // treat undefined as "too old to say" rather than as a mismatch.
+  async health(): Promise<{ ok: boolean; port: number; bundleLoaded?: boolean; bundleHash?: string | null }> {
     try {
       const r = await fetch(`${this.base}/health`, { signal: AbortSignal.timeout(2000) });
       if (!r.ok) throw new Error(`health HTTP ${r.status}`);
-      return (await r.json()) as { ok: boolean; port: number; bundleLoaded?: boolean };
+      return (await r.json()) as { ok: boolean; port: number; bundleLoaded?: boolean; bundleHash?: string | null };
     } catch (e) {
       throw new BridgeUnreachableError(this.port, e as Error);
     }

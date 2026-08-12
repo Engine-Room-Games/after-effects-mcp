@@ -16,17 +16,24 @@ file path they did not ask about.
 Work through these in order, and **stop at the first one that needs something
 from them**. Do not run ahead and report four steps at once.
 
-## 1. Is After Effects reachable?
+## 1. Install the panel — before they open After Effects
 
 Call `check_setup`. It is read-only and safe.
 
+**Do not ask them to open After Effects yet.** The panel only loads when AE
+launches, so installing while AE is still closed means it is simply there when
+they open it — no restart to ask for. If AE is already running you have to ask
+for one, which is why this step comes first.
+
 - **Everything green** — say so in one line and move on.
-- **Anything red** — this is the one step that cannot be skipped. Explain what
-  `setup_panel` is about to do before calling it: it copies a small panel into
-  their Adobe extensions folder and switches on the Adobe setting that allows
-  unsigned panels. Both are user-level and reversible. Call it, then ask them to
-  **quit and reopen After Effects** — the panel only loads at launch, and you
-  cannot do it for them. Then `check_setup` again to confirm.
+- **Anything red** — explain what `setup_panel` is about to do before calling
+  it: it copies a small panel into their Adobe extensions folder and switches on
+  the Adobe setting that allows unsigned panels. Both are user-level and
+  reversible. Call it, then:
+  - if `afterEffectsRunning` was false, ask them to **open** After Effects;
+  - if it was true, ask them to **quit and reopen** it.
+
+  Then `check_setup` again to confirm.
 
 If it still fails, load the `ae-setup` topic of `ae_guide` and work through it.
 Do not improvise CEP diagnostics.
@@ -43,11 +50,12 @@ that is exactly what it means — ask, then call again with `dir`.
 Tell them the folder it created and what is in it, in one sentence. Do not paste
 the file list.
 
-## 3. Do they have a project open?
+## 3. Now bring up After Effects
 
-Ask them to open the After Effects project they want to work on — or to create
-and **save** one. Saving matters: the style guide is written next to the .aep,
-and an unsaved project has no folder to put it in.
+By this point the panel is installed, so this is the moment to have them open
+After Effects and load the project they want to work on — or create one and
+**save** it. Saving matters: the style guide is written next to the .aep, and an
+unsaved project has no folder to put it in.
 
 `get_project_summary` will tell you what is open.
 

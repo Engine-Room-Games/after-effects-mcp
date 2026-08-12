@@ -8,83 +8,6 @@
 
 Works with Claude, Cursor, VS Code, Codex, Windsurf and any other MCP client, on macOS and Windows. Requires After Effects 2026.
 
-## Install
-
-**Claude Desktop — download [the latest `.mcpb`](https://github.com/Engine-Room-Games/after-effects-mcp/releases/latest) and open it.** That is the whole install. Nothing else to download, no terminal, no Node.
-
-Then open After Effects and ask:
-
-> Set up After Effects.
-
-It installs a small panel into After Effects and tells you to restart it. One time per machine.
-
-<details>
-<summary><b>Other clients — Cursor, VS Code, Claude Code, Codex, Windsurf, anything else</b></summary>
-
-<br>
-
-**If you have [Node 22+](https://nodejs.org)**, add this to your client's MCP configuration:
-
-```json
-{
-  "mcpServers": {
-    "after-effects": {
-      "command": "npx",
-      "args": ["-y", "@engine-room/after-effects-mcp"]
-    }
-  }
-}
-```
-
-VS Code uses a slightly different shape — `{"servers": {"after-effects": {"type": "stdio", …}}}` in `.vscode/mcp.json`.
-
-**If you do not have Node**, download the standalone build for your machine from [the latest release](https://github.com/Engine-Room-Games/after-effects-mcp/releases/latest), unzip it anywhere, and point your client at the executable inside:
-
-```json
-{
-  "mcpServers": {
-    "after-effects": {
-      "command": "/Users/you/Applications/after-effects-mcp/after-effects-mcp"
-    }
-  }
-}
-```
-
-Keep that folder together — the After Effects panel ships next to the executable.
-
-Restart your client, then ask it to set up After Effects.
-
-</details>
-
-<details>
-<summary><b>Claude Code plugin</b></summary>
-
-<br>
-
-This repository is also a plugin marketplace, which adds the skills and `/`-commands on top of the tools:
-
-```
-/plugin marketplace add Engine-Room-Games/after-effects-mcp
-/plugin install after-effects@engine-room
-```
-
-</details>
-
-## Start working
-
-Open the After Effects project you want to work on, then say what you want:
-
-> Build a lower third that says Chapter One, sliding in from the left.
-
-Your assistant reads the current state of your comp, makes the change, and can screenshot the result to check it. Everything it builds is ordinary editable After Effects work.
-
-Two commands worth knowing, both available in any client that supports MCP prompts:
-
-| | |
-|---|---|
-| `/init-after-effects` | Walks you through the whole setup and offers to capture your style |
-| `/create-style-guide` | Teaches it what your work should look like |
-
 ## What it builds
 
 Six scenes from one quarterly-report sequence, each in a different visual style. Every layer, keyframe and effect below was built through these tools.
@@ -122,6 +45,99 @@ Six scenes from one quarterly-report sequence, each in a different visual style.
   </tr>
 </table>
 
+## Install
+
+Pick the one that matches how you work. **With After Effects closed**, then say:
+
+> Set up After Effects.
+
+The panel installs, and it is there when you next open After Effects. Doing it in that order saves a restart. One time per machine.
+
+<details>
+<summary><b>Claude Desktop</b> — one click, nothing else to install</summary>
+
+<br>
+
+Download [the latest `.mcpb`](https://github.com/Engine-Room-Games/after-effects-mcp/releases/latest) and open it. That is the whole install — Claude Desktop runs it on the Node runtime it already ships, so there is no terminal and nothing to set up.
+
+</details>
+
+<details>
+<summary><b>Cursor, VS Code, Claude Code, Codex, Windsurf</b> — if you have Node 22+</summary>
+
+<br>
+
+Add this to your client's MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "after-effects": {
+      "command": "npx",
+      "args": ["-y", "@engine-room/after-effects-mcp"]
+    }
+  }
+}
+```
+
+VS Code uses a different shape — `{"servers": {"after-effects": {"type": "stdio", …}}}` in `.vscode/mcp.json`.
+
+Restart your client afterwards.
+
+</details>
+
+<details>
+<summary><b>Any client, without Node</b> — a standalone download</summary>
+
+<br>
+
+Download the build for your machine from [the latest release](https://github.com/Engine-Room-Games/after-effects-mcp/releases/latest), unzip it anywhere, and point your client at the executable inside:
+
+```json
+{
+  "mcpServers": {
+    "after-effects": {
+      "command": "/Users/you/Applications/after-effects-mcp/after-effects-mcp"
+    }
+  }
+}
+```
+
+Keep that folder together — the After Effects panel ships next to the executable.
+
+The macOS builds are signed and notarized. The Windows build is unsigned, so SmartScreen may warn on first run.
+
+</details>
+
+<details>
+<summary><b>Claude Code plugin</b> — adds skills and slash commands</summary>
+
+<br>
+
+This repository is also a plugin marketplace:
+
+```
+/plugin marketplace add Engine-Room-Games/after-effects-mcp
+/plugin install after-effects@engine-room
+```
+
+</details>
+
+## Start working
+
+Open the After Effects project you want to work on, then say what you want:
+
+> Build a lower third that says Chapter One, sliding in from the left.
+
+Your assistant reads the current state of your comp, makes the change, and can screenshot the result to check it. Everything it builds is ordinary editable After Effects work.
+
+Two commands worth knowing, both available in any client that supports MCP prompts:
+
+| | |
+|---|---|
+| `/init-after-effects` | Walks you through the whole setup and offers to capture your style |
+| `/create-style-guide` | Teaches it what your work should look like |
+
 ## Your house style
 
 Ask for a style guide and point at a comp you already like. Your colours, fonts, sizes and timing get read off it and saved as `house-style.md` **next to your After Effects project**, and everything built afterwards follows them.
@@ -145,13 +161,15 @@ Updating the tools never touches either file.
 
 ## Updating
 
-Two things update separately: the tools, and the panel inside After Effects.
+Two things update separately, and **the panel does not update itself**.
 
-For the tools — reinstall the `.mcpb`, or restart your client if you use `npx`, or download the new build. Then, with After Effects open:
+First the tools: reinstall the `.mcpb`, download the new standalone build, or just restart your client if you use `npx`. Then quit After Effects and say:
 
 > Update the After Effects panel.
 
-Ask it to check the setup afterwards; it reports whether the panel matches the tools.
+Reopen After Effects and it is running the new one. If you would rather not close AE, that works too — you will just be asked to restart it afterwards.
+
+You do not have to remember any of this. If the panel falls behind the tools, the next thing you ask for stops with an explanation rather than a confusing error, and your assistant walks you through it.
 
 <details>
 <summary><b>Tools — all 67</b></summary>
@@ -207,8 +225,9 @@ Ask your assistant to check the After Effects setup. It reports which part is br
 
 | Symptom | Cause and fix |
 |---|---|
-| "Cannot reach the After Effects panel" | AE is not running, or the panel is not installed. Ask it to set up After Effects, then restart AE. |
-| Tools worked before, now fail inside AE | The tools were updated but the panel was not. Ask it to update the panel, then restart AE. |
+| "Cannot reach the After Effects panel" | AE is not running, or the panel is not installed. Ask it to set up After Effects; if AE was closed, just open it afterwards. |
+| "The After Effects panel is out of date" | The tools were updated but the panel was not. Ask it to update the panel, then restart AE. |
+| "…updated on disk, but After Effects is still running the previous version" | The update landed; AE just has not restarted. Quit and reopen it. Updating again will not help. |
 | Panel never loads, setup looks correct | On macOS, reboot once. Some builds cache the Adobe setting until a restart. |
 | A panel answers but the setup check reports none installed | An older install is still serving. Remove it from the CEP extensions folder, reinstall, restart AE. |
 | "No project folder to write to" | Your client did not tell the server where it is working. Say which folder you want. |

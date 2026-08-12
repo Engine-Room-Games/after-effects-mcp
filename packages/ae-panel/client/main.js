@@ -10,6 +10,7 @@
   var fs = require("fs");
   var os = require("os");
   var http = require("http");
+  var crypto = require("crypto");
   var WebSocket;
   try { WebSocket = require("ws"); }
   catch (e) {
@@ -84,6 +85,24 @@
   }
 
   // ---------- Load bundle.jsx ----------
+  // Hash of the bundle *actually evaluated into ExtendScript*, reported on
+  // /health. The server compares it against the bundle it ships to decide
+  // whether the running panel understands the ops it is about to send.
+  //
+  // It has to be captured here rather than read off disk on demand: after
+  // setup_panel refreshes the extension folder, the file on disk is new while
+  // this process is still running the old code, and that gap — between
+  // installing an update and restarting AE — is exactly when calls fail.
+  var loadedBundleHash = null;
+
+  function hashFile(file) {
+    try {
+      return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    } catch (e) {
+      return null;
+    }
+  }
+
   function loadJsxBundle() {
     setStatus("Loading bundle.jsx…");
     if (!fs.existsSync(bundlePath)) {
@@ -95,7 +114,12 @@
     var loadScript = "$.evalFile(" + JSON.stringify(bundlePath) + "); typeof dispatch === 'function' ? 'ok' : 'no-dispatch';";
     return new Promise(function (resolve, reject) {
       cs.evalScript(loadScript, function (raw) {
-        if (raw === "ok") { $jsx.textContent = "loaded"; $jsx.className = "ok"; resolve(); }
+        if (raw === "ok") {
+          loadedBundleHash = hashFile(bundlePath);
+          $jsx.textContent = "loaded";
+          $jsx.className = "ok";
+          resolve();
+        }
         else { $jsx.textContent = "fail: " + raw; $jsx.className = "err"; reject(new Error("dispatch not defined after loading bundle.jsx: " + raw)); }
       });
     });
@@ -245,7 +269,15 @@
         if (url === "/health") {
           res.statusCode = 200;
           res.setHeader("content-type", "application/json");
-          res.end(JSON.stringify({ ok: true, port: port, bundleLoaded: true, ts: Date.now() }));
+          // bundleHash identifies the code this panel is *running*, which is what
+          // the server needs to know before sending an op the panel may predate.
+          res.end(JSON.stringify({
+            ok: true,
+            port: port,
+            bundleLoaded: true,
+            bundleHash: loadedBundleHash,
+            ts: Date.now()
+          }));
           return;
         }
 

@@ -15,11 +15,26 @@ Assume the person you are helping is a motion designer, not a developer. They sh
 
 **Relay `nextSteps` to the user directly.** Do not paraphrase it into jargon, and do not invent steps it did not mention.
 
+## Install before they open After Effects, if you still can
+
+The panel loads at launch and only at launch. So the order matters, and it is
+the opposite of what people assume:
+
+- **After Effects is closed** — install now. When they open it, the panel is
+  simply there. No restart, nothing to ask for. This is the good path, and on a
+  first-time setup you can usually get it.
+- **After Effects is open** — install, then they have to quit and reopen it.
+  Unavoidable, but worth avoiding: if they have not opened AE yet in this
+  conversation, do the install *first* and tell them to open it after.
+
+`check_setup` reports `afterEffectsRunning`, so you always know which case you
+are in before you say anything.
+
 ## The repair path
 
 1. **`check_setup`** — find out what is actually wrong.
 2. **`setup_panel`** — if the panel is missing or out of date. Tell the user what it will do *before* you call it: it copies the panel into their Adobe extensions folder and switches on the Adobe preference that permits unsigned panels. Both changes are user-level and reversible.
-3. **Ask them to quit and reopen After Effects.** The panel only loads at launch. This step is not optional and you cannot do it for them.
+3. **Get the panel loaded.** If AE was closed, ask them to open it. If it was already open, ask them to quit and reopen it. You cannot do either for them.
 4. **`check_setup`** again to confirm.
 
 ## What the individual failures mean
@@ -30,13 +45,29 @@ Assume the person you are helping is a motion designer, not a developer. They sh
 | `panelAssetsPresent` | The server package is incomplete — it needs reinstalling. |
 | `cepDebugMode` | Adobe refuses to load unsigned panels until this preference is on. `setup_panel` sets it. |
 | `panelInstalled` | The panel is not in the Adobe extensions folder yet. `setup_panel` installs it. |
-| `panelUpToDate` | The server was upgraded but the installed panel wasn't. Run `setup_panel`, then restart AE. |
-| `afterEffectsRunning` | AE is closed. Ask the user to open it. |
+| `panelUpToDate` | The files on disk are older than this server. Run `setup_panel`. |
+| `panelRunningCurrent` | AE is *running* an older panel than these tools ship. This is the one that predicts whether calls will actually work — `panelUpToDate` can pass while this fails, for the whole window between installing an update and restarting AE. |
+| `afterEffectsRunning` | AE is closed. If the panel also needs installing, install it now and then ask them to open AE — that saves a restart. |
 | `bridgeReachable` | Everything is installed but the panel isn't answering — almost always fixed by restarting AE. |
 
 ## The reboot case
 
 `cepDebugMode` is an Adobe preference that, on some macOS builds, only takes effect after a **restart of the Mac** — not just of After Effects. If `setup_panel` reports `rebootRecommended: true` and restarting AE alone did not fix it, ask the user to reboot once. This is a one-time cost, never needed again.
+
+## When a tool says the panel is out of date
+
+You may get an error saying the panel is older than these tools, or that it does
+not recognise an op. That is a version mismatch, not a broken tool, and the
+message tells you which of the two fixes applies:
+
+- **"updated on disk … still running the previous version"** — `setup_panel` has
+  already done its part. Only a restart of After Effects will help; running it
+  again will not.
+- **anything else** — run `setup_panel`, then get AE restarted.
+
+Either way, do not retry the failed call until the user confirms AE has
+restarted. Say it as a version mismatch in plain language, not as a failure:
+their tools moved ahead of the panel, and it takes a restart to catch up.
 
 ## If it still will not connect
 

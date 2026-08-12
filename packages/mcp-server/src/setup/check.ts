@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { discoverPort } from "../bridge/discovery.js";
 import { cepExtensionsDir, installedPanelDir, isSupportedPlatform, panelSourceDir } from "./paths.js";
+import { assessPanel } from "./panelVersion.js";
 import { debugModeLocation, isAfterEffectsRunning, isDebugModeOn } from "./platform.js";
 
 export interface Check {
@@ -27,11 +28,14 @@ function sha256(file: string): string | null {
   }
 }
 
-async function bridgeReachable(port: number): Promise<{ ok: boolean; detail: string }> {
+async function bridgeReachable(
+  port: number
+): Promise<{ ok: boolean; detail: string; bundleHash?: string | null }> {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) });
     if (!res.ok) return { ok: false, detail: `port ${port} returned HTTP ${res.status}` };
-    return { ok: true, detail: `responding on port ${port}` };
+    const body = (await res.json().catch(() => ({}))) as { bundleHash?: string | null };
+    return { ok: true, detail: `responding on port ${port}`, bundleHash: body.bundleHash };
   } catch (e) {
     return { ok: false, detail: `no response on port ${port} (${(e as Error).message})` };
   }
@@ -106,6 +110,27 @@ export async function checkSetup(): Promise<SetupReport> {
     fix: bridge.ok ? undefined : "If the other checks pass, restart After Effects so the panel reloads.",
   });
 
+  // `panelUpToDate` above compares files on disk, which start matching the
+  // instant setup_panel runs — while AE carries on running the old code until it
+  // restarts. This is the check that notices that window, and it is the one that
+  // predicts whether calls will actually work.
+  if (bridge.ok && source) {
+    const assessment = assessPanel(bridge.bundleHash, sha256(path.join(installed, "jsx", "bundle.jsx")));
+    const ok = assessment.state === "current";
+    checks.push({
+      name: "panelRunningCurrent",
+      ok,
+      detail: ok
+        ? "After Effects is running the panel that ships with these tools"
+        : assessment.state === "restart-needed"
+          ? "After Effects is still running the previous panel — the update needs a restart to take effect"
+          : assessment.state === "unknown"
+            ? "the running panel is too old to report its version"
+            : "After Effects is running a panel older than these tools",
+      fix: ok ? undefined : assessment.message,
+    });
+  }
+
   // A live bridge with no panel at the expected path means some older build is
   // serving — most often one installed under a previous bundle id. Everything
   // works right now, but an upgrade will not reach the running panel, and the
@@ -154,8 +179,10 @@ function buildNextSteps(checks: Check[], ready: boolean): string[] {
     steps.push(identity.fix!);
   }
   if (by("afterEffectsRunning")?.ok === false) {
-    steps.push("Open After Effects 2026.");
-  } else if (needsInstall) {
+    // Installing before AE is open is the cheaper order: the panel is simply
+    // there when it launches, with no restart to ask for.
+    steps.push(needsInstall ? "Open After Effects 2026 — the panel loads with it." : "Open After Effects 2026.");
+  } else if (needsInstall || by("panelRunningCurrent")?.ok === false) {
     steps.push("Quit and reopen After Effects so it picks up the panel.");
   }
   if (steps.length === 0 && by("bridgeReachable")?.ok === false) {
