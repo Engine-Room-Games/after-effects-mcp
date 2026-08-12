@@ -1,0 +1,6 @@
+# `scripts/build-guides.mjs --check` compares generated files against what it
+# would write, so a Windows checkout rewriting LF to CRLF would report every one
+# of them as stale. The script normalises line endings defensively as well —
+# this keeps the working tree honest in the first place.
+*.md text eol=lf
+*.ts text eol=lf

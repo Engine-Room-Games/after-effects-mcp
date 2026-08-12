@@ -4,9 +4,19 @@ This file is for future Claude Code sessions working in this repo. Humans readin
 
 ## What this project is
 
-An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, one-off screenshots, bulk batches. 63 tools. macOS and Windows — the only two platforms AE runs on.
+An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, one-off screenshots, bulk batches. 67 tools. macOS and Windows — the only two platforms AE runs on.
 
-It ships three ways: as an npm package (`npx @engine-room/after-effects-mcp`), as a Claude Code plugin (this repo is also its marketplace), and as a git checkout for development.
+It ships five ways, and the ordering below is deliberate — it goes from least to most that the user has to already have installed:
+
+| | For | Needs |
+|---|---|---|
+| `.mcpb` bundle | Claude Desktop | nothing — Desktop runs it on the Node it ships |
+| Signed binary | any client, no Node | download and unzip |
+| npm package | any client | Node 22+ |
+| Claude Code plugin | Claude Code | this repo added as a marketplace |
+| git checkout | development | the lot |
+
+**Nothing here is Claude-only by design.** Skills and slash commands exist only in Claude's clients, so anything written only there reaches maybe half the users. The cross-cutting knowledge is carried by the MCP `instructions` field, MCP prompts, MCP resources and the `ae_guide` tool — all four are generated from the same source, and the Claude Code skills are one more generated output rather than the original. See "Guidance and how it reaches an agent" below.
 
 ## How the pieces talk
 
@@ -49,12 +59,21 @@ The MCP server is stateless except for an in-memory `JobManager`. The panel is t
 | `packages/mcp-server/src/setup/{check,install,paths}.ts` | Backs `check_setup` / `setup_panel`. Never touches the bridge — it exists for the case where the panel isn't installed yet. |
 | `packages/mcp-server/src/setup/platform.ts` | **The only place macOS and Windows diverge** (PlayerDebugMode storage, AE process detection). Plus `cepExtensionsDir()` in `paths.ts`. Keep platform branching here — do not scatter `process.platform` through the codebase. |
 | `scripts/lib/setup.mjs` | Loads the compiled setup module so the dev scripts (`doctor`, `install-panel`, `enable-debug`) reuse the same platform logic the MCP tools use instead of keeping a second copy. |
-| `packages/mcp-server/src/cli/init.ts` | `npx @engine-room/after-effects-mcp init <dir>` project scaffold. Templates are inline string constants so nothing extra has to be packaged. |
-| `plugin/` | The Claude Code plugin: `.mcp.json` + `skills/{after-effects,ae-setup}` + `commands/report-ae-issue.md`. Skills carry tool knowledge only — never anyone's house style. |
+| `packages/mcp-server/src/setup/scaffold.ts` | **The one definition of what a project folder is.** Client-aware layout, target resolution, never-overwrite. Used by both `init_project` and the CLI. |
+| `packages/mcp-server/src/cli/init.ts` | `npx … init <dir>` — the terminal front end to `scaffold()`. Holds no templates of its own. |
+| `packages/mcp-server/src/guides/*.md` | **Source of truth for agent guidance.** Frontmatter + markdown. Generated into resources, `ae_guide`, `instructions` and Claude Code skills. |
+| `packages/mcp-server/src/prompts/*.md` | Source of truth for user-invoked flows. Generated into MCP prompts and Claude Code commands. `$ARGUMENTS` is substituted at `prompts/get`. |
+| `packages/mcp-server/src/generated/content.ts` | Generated. Never hand-edit — `build-guides.mjs --check` fails the build if you do. |
+| `packages/jsx/style.jsx` | `get_house_style` / `set_house_style`. Reads `house-style.md` beside the .aep over the bridge, which is the only channel every client has. |
+| `plugin/` | The Claude Code plugin: `.mcp.json` + generated `skills/` and `commands/`. Everything under those two is output, not source. |
 | `.claude-plugin/marketplace.json` | Marketplace catalog. Users add this repo, then install `after-effects@engine-room`. |
 | `scripts/bundle-jsx.mjs` | Concatenates `packages/jsx/*.jsx` in dependency order into `packages/ae-panel/jsx/bundle.jsx`. Run via `npm run build:jsx`. |
 | `scripts/prepare-package.mjs` | `prepack` hook. esbuild-bundles the server to `bin/server.js` (inlining `@engineroom/shared`, which is never published separately) and vendors the panel to `panel/`. |
 | `scripts/install-panel.mjs` | Dev equivalent of `setup_panel`. Copies (or symlinks with `--symlink`) the panel into `~/Library/Application Support/Adobe/CEP/extensions/`. |
+| `scripts/build-guides.mjs` | Generates every copy of the guidance prose from `src/{guides,prompts}/*.md`. `--check` mode runs in CI. Also asserts `GUIDE_TOPICS` in `schemas.ts` matches the guides on disk. |
+| `scripts/build-mcpb.mjs` | The Claude Desktop bundle. Reproduces the runtime layout `setup/paths.ts` expects: `package.json`, `server/index.js`, real `node_modules/ws`, vendored `panel/`. |
+| `scripts/build-binaries.mjs` | `bun build --compile` for mac arm64/x64 and win x64. Each target is a *folder* — the binary alone cannot find the panel. |
+| `scripts/sign-and-notarize.sh` | codesign (hardened runtime + `scripts/entitlements.plist`) then `notarytool submit --wait`. Local-only; reads credentials from the environment and never from the repo. |
 
 ## The op pipeline (in detail)
 
@@ -72,7 +91,8 @@ The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring 
 
 - **Vision** (`screenshot_frame`, `screenshot_layer`): JSX returns `{path, width, height, time, compId, layerId?}`. Panel reads the PNG, base64-encodes, returns `{base64, bytes, ...}`. Server packages as MCP `image` content block.
 - **Long batch** (`run_batch` >100 ops): JSX returns `{jobId, async:true, total}`. Panel drives `_continue_job` in chunks of 25 in the background, broadcasting `progress` events on WS. Server forwards WS progress as `notifications/progress` keyed by the request's `progressToken`.
-- **Server-resident** (`await_job`, `get_job`, `cancel_job`, `check_setup`, `setup_panel`, `log_issue`, `list_known_issues`, `mark_issue_reported`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag). They're still listed in `OpSchemas` so `tools/list` picks them up — membership in `SERVER_OPS` is what stops the forwarding.
+- **Server-resident** (`await_job`, `get_job`, `cancel_job`, `check_setup`, `setup_panel`, `init_project`, `ae_guide`, `log_issue`, `list_known_issues`, `mark_issue_reported`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag). They're still listed in `OpSchemas` so `tools/list` picks them up — membership in `SERVER_OPS` is what stops the forwarding.
+- **Prose** (`ae_guide`): returns the markdown as a bare text content block rather than through `textResult()`. JSON-stringifying it would hand the model a wall of `\n`.
 - **Downsampled screenshots**: handled entirely in `vision.jsx`. `saveFrameToPng` *does* respect `CompItem.resolutionFactor` (measured: a 3840×2160 comp yields 1920×1080 at factor 2, 960×540 at factor 4), so `__saveFrameAt` sets the factor, renders, and restores it in a `finally`. That restore is not optional — a throw mid-render would otherwise leave the user's comp at reduced resolution. The panel reads the true dimensions out of the PNG's IHDR chunk rather than computing them, so reported size can never disagree with the image sent. An earlier version shelled out to `sips`; it was replaced because rendering smaller is faster than resampling and needs no external tool, which is what makes downsampling work on Windows.
 
 ## Conventions
@@ -83,6 +103,123 @@ The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring 
 - **MCP server stdout is sacred.** All logs go to stderr via `util/logger.ts`. Touching `console.log` anywhere in mcp-server will corrupt the JSON-RPC stream.
 - **Tool descriptions are written for LLMs.** Tell the agent (a) what the tool does, (b) when to reach for it, (c) what to avoid. Screenshot descriptions especially must say "one-off, do NOT screenshot every frame."
 - **Never report success for work that didn't happen.** An agent can only correct a failure it's told about, so a swallowed error is worse than a thrown one. `add_shape_content` is the reference case: it resolves every key first, and if any is unresolvable it removes the node it created and throws with the offending keys named, rather than leaving a half-built shape behind an `{ok:true}`. Schemas that accept free-form objects must be `.strict()` for the same reason — zod's default is to strip unknown keys silently.
+
+## Guidance and how it reaches an agent
+
+Tool descriptions cover one tool each. The knowledge that actually costs people
+time is cross-cutting — ids not indexes, read then write then verify, the
+spatial-ease array trap — and belongs to no single tool. There are four carriers
+for it, in descending order of reach:
+
+| Carrier | Reaches | Cost |
+|---|---|---|
+| Tool descriptions | every client, always | always resident |
+| `instructions` (initialize result) | every client that honours it | always resident — keep it short |
+| `ae_guide` tool | every client | on demand |
+| MCP resources (`ae://guide/…`) | clients with resource support | on demand |
+| Claude Code skills | Claude Code, claude.ai | on demand |
+
+All of them except the tool descriptions come from
+`packages/mcp-server/src/guides/*.md` via `scripts/build-guides.mjs`. **Edit the
+markdown, never the outputs.** The same script generates
+`packages/mcp-server/src/prompts/*.md` into MCP prompts and Claude Code commands.
+
+Two rules that keep this honest:
+
+- **`instructions` is always resident in every session, so it stays short.** It
+  is the six things an agent cannot infer from the tool list, and a pointer to
+  `ae_guide` for the rest. Adding a paragraph there is a tax on every request
+  the user ever makes. Add it to a guide instead.
+- **`ae_guide` exists because the better carriers are not universal.** Some
+  clients drop `instructions`; fewer support resources. Tools are the floor
+  every client reaches, so the guidance has to be available as one.
+
+## Panel version gating
+
+The panel does not update itself, and it ships inside every distribution — so
+"tools newer than panel" is the normal state after any upgrade, not an edge
+case. Before this existed it surfaced as `Unknown op: get_house_style`, which
+tells an agent nothing and usually got retried.
+
+**Two hashes, and they are not interchangeable:**
+
+| | What it is | Where from |
+|---|---|---|
+| installed | the bundle in the CEP extension folder — what AE loads *next* launch | `sha256` on disk |
+| running | the bundle the panel actually `$.evalFile`d — what answers *now* | `bundleHash` on `/health` |
+
+They diverge for the entire window between `setup_panel` and restarting AE,
+which is exactly when calls break. **Only the running hash is worth gating on.**
+`setup/panelVersion.ts` maps the pair onto four states, and the distinction that
+matters most to a user is `restart-needed` — telling someone to run
+`setup_panel` again there wastes their time, so the message says so explicitly.
+
+Three enforcement points, in order of preference:
+
+1. **The gate in `server.ts`** — one `/health` per session, cached; refuses to
+   forward and returns the remediation. `panelGate.invalidate()` after
+   `setup_panel`, because the disk half of the comparison just changed.
+2. **The `Unknown op:` backstop** — for panels too old to report a hash at all.
+   This is never a false positive: `server.ts` validates tool names against
+   `OpSchemas` before forwarding, so any op the panel rejects is one this server
+   defines.
+3. **`check_setup`'s `panelRunningCurrent`** — the truthful version of
+   `panelUpToDate`, which compares files and therefore goes green the instant
+   `setup_panel` runs, while AE carries on running the old code.
+
+`tests/unit/panel-version.mjs` covers the decision table; CI runs it. Old panels
+predate `bundleHash` entirely, so `undefined` must always mean "too old to say",
+never "matches".
+
+**Install before AE is open.** The panel loads at launch and only at launch, so
+installing while AE is closed costs no restart. `check_setup` reports
+`afterEffectsRunning`, and the guides, the `init-after-effects` prompt and
+`setup_panel`'s description all branch on it. When changing that advice, change
+all four.
+
+## The project scaffold
+
+`init_project` and `npx … init` both call `scaffold()` in `setup/scaffold.ts`.
+The tool exists because **the server writing the files is the only design that
+works everywhere** — Claude Desktop gives its agent no filesystem tools, so
+"tell the agent to write these files" fails there entirely.
+
+Three things it has to get right:
+
+- **Where.** Explicit `dir` → the client's `roots` → `process.cwd()`. It refuses
+  the filesystem root and the home directory outright, because Claude Desktop
+  starts servers at `/` and scaffolding there is never what anyone meant. The
+  error tells the agent to ask the user, which is the correct next move.
+- **Which layout.** `server.getClientVersion()` carries the client's name
+  through the MCP handshake, so `detectClient()` picks `CLAUDE.md` vs
+  `AGENTS.md` vs `.cursor/rules/` without asking the user what they are running.
+  `AGENTS.md` is always written; the client-specific file is a pointer to it,
+  never a second copy.
+- **Never clobber.** It checks every path first and writes nothing if any
+  exists. An agent calling this does not know what is already there.
+
+The house style is deliberately *not* part of the scaffold — see below.
+
+## The house style
+
+`house-style.md` lives next to the `.aep`, and is read and written over the
+bridge by `packages/jsx/style.jsx`, not by the MCP server.
+
+That looks like the wrong layer until you count clients. The bridge is the one
+channel every client has, because the whole product already depends on it.
+Reading the style over it needs no working directory, no `roots`, and no
+filesystem tools on the client — so it works identically in Claude Desktop and
+in a git checkout. A server-side file would need a project folder, and the
+clients that need help most are exactly the ones that do not have one.
+
+The costs, both reported rather than worked around:
+
+- **The project must have been saved once.** `app.project.file` is null until
+  then and there is no folder to write into. `get_house_style` returns
+  `projectSaved: false` with an explanation; `set_house_style` throws it.
+- **`set_house_style` replaces the whole file** and requires `overwrite: true`
+  to replace an existing one. It is not a patch, and quietly half-rewriting
+  someone's hand-written style guide is worse than refusing.
 
 ## Build + run
 
@@ -95,6 +232,10 @@ npm run doctor              # sanity checks (debug mode, install, port, AE runni
 npm run inspect             # MCP Inspector UI against the server
 npm run new:project <dir>   # scaffold a designer project folder
 npm run pack:check          # build + `npm pack --dry-run` to preview the tarball
+npm run build:guides        # regenerate skills/commands/content.ts from the md sources
+npm run build:mcpb          # the Claude Desktop bundle -> dist-release/
+npm run build:binaries      # bun-compiled standalone folders -> dist-release/
+make artifacts              # both of the above, unsigned
 ```
 
 Publishing: `npm publish -w @engine-room/after-effects-mcp` (the `prepack` hook builds `bin/` and `panel/` first). The workspace root and `@engineroom/shared` stay private — `shared` is inlined into the bundle, so it is never published on its own. Verify a release by installing the tarball into an empty directory and running the binary; the published layout puts the panel at `<pkg>/panel`, which is a different path from the checkout's `packages/ae-panel`.
@@ -112,6 +253,9 @@ Publishing: `npm publish -w @engine-room/after-effects-mcp` (the `prepack` hook 
 7. `run_batch` with 600 ops → returns `{jobId}` (inline cutoff is 500). With `progressToken` set, `notifications/progress` fire ~20/sec. Without it, `await_job(jobId)` resolves with the final result.
 8. `run_jsx("app.project.activeItem.name")` → comp name. With deliberate error → structured `AeError` with line number.
 9. `log_issue` twice with the same title → one file, `occurrences: 2`, `previouslyLogged: true`. `mark_issue_reported` then `log_issue` again → still `reported: true` (a new sighting must not un-report an entry).
+10. `get_house_style` on an **unsaved** project → `{found:false, projectSaved:false}` with a readable reason, not a throw. Save the project, `set_house_style({content})` → file appears next to the .aep. Call it again without `overwrite` → refuses and names the path. With `overwrite:true` → replaces. Non-ASCII (curly quotes, accented font names) survives the round trip — that is the UTF-8 encoding, and it fails silently if dropped.
+11. `init_project` with no `dir` from a client that advertises `roots` → writes into the client's folder, `resolvedFrom: "client-root"`. From Claude Desktop (cwd `/`) → refuses with a message telling the agent to ask.
+12. Version gate, with AE running an older panel: any forwarded op → the remediation message, not `Unknown op`. `setup_panel` then the same op → "still running the previous version", naming the restart as the only fix. Restart AE → works. (`tests/unit/panel-version.mjs` covers the decision table; this recipe covers the wiring.)
 
 ## The issue journal
 
@@ -123,7 +267,7 @@ Publishing: `npm publish -w @engine-room/after-effects-mcp` (the `prepack` hook 
 - **Reporting state belongs to the entry, not the sighting.** Re-logging a known problem preserves `reported`, `issueUrl` and `firstSeen`, and a `cause` worked out once survives a later sighting logged without one. Otherwise the user gets asked to report the same thing repeatedly, which is the fastest way to make them stop reading the offer.
 - **The files are meant to be hand-edited.** `parse()` is deliberately forgiving: missing keys, reflowed text and deleted headings degrade one entry instead of failing the whole journal. A file with no recognised headings keeps its text as the symptom rather than being read as empty.
 
-The user-facing half is the offer to report. It lives in three places by necessity, because not every client loads skills: the `log_issue` **tool description** carries the minimum (finish the work first, phrase it for a non-programmer, don't say "GitHub issue"), the **`after-effects` skill** carries the full protocol with an example, and **`/report-ae-issue`** carries the reporting flow. If you change the behaviour, change all three — plus the condensed command template in `cli/init.ts`, which is what non-plugin users get.
+The user-facing half is the offer to report. It now lives in exactly two places: the `log_issue` **tool description** carries the minimum (finish the work first, phrase it for a non-programmer, don't say "GitHub issue"), and `src/prompts/report-ae-issue.md` carries the full flow. That second one is generated into both the MCP prompt (every client) and the Claude Code command, so there is nothing to keep in sync by hand. If you change the behaviour, change those two.
 
 ## Known fragile areas
 
@@ -137,6 +281,11 @@ The user-facing half is the offer to report. It lives in three places by necessi
 - **`panelSourceDir()` must prefer the checkout over the vendored copy.** After any `npm pack`, a stale `packages/mcp-server/panel/` is left on disk (gitignored). If that were checked first, `setup_panel` in a dev checkout would install the stale copy instead of what you're editing. Order matters in `setup/paths.ts`.
 - **esbuild preserves the entry point's hashbang.** Adding a `banner` with `#!/usr/bin/env node` produces a second one on line 2 and the published binary dies with a syntax error. `prepare-package.mjs` asserts there is exactly one.
 - **`addText()` anchors point text at the bbox center**, not the baseline-left an agent would assume. `paragraphJustification: LEFT_JUSTIFY` doesn't move the anchor for point text. `create_text_layer` defaults `anchorAlign: "left"` so `position` semantically matches the visible left edge; pass `"center"`/`"right"`/`"none"` to override.
+- **A compiled binary has no module paths.** `import.meta.url` inside a `bun --compile` build points into the executable's virtual filesystem, so `packageRoot()` finds nothing and `require.resolve("ws")` throws. `setup/paths.ts` falls back to `executableDir()` — the panel, `package.json` and a real `node_modules/ws` ship *beside* the binary, which is why every binary target is a folder and not a single file. Shipping the bare executable would break `setup_panel` with no obvious cause.
+- **`ws` can never be inlined.** `setup_panel` copies the directory into the CEP extension, because AE's CEF process cannot resolve modules out of this package. Every packaging path (`prepare-package.mjs`, `build-mcpb.mjs`, `build-binaries.mjs`) has to keep it as a real directory on disk.
+- **Bare Mach-O binaries cannot be stapled.** `xcrun stapler` only writes tickets into bundle formats (.app/.pkg/.dmg). The release notarizes the *zip* and lets Gatekeeper verify online on first launch. Do not add a `stapler staple` call expecting it to work.
+- **The hardened runtime blocks JIT.** Bun embeds JavaScriptCore, so `scripts/entitlements.plist` must grant `allow-jit` and `allow-unsigned-executable-memory`. Without them the binary signs and verifies fine and then refuses to launch — on someone else's machine, not yours.
+- **Generated files under `plugin/` will be overwritten.** `plugin/skills/**` and `plugin/commands/**` come from `src/{guides,prompts}/*.md`. Hand-edits survive until the next `npm run build`. CI runs `build-guides.mjs --check` to catch this at review time rather than in a release.
 
 ## Platform notes
 
@@ -144,11 +293,20 @@ Linux is impossible, not merely unimplemented — Adobe has never shipped AE for
 
 All `packages/jsx/*.jsx` is AE's own scripting API and is platform-neutral; never add platform branching there. Host differences are confined to `setup/platform.ts` (PlayerDebugMode via `defaults` vs `reg`, AE process via `pgrep` vs `tasklist`) and `cepExtensionsDir()` in `setup/paths.ts` (`~/Library/Application Support/...` vs `%APPDATA%\...`).
 
-CI (`.github/workflows/ci.yml`) builds and smoke-tests on macos-latest and windows-latest: server starts, ≥63 tools, `check_setup` resolves paths, scaffold writes files. It cannot exercise the CEP install — no AE on a runner — so the Windows install path is the least-proven part of the project. macOS is the daily-driven platform.
+CI (`.github/workflows/ci.yml`) builds and smoke-tests on macos-latest and windows-latest: server starts, ≥67 tools, `instructions`/prompts/resources are served and `$ARGUMENTS` substitutes, `check_setup` resolves paths, and both scaffold entry points write files and refuse to clobber. It cannot exercise the CEP install — no AE on a runner — so the Windows install path is the least-proven part of the project. macOS is the daily-driven platform.
+
+## Releasing
+
+`make release` is local-only and does the whole thing in one pass: bump → build → npm dry-run → `.mcpb` → binaries → codesign → notarize → commit → tag → push → `gh release create`. Pushing the tag is what triggers `release.yml`, which publishes to npm over OIDC; the GitHub release with its assets is created by the script itself.
+
+Everything that can fail happens **before** the tag is pushed. A failed notarization costs a `git checkout -- .` and nothing else — that ordering is deliberate, so do not move the artifact build after the tag.
+
+The Developer ID certificate stays on one machine and is never read by anything in this repo; `sign-and-notarize.sh` takes credentials from the environment only. A leaked certificate is revoked by Apple, and revocation stops *already-distributed* binaries from launching, which is why CI does not sign.
 
 ## Out of scope (v1)
 
 - Render queue (queue + render + progress + cancel).
 - Footage / asset import & replace.
 - AE preferences / settings changes (excluded by design — animation only).
-- Windows support (`install-panel.mjs` is mac-only; CEP layout differs on Windows).
+- Code-signing the Windows binary (needs a separate certificate; SmartScreen warns on first run until then).
+- MCP-over-HTTP straight from the CEP panel. It would remove the separate server process entirely, but the panel cannot install itself — `check_setup` and `setup_panel` exist precisely for when the panel is not there yet, so something still has to ship.

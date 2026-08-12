@@ -12,7 +12,7 @@ $(RELEASE_VERSION):
 endif
 endif
 
-.PHONY: help build jsx watch doctor verify panel clean release
+.PHONY: help build jsx watch doctor verify panel clean release artifacts
 
 help: ## Show this help
 	@echo "Targets:"
@@ -44,13 +44,21 @@ panel: ## Install the CEP panel into After Effects
 verify: ## Build, check versions agree, and dry-run the package
 	@npm run build
 	@node scripts/sync-version.mjs --check
+	@node scripts/build-guides.mjs --check
 	@npm publish --workspace @engine-room/after-effects-mcp --dry-run 2>&1 \
 		| grep -E "name:|version:|total files|package size" || true
 
+artifacts: ## Build the .mcpb and standalone binaries without releasing
+	@npm run build
+	@node scripts/build-mcpb.mjs
+	@node scripts/build-binaries.mjs
+	@echo ""
+	@echo "Unsigned. To sign them:  ./scripts/sign-and-notarize.sh"
+
 clean: ## Remove build output
-	@rm -rf packages/*/dist packages/mcp-server/bin packages/mcp-server/panel
+	@rm -rf packages/*/dist packages/mcp-server/bin packages/mcp-server/panel dist-release
 	@rm -f packages/ae-panel/jsx/bundle.jsx
 	@echo "cleaned"
 
-release: ## Bump the version, tag, and trigger the npm release
+release: ## Bump the version, build and sign every artifact, tag, and publish
 	@./scripts/release.sh $(RELEASE_VERSION)

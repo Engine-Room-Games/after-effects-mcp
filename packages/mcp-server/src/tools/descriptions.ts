@@ -87,14 +87,26 @@ export const descriptions: Record<string, string> = {
   // ---------- raw ----------
   run_jsx: "Escape hatch: arbitrary ExtendScript in an undo group. `comp`/`app`/`OPS`/helpers in scope. Use `return X` to send a value back; complex AE objects are coerced to plain props.",
 
+  // ---------- house style ----------
+  get_house_style:
+    "The user's palette, type, motion and layout defaults for the project that is open, read from `house-style.md` beside the .aep. Call it once before building anything so your work matches the rest of theirs. `found:false` means none exists yet — build with sensible defaults and offer to capture one afterwards. Cheap; never a reason to skip.",
+  set_house_style:
+    "Write the project's style guide. Replaces the whole file, so read it first and send the merged document — `overwrite:true` is required to replace an existing one. The project must have been saved at least once, since the file lives beside the .aep. Use the style-guide topic of ae_guide for how to capture a style worth writing down.",
+
+  // ---------- guidance ----------
+  ae_guide:
+    "The full working guidance for these tools, by topic. Read `after-effects` before a first substantial build in a session, `style-guide` when capturing or editing the user's look, `ae-setup` when a tool cannot reach After Effects. Covers the traps that silently produce wrong output and are not visible from any single tool's schema.",
+
   // ---------- jobs ----------
   await_job: "Block until job is done. Default 10min timeout. Returns the same payload the tool would have.",
   get_job: "Non-blocking job status: progress/total/state/error.",
   cancel_job: "Set cancel flag; chunked loop stops at next boundary.",
 
   // ---------- setup ----------
-  check_setup: "Diagnose the After Effects connection: panel installed, up to date, Adobe debug preference on, AE running, bridge answering. Read-only and safe to call any time. Call this FIRST whenever another tool reports it cannot reach After Effects, then relay `nextSteps` to the user in plain language.",
-  setup_panel: "Install or refresh the After Effects panel and enable the Adobe preference AE needs to load it. Run this when check_setup reports the panel is missing or out of date. It writes to the user's Adobe CEP extensions folder and sets a user-level Adobe preference — tell the user what it will do before calling it. Afterwards, AE must be restarted; if the preference was newly enabled, a one-time Mac reboot may also be needed.",
+  check_setup: "Diagnose the After Effects connection: panel installed, up to date, the version AE is actually running, Adobe debug preference on, AE running, bridge answering. Read-only and safe to call any time. Call this FIRST whenever another tool reports it cannot reach After Effects or says the panel is out of date, then relay `nextSteps` to the user in plain language. `panelRunningCurrent` is the one that predicts whether calls will work — it can fail while `panelUpToDate` passes, which means an update is installed but AE has not been restarted.",
+  setup_panel: "Install or refresh the After Effects panel and enable the Adobe preference AE needs to load it. Run this when check_setup reports the panel is missing, out of date, or older than what AE is running. It writes to the user's Adobe CEP extensions folder and sets a user-level Adobe preference — tell the user what it will do before calling it. Prefer running it while AE is CLOSED: the panel then loads when they open it, with no restart. If AE is already open they must quit and reopen it, and until they do, the old panel keeps answering. If the preference was newly enabled, a one-time Mac reboot may also be needed.",
+  init_project:
+    "Set up a working folder for one video, series or client: a project brief and a pointer to the house style, written in whichever layout this client reads. Run it when the user is starting out or asks to set up a project. It writes files to disk — say which folder before calling, and pass `dir` explicitly unless the client already told the server where it is working. It never overwrites anything and reports every path it wrote.",
 
   // ---------- issue journal ----------
   list_known_issues:
