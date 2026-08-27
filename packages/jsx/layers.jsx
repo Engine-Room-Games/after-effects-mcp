@@ -48,27 +48,35 @@ OPS.create_text_layer = function (args) {
   var c = getCompById(args.compId);
   var l = c.layers.addText(args.text || "");
   if (args.name) l.name = args.name;
-  // Apply font/size/color through TextDocument first — sourceRectAtTime depends on these.
-  if (args.font || args.size || args.color) {
+  // `anchorAlign` is paragraph justification, not geometry. Offsetting the
+  // anchor to the measured bbox edge (what this did before) looks right at
+  // creation and is wrong the moment the Source Text changes — retyped, driven
+  // by an expression, or edited through Essential Graphics in Premiere — because
+  // the anchor stays baked for the old string and the layout jumps. Justifying
+  // instead keeps the alignment live and leaves the anchor at the origin, which
+  // is also what sourceRectAtTime()-driven backgrounds expect.
+  //
+  // Tracking is normalised for a different reason: addText() inherits the
+  // workspace's Character panel, so an untouched layer arrives with whatever
+  // that was last left on (-20 is common) and the same call renders differently
+  // on two machines. `tracking` sets it explicitly; omitting it means 0.
+  //
+  // 'none' opts out of all of it and leaves AE's raw defaults alone.
+  var align = args.anchorAlign === undefined ? "left" : args.anchorAlign;
+  var wantJustify = align !== "none" && __JUSTIFICATION[align] !== undefined;
+  var wantTracking = args.tracking !== undefined || align !== "none";
+  if (args.font || args.size || args.color || wantJustify || wantTracking) {
     var srcText = l.property("Source Text");
     var td = srcText.value;
     if (args.font) td.font = args.font;
     if (args.size) td.fontSize = args.size;
     if (args.color) { td.applyFill = true; td.fillColor = [args.color[0], args.color[1], args.color[2]]; }
+    if (wantTracking) td.tracking = (args.tracking !== undefined ? args.tracking : 0);
+    if (wantJustify) td.justification = __JUSTIFICATION[align];
     srcText.setValue(td);
   }
-  // AE's addText() puts the anchor at the bbox center, which surprises agents
-  // who expect position to mean the left edge. Default to 'left' so position
-  // semantically matches the visible start of the text. 'none' opts out.
-  var align = args.anchorAlign === undefined ? "left" : args.anchorAlign;
   if (align !== "none") {
-    try {
-      var __rect = l.sourceRectAtTime(c.time, false);
-      var __ax = __rect.left;
-      if (align === "center") __ax = __rect.left + __rect.width / 2;
-      else if (align === "right") __ax = __rect.left + __rect.width;
-      l.property("Transform").property("Anchor Point").setValue([__ax, 0, 0]);
-    } catch (__e) {}
+    l.property("Transform").property("Anchor Point").setValue([0, 0, 0]);
   }
   if (args.position) {
     var p = args.position;

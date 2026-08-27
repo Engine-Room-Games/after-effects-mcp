@@ -16,7 +16,7 @@ export const descriptions: Record<string, string> = {
   // ---------- layers ----------
   list_layers: "Layers in a comp, one-line each. Use get_layer_full for details.",
   get_layer_full: "Full state of one layer: transform + keyframes + expressions, effects, masks, markers, parenting, text/shape/footage extras, and sourceRect (visible bounds). Always prefer over multiple smaller queries.",
-  create_text_layer: "Text layer with optional font/size/color/position. anchorAlign defaults to 'left' so position means the visible left edge.",
+  create_text_layer: "Text layer with optional font/size/color/position/tracking. anchorAlign (default 'left') aligns the text by setting paragraph justification and leaving the anchor at [0,0], so position means the start of the baseline AND stays right when the text is changed later. Tracking is set to 0 unless you pass one, because AE otherwise inherits the user's Character panel. anchorAlign 'none' keeps AE's raw defaults.",
   create_shape_layer: "Empty shape layer; fill via add_shape_content.",
   create_solid_layer: "Solid-color layer. color is RGB 0..1.",
   create_null_layer: "Null parent layer.",
@@ -61,7 +61,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- shapes ----------
   set_shape_path: "Replace a shape path with new vertices/tangents/closed.",
-  add_shape_content: "Add shape content under Contents or a sub-group. `content.type` picks the node (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group); the other keys set its properties by friendly name (e.g. rect: size/position/roundness; fill: color/opacity; stroke: color/width/lineCap; path: vertices/inTangents/outTangents/closed). Unknown or unsettable keys are NOT ignored — the whole node is rolled back and an error lists them, so trust a success result. Use get_layer_full to see exact property names.",
+  add_shape_content: "Add shape content under Contents or a sub-group. `content.type` picks the node (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group); the other keys set its properties by friendly name (e.g. rect: size/position/roundness; fill: color/opacity; stroke: color/width/lineCap; path: vertices/inTangents/outTangents/closed). Unknown or unsettable keys are NOT ignored — the whole node is rolled back and an error lists them, so trust a success result. Use get_layer_full to see exact property names. ORDER MATTERS: index 1 renders in FRONT and each call appends behind the last, so add front-to-back — details and dots first, big background rects last. `zOrder:'front'` can override that, but it needs an internal moveTo which has disturbed nested renders in AE 26.3, so prefer call order. A reference to one node goes stale once a sibling is added to the same group (add a Stroke and an earlier Fill reference throws 'Object is invalid'): add every node first, then address them by name.",
   set_shape_property: "Set a property on a shape content node. Optional keyframe at time.",
 
   // ---------- masks ----------
