@@ -51,6 +51,14 @@ Property values are the ground truth. A screenshot tells you something *looks* w
 - Take at most 2–3 across an animation — typically start, middle, end.
 - **Always pass `downsample`** on large comps: `2` for 1080p, `3`–`4` for 4K. A full-resolution 4K frame is large enough to blow out your context in one call.
 - The result reports the dimensions actually returned and warns if the downsample could not be applied — trust those numbers rather than assuming.
+- **Space them out.** Rapid back-to-back requests are far more likely to come back stale than requests a few seconds apart.
+
+Two results are not images, and both are information rather than something to retry blindly:
+
+- **`Stale frame` (an error)** — After Effects returned the pixels it had already rendered for a *different* request, which the error names. Pause a few seconds and retry with a higher `downsample`; `6` has worked where `3`–`4` stayed stale. If it repeats, read the keyframes instead.
+- **`empty: true`** — every pixel at that time is fully transparent, so no image was sent. That is a fact about the composition: usually the wrong time, a layer outside its in/out points, disabled, or at zero opacity.
+
+**Never disable layers to make a screenshot render.** A frame that will not render is a limit of the panel's render path, not project content that needs fixing — and it is very easy to leave someone's comp switched off afterwards.
 
 To check motion, read the keyframe values. That is exact; a picture is not.
 

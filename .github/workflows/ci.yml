@@ -109,6 +109,17 @@ jobs:
       # the only difference the user sees is which remedy we prescribe.
       - name: Bridge timeouts are diagnosed apart from disconnections
         run: node tests/unit/bridge-timeout.mjs
+      # Real image code, written against a 16-bit project nobody here has: a
+      # frame that decodes on the far side of the wire is the only thing that
+      # makes a screenshot worth taking.
+      - name: Panel normalises PNG frames to 8-bit
+        run: node tests/unit/png-codec.mjs
+
+      # Deciding that two identical frames mean a stale render buffer rather
+      # than a static comp is the difference between a useful error and a false
+      # alarm on every screenshot of a title card.
+      - name: Panel tells a stale render from a repeated request
+        run: node tests/unit/frame-cache.mjs
 
       - name: check_setup resolves platform paths without throwing
         shell: bash

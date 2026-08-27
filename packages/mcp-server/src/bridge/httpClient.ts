@@ -3,7 +3,7 @@ import { logger } from "../util/logger.js";
 import { discoverPort } from "./discovery.js";
 
 interface OpResultOk { ok: true; result: unknown; }
-interface OpResultErr { ok: false; error: string; stack?: string; line?: number; }
+interface OpResultErr { ok: false; error: string; code?: string; stack?: string; line?: number; }
 type OpResult = OpResultOk | OpResultErr;
 
 /** Long enough that a normal op never trips it; short enough to be a signal. */
@@ -93,7 +93,7 @@ export class HttpClient {
       throw new AeError(`Bridge returned non-JSON (HTTP ${resp.status})`);
     }
     if (!data.ok) {
-      throw new AeError(data.error, data.stack, data.line);
+      throw new AeError(data.error, data.stack, data.line, data.code);
     }
     return data.result;
   }

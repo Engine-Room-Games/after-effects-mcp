@@ -92,7 +92,13 @@ export function isTimeoutError(e: unknown, depth = 0): boolean {
 }
 
 export class AeError extends Error {
-  constructor(message: string, public stack_?: string, public line?: number) {
+  /**
+   * `code` is set only when the panel diagnosed the failure itself rather than
+   * relaying one from ExtendScript — `STALE_FRAME` is the first. Those messages
+   * already read as complete instructions, so the caller uses this to decide
+   * whether an `AE:` prefix would help or just obscure them.
+   */
+  constructor(message: string, public stack_?: string, public line?: number, public code?: string) {
     super(message);
     this.name = "AeError";
   }

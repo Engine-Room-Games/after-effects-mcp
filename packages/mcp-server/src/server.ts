@@ -270,12 +270,19 @@ export function createServer() {
         return textResult({ jobId: env.jobId, async: true, total: env.total });
       }
 
+      // An empty frame is reported, never shipped. The panel found every pixel
+      // fully transparent, and the PNG that encodes that is the one decoders
+      // reject with "could not process image" — so the useful answer is the
+      // sentence, not the picture.
+      if (VISION_OPS.has(name) && isEmptyFrameResult(result)) return textResult(result);
+
       // Vision: package as MCP image content
       if (VISION_OPS.has(name) && isVisionResult(result)) {
         const v = result as {
           width: number; height: number; fullWidth?: number; fullHeight?: number;
           downsample?: number; time: number; compId: number; layerId?: number;
           base64: string; bytes: number; warning?: string;
+          converted?: boolean; sourceBitDepth?: number;
         };
         return imageContent(
           {
@@ -288,6 +295,10 @@ export function createServer() {
             compId: v.compId,
             layerId: v.layerId,
             bytes: v.bytes,
+            // Present only when the project renders deeper than 8 bits per
+            // channel and the panel re-encoded the frame so it would decode.
+            converted: v.converted,
+            sourceBitDepth: v.sourceBitDepth,
             // Surfaced when a requested downsample could not be applied, so the
             // agent knows it is looking at a full-resolution frame.
             warning: v.warning,
@@ -303,6 +314,10 @@ export function createServer() {
       if (e instanceof BridgeTimeoutError) return errorResult(e.message);
       if (e instanceof BridgeUnreachableError) return errorResult(e.message);
       if (e instanceof AeError) {
+        // A failure the panel diagnosed itself — a stale render buffer, so far.
+        // Those messages are already a complete instruction to the agent, and
+        // "AE:" in front of one would read as After Effects having raised it.
+        if (e.code) return errorResult(e.message);
         // The gate above should have caught this, but it depends on /health
         // reporting a hash. On a panel too old to do that, this is the backstop
         // — and it is unambiguous, since unknown tool names never get this far.
@@ -430,4 +445,7 @@ function isAsyncEnvelope(v: unknown): boolean {
 }
 function isVisionResult(v: unknown): boolean {
   return !!(v && typeof v === "object" && "base64" in v && "width" in v);
+}
+function isEmptyFrameResult(v: unknown): boolean {
+  return !!(v && typeof v === "object" && (v as { empty?: unknown }).empty === true && !("base64" in v));
 }
