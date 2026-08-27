@@ -1,6 +1,6 @@
 {
   "name": "@engineroom/ae-panel",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Invisible CEP extension hosting an HTTP+WS bridge inside After Effects.",
   "dependencies": {
