@@ -22,7 +22,7 @@ const DEFAULT_OP_TIMEOUT_MS = 120_000;
  * `run_jsx` and `run_batch` are here because their duration is chosen by the
  * caller, not by us.
  */
-const SLOW_OPS = new Set(["run_batch", "run_jsx", "screenshot_frame", "screenshot_layer"]);
+const SLOW_OPS = new Set(["run_batch", "run_jsx", "screenshot_frame", "screenshot_layer", "export_mogrt", "import_footage"]);
 const SLOW_OP_TIMEOUT_MS = 300_000;
 
 /**

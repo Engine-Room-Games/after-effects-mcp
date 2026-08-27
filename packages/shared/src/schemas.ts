@@ -497,6 +497,50 @@ export const RunJsx = z.object({
     .describe("Wrap the script in one undo step. Set false only for the operations AE refuses while an undo group is open — copyToComp on a layer with a parent or a linked expression. The script's changes then land as whatever undo steps AE records on its own."),
 });
 
+// ---------- footage ----------
+export const ImportFootage = z
+  .object({
+    path: z.string().min(1).describe("Absolute path to the file to import."),
+    name: z.string().optional().describe("Rename the project item after import. Omit to keep the filename."),
+    sequence: z.boolean().default(false).optional()
+      .describe("Import a numbered still as an image sequence rather than a single frame."),
+    force: z.boolean().default(false).optional()
+      .describe(
+        "Keep an item that failed validation instead of deleting it and throwing. The problem is still reported in `validation`. Only pass this when you know the dimensions are wrong and want the item anyway."
+      ),
+  })
+  .strict();
+export const CreateFootageLayer = z.object({
+  compId: z.number(),
+  itemId: z.number().describe("Project item id from import_footage or get_project_summary."),
+  name: z.string().optional(),
+  position: VecAny.optional(),
+  startTime: z.number().optional(),
+});
+
+// ---------- motion graphics templates ----------
+export const ExportMogrt = z
+  .object({
+    compId: z.number(),
+    destDir: z.string().optional()
+      .describe("Folder to write the .mogrt into. Defaults to the folder holding the .aep."),
+    name: z.string().optional()
+      .describe(
+        "Template name, which is also the output filename. Defaults to the comp name — AE's own default is the literal 'Untitled', so every scripted export would otherwise overwrite the same file."
+      ),
+    overwrite: z.boolean().default(false).optional()
+      .describe("Required to replace an existing .mogrt at that path."),
+    posterTime: z.number().optional()
+      .describe(
+        "Comp time to render as the template's still thumbnail, replacing the black one AE writes. Omit to leave AE's thumbnail alone."
+      ),
+    suppressDialogs: z.boolean().default(true).optional()
+      .describe(
+        "Suppress the modal font warning during export. Leave true: an unsuppressed dialog freezes the bridge until someone clicks it in AE. Set false only to see the dialog deliberately."
+      ),
+  })
+  .strict();
+
 // ---------- house style (a markdown file beside the .aep, read over the bridge) ----------
 export const GetHouseStyle = z.object({}).strict();
 export const SetHouseStyle = z
@@ -659,6 +703,11 @@ export const OpSchemas = {
   // explore
   get_project_summary: GetProjectSummary,
   find_layers: FindLayers,
+  // footage
+  import_footage: ImportFootage,
+  create_footage_layer: CreateFootageLayer,
+  // motion graphics templates
+  export_mogrt: ExportMogrt,
   // raw
   run_jsx: RunJsx,
   // house style

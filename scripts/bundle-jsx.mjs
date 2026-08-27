@@ -26,6 +26,8 @@ const order = [
   "masks.jsx",
   "markers.jsx",
   "vision.jsx",
+  "footage.jsx",
+  "mogrt.jsx",
   "style.jsx",
   "batch.jsx",
   "explore.jsx",

@@ -39,11 +39,30 @@
     while ($log.childNodes.length > 80) $log.removeChild($log.lastChild);
   }
 
+  // CSInterface comes from the plain <script> tag before this one, so it needs
+  // no require and is available here — which matters, because the extension
+  // path it reports is the only trustworthy anchor for everything below.
+  //
+  // __dirname is NOT that anchor. CEP anchors it at the *extension root* (where
+  // the manifest and node_modules live), not at the folder holding this file.
+  // That is why require("ws") resolves and a require of a file sitting right
+  // next to main.js does not.
+  var cs, extDir, clientDir;
+  try {
+    cs = new CSInterface();
+    extDir = cs.getSystemPath(SystemPath.EXTENSION);
+    clientDir = path.join(extDir, "client");
+  } catch (e) {
+    setStatus("cannot start — CSInterface is unavailable", "err");
+    log("error", "new CSInterface() failed: " + e.message);
+    return;
+  }
+
   var WebSocket;
   try { WebSocket = require("ws"); }
   catch (primary) {
-    // ws is bundled in packages/ae-panel/node_modules; resolve manually if normal require fails.
-    var alt = path.join(__dirname, "..", "node_modules", "ws");
+    // ws is bundled at the extension root; resolve manually if normal require fails.
+    var alt = path.join(extDir, "node_modules", "ws");
     try { WebSocket = require(alt); }
     catch (fallback) {
       // Nothing below can be built without ws, so this stops here — but it
@@ -61,28 +80,39 @@
   // them without a DOM: there is no After Effects on a CI runner, and neither
   // real image code nor stale-buffer bookkeeping should be written blind.
   // Same failure discipline as ws above — say what is missing, name the fix.
+  //
+  // The list is ordered by how much it is trusted, not by convenience.
+  // clientDir comes from CSInterface and is what the shipped layout actually
+  // is; the __dirname forms are kept behind it because a host build that
+  // anchors __dirname somewhere else again should degrade to a warning in the
+  // log rather than a panel that will not start.
   function requireSibling(name) {
-    // Both forms are documented CEP idioms and neither is guaranteed on every
-    // host build. The relative form is tried first because it needs nothing of
-    // the page; __dirname is the fallback, and is the one the ws lookup above
-    // already depends on.
-    try { return require("./" + name); }
-    catch (relative) { return require(path.join(__dirname, name)); }
+    var candidates = [
+      path.join(clientDir, name),
+      path.join(__dirname, name),
+      path.join(__dirname, "client", name),
+      "./" + name,
+    ];
+    var failures = [];
+    for (var i = 0; i < candidates.length; i++) {
+      try { return require(candidates[i]); }
+      catch (e) { failures.push(candidates[i] + " (" + e.message.split("\n")[0] + ")"); }
+    }
+    throw new Error("could not load " + name + " from any of: " + failures.join("; "));
   }
-  var pngCodec, frameCacheModule;
+  var pngCodec, frameCacheModule, mogrtModule;
   try {
     pngCodec = requireSibling("pngcodec.js");
     frameCacheModule = requireSibling("framecache.js");
+    mogrtModule = requireSibling("mogrt.js");
   } catch (e) {
-    setStatus("cannot start — pngcodec.js or framecache.js is missing", "err");
-    log("error", "loading the screenshot modules from " + __dirname + " failed: " + e.message);
+    setStatus("cannot start — pngcodec.js, framecache.js or mogrt.js is missing", "err");
+    log("error", "loading the panel's file-processing modules from " + __dirname + " failed: " + e.message);
     log("error", "Quit After Effects, run the setup_panel tool, then reopen it.");
     return;
   }
   var frameCache = frameCacheModule.createFrameCache();
 
-  var cs = new CSInterface();
-  var extDir = cs.getSystemPath(SystemPath.EXTENSION);
   var bundlePath = path.join(extDir, "jsx", "bundle.jsx");
 
   // ---------- ExtendScript evalScript: serialized via Promise chain ----------
@@ -341,8 +371,63 @@
     return step();
   }
 
+  // ---------- Motion Graphics template thumbnail ----------
+  // ExtendScript can render the poster frame but cannot rewrite a zip, so the
+  // JSX side hands back a PNG path and the archive surgery happens here.
+  //
+  // A failed patch is reported on an otherwise successful result, never thrown:
+  // the .mogrt is already written and valid at this point, and throwing away a
+  // successful export because its thumbnail could not be improved would be the
+  // worse trade. The result says plainly that the thumbnail is still AE's.
+  function patchMogrtThumbnail(info) {
+    return waitForPngFile(info.posterPngPath, 120000).then(function () {
+      var poster = fs.readFileSync(info.posterPngPath);
+      try { fs.unlinkSync(info.posterPngPath); } catch (e) {}
+      var patched = mogrtModule.patchThumbnail(fs.readFileSync(info.path), poster);
+      // Write via a sibling temp file and rename, so an interrupted write
+      // cannot leave a half-rewritten template where a valid one used to be.
+      var tmp = info.path + ".tmp-thumb";
+      fs.writeFileSync(tmp, patched.buffer);
+      fs.renameSync(tmp, info.path);
+      return {
+        patched: true,
+        posterTime: info.posterTime,
+        width: patched.width,
+        height: patched.height,
+        sourceWidth: patched.sourceWidth,
+        sourceHeight: patched.sourceHeight,
+        letterboxed: patched.letterboxed || undefined,
+      };
+    }).catch(function (e) {
+      try { fs.unlinkSync(info.posterPngPath); } catch (e2) {}
+      log("warn", "could not patch the .mogrt thumbnail: " + e.message);
+      return {
+        patched: false,
+        posterTime: info.posterTime,
+        reason: "The template exported correctly, but its thumbnail could not be replaced (" +
+          e.message + "). It still shows the one After Effects wrote.",
+      };
+    });
+  }
+
   // ---------- Op handler with vision/job specialization ----------
   function handleOp(op, args, progressToken) {
+    // Export writes the .mogrt; the thumbnail it wants is a second file that
+    // has to be folded into it afterwards.
+    if (op === "export_mogrt") {
+      return runOp(op, args).then(function (info) {
+        if (!info || !info.posterPngPath) return info;
+        return patchMogrtThumbnail(info).then(function (thumbnail) {
+          var out = {};
+          for (var k in info) { if (info.hasOwnProperty(k) && k !== "posterPngPath") out[k] = info[k]; }
+          out.thumbnail = thumbnail;
+          // The file changed size when the thumbnail was replaced, and the
+          // reported number has to be the one on disk.
+          try { out.bytes = fs.statSync(info.path).size; } catch (e) {}
+          return out;
+        });
+      });
+    }
     // Vision ops: run JSX, then read PNG and base64-encode on Node side.
     if (op === "screenshot_frame" || op === "screenshot_layer") {
       return runOp(op, args).then(function (info) {

@@ -346,4 +346,57 @@ function normalizePng(buf) {
   return result;
 }
 
-module.exports = { normalizePng: normalizePng };
+/**
+ * Decode a PNG to flat 8-bit samples.
+ *
+ * `normalizePng` deliberately passes the awkward encodings through untouched,
+ * because a screenshot it cannot read is still a screenshot the client might.
+ * A caller that is going to *resample* the pixels has no such fallback — half a
+ * decode is not a smaller picture, it is a wrong one — so this throws on
+ * anything it cannot interpret exactly.
+ *
+ * Returns { width, height, colorType, channels, bitDepth, pixels }, where
+ * `pixels` is width*height*channels bytes and `bitDepth` is the source's.
+ */
+function decodePng8(buf) {
+  if (!Buffer.isBuffer(buf)) throw new Error("decodePng8 expects a Buffer");
+  var chunks = readChunks(buf);
+  var h = parseHeader(chunks);
+  var channels = channelsFor(h.colorType);
+
+  if (h.compression !== 0 || h.filter !== 0) {
+    throw new Error("unsupported PNG: compression " + h.compression + ", filter method " + h.filter);
+  }
+  if (channels === 0) throw new Error("unsupported PNG colour type " + h.colorType);
+  if (h.interlace !== 0) throw new Error("unsupported PNG: interlaced");
+  if (h.colorType === 3) throw new Error("unsupported PNG: indexed colour");
+  if (h.bitDepth !== 8 && h.bitDepth !== 16) throw new Error("unsupported PNG: " + h.bitDepth + "-bit samples");
+
+  var idatParts = [];
+  for (var i = 0; i < chunks.length; i++) {
+    if (chunks[i].type === "IDAT") idatParts.push(chunks[i].data);
+  }
+  if (!idatParts.length) throw new Error("malformed PNG: no IDAT chunk");
+
+  var un = unfilter(zlib.inflateSync(Buffer.concat(idatParts)), h.width, h.height, h.bitDepth, channels);
+  var pixels = h.bitDepth === 16 ? narrow16to8(un.data, h.width * h.height * channels) : un.data;
+
+  return {
+    width: h.width,
+    height: h.height,
+    colorType: h.colorType,
+    channels: channels,
+    bitDepth: h.bitDepth,
+    pixels: pixels,
+  };
+}
+
+module.exports = {
+  normalizePng: normalizePng,
+  // For mogrt.js, which resamples a rendered frame into a template's thumbnail
+  // and needs the same decoder, encoder and CRC rather than a second copy of
+  // each. The zip format's CRC-32 is the one PNG uses, bit for bit.
+  decodePng8: decodePng8,
+  encodePng8: encodePng8,
+  crc32: crc32,
+};
