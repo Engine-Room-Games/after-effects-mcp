@@ -54,7 +54,7 @@ export const descriptions: Record<string, string> = {
   remove_effect: "Remove effect by 1-based index.",
   set_effect_param: "Set an effect param by name/matchName. keyframe:true+time for keyframed value.",
   set_effect_enabled: "Toggle an effect on/off without removing.",
-  list_available_effects: "Effects installed in this AE: displayName, matchName, category. Pass `filter` to substring-search instead of pulling ~250 entries; `refresh:true` re-reads after installing a plugin. Cached per AE session — this is the only cheap way to search effects. Never loop over `app.effects` in run_jsx: it is slow enough to block the bridge past its timeout and looks like a crash.",
+  list_available_effects: "Effects installed in this AE: displayName, matchName, category. **Always pass `filter`** to substring-search: the full list is 250-450+ entries and the cost is in returning them, not in reading them, so an unfiltered call takes seconds every time while a filtered one takes a fraction of one (measured on AE 26.3: 446 entries in 3.9s, 22 filtered in 0.17s). `refresh:true` re-reads after installing a plugin; the enumeration is cached per AE session, which is why refresh exists. Never loop over `app.effects` in run_jsx: it is slow enough to block the bridge past its timeout and looks like a crash.",
 
   // ---------- text ----------
   set_text: "Set text content + styling (font, size, fill/stroke, tracking, leading, justification). Undefined fields unchanged.",
