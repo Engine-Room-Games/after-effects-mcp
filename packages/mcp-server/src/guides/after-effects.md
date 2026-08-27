@@ -138,26 +138,36 @@ AE refuses `copyToComp` for a layer with a parent or a linked expression **while
 
 Set the parent first and the transform after, never the reverse. `parent_layer` keeps the layer where it is; raw `layer.parent = x` inside a script does not do so reliably two levels deep, so after scripted parenting audit scale and rotation as well as position.
 
-### Exporting, saving frames, and the dialogs they raise
+### Exporting a Motion Graphics template
 
-After Effects asks the user interactively where a script would rather have an error, and every dialog freezes the bridge until someone clicks it. Three of them turn up around `comp.exportAsMotionGraphicsTemplate(...)` and `comp.saveFrameToPng(...)`:
+Use **`export_mogrt`**. Do not drive `comp.exportAsMotionGraphicsTemplate` from `run_jsx` — the tool exists because that call raises modal dialogs, and a modal dialog freezes this whole connection until someone clicks it in After Effects.
 
-- **"The project needs to be saved first."** Call `app.project.save()` immediately before the export, in the same `run_jsx`. That removes this one deterministically. If the project has never been saved there is no path to save to — ask the user to save it once first.
-- **"The following fonts were not synced from Adobe … Click OK to continue."** Unavoidable when the comp uses non-Adobe fonts. Warn the user *before* you start the export that they will have to click OK, so a dialog they were not expecting does not read as a hang.
-- **"Undo group mismatch, will attempt to fix."** Harmless; the export is not undoable and interrupting it unbalances the group `run_jsx` wraps your code in.
+`export_mogrt` handles all of it: it saves the project first (which is what removes AE's "the project needs to be saved" prompt, and it has to happen per export because exporting dirties the project again), it suppresses the font warning, and it runs outside the undo group so there is no "undo group mismatch" afterwards. Measured on 26.3: suppressed, an export of a comp using a non-Adobe font returns in about three seconds; unsuppressed, the same export sat past sixty and wrote nothing until the dialog was clicked.
 
-If an export seems to have hung, assume a dialog before you assume a crash — it may be behind another window. And note that `comp.setMotionGraphicsControllerName(index, …)` numbers controllers in **reverse order of addition**: index 1 is the one you added last.
+Three things worth knowing before you call it:
 
-### Importing SVG
+- **The project must have been saved once, by hand.** There is no folder to save into otherwise, and the tool refuses rather than raising a dialog the user was not expecting.
+- **`name` is the filename.** It defaults to the comp name, because AE's own default is the literal `Untitled` — leave it to AE and every template in the project overwrites the same file.
+- **`fonts` in the result lists what the template will require.** Tell the user about any non-Adobe ones: Premiere flags the template as needing fonts it cannot supply, and that is worth hearing from you rather than discovering later.
 
-There is no import tool; SVG import happens through `run_jsx` and `importFile`, and AE's own SVG importer has a trap. An SVG with a very large `viewBox` (say `0 0 278050 333334`) imports with **fabricated dimensions and renders as nothing**, with no error at any stage.
+**The thumbnail.** AE writes the comp's *first frame* into the template, so anything that fades up from nothing gets a black one. Pass `posterTime` with a moment that actually shows the design and it is rendered and swapped in. If only the thumbnail fails the export still succeeds — check `thumbnail.patched` in the result.
 
-Check it yourself after importing: read the footage item's `width`/`height` and compare the aspect ratio with the `viewBox`. If they disagree, the item is broken however healthy it looks in the project panel.
+Also note that `comp.setMotionGraphicsControllerName(index, …)` numbers controllers in **reverse order of addition**: index 1 is the one you added last.
+
+**If any long call seems to have hung, assume a dialog before you assume a crash** — it may be behind another window. `comp.saveFrameToPng(...)` from `run_jsx` raises the save prompt the same way; use `screenshot_frame`, which does not.
+
+### Importing footage, and the SVG trap
+
+Use **`import_footage`**, then **`create_footage_layer`** to place the item in a comp. (For a comp as a layer, `create_precomp_layer`.)
+
+`import_footage` checks what AE actually produced, because one case fails silently: an SVG with a very large `viewBox` (say `0 0 278050 333334`) imports with **fabricated dimensions and renders as nothing**, no error at any stage. Verified on 26.3 — that viewBox yields a 15906x5654 item that will not even rasterize. The tool compares the aspect ratio the file asks for against the one AE produced, and on a mismatch it deletes the item and throws, rather than handing you an asset that looks healthy in the project panel and renders empty.
+
+If you hit that, the workarounds are:
 
 - **Simple flat SVGs** — rebuild the path as a shape layer with the real vertices, scaled down to a sane coordinate space (divide by `333.334` for a 1000px version), set the fill from the SVG, and set `ADBE Vector Fill Rule` to `2` when the SVG says `fill-rule="evenodd"`. Done this way the result is pixel-accurate.
 - **Complex SVGs** — rasterise to PNG outside AE, or normalise the `viewBox` to a small coordinate space before importing.
 
-Either way, delete the broken footage item so nobody places it later.
+`force: true` keeps the item and reports the problem in `validation` instead of throwing. It is for when you know the dimensions are wrong and want it anyway — not a way past the error.
 
 ## When something costs you real time
 
