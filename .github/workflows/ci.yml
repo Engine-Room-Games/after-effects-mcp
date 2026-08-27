@@ -57,7 +57,7 @@ jobs:
               c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
               const t=await send("tools/list",{});
               const n=t.result.tools.length;
-              if(n<67){console.error(`expected >=67 tools, got ${n}`);process.exit(1);}
+              if(n<70){console.error(`expected >=70 tools, got ${n}`);process.exit(1);}
               console.log(`${n} tools on ${process.platform}`);
               c.kill();process.exit(0);
             })();'
@@ -105,6 +105,13 @@ jobs:
       - name: Panel resolves the extension path CEP hands it
         run: node tests/unit/panel-paths.mjs
 
+      # The panel had never been booted by anything but After Effects, and it
+      # turned out not to boot at all: CEP anchors __dirname at the extension
+      # root, so requiring a file sitting next to main.js failed. This runs the
+      # real main.js against a stub CEP host in a copy of the installed layout.
+      - name: Panel boots from the layout setup_panel installs
+        run: node tests/unit/panel-boot.mjs
+
       # A busy AE and a dead bridge are the same event at the socket layer, and
       # the only difference the user sees is which remedy we prescribe.
       - name: Bridge timeouts are diagnosed apart from disconnections
@@ -120,6 +127,12 @@ jobs:
       # alarm on every screenshot of a title card.
       - name: Panel tells a stale render from a repeated request
         run: node tests/unit/frame-cache.mjs
+
+      # Archive surgery on a file the user is about to hand to an editor: a
+      # thumbnail worth looking at is not worth a corrupt .mogrt, so every
+      # entry the patch does not mean to touch is checked byte-for-byte.
+      - name: Panel rewrites a .mogrt thumbnail without corrupting the archive
+        run: node tests/unit/mogrt-thumbnail.mjs
       # The journal is read when something has already failed, so a compact
       # index that stopped short of the workaround would be worse than the
       # oversized listing it replaced.
@@ -136,6 +149,7 @@ jobs:
           node tests/unit/jsx-undo-group.mjs
           node tests/unit/run-jsx-result.mjs
           node tests/unit/parent-transform.mjs
+          node tests/unit/svg-import.mjs
 
       - name: check_setup resolves platform paths without throwing
         shell: bash
