@@ -5,7 +5,7 @@
  */
 export const descriptions: Record<string, string> = {
   // ---------- comps ----------
-  list_comps: "All comps: id, name, dims, duration, fps, layer count.",
+  list_comps: "All comps: id, name, dims, duration, fps, layer count. Pass `include` to trim it — `include: []` returns the id+name map alone, which is all orientation usually needs.",
   get_comp: "Single comp summary by id (no layers).",
   get_comp_tree: "Comp + nested layer tree, recursing pre-comps to `depth`.",
   create_comp: "Create a new comp. Returns id.",
@@ -14,8 +14,8 @@ export const descriptions: Record<string, string> = {
   set_active_comp: "Focus a comp in the viewer/timeline.",
 
   // ---------- layers ----------
-  list_layers: "Layers in a comp, one-line each. Use get_layer_full for details.",
-  get_layer_full: "Full state of one layer: transform + keyframes + expressions, effects, masks, markers, parenting, text/shape/footage extras, and sourceRect (visible bounds). Always prefer over multiple smaller queries.",
+  list_layers: "Layers in a comp, one-line each. Use get_layer_full for details. Pass `include` to trim it — `include: []` returns just id/index/name/type, the cheapest way to learn what is in a comp.",
+  get_layer_full: "Full state of one layer: transform + keyframes + expressions, effects, masks, markers, parenting, text/shape/footage extras, and sourceRect (visible bounds). Always prefer over multiple smaller queries. Bound the answer on a heavy layer: `include` picks the sections you need, `maxKeyframes` caps the keyframes per property, `shapeDepth` limits the Contents walk. Anything dropped is named and counted in the response, so a bounded read is never mistaken for a complete one.",
   create_text_layer: "Text layer with optional font/size/color/position. anchorAlign defaults to 'left' so position means the visible left edge.",
   create_shape_layer: "Empty shape layer; fill via add_shape_content.",
   create_solid_layer: "Solid-color layer. color is RGB 0..1.",
@@ -74,7 +74,7 @@ export const descriptions: Record<string, string> = {
   remove_marker: "Remove a marker by 1-based index.",
 
   // ---------- vision ----------
-  screenshot_frame: "ONE-OFF visual check of a comp at a time. Base64 PNG. Use only at key moments — never per-frame or in a loop. For motion, 2-3 snapshots + get_layer_full property values. Set downsample:2 (or 3-4 on 4K comps) to keep the image small — full-res 4K frames are large enough to exhaust the context. The result reports the dimensions actually returned, and warns if a requested downsample could not be applied.",
+  screenshot_frame: "ONE-OFF visual check of a comp at a time. Base64 PNG. Use only at key moments — never per-frame or in a loop. For motion, 2-3 snapshots + get_layer_full property values. A downsample is chosen from the comp size unless you pass one — omit it, and pass downsample:1 only when you genuinely need full resolution. The result reports the dimensions actually returned, and warns if a requested downsample could not be applied.",
   screenshot_layer: "ONE-OFF visual check of a single layer (solo'd) at a time. Same one-off rule and same downsample guidance as screenshot_frame.",
 
   // ---------- batch ----------
@@ -110,7 +110,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- issue journal ----------
   list_known_issues:
-    "Problems earlier sessions hit with these tools, with the workarounds that worked. Read it when a tool fails in a way you don't immediately understand — pass `tool` to narrow it to that one — and before nontrivial work. It can save you rediscovering a fix that already cost someone an hour. Also returns the repo and server version needed to report one.",
+    "Problems earlier sessions hit with these tools, with the workarounds that worked. Read it when a tool fails in a way you don't immediately understand — pass `tool` or `query` to narrow it — and before nontrivial work. It can save you rediscovering a fix that already cost someone an hour. Returns a one-line index by default; the cause and the workaround are in the entry, so follow up with `id` on anything that looks like your problem. `detail:'full'` dumps every matching entry and is rarely worth it. Also returns the repo and server version needed to report one.",
   log_issue:
     "Record a problem you hit and the workaround that got past it, so the next session doesn't rediscover it. Log only what cost real effort and will recur: a tool failing for a non-obvious reason, an argument shape the schema didn't imply, AE behaving unlike the docs. Not your own typos, not one-off user mistakes. Call list_known_issues first and reuse the same title to extend an existing entry rather than duplicating it. If the result comes back with reported:false, then AFTER you have finished the actual work, close your reply by telling the user in plain language that something took much longer than it should have and offering to pass it to the people who maintain this tool — phrase it for a motion designer, in terms of what actually happened, and don't say 'GitHub issue' or 'bug report' unless they say it first.",
   mark_issue_reported:

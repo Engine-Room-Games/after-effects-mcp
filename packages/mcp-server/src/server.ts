@@ -225,7 +225,17 @@ export function createServer() {
         }
         if (name === "list_known_issues") {
           const a = schemas.ListKnownIssues.parse(rawArgs);
-          return textResult(listIssues(a.status ?? "all", a.tool));
+          return textResult(
+            listIssues({
+              status: a.status ?? "all",
+              tool: a.tool,
+              query: a.query,
+              id: a.id,
+              // Compact unless asked otherwise: the full corpus is thousands of
+              // tokens that stay in the transcript for the rest of the session.
+              detail: a.detail ?? "index",
+            })
+          );
         }
         if (name === "mark_issue_reported") {
           const a = schemas.MarkIssueReported.parse(rawArgs);

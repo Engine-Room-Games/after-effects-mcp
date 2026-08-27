@@ -105,6 +105,12 @@ jobs:
       - name: Panel resolves the extension path CEP hands it
         run: node tests/unit/panel-paths.mjs
 
+      # The journal is read when something has already failed, so a compact
+      # index that stopped short of the workaround would be worse than the
+      # oversized listing it replaced.
+      - name: Issue journal reads are scoped and still lead somewhere
+        run: node tests/unit/issue-journal.mjs
+
       - name: check_setup resolves platform paths without throwing
         shell: bash
         run: |
@@ -180,7 +186,7 @@ jobs:
               if(again.id!==first.id) throw new Error(`title should map to one id: ${again.id} vs ${first.id}`);
               if(again.occurrences!==2) throw new Error("re-log should count the sighting");
               if(!again.reported) throw new Error("a new sighting must not un-report an entry");
-              const all=j.listIssues("all"), open=j.listIssues("unreported");
+              const all=j.listIssues({detail:"full"}), open=j.listIssues({status:"unreported"});
               if(all.count!==1||open.count!==0) throw new Error(`status filter wrong: ${all.count}/${open.count}`);
               if(all.issues[0].cause!=="because") throw new Error("a known cause must survive a sighting logged without one");
               // Untracked by construction, not by asking the project to ignore it.

@@ -25,8 +25,24 @@ export const Interpolation = z.object({
   easeOut: z.object({ influence: z.number(), speed: z.number() }).optional(),
 });
 
+/**
+ * The scoping vocabulary shared by the read tools. Every one of them names the
+ * optional sections of its own response; omitting `include` returns all of them,
+ * which is what every caller written before this existed already gets. `[]`
+ * returns the identifying core alone — the cheapest useful answer.
+ */
+const includeParam = <T extends [string, ...string[]]>(sections: T, hint: string) =>
+  z
+    .array(z.enum(sections))
+    .optional()
+    .describe(`Sections to return: ${sections.join(", ")}. Omit for all of them; [] for ${hint}.`);
+
 // ---------- comps ----------
-export const ListComps = z.object({}).strict();
+export const ListComps = z
+  .object({
+    include: includeParam(["size", "timing", "bg", "counts"], "id + name only"),
+  })
+  .strict();
 export const GetComp = z.object({ compId: z.number() });
 export const GetCompTree = z.object({ compId: z.number(), depth: z.number().int().min(0).max(8).default(2).optional() });
 export const CreateComp = z.object({
@@ -53,8 +69,34 @@ export const DeleteComp = z.object({ compId: z.number() });
 export const SetActiveComp = z.object({ compId: z.number() });
 
 // ---------- layers ----------
-export const ListLayers = z.object({ compId: z.number() });
-export const GetLayerFull = z.object({ compId: z.number(), layerId: z.number(), includeChildren: z.boolean().default(false).optional() });
+export const ListLayers = z.object({
+  compId: z.number(),
+  include: includeParam(["flags", "timing", "parent"], "the id/index/name/type map alone"),
+});
+export const GetLayerFull = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  includeChildren: z.boolean().default(false).optional(),
+  include: includeParam(
+    ["transform", "effects", "masks", "markers", "bounds", "text", "shape", "source"],
+    "the layer header alone"
+  ),
+  maxKeyframes: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      "Cap the keyframes serialized per property. Over the cap you get the first and last few plus a count of what was omitted — never a silent truncation. Omit for all of them."
+    ),
+  shapeDepth: z
+    .number()
+    .int()
+    .min(0)
+    .max(4)
+    .optional()
+    .describe("How deep to walk a shape layer's Contents tree. Default 4; drop to 1-2 on heavy shape layers."),
+});
 
 export const CreateTextLayer = z.object({
   compId: z.number(),
@@ -388,16 +430,31 @@ export const RemoveMarker = z.object({
 });
 
 // ---------- vision ----------
+/**
+ * Omitted means "pick one from the comp size", not 1. The right factor is
+ * derivable from the comp's dimensions, and a caller who forgets it was
+ * previously served a full-resolution 4K frame — the single most expensive
+ * accident available through these tools.
+ */
+const downsampleParam = z
+  .number()
+  .int()
+  .min(1)
+  .max(8)
+  .optional()
+  .describe(
+    "Render at 1/N resolution. Omit and one is chosen from the comp size (long edge ~1280px: 2 at 1080p, 3 at 4K). Pass 1 for a full-resolution frame."
+  );
 export const ScreenshotFrame = z.object({
   compId: z.number(),
   time: z.number().optional(),
-  downsample: z.number().int().min(1).max(8).default(1).optional(),
+  downsample: downsampleParam,
 });
 export const ScreenshotLayer = z.object({
   compId: z.number(),
   layerId: z.number(),
   time: z.number().optional(),
-  downsample: z.number().int().min(1).max(8).default(1).optional(),
+  downsample: downsampleParam,
 });
 
 // ---------- batch ----------
@@ -481,6 +538,21 @@ export const ListKnownIssues = z
   .object({
     status: z.enum(["all", "unreported", "reported"]).default("all").optional(),
     tool: z.string().optional().describe("Only entries about this tool, e.g. 'set_temporal_ease'. Omit for everything."),
+    query: z
+      .string()
+      .optional()
+      .describe("Free-text filter: every whitespace-separated term must appear in an entry's title, symptom or tools."),
+    id: z
+      .string()
+      .optional()
+      .describe("Read one entry in full — cause and workaround included — by the id from a previous listing. Ignores the filters."),
+    detail: z
+      .enum(["index", "full"])
+      .default("index")
+      .optional()
+      .describe(
+        "'index' (default) is one line per entry: id, title, tools, counts and a one-line summary — read the one you need with `id`. 'full' returns every matching entry's whole body and costs thousands of tokens."
+      ),
   })
   .strict();
 export const MarkIssueReported = z

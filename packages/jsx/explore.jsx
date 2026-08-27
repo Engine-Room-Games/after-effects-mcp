@@ -1,6 +1,45 @@
 // explore.jsx — rich one-shot inspection. The whole reason this MCP exists.
 
-function __serializeProperty(p, deep) {
+// Which keyframes survive a cap, or null when none need to go. Keeping the
+// first few and the last few rather than a prefix means the shape of the
+// animation — where it starts, where it ends — is still readable.
+function __keyframeWindow(total, max) {
+  if (!(max > 0) || total <= max) return null;
+  var head = Math.ceil(max / 2);
+  return { head: head, tail: max - head, total: total, omitted: total - max };
+}
+
+// Truncation is never silent: an agent that cannot see what was dropped will
+// read a partial answer as the whole one.
+function __truncationNote(w) {
+  return "first " + w.head + " and last " + w.tail + " of " + w.total + " keyframes; " +
+    w.omitted + " omitted — raise maxKeyframes, or read them all with get_keyframes";
+}
+
+function __serializeKeyframe(p, k) {
+  var entry = { index: k, time: p.keyTime(k), value: p.keyValue(k) };
+  try {
+    entry["in"] = String(p.keyInInterpolationType(k));
+    entry["out"] = String(p.keyOutInterpolationType(k));
+  } catch (e1) {}
+  try {
+    var inE = p.keyInTemporalEase(k);
+    var outE = p.keyOutTemporalEase(k);
+    entry.easeIn = { influence: inE[0].influence, speed: inE[0].speed };
+    entry.easeOut = { influence: outE[0].influence, speed: outE[0].speed };
+  } catch (e2) {}
+  if (p.isSpatial) {
+    try {
+      entry.inTangent = p.keyInSpatialTangent(k);
+      entry.outTangent = p.keyOutSpatialTangent(k);
+    } catch (e3) {}
+  }
+  return entry;
+}
+
+// `opts.maxKeyframes` bounds the response; 0 or absent means every keyframe,
+// which is what every caller written before the cap existed gets.
+function __serializeProperty(p, opts) {
   var out = {
     name: p.name,
     matchName: p.matchName,
@@ -11,49 +50,66 @@ function __serializeProperty(p, deep) {
   try { out.value = p.value; } catch (e) {}
   if (p.canSetExpression && p.expression) out.expression = p.expression;
   if (p.numKeys > 0) {
+    var total = p.numKeys;
+    var w = __keyframeWindow(total, (opts && opts.maxKeyframes) ? opts.maxKeyframes : 0);
     out.keyframes = [];
-    for (var k = 1; k <= p.numKeys; k++) {
-      var entry = { index: k, time: p.keyTime(k), value: p.keyValue(k) };
-      try {
-        entry["in"] = String(p.keyInInterpolationType(k));
-        entry["out"] = String(p.keyOutInterpolationType(k));
-      } catch (e1) {}
-      try {
-        var inE = p.keyInTemporalEase(k);
-        var outE = p.keyOutTemporalEase(k);
-        entry.easeIn = { influence: inE[0].influence, speed: inE[0].speed };
-        entry.easeOut = { influence: outE[0].influence, speed: outE[0].speed };
-      } catch (e2) {}
-      if (p.isSpatial) {
-        try {
-          entry.inTangent = p.keyInSpatialTangent(k);
-          entry.outTangent = p.keyOutSpatialTangent(k);
-        } catch (e3) {}
-      }
-      out.keyframes.push(entry);
+    for (var k = 1; k <= total; k++) {
+      if (w && k > w.head && k <= total - w.tail) continue;
+      out.keyframes.push(__serializeKeyframe(p, k));
+    }
+    if (w) {
+      out.keyframeCount = w.total;
+      out.keyframesOmitted = w.omitted;
+      out.keyframesTruncated = __truncationNote(w);
     }
   }
   return out;
 }
 
-function __serializeTransformGroup(tg) {
+function __serializeTransformGroup(tg, opts) {
   var out = {};
   for (var i = 1; i <= tg.numProperties; i++) {
     var p = tg.property(i);
-    out[p.name] = __serializeProperty(p);
+    out[p.name] = __serializeProperty(p, opts);
   }
   return out;
 }
 
-function __serializeEffects(layer) {
+// The cap is applied after the fact rather than inside __serializeEffect,
+// which effects.jsx also uses for list_effects and add_effect — those return
+// one effect and have no size problem to solve.
+function __capEffectKeyframes(effects, max) {
+  if (!(max > 0)) return effects;
+  for (var i = 0; i < effects.length; i++) {
+    var params = effects[i].params;
+    for (var j = 0; j < params.length; j++) {
+      var keys = params[j].keyframes;
+      if (!keys) continue;
+      var w = __keyframeWindow(keys.length, max);
+      if (!w) continue;
+      var kept = [];
+      for (var k = 0; k < w.total; k++) {
+        if (k >= w.head && k < w.total - w.tail) continue;
+        kept.push(keys[k]);
+      }
+      params[j].keyframes = kept;
+      params[j].keyframeCount = w.total;
+      params[j].keyframesOmitted = w.omitted;
+      params[j].keyframesTruncated = __truncationNote(w);
+    }
+  }
+  return effects;
+}
+
+function __serializeEffects(layer, opts) {
   var fx = layer.property("Effects");
   if (!fx || fx.numProperties === 0) return [];
   var arr = [];
   for (var i = 1; i <= fx.numProperties; i++) arr.push(__serializeEffect(fx.property(i)));
-  return arr;
+  return __capEffectKeyframes(arr, (opts && opts.maxKeyframes) ? opts.maxKeyframes : 0);
 }
 
-function __serializeMasks(layer) {
+function __serializeMasks(layer, opts) {
   var masks = layer.property("Masks");
   if (!masks || masks.numProperties === 0) return [];
   var out = [];
@@ -65,10 +121,10 @@ function __serializeMasks(layer) {
       mode: String(m.maskMode),
       inverted: m.inverted,
     };
-    try { entry.shape = __serializeProperty(m.property("ADBE Mask Shape")); } catch (e1) {}
-    try { entry.opacity = __serializeProperty(m.property("ADBE Mask Opacity")); } catch (e2) {}
-    try { entry.expansion = __serializeProperty(m.property("ADBE Mask Offset")); } catch (e3) {}
-    try { entry.feather = __serializeProperty(m.property("ADBE Mask Feather")); } catch (e4) {}
+    try { entry.shape = __serializeProperty(m.property("ADBE Mask Shape"), opts); } catch (e1) {}
+    try { entry.opacity = __serializeProperty(m.property("ADBE Mask Opacity"), opts); } catch (e2) {}
+    try { entry.expansion = __serializeProperty(m.property("ADBE Mask Offset"), opts); } catch (e3) {}
+    try { entry.feather = __serializeProperty(m.property("ADBE Mask Feather"), opts); } catch (e4) {}
     out.push(entry);
   }
   return out;
@@ -123,6 +179,9 @@ function __serializeShapeContents(group, depth) {
     var entry = { name: p.name, matchName: p.matchName, index: i };
     if (p.propertyType === PropertyType.NAMED_GROUP || p.propertyType === PropertyType.INDEXED_GROUP) {
       if (depth > 0) entry.children = __serializeShapeContents(p, depth - 1);
+      // Say where the walk stopped. A group that simply has no `children` key
+      // reads as empty, which for a deep shape tree is a lie.
+      else if (p.numProperties > 0) entry.childrenOmitted = p.numProperties;
     } else {
       try { entry.value = p.value; } catch (e) {}
     }
@@ -134,6 +193,11 @@ function __serializeShapeContents(group, depth) {
 OPS.get_layer_full = noUndo(function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
+  // `include` bounds the response by section, `maxKeyframes` and `shapeDepth`
+  // bound the two things that make a single layer weigh 250KB. All three are
+  // absent by default, and absent means "everything", exactly as before.
+  var want = (args && args.include) ? args.include : null;
+  var opts = { maxKeyframes: (args && args.maxKeyframes > 0) ? args.maxKeyframes : 0 };
   var out = {
     id: l.id,
     index: l.index,
@@ -152,41 +216,48 @@ OPS.get_layer_full = noUndo(function (args) {
     preserveTransparency: l.preserveTransparency,
     parent: l.parent ? { layerId: l.parent.id, name: l.parent.name } : null,
     sourceType: __layerKind(l),
-    transform: __serializeTransformGroup(l.property("Transform")),
-    effects: __serializeEffects(l),
-    masks: __serializeMasks(l),
-    markers: __serializeMarkers(l),
   };
+  if (__wantsSection(want, "transform")) out.transform = __serializeTransformGroup(l.property("Transform"), opts);
+  if (__wantsSection(want, "effects")) out.effects = __serializeEffects(l, opts);
+  if (__wantsSection(want, "masks")) out.masks = __serializeMasks(l, opts);
+  if (__wantsSection(want, "markers")) out.markers = __serializeMarkers(l);
   // Visual bounds at the comp's current time — cheap to fetch and removes a
   // class of "I need to screenshot to know where this renders" round-trips.
   // Coordinates are in the layer's local space (origin at the Anchor Point).
-  try {
-    var __rect = l.sourceRectAtTime(c.time, false);
-    out.sourceRect = { left: __rect.left, top: __rect.top, width: __rect.width, height: __rect.height, time: c.time };
-  } catch (__e) {}
-  if (l instanceof TextLayer) out.text = __serializeText(l);
-  if (l instanceof ShapeLayer) {
-    try { out.shape = { contents: __serializeShapeContents(l.property("Contents"), 4) }; }
+  if (__wantsSection(want, "bounds")) {
+    try {
+      var __rect = l.sourceRectAtTime(c.time, false);
+      out.sourceRect = { left: __rect.left, top: __rect.top, width: __rect.width, height: __rect.height, time: c.time };
+    } catch (__e) {}
+  }
+  if (l instanceof TextLayer && __wantsSection(want, "text")) out.text = __serializeText(l);
+  if (l instanceof ShapeLayer && __wantsSection(want, "shape")) {
+    var depth = (args && args.shapeDepth !== undefined && args.shapeDepth !== null) ? args.shapeDepth : 4;
+    try { out.shape = { depth: depth, contents: __serializeShapeContents(l.property("Contents"), depth) }; }
     catch (e) {}
   }
-  if (l.source && l.source instanceof CompItem) {
-    out.precomp = { compId: l.source.id, compName: l.source.name };
-    if (args.includeChildren) {
-      out.children = [];
-      for (var i = 1; i <= l.source.numLayers; i++) out.children.push(__layerSummary(l.source.layer(i)));
+  if (__wantsSection(want, "source")) {
+    if (l.source && l.source instanceof CompItem) {
+      out.precomp = { compId: l.source.id, compName: l.source.name };
+      if (args.includeChildren) {
+        out.children = [];
+        for (var i = 1; i <= l.source.numLayers; i++) out.children.push(__layerSummary(l.source.layer(i)));
+      }
+    } else if (l.source && l.source instanceof FootageItem) {
+      var src = l.source;
+      out.footage = {
+        itemId: src.id,
+        name: src.name,
+        hasAlpha: src.hasAlpha,
+        duration: src.duration,
+        width: src.width,
+        height: src.height,
+      };
+      try { if (src.file) out.footage.path = src.file.fsName; } catch (e2) {}
     }
-  } else if (l.source && l.source instanceof FootageItem) {
-    var src = l.source;
-    out.footage = {
-      itemId: src.id,
-      name: src.name,
-      hasAlpha: src.hasAlpha,
-      duration: src.duration,
-      width: src.width,
-      height: src.height,
-    };
-    try { if (src.file) out.footage.path = src.file.fsName; } catch (e2) {}
   }
+  // Echo the scoping back, so a bounded answer is never read as a full one.
+  if (want) out.included = want;
   return out;
 });
 
