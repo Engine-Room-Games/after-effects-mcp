@@ -19,3 +19,6 @@ packages/ae-panel/node_modules/
 # it does not swallow plugin/.mcp.json, which is a shipped part of the plugin.
 /.mcp.json
 .idea/
+
+# Worktrees created by background agents; the branches live on the remote.
+.claude/worktrees/

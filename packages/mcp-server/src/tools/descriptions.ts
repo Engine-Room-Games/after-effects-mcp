@@ -5,7 +5,7 @@
  */
 export const descriptions: Record<string, string> = {
   // ---------- comps ----------
-  list_comps: "All comps: id, name, dims, duration, fps, layer count.",
+  list_comps: "All comps: id, name, dims, duration, fps, layer count. Pass `include` to trim it — `include: []` returns the id+name map alone, which is all orientation usually needs.",
   get_comp: "Single comp summary by id (no layers).",
   get_comp_tree: "Comp + nested layer tree, recursing pre-comps to `depth`.",
   create_comp: "Create a new comp. Returns id.",
@@ -14,9 +14,9 @@ export const descriptions: Record<string, string> = {
   set_active_comp: "Focus a comp in the viewer/timeline.",
 
   // ---------- layers ----------
-  list_layers: "Layers in a comp, one-line each. Use get_layer_full for details.",
-  get_layer_full: "Full state of one layer: transform + keyframes + expressions, effects, masks, markers, parenting, text/shape/footage extras, and sourceRect (visible bounds). Always prefer over multiple smaller queries.",
-  create_text_layer: "Text layer with optional font/size/color/position. anchorAlign defaults to 'left' so position means the visible left edge.",
+  list_layers: "Layers in a comp, one-line each. Use get_layer_full for details. Pass `include` to trim it — `include: []` returns just id/index/name/type, the cheapest way to learn what is in a comp.",
+  get_layer_full: "Full state of one layer: transform + keyframes + expressions, effects, masks, markers, parenting, text/shape/footage extras, and sourceRect (visible bounds). Always prefer over multiple smaller queries. Bound the answer on a heavy layer: `include` picks the sections you need, `maxKeyframes` caps the keyframes per property, `shapeDepth` limits the Contents walk. Anything dropped is named and counted in the response, so a bounded read is never mistaken for a complete one.",
+  create_text_layer: "Text layer with optional font/size/color/position/tracking. anchorAlign (default 'left') aligns the text by setting paragraph justification and leaving the anchor at [0,0], so position means the start of the baseline AND stays right when the text is changed later. Tracking is set to 0 unless you pass one, because AE otherwise inherits the user's Character panel. anchorAlign 'none' keeps AE's raw defaults.",
   create_shape_layer: "Empty shape layer; fill via add_shape_content.",
   create_solid_layer: "Solid-color layer. color is RGB 0..1.",
   create_null_layer: "Null parent layer.",
@@ -27,7 +27,8 @@ export const descriptions: Record<string, string> = {
   duplicate_layer: "Duplicate a layer N times; each has a fresh id.",
   delete_layer: "Remove a layer.",
   set_layer: "Update layer metadata (name/enabled/locked/shy/solo/3D/blend/label/in-out/stretch/trackMatte). Undefined fields unchanged.",
-  parent_layer: "Set/clear a layer's parent (parentLayerId=null to unparent).",
+  parent_layer:
+    "Set/clear a layer's parent (parentLayerId=null to unparent). The layer stays visually put: AE's own compensation double-counts when the parent was itself re-parented in the same call, so this recomputes the world transform and corrects position/scale/rotation, reporting any correction in `correction`. Read `correction.notes` — 3D layers, cameras and lights are not corrected, and with a keyframed ancestor the fix is only exact at the comp's current time. Pass preserveTransform:false to let the layer jump instead.",
   reorder_layer: "Move layer to 1-based stack index.",
 
   // ---------- transforms ----------
@@ -49,11 +50,11 @@ export const descriptions: Record<string, string> = {
 
   // ---------- effects ----------
   list_effects: "All effects on a layer with current param values + keyframes/expressions.",
-  add_effect: "Add effect by matchName (use list_available_effects — matchNames are stable across AE versions; display names aren't).",
+  add_effect: "Add effect by matchName (use list_available_effects — matchNames are stable across AE versions; display names aren't). A wrong matchName fails immediately and cheaply, so try the standard one (ADBE Gaussian Blur 2, ADBE Slider Control) before searching.",
   remove_effect: "Remove effect by 1-based index.",
   set_effect_param: "Set an effect param by name/matchName. keyframe:true+time for keyframed value.",
   set_effect_enabled: "Toggle an effect on/off without removing.",
-  list_available_effects: "All effects installed in this AE: displayName, matchName, category.",
+  list_available_effects: "Effects installed in this AE: displayName, matchName, category. **Always pass `filter`** to substring-search: the full list is 250-450+ entries and the cost is in returning them, not in reading them, so an unfiltered call takes seconds every time while a filtered one takes a fraction of one (measured on AE 26.3: 446 entries in 3.9s, 22 filtered in 0.17s). `refresh:true` re-reads after installing a plugin; the enumeration is cached per AE session, which is why refresh exists. Never loop over `app.effects` in run_jsx: it is slow enough to block the bridge past its timeout and looks like a crash.",
 
   // ---------- text ----------
   set_text: "Set text content + styling (font, size, fill/stroke, tracking, leading, justification). Undefined fields unchanged.",
@@ -61,7 +62,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- shapes ----------
   set_shape_path: "Replace a shape path with new vertices/tangents/closed.",
-  add_shape_content: "Add shape content under Contents or a sub-group. `content.type` picks the node (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group); the other keys set its properties by friendly name (e.g. rect: size/position/roundness; fill: color/opacity; stroke: color/width/lineCap; path: vertices/inTangents/outTangents/closed). Unknown or unsettable keys are NOT ignored — the whole node is rolled back and an error lists them, so trust a success result. Use get_layer_full to see exact property names.",
+  add_shape_content: "Add shape content under Contents or a sub-group. `content.type` picks the node (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group); the other keys set its properties by friendly name (e.g. rect: size/position/roundness; fill: color/opacity; stroke: color/width/lineCap; path: vertices/inTangents/outTangents/closed). Unknown or unsettable keys are NOT ignored — the whole node is rolled back and an error lists them, so trust a success result. Use get_layer_full to see exact property names. ORDER MATTERS: index 1 renders in FRONT and each call appends behind the last, so add front-to-back — details and dots first, big background rects last. `zOrder:'front'` can override that, but it needs an internal moveTo which has disturbed nested renders in AE 26.3, so prefer call order. A reference to one node goes stale once a sibling is added to the same group (add a Stroke and an earlier Fill reference throws 'Object is invalid'): add every node first, then address them by name.",
   set_shape_property: "Set a property on a shape content node. Optional keyframe at time.",
 
   // ---------- masks ----------
@@ -74,18 +75,29 @@ export const descriptions: Record<string, string> = {
   remove_marker: "Remove a marker by 1-based index.",
 
   // ---------- vision ----------
-  screenshot_frame: "ONE-OFF visual check of a comp at a time. Base64 PNG. Use only at key moments — never per-frame or in a loop. For motion, 2-3 snapshots + get_layer_full property values. Set downsample:2 (or 3-4 on 4K comps) to keep the image small — full-res 4K frames are large enough to exhaust the context. The result reports the dimensions actually returned, and warns if a requested downsample could not be applied.",
-  screenshot_layer: "ONE-OFF visual check of a single layer (solo'd) at a time. Same one-off rule and same downsample guidance as screenshot_frame.",
+  screenshot_frame: "ONE-OFF visual check of a comp at a time. Base64 PNG. Use only at key moments — never per-frame or in a loop. For motion, 2-3 snapshots + get_layer_full property values. A downsample is chosen from the comp size unless you pass one — omit it, and pass downsample:1 only when you genuinely need full resolution. The result reports the dimensions actually returned, and warns if a requested downsample could not be applied. Not every result is an image: a 'Stale frame' error means AE re-served an earlier render — space calls a few seconds apart, retry with a higher downsample, and confirm motion by reading keyframes instead; `empty:true` means every pixel is transparent, so check the time, in/out points and enabled state. Never disable layers to make a frame render.",
+  screenshot_layer: "ONE-OFF visual check of a single layer (solo'd) at a time. Same one-off rule and same downsample guidance as screenshot_frame. The same 'Stale frame' and `empty:true` non-image results apply.",
 
   // ---------- batch ----------
   run_batch: "Many ops in one ExtendScript pass, one undo step. >500 ops returns a jobId + streams progress; use await_job. transactional:true (default) rolls back on first error.",
 
   // ---------- explore ----------
-  get_project_summary: "Project state: path, item count, active item, flat item list with type.",
+  get_project_summary: "Project state: path, item count, active item, flat item list with type (comp | footage | solid | folder | unknown — same vocabulary as a layer's sourceType).",
   find_layers: "Search across one or all comps for layers matching name/type/effect filters.",
 
   // ---------- raw ----------
-  run_jsx: "Escape hatch: arbitrary ExtendScript in an undo group. `comp`/`app`/`OPS`/helpers in scope. Use `return X` to send a value back; complex AE objects are coerced to plain props.",
+  run_jsx:
+    "Escape hatch: arbitrary ExtendScript in an undo group. `comp`/`app`/`OPS`/helpers in scope. `return X` sends a value back — arrays and nested objects come back whole. Anything that cannot be JSON is replaced in place by a marker string, never dropped: `\"[function]\"`, `\"[undefined]\"`, `\"[circular]\"`, `\"[max depth]\"`, `\"[NaN]\"`, and live AE objects as `\"[CompItem \\\"Main\\\" #12]\"` — a handle to pass to a real read tool, not a walk of the object. An empty result therefore means the script really returned nothing. " +
+    "AE refuses copyToComp for a layer with a parent or a linked expression while an undo group is open: call `withoutUndoGroup(function(){ … })` around just that part, or pass undoGroup:false for the whole script (its changes then land as whatever undo steps AE records on its own, not one). Keep loops short — ExtendScript is single-threaded and freezes the user's UI.",
+
+  // ---------- footage ----------
+  import_footage:
+    "Import a file (video, image, audio, SVG, PSD/AI) into the project. Returns the item id — pass it to create_footage_layer to place it. Validates what AE actually produced: an SVG whose viewBox asks for one aspect ratio and imports at another is a known AE bug that renders as nothing with no error, so the item is deleted and the call throws with the workaround. `force:true` keeps it and reports the problem in `validation` instead.",
+  create_footage_layer: "Place an imported project item into a comp as a layer. Takes the itemId from import_footage or get_project_summary. For a comp use create_precomp_layer instead.",
+
+  // ---------- motion graphics templates ----------
+  export_mogrt:
+    "Export a comp as a .mogrt for Premiere. Handles the three things that make a scripted export look like a hung connection: it saves the project first (removes AE's modal save prompt), suppresses the modal font warning that otherwise freezes this connection until someone clicks OK in AE, and runs outside the undo group. `name` defaults to the comp name — AE's own default is the literal 'Untitled', so every export would otherwise overwrite the same file. Pass `posterTime` to render that frame as the template's thumbnail, replacing the black one AE writes; the export still succeeds if only the thumbnail fails. Needs the project saved once by hand first. `fonts` in the result lists the fonts the template will require — tell the user, since non-Adobe ones make Premiere flag the template.",
 
   // ---------- house style ----------
   get_house_style:
@@ -110,7 +122,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- issue journal ----------
   list_known_issues:
-    "Problems earlier sessions hit with these tools, with the workarounds that worked. Read it when a tool fails in a way you don't immediately understand — pass `tool` to narrow it to that one — and before nontrivial work. It can save you rediscovering a fix that already cost someone an hour. Also returns the repo and server version needed to report one.",
+    "Problems earlier sessions hit with these tools, with the workarounds that worked. Read it when a tool fails in a way you don't immediately understand — pass `tool` or `query` to narrow it — and before nontrivial work. It can save you rediscovering a fix that already cost someone an hour. Returns a one-line index by default; the cause and the workaround are in the entry, so follow up with `id` on anything that looks like your problem. `detail:'full'` dumps every matching entry and is rarely worth it. Also returns the repo and server version needed to report one.",
   log_issue:
     "Record a problem you hit and the workaround that got past it, so the next session doesn't rediscover it. Log only what cost real effort and will recur: a tool failing for a non-obvious reason, an argument shape the schema didn't imply, AE behaving unlike the docs. Not your own typos, not one-off user mistakes. Call list_known_issues first and reuse the same title to extend an existing entry rather than duplicating it. If the result comes back with reported:false, then AFTER you have finished the actual work, close your reply by telling the user in plain language that something took much longer than it should have and offering to pass it to the people who maintain this tool — phrase it for a motion designer, in terms of what actually happened, and don't say 'GitHub issue' or 'bug report' unless they say it first.",
   mark_issue_reported:

@@ -15,6 +15,17 @@ Assume the person you are helping is a motion designer, not a developer. They sh
 
 **Relay `nextSteps` to the user directly.** Do not paraphrase it into jargon, and do not invent steps it did not mention.
 
+## A timeout is not a disconnection
+
+Before you start any repair, check which failure you actually have. "The panel did not answer within N seconds" and "cannot reach the panel" are opposite diagnoses:
+
+- **Did not answer** — something is listening; it is just too busy to reply. After Effects is single-threaded, so a long script or a modal dialog waiting for a click blocks it completely. Nothing is broken and nothing needs installing.
+- **Cannot reach** — nothing is listening. That is the case the repair path below is for.
+
+On a timeout, `check_setup` says so itself: `bridgeReachable` reports that the port accepted the connection but did not answer in time, and `nextSteps` tells you to wait. Follow it. Re-running `setup_panel` or restarting After Effects here costs the user their work-in-progress for nothing, and both are the wrong move. Poll `check_setup` for about a minute; it usually clears on its own.
+
+Two things to ask about while waiting: whether a dialog is sitting behind another window in After Effects, and — on macOS — whether they have switched to another desktop. Calls have been reported to stall while the user is on a different Space and to complete as soon as they come back.
+
 ## Install before they open After Effects, if you still can
 
 The panel loads at launch and only at launch. So the order matters, and it is
@@ -48,7 +59,7 @@ are in before you say anything.
 | `panelUpToDate` | The files on disk are older than this server. Run `setup_panel`. |
 | `panelRunningCurrent` | AE is *running* an older panel than these tools ship. This is the one that predicts whether calls will actually work — `panelUpToDate` can pass while this fails, for the whole window between installing an update and restarting AE. |
 | `afterEffectsRunning` | AE is closed. If the panel also needs installing, install it now and then ask them to open AE — that saves a restart. |
-| `bridgeReachable` | Everything is installed but the panel isn't answering — almost always fixed by restarting AE. |
+| `bridgeReachable` | Everything is installed but the panel isn't answering. Read the detail: if the port **timed out**, After Effects is busy and you should wait, not restart. If nothing is listening at all, restarting AE almost always fixes it. |
 
 ## The reboot case
 

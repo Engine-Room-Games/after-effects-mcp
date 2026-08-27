@@ -12,6 +12,15 @@ import {
 } from "./paths.js";
 import { assessPanel } from "./panelVersion.js";
 import { debugModeLocation, isAfterEffectsRunning, isDebugModeOn } from "./platform.js";
+import { isTimeoutError } from "../util/errors.js";
+
+/** Matches the probe timeout below; quoted at the user in two places. */
+const BRIDGE_PROBE_MS = 2000;
+const BRIDGE_BUSY_FIX =
+  "This is a timeout, not a refused connection — something is listening, it just did not answer in time. " +
+  "After Effects is most likely busy running a script, or waiting on a modal dialog nobody has clicked. " +
+  "Wait and run check_setup again, up to about a minute, before restarting anything; it usually clears on its own. " +
+  "On macOS, if the user has switched to another desktop, ask them to switch back to the one After Effects is on.";
 
 export interface Check {
   name: string;
@@ -37,13 +46,26 @@ function sha256(file: string): string | null {
 
 async function bridgeReachable(
   port: number
-): Promise<{ ok: boolean; detail: string; bundleHash?: string | null }> {
+): Promise<{ ok: boolean; detail: string; bundleHash?: string | null; timedOut?: boolean }> {
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) });
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(BRIDGE_PROBE_MS),
+    });
     if (!res.ok) return { ok: false, detail: `port ${port} returned HTTP ${res.status}` };
     const body = (await res.json().catch(() => ({}))) as { bundleHash?: string | null };
     return { ok: true, detail: `responding on port ${port}`, bundleHash: body.bundleHash };
   } catch (e) {
+    // A timeout and a refused connection are opposite diagnoses: one means the
+    // panel is busy and will come back, the other means nothing is listening.
+    // Reporting both as "no response" is what sends people restarting a bridge
+    // that was only blocked behind a long script (issue #26).
+    if (isTimeoutError(e)) {
+      return {
+        ok: false,
+        timedOut: true,
+        detail: `port ${port} accepted the connection but did not answer within ${BRIDGE_PROBE_MS / 1000}s — After Effects is probably busy`,
+      };
+    }
     return { ok: false, detail: `no response on port ${port} (${(e as Error).message})` };
   }
 }
@@ -139,7 +161,11 @@ export async function checkSetup(): Promise<SetupReport> {
     name: "bridgeReachable",
     ok: bridge.ok,
     detail: bridge.detail,
-    fix: bridge.ok ? undefined : "If the other checks pass, restart After Effects so the panel reloads.",
+    fix: bridge.ok
+      ? undefined
+      : bridge.timedOut
+        ? BRIDGE_BUSY_FIX
+        : "If the other checks pass, restart After Effects so the panel reloads.",
   });
 
   // `panelUpToDate` above compares files on disk, which start matching the
@@ -181,14 +207,14 @@ export async function checkSetup(): Promise<SetupReport> {
   }
 
   const ready = checks.every((c) => c.ok);
-  return { ready, checks, nextSteps: buildNextSteps(checks, ready) };
+  return { ready, checks, nextSteps: buildNextSteps(checks, ready, bridge.timedOut === true) };
 }
 
 /**
  * Ordered remediation, phrased so the agent can read it straight out to a user
  * who has never opened a terminal.
  */
-function buildNextSteps(checks: Check[], ready: boolean): string[] {
+export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut = false): string[] {
   if (ready) return ["Everything is connected. After Effects is ready to drive."];
 
   const by = (name: string) => checks.find((c) => c.name === name);
@@ -196,6 +222,29 @@ function buildNextSteps(checks: Check[], ready: boolean): string[] {
 
   if (by("platform")?.ok === false) return [by("platform")!.fix!];
   if (by("panelAssetsPresent")?.ok === false) return [by("panelAssetsPresent")!.fix!];
+
+  // A busy panel outranks everything below: the install is fine, and every
+  // remedy further down costs the user a restart they do not need. The one
+  // thing that must not be said here is "restart After Effects".
+  //
+  // Only when nothing *else* is broken, though. A panel that is genuinely
+  // half-installed still needs its own remediation, and a timeout is not
+  // evidence against it — so fall through and let the normal path speak, with
+  // the busy explanation still attached to the bridgeReachable check itself.
+  const installSound =
+    by("panelInstalled")?.ok !== false &&
+    by("panelUpToDate")?.ok !== false &&
+    by("panelDependencies")?.ok !== false &&
+    by("cepDebugMode")?.ok !== false;
+  if (bridgeTimedOut && installSound) {
+    return [
+      "Wait — do not restart anything yet. The panel is answering its port but is too busy to reply, which almost always means After Effects is still running a script.",
+      "Run check_setup again in about ten seconds, and keep checking for up to a minute. It usually clears on its own.",
+      "While waiting, ask the user to look at After Effects: a dialog it is waiting on (unsaved project, missing fonts) blocks it the same way and may be hidden behind another window.",
+      "On macOS, if they have moved to a different desktop, ask them to switch back to the one After Effects is on.",
+      "Only if it is still not answering after a minute should you treat it as disconnected and quit and reopen After Effects.",
+    ];
+  }
 
   // A half-updated install or a missing dependency is not fixed by restarting;
   // both are fixed by reinstalling, and reinstalling only works with AE closed.

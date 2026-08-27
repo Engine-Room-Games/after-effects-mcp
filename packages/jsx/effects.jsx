@@ -69,26 +69,55 @@ OPS.set_effect_enabled = function (args) {
   return { ok: true };
 };
 
-OPS.list_available_effects = noUndo(function (args) {
+// Enumerating app.effects is very slow — around 250 entries in AE 26.3, slow
+// enough that a hand-rolled loop over it in run_jsx blocks the panel's socket
+// past the server's timeout and presents as a dead bridge (issue #26). The
+// table only changes when a plugin is installed, which needs an AE restart,
+// which reloads this bundle — so caching it for the life of the session is
+// exact, not merely close enough. Refreshing is available for the case where a
+// user swears they just installed something.
+var __availableEffects = null;
+
+function __enumerateEffects() {
   // app.effects is an array of {displayName, matchName, category, version} on modern AE.
-  var out = [];
+  var fx;
   try {
-    var fx = app.effects;
-    for (var i = 0; i < fx.length; i++) {
-      out.push({ displayName: fx[i].displayName, matchName: fx[i].matchName, category: fx[i].category });
-    }
+    fx = app.effects;
   } catch (e) {
-    // Fallback: return a curated subset of common match names.
-    out = [
-      { displayName: "Gaussian Blur", matchName: "ADBE Gaussian Blur 2", category: "Blur & Sharpen" },
-      { displayName: "Fast Box Blur", matchName: "ADBE Box Blur2", category: "Blur & Sharpen" },
-      { displayName: "Glow", matchName: "ADBE Glo2", category: "Stylize" },
-      { displayName: "Drop Shadow", matchName: "ADBE Drop Shadow", category: "Perspective" },
-      { displayName: "Curves", matchName: "ADBE CurvesCustom", category: "Color Correction" },
-      { displayName: "Levels", matchName: "ADBE Easy Levels2", category: "Color Correction" },
-      { displayName: "Fill", matchName: "ADBE Fill", category: "Generate" },
-      { displayName: "CC Light Sweep", matchName: "CC Light Sweep", category: "Generate" },
-    ];
+    fx = null;
+  }
+  if (!fx || fx.length === undefined) {
+    // No silent curated substitute here. Handing back eight effects that look
+    // like the whole list makes "not installed" indistinguishable from "not
+    // enumerated", and an agent then rules out an effect that is right there.
+    throw new Error(
+      "Cannot read app.effects on this After Effects build, so the installed-effect list is unavailable. " +
+        "Add effects by matchName directly — add_effect fails immediately and clearly on a wrong one. " +
+        "Common matchNames: ADBE Gaussian Blur 2 (Gaussian Blur), ADBE Box Blur2 (Fast Box Blur), " +
+        "ADBE Glo2 (Glow), ADBE Drop Shadow, ADBE CurvesCustom (Curves), ADBE Easy Levels2 (Levels), " +
+        "ADBE Fill, CC Light Sweep."
+    );
+  }
+  var out = [];
+  for (var i = 0; i < fx.length; i++) {
+    out.push({ displayName: fx[i].displayName, matchName: fx[i].matchName, category: fx[i].category });
   }
   return out;
+}
+
+OPS.list_available_effects = noUndo(function (args) {
+  if (!args) args = {};
+  // Only a successful enumeration is cached; a throw leaves the cache empty so
+  // the next call retries rather than repeating a stale failure.
+  if (args.refresh || !__availableEffects) __availableEffects = __enumerateEffects();
+  if (!args.filter) return __availableEffects;
+
+  var q = String(args.filter).toLowerCase();
+  var hits = [];
+  for (var i = 0; i < __availableEffects.length; i++) {
+    var entry = __availableEffects[i];
+    var hay = String(entry.displayName) + " " + String(entry.matchName) + " " + String(entry.category);
+    if (hay.toLowerCase().indexOf(q) !== -1) hits.push(entry);
+  }
+  return hits;
 });

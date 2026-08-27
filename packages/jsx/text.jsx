@@ -1,5 +1,15 @@
 // text.jsx — text layer styling.
 
+// Shared with create_text_layer, which implements `anchorAlign` as live
+// paragraph justification rather than a one-time anchor offset. One map so the
+// two cannot drift.
+var __JUSTIFICATION = {
+  left: ParagraphJustification.LEFT_JUSTIFY,
+  center: ParagraphJustification.CENTER_JUSTIFY,
+  right: ParagraphJustification.RIGHT_JUSTIFY,
+  full: ParagraphJustification.FULL_JUSTIFY_LASTLINE_LEFT,
+};
+
 OPS.set_text = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
@@ -15,13 +25,7 @@ OPS.set_text = function (args) {
   if (args.tracking !== undefined) td.tracking = args.tracking;
   if (args.leading !== undefined) td.leading = args.leading;
   if (args.justification !== undefined) {
-    var jmap = {
-      left: ParagraphJustification.LEFT_JUSTIFY,
-      center: ParagraphJustification.CENTER_JUSTIFY,
-      right: ParagraphJustification.RIGHT_JUSTIFY,
-      full: ParagraphJustification.FULL_JUSTIFY_LASTLINE_LEFT,
-    };
-    if (jmap[args.justification]) td.justification = jmap[args.justification];
+    if (__JUSTIFICATION[args.justification]) td.justification = __JUSTIFICATION[args.justification];
   }
   if (args.applyFill !== undefined) td.applyFill = args.applyFill;
   if (args.applyStroke !== undefined) td.applyStroke = args.applyStroke;

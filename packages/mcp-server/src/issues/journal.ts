@@ -277,6 +277,38 @@ export function logIssue(input: LogIssueInput): LogIssueResult {
 
 export type IssueStatus = "all" | "unreported" | "reported";
 
+/**
+ * How much of each entry to return.
+ *
+ * "full" was the only behaviour, and it returned the whole corpus on every call
+ * — five thousand tokens to answer "is there anything about screenshot_frame?",
+ * re-sent on every request for the rest of the session. The index answers that
+ * question for a few hundred, and names the id to open for the rest.
+ */
+export type IssueDetail = "index" | "full";
+
+/** One line per entry: enough to decide which one is worth opening. */
+export interface IssueIndexEntry {
+  id: string;
+  title: string;
+  tools: string[];
+  lastSeen: string;
+  occurrences: number;
+  reported: boolean;
+  /** The opening of the symptom, deliberately clipped — the workaround is in the full entry. */
+  summary: string;
+}
+
+export interface ListIssuesOptions {
+  status?: IssueStatus;
+  tool?: string;
+  /** Every whitespace-separated term must appear in the title, symptom or tools. */
+  query?: string;
+  /** One entry, in full. Takes precedence over every filter. */
+  id?: string;
+  detail?: IssueDetail;
+}
+
 export interface IssueListing {
   dir: string;
   /** "project" for this folder's own journal; "home" when there was no usable working directory. */
@@ -285,28 +317,88 @@ export interface IssueListing {
   newIssueUrl: string;
   serverVersion: string;
   platform: string;
+  /** Which shape `issues` is in, so a short answer is never mistaken for a complete one. */
+  detail: IssueDetail;
   count: number;
-  issues: IssueEntry[];
+  issues: Array<IssueEntry | IssueIndexEntry>;
+  /** Present on an index: the call that turns one line into the fix it summarises. */
+  next?: string;
 }
 
-export function listIssues(status: IssueStatus = "all", tool?: string): IssueListing {
-  const { scope } = journalRoot();
+const SUMMARY_CHARS = 160;
+
+function summarize(entry: IssueEntry): string {
+  const text = oneLine(entry.symptom || entry.workaround || "");
+  return text.length > SUMMARY_CHARS ? `${text.slice(0, SUMMARY_CHARS).trimEnd()}…` : text;
+}
+
+function toIndexEntry(e: IssueEntry): IssueIndexEntry {
+  return {
+    id: e.id,
+    title: e.title,
+    tools: e.tools,
+    lastSeen: e.lastSeen,
+    occurrences: e.occurrences,
+    reported: e.reported,
+    summary: summarize(e),
+  };
+}
+
+function readAllEntries(): IssueEntry[] {
   const dir = journalDir();
-  let entries: IssueEntry[] = [];
   try {
-    entries = fs
+    return fs
       .readdirSync(dir)
       .filter((f) => f.endsWith(".md"))
       .map((f) => readEntry(path.join(dir, f)))
       .filter((e): e is IssueEntry => e !== null);
   } catch {
-    entries = []; // No journal yet is the normal state, not an error.
+    return []; // No journal yet is the normal state, not an error.
+  }
+}
+
+function matchesQuery(entry: IssueEntry, terms: string[]): boolean {
+  const haystack = `${entry.title} ${entry.symptom} ${entry.tools.join(" ")}`.toLowerCase();
+  return terms.every((t) => haystack.includes(t));
+}
+
+export function listIssues(options: ListIssuesOptions = {}): IssueListing {
+  const { scope } = journalRoot();
+  const dir = journalDir();
+  const entries = readAllEntries();
+  const envelope = {
+    dir,
+    scope,
+    repo: REPO,
+    newIssueUrl: NEW_ISSUE_URL,
+    serverVersion: packageVersion(),
+    platform: process.platform,
+  };
+
+  // A named entry is a read, not a search: the filters would only be able to
+  // hide the thing that was asked for by name.
+  const wantedId = options.id?.trim();
+  if (wantedId) {
+    const found = entries.find((e) => e.id === slugify(wantedId));
+    if (!found) {
+      throw new Error(
+        `No journal entry with id "${wantedId}".` +
+          (entries.length > 0 ? ` Known ids: ${entries.map((e) => e.id).join(", ")}` : " The journal is empty.")
+      );
+    }
+    return { ...envelope, detail: "full", count: 1, issues: [found] };
   }
 
-  const wanted = tool?.trim().toLowerCase();
+  const status = options.status ?? "all";
+  const wanted = options.tool?.trim().toLowerCase();
+  const terms = (options.query ?? "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 0);
   const filtered = entries.filter((e) => {
     const byStatus = status === "all" ? true : status === "reported" ? e.reported : !e.reported;
     if (!byStatus) return false;
+    if (terms.length > 0 && !matchesQuery(e, terms)) return false;
     if (!wanted) return true;
     // The title is matched too: an entry logged before the `tools` field was
     // filled in still names the tool it is about.
@@ -315,15 +407,18 @@ export function listIssues(status: IssueStatus = "all", tool?: string): IssueLis
   // Most recent first, and among same-day entries the ones that keep recurring.
   filtered.sort((a, b) => b.lastSeen.localeCompare(a.lastSeen) || b.occurrences - a.occurrences);
 
+  const detail = options.detail ?? "index";
   return {
-    dir,
-    scope,
-    repo: REPO,
-    newIssueUrl: NEW_ISSUE_URL,
-    serverVersion: packageVersion(),
-    platform: process.platform,
+    ...envelope,
+    detail,
     count: filtered.length,
-    issues: filtered,
+    issues: detail === "full" ? filtered : filtered.map(toIndexEntry),
+    // The reason to read this journal is that something failed, so an index
+    // that stopped short of the workaround would be worse than useless. Say
+    // how to reach it, every time there is one to reach.
+    ...(detail === "index" && filtered.length > 0
+      ? { next: 'list_known_issues({ id: "<id>" }) for the cause and the workaround.' }
+      : {}),
   };
 }
 
@@ -331,7 +426,7 @@ export function markReported(id: string, url?: string): IssueEntry {
   const file = entryPath(slugify(id));
   const entry = fs.existsSync(file) ? readEntry(file) : null;
   if (!entry) {
-    const known = listIssues("all").issues.map((e) => e.id);
+    const known = readAllEntries().map((e) => e.id);
     throw new Error(
       `No journal entry with id "${id}".` + (known.length > 0 ? ` Known ids: ${known.join(", ")}` : "")
     );

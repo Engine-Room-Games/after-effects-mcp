@@ -25,8 +25,24 @@ export const Interpolation = z.object({
   easeOut: z.object({ influence: z.number(), speed: z.number() }).optional(),
 });
 
+/**
+ * The scoping vocabulary shared by the read tools. Every one of them names the
+ * optional sections of its own response; omitting `include` returns all of them,
+ * which is what every caller written before this existed already gets. `[]`
+ * returns the identifying core alone — the cheapest useful answer.
+ */
+const includeParam = <T extends [string, ...string[]]>(sections: T, hint: string) =>
+  z
+    .array(z.enum(sections))
+    .optional()
+    .describe(`Sections to return: ${sections.join(", ")}. Omit for all of them; [] for ${hint}.`);
+
 // ---------- comps ----------
-export const ListComps = z.object({}).strict();
+export const ListComps = z
+  .object({
+    include: includeParam(["size", "timing", "bg", "counts"], "id + name only"),
+  })
+  .strict();
 export const GetComp = z.object({ compId: z.number() });
 export const GetCompTree = z.object({ compId: z.number(), depth: z.number().int().min(0).max(8).default(2).optional() });
 export const CreateComp = z.object({
@@ -53,8 +69,34 @@ export const DeleteComp = z.object({ compId: z.number() });
 export const SetActiveComp = z.object({ compId: z.number() });
 
 // ---------- layers ----------
-export const ListLayers = z.object({ compId: z.number() });
-export const GetLayerFull = z.object({ compId: z.number(), layerId: z.number(), includeChildren: z.boolean().default(false).optional() });
+export const ListLayers = z.object({
+  compId: z.number(),
+  include: includeParam(["flags", "timing", "parent"], "the id/index/name/type map alone"),
+});
+export const GetLayerFull = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  includeChildren: z.boolean().default(false).optional(),
+  include: includeParam(
+    ["transform", "effects", "masks", "markers", "bounds", "text", "shape", "source"],
+    "the layer header alone"
+  ),
+  maxKeyframes: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      "Cap the keyframes serialized per property. Over the cap you get the first and last few plus a count of what was omitted — never a silent truncation. Omit for all of them."
+    ),
+  shapeDepth: z
+    .number()
+    .int()
+    .min(0)
+    .max(4)
+    .optional()
+    .describe("How deep to walk a shape layer's Contents tree. Default 4; drop to 1-2 on heavy shape layers."),
+});
 
 export const CreateTextLayer = z.object({
   compId: z.number(),
@@ -63,8 +105,10 @@ export const CreateTextLayer = z.object({
   size: z.number().positive().optional(),
   color: Color.optional(),
   position: VecAny.optional(),
+  tracking: z.number().optional()
+    .describe("Letter-spacing. Omit it and the layer is created with tracking 0, because AE's addText() otherwise inherits whatever the user's Character panel was last left on (-20 is common) and the same call then renders differently on two machines. Not normalised when anchorAlign is 'none'."),
   anchorAlign: z.enum(["left", "center", "right", "none"]).default("left").optional()
-    .describe("Where the anchor point sits on the rendered text. Default 'left' makes `position` mean the visible left edge of the first character's baseline — the natural assumption. AE's addText() defaults to a centered anchor, which surprises agents; use 'none' to keep AE's raw default."),
+    .describe("How the text aligns to `position`, implemented as live paragraph justification with the anchor point left at [0,0]. Default 'left' makes `position` the start of the first baseline; 'center' and 'right' put it at the centre/end. Because it is justification rather than a measured anchor offset, the alignment stays correct when the Source Text changes later — retyped, driven by an expression, or edited through Essential Graphics. 'none' leaves AE's raw defaults alone: no justification, no anchor move, no tracking reset."),
   name: z.string().optional(),
 });
 export const CreateShapeLayer = z.object({
@@ -115,7 +159,13 @@ export const SetLayer = z.object({
   preserveTransparency: z.boolean().optional(),
   trackMatte: z.object({ type: z.string(), layerId: z.number().optional() }).optional(),
 });
-export const ParentLayer = z.object({ compId: z.number(), layerId: z.number(), parentLayerId: z.number().nullable() });
+export const ParentLayer = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  parentLayerId: z.number().nullable(),
+  preserveTransform: z.boolean().default(true).optional()
+    .describe("Keep the layer visually where it is (what AE's UI does). Leave on unless you want the layer to jump into the parent's coordinate space."),
+});
 export const ReorderLayer = z.object({ compId: z.number(), layerId: z.number(), toIndex: z.number().int().positive() });
 
 // ---------- transforms ----------
@@ -203,7 +253,14 @@ export const SetEffectParam = z.object({
   keyframe: z.boolean().default(false).optional(),
 });
 export const SetEffectEnabled = z.object({ compId: z.number(), layerId: z.number(), effectIndex: z.number().int().positive(), enabled: z.boolean() });
-export const ListAvailableEffects = z.object({}).strict();
+// The result is cached for the AE session because enumerating app.effects is
+// slow enough to time the bridge out (issue #26). `filter` is a case-insensitive
+// substring match over displayName + matchName + category, so an agent looking
+// for one effect never has to pull ~250 entries into its context.
+export const ListAvailableEffects = z.object({
+  filter: z.string().optional(),
+  refresh: z.boolean().optional(),
+}).strict();
 
 // ---------- text ----------
 export const SetText = z.object({
@@ -332,6 +389,8 @@ export const AddShapeContent = z.object({
   layerId: z.number(),
   parentGroupPath: PropertyPath.optional(),
   content: ShapeContent,
+  zOrder: z.enum(["front", "back"]).optional()
+    .describe("Where the new node sits in its group's render stack. Index 1 renders in FRONT, and AE appends new content to the end — so the default, 'back', puts each node behind everything already there. 'front' moves it to index 1. Prefer ordering your calls front-to-back (details first, background rects last) over reaching for 'front': it needs an internal moveTo, which has been seen to disturb nested renders of the comp in AE 26.3."),
 });
 export const SetShapeProperty = z.object({
   compId: z.number(),
@@ -388,16 +447,31 @@ export const RemoveMarker = z.object({
 });
 
 // ---------- vision ----------
+/**
+ * Omitted means "pick one from the comp size", not 1. The right factor is
+ * derivable from the comp's dimensions, and a caller who forgets it was
+ * previously served a full-resolution 4K frame — the single most expensive
+ * accident available through these tools.
+ */
+const downsampleParam = z
+  .number()
+  .int()
+  .min(1)
+  .max(8)
+  .optional()
+  .describe(
+    "Render at 1/N resolution. Omit and one is chosen from the comp size (long edge ~1280px: 2 at 1080p, 3 at 4K). Pass 1 for a full-resolution frame."
+  );
 export const ScreenshotFrame = z.object({
   compId: z.number(),
   time: z.number().optional(),
-  downsample: z.number().int().min(1).max(8).default(1).optional(),
+  downsample: downsampleParam,
 });
 export const ScreenshotLayer = z.object({
   compId: z.number(),
   layerId: z.number(),
   time: z.number().optional(),
-  downsample: z.number().int().min(1).max(8).default(1).optional(),
+  downsample: downsampleParam,
 });
 
 // ---------- batch ----------
@@ -417,7 +491,55 @@ export const FindLayers = z.object({
 });
 
 // ---------- raw ----------
-export const RunJsx = z.object({ code: z.string() });
+export const RunJsx = z.object({
+  code: z.string(),
+  undoGroup: z.boolean().default(true).optional()
+    .describe("Wrap the script in one undo step. Set false only for the operations AE refuses while an undo group is open — copyToComp on a layer with a parent or a linked expression. The script's changes then land as whatever undo steps AE records on its own."),
+});
+
+// ---------- footage ----------
+export const ImportFootage = z
+  .object({
+    path: z.string().min(1).describe("Absolute path to the file to import."),
+    name: z.string().optional().describe("Rename the project item after import. Omit to keep the filename."),
+    sequence: z.boolean().default(false).optional()
+      .describe("Import a numbered still as an image sequence rather than a single frame."),
+    force: z.boolean().default(false).optional()
+      .describe(
+        "Keep an item that failed validation instead of deleting it and throwing. The problem is still reported in `validation`. Only pass this when you know the dimensions are wrong and want the item anyway."
+      ),
+  })
+  .strict();
+export const CreateFootageLayer = z.object({
+  compId: z.number(),
+  itemId: z.number().describe("Project item id from import_footage or get_project_summary."),
+  name: z.string().optional(),
+  position: VecAny.optional(),
+  startTime: z.number().optional(),
+});
+
+// ---------- motion graphics templates ----------
+export const ExportMogrt = z
+  .object({
+    compId: z.number(),
+    destDir: z.string().optional()
+      .describe("Folder to write the .mogrt into. Defaults to the folder holding the .aep."),
+    name: z.string().optional()
+      .describe(
+        "Template name, which is also the output filename. Defaults to the comp name — AE's own default is the literal 'Untitled', so every scripted export would otherwise overwrite the same file."
+      ),
+    overwrite: z.boolean().default(false).optional()
+      .describe("Required to replace an existing .mogrt at that path."),
+    posterTime: z.number().optional()
+      .describe(
+        "Comp time to render as the template's still thumbnail, replacing the black one AE writes. Omit to leave AE's thumbnail alone."
+      ),
+    suppressDialogs: z.boolean().default(true).optional()
+      .describe(
+        "Suppress the modal font warning during export. Leave true: an unsuppressed dialog freezes the bridge until someone clicks it in AE. Set false only to see the dialog deliberately."
+      ),
+  })
+  .strict();
 
 // ---------- house style (a markdown file beside the .aep, read over the bridge) ----------
 export const GetHouseStyle = z.object({}).strict();
@@ -481,6 +603,21 @@ export const ListKnownIssues = z
   .object({
     status: z.enum(["all", "unreported", "reported"]).default("all").optional(),
     tool: z.string().optional().describe("Only entries about this tool, e.g. 'set_temporal_ease'. Omit for everything."),
+    query: z
+      .string()
+      .optional()
+      .describe("Free-text filter: every whitespace-separated term must appear in an entry's title, symptom or tools."),
+    id: z
+      .string()
+      .optional()
+      .describe("Read one entry in full — cause and workaround included — by the id from a previous listing. Ignores the filters."),
+    detail: z
+      .enum(["index", "full"])
+      .default("index")
+      .optional()
+      .describe(
+        "'index' (default) is one line per entry: id, title, tools, counts and a one-line summary — read the one you need with `id`. 'full' returns every matching entry's whole body and costs thousands of tokens."
+      ),
   })
   .strict();
 export const MarkIssueReported = z
@@ -566,6 +703,11 @@ export const OpSchemas = {
   // explore
   get_project_summary: GetProjectSummary,
   find_layers: FindLayers,
+  // footage
+  import_footage: ImportFootage,
+  create_footage_layer: CreateFootageLayer,
+  // motion graphics templates
+  export_mogrt: ExportMogrt,
   // raw
   run_jsx: RunJsx,
   // house style

@@ -16,8 +16,11 @@ things they can actually answer.
 
 ## 1. Find out what to report
 
-Call `list_known_issues` with `status: "unreported"`. It returns entries earlier
-sessions wrote down, plus `repo`, `newIssueUrl`, `serverVersion` and `platform`.
+Call `list_known_issues` with `status: "unreported"`. It returns a one-line index
+of what earlier sessions wrote down, plus `repo`, `newIssueUrl`, `serverVersion`
+and `platform`. Once they have chosen, read each chosen entry in full with
+`list_known_issues({id})` — the draft below needs the symptom and workaround
+text, which the index does not carry.
 
 - **Entries exist** — show them as a short numbered list, one plain sentence each
   ("Text layers ended up in the wrong place when a font was missing"), not the
