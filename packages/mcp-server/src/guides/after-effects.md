@@ -45,6 +45,8 @@ Omit them all and you get everything, as before. Whatever they leave out is name
 
 Every comp and layer has a stable numeric `id`. Layer `index` is a 1-based position that **shifts whenever layers are added, deleted, or reordered**. Store `(compId, layerId)` and pass those. An index captured before a `create_*` call may point at a different layer by the time you use it.
 
+The same trap bites inside `run_jsx`: a `comp.layer(1)` wrapper is index-bound, not a handle. After a `copyToComp` inserts the copy at index 1, a reference you took earlier silently resolves to the *new* layer — which is how a script ends up parenting a layer to itself. Re-resolve by id or name after anything that inserts a layer.
+
 ## Read, then write, then verify
 
 1. Read the current state (`get_layer_full`).
@@ -128,7 +130,13 @@ For a custom path, use `{type: "path", vertices: [[x,y], …], closed: true}`. T
 
 `run_jsx` executes arbitrary ExtendScript with `app`, `comp`, `OPS` and the helper functions in scope. Reach for it when a needed operation has no tool — duplicating a comp, driving the render queue, batch-renaming.
 
-Two warnings: ExtendScript is **single-threaded**, so a long synchronous loop freezes the user's AE UI; and returned objects are flattened, so return a string you have assembled yourself rather than a nested object.
+ExtendScript is **single-threaded**, so a long synchronous loop freezes the user's AE UI. Keep the script short.
+
+`return X` sends the whole value back — arrays and nested objects included. Values that cannot be represented (functions, live AE objects, cycles) come back as a marker string in place, never dropped — a live object as `"[AVLayer \"Hero\" #616]"`, which is a handle to pass to `get_layer_full`, not a copy of the layer. So an empty result genuinely means the script returned nothing; never read one as "nothing happened".
+
+AE refuses `copyToComp` for a layer with a parent or a linked expression **while an undo group is open**, which is exactly the rig you wanted to copy. Wrap that one call in `withoutUndoGroup(function () { … })`, or pass `undoGroup: false` for the whole script. Nothing rolls back on error, so a script that fails halfway leaves its earlier changes applied — read the state back before re-running one that mutates.
+
+Set the parent first and the transform after, never the reverse. `parent_layer` keeps the layer where it is; raw `layer.parent = x` inside a script does not do so reliably two levels deep, so after scripted parenting audit scale and rotation as well as position.
 
 ### Exporting, saving frames, and the dialogs they raise
 

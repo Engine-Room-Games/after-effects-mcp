@@ -65,10 +65,29 @@ function __newJobId() {
 }
 
 // ---------- Undo wrapper ----------
+// __UNDO_OPEN tracks only the group *dispatch* opened. Nothing else may set it:
+// it is what lets withoutUndoGroup() reopen exactly what it closed, and leave
+// undo state alone entirely when we never opened a group in the first place.
+var __UNDO_OPEN = false;
+
 function withUndo(name, fn) {
   app.beginUndoGroup(name || "AE MCP");
+  __UNDO_OPEN = true;
   try { return fn(); }
-  finally { app.endUndoGroup(); }
+  finally { __UNDO_OPEN = false; app.endUndoGroup(); }
+}
+
+// Run fn with the dispatcher's undo group closed, then reopen it.
+// After Effects refuses a handful of operations while an undo group is open —
+// copyToComp on a layer with a parent or a linked expression is the one that
+// bites (issue #30). No-op when no group of ours is open, so it is always safe
+// to call. The work inside becomes its own undo step, separate from the rest.
+function withoutUndoGroup(fn) {
+  if (!__UNDO_OPEN) return fn();
+  app.endUndoGroup();
+  __UNDO_OPEN = false;
+  try { return fn(); }
+  finally { app.beginUndoGroup("AE MCP: continue"); __UNDO_OPEN = true; }
 }
 
 // ---------- Error helper ----------
@@ -92,7 +111,13 @@ function dispatch(payloadJson) {
   try {
     var handler = OPS[op];
     var meta = handler.__meta || {};
-    if (meta.noUndo) {
+    // __meta.noUndo is a boolean for handlers that never want a group, or a
+    // predicate over args for ops where the caller decides per call (run_jsx).
+    // Keeping the predicate on the handler is what stops one op's opt-out from
+    // leaking into the next: dispatch never remembers anything between calls.
+    var skipUndo = meta.noUndo;
+    if (typeof skipUndo === "function") skipUndo = skipUndo(args);
+    if (skipUndo) {
       return { ok: true, result: handler(args) };
     }
     var result = withUndo(meta.undoName || ("AE MCP: " + op), function () { return handler(args); });
@@ -104,4 +129,6 @@ function dispatch(payloadJson) {
 
 // Helper for handlers that don't want an undo group (read-only ops, job continuations).
 function noUndo(fn) { fn.__meta = { noUndo: true }; return fn; }
+// Same, but the handler decides per call from its own args.
+function noUndoWhen(pred, fn) { fn.__meta = { noUndo: pred }; return fn; }
 function undoNamed(name, fn) { fn.__meta = { undoName: name }; return fn; }
