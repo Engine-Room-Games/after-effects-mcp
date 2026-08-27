@@ -13,7 +13,7 @@ import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
 import { JobManager } from "./jobs/manager.js";
 import { descriptions } from "./tools/descriptions.js";
-import { AeError, BridgeUnreachableError } from "./util/errors.js";
+import { AeError, BridgeTimeoutError, BridgeUnreachableError } from "./util/errors.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
@@ -298,6 +298,9 @@ export function createServer() {
 
       return textResult(result);
     } catch (e) {
+      // Checked before BridgeUnreachableError because the remedies are
+      // opposites: one says restart After Effects, the other says do not.
+      if (e instanceof BridgeTimeoutError) return errorResult(e.message);
       if (e instanceof BridgeUnreachableError) return errorResult(e.message);
       if (e instanceof AeError) {
         // The gate above should have caught this, but it depends on /health

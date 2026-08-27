@@ -20,7 +20,7 @@
     "install:panel": "node scripts/install-panel.mjs",
     "uninstall:panel": "node scripts/uninstall-panel.mjs",
     "doctor": "node scripts/doctor.mjs",
-    "test": "node tests/unit/panel-version.mjs && node tests/unit/panel-paths.mjs && node tests/unit/panel-install.mjs",
+    "test": "node tests/unit/panel-version.mjs && node tests/unit/panel-paths.mjs && node tests/unit/panel-install.mjs && node tests/unit/bridge-timeout.mjs",
     "new:project": "node packages/mcp-server/dist/index.js init",
     "start": "node packages/mcp-server/dist/index.js",
     "inspect": "npx @modelcontextprotocol/inspector node packages/mcp-server/dist/index.js",

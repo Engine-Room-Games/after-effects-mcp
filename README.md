@@ -268,6 +268,7 @@ Start here: **ask your assistant to check the After Effects setup.** It reports 
 | Symptom | Cause and fix |
 |---|---|
 | "Cannot reach the After Effects panel" | After Effects isn't running, or the panel isn't installed. Ask it to set up After Effects; if AE was closed, just open it afterwards. |
+| "The panel did not answer within 120 seconds" | Not the same thing. After Effects is busy — usually a long script, or a dialog waiting for a click behind another window. Wait a minute and check again before restarting anything; it normally comes back on its own. |
 | "The After Effects panel is out of date" | The tools were updated but the panel wasn't. Ask it to update the panel, then restart AE. |
 | "…updated on disk, but After Effects is still running the previous version" | The update landed; AE just hasn't restarted. Quit and reopen it. Updating again won't help. |
 | Panel never loads, but setup looks correct | On macOS, reboot once. Some builds cache the Adobe setting until a restart. |
@@ -275,6 +276,20 @@ Start here: **ask your assistant to check the After Effects setup.** It reports 
 | "No project folder to write to" | Your client didn't tell the server where it's working. Say which folder you want. |
 | Style guide can't be saved | The After Effects project has never been saved. Save it, then try again. |
 | You need the panel's own log | In After Effects: **Window → Extensions → AE MCP Bridge**. |
+
+**If your work legitimately takes longer.** A heavy render or a deliberately long script can pass the limit honestly. Set `AE_MCP_OP_TIMEOUT_MS` in the server's environment to a larger number of milliseconds and it applies to every operation:
+
+```json
+{
+  "mcpServers": {
+    "after-effects": {
+      "command": "npx",
+      "args": ["-y", "@engine-room/after-effects-mcp"],
+      "env": { "AE_MCP_OP_TIMEOUT_MS": "600000" }
+    }
+  }
+}
+```
 
 **The issue notebook.** These tools have rough edges. When your assistant hits one and works out a way around it, it writes the problem and the fix into `.ae-mcp/issues/` in your project folder — plain text files you can read or delete. The next session reads that notebook before guessing. The folder keeps itself out of version control.
 

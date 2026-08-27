@@ -105,6 +105,11 @@ jobs:
       - name: Panel resolves the extension path CEP hands it
         run: node tests/unit/panel-paths.mjs
 
+      # A busy AE and a dead bridge are the same event at the socket layer, and
+      # the only difference the user sees is which remedy we prescribe.
+      - name: Bridge timeouts are diagnosed apart from disconnections
+        run: node tests/unit/bridge-timeout.mjs
+
       - name: check_setup resolves platform paths without throwing
         shell: bash
         run: |

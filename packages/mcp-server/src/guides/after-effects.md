@@ -81,9 +81,11 @@ Use `get_expression` to read one back and `toggle_expression` to disable without
 
 ## Effects
 
-Effects are added by **matchName**, not display name: `add_effect({matchName: "ADBE Gaussian Blur 2"})`. If you do not know a matchName, call `list_available_effects` and search it — do not guess. `list_effects` shows what is already on a layer, with every parameter.
+Effects are added by **matchName**, not display name: `add_effect({matchName: "ADBE Gaussian Blur 2"})`. If you do not know a matchName, call `list_available_effects({filter: "blur"})` — do not guess. `list_effects` shows what is already on a layer, with every parameter.
 
 Set parameters with `set_effect_param` by parameter name (e.g. `"Blurriness"`).
+
+**Never enumerate `app.effects` yourself in `run_jsx`.** There are around 250 of them and reading the table is slow enough to block the bridge past its timeout, which looks exactly like a crash and costs a minute of everyone's time. `list_available_effects` does the same enumeration once and caches it for the session, so `filter` searches are free after the first call. A wrong matchName also fails instantly and clearly, so trying `ADBE Slider Control` is cheaper than searching for it.
 
 ## Text
 
@@ -104,6 +106,27 @@ For a custom path, use `{type: "path", vertices: [[x,y], …], closed: true}`. T
 `run_jsx` executes arbitrary ExtendScript with `app`, `comp`, `OPS` and the helper functions in scope. Reach for it when a needed operation has no tool — duplicating a comp, driving the render queue, batch-renaming.
 
 Two warnings: ExtendScript is **single-threaded**, so a long synchronous loop freezes the user's AE UI; and returned objects are flattened, so return a string you have assembled yourself rather than a nested object.
+
+### Exporting, saving frames, and the dialogs they raise
+
+After Effects asks the user interactively where a script would rather have an error, and every dialog freezes the bridge until someone clicks it. Three of them turn up around `comp.exportAsMotionGraphicsTemplate(...)` and `comp.saveFrameToPng(...)`:
+
+- **"The project needs to be saved first."** Call `app.project.save()` immediately before the export, in the same `run_jsx`. That removes this one deterministically. If the project has never been saved there is no path to save to — ask the user to save it once first.
+- **"The following fonts were not synced from Adobe … Click OK to continue."** Unavoidable when the comp uses non-Adobe fonts. Warn the user *before* you start the export that they will have to click OK, so a dialog they were not expecting does not read as a hang.
+- **"Undo group mismatch, will attempt to fix."** Harmless; the export is not undoable and interrupting it unbalances the group `run_jsx` wraps your code in.
+
+If an export seems to have hung, assume a dialog before you assume a crash — it may be behind another window. And note that `comp.setMotionGraphicsControllerName(index, …)` numbers controllers in **reverse order of addition**: index 1 is the one you added last.
+
+### Importing SVG
+
+There is no import tool; SVG import happens through `run_jsx` and `importFile`, and AE's own SVG importer has a trap. An SVG with a very large `viewBox` (say `0 0 278050 333334`) imports with **fabricated dimensions and renders as nothing**, with no error at any stage.
+
+Check it yourself after importing: read the footage item's `width`/`height` and compare the aspect ratio with the `viewBox`. If they disagree, the item is broken however healthy it looks in the project panel.
+
+- **Simple flat SVGs** — rebuild the path as a shape layer with the real vertices, scaled down to a sane coordinate space (divide by `333.334` for a 1000px version), set the fill from the SVG, and set `ADBE Vector Fill Rule` to `2` when the SVG says `fill-rule="evenodd"`. Done this way the result is pixel-accurate.
+- **Complex SVGs** — rasterise to PNG outside AE, or normalise the `viewBox` to a small coordinate space before importing.
+
+Either way, delete the broken footage item so nobody places it later.
 
 ## When something costs you real time
 
@@ -155,3 +178,12 @@ Never claim you have reported something you have not.
 ## When something is not connected
 
 If a tool reports it cannot reach After Effects, call `check_setup` and relay its `nextSteps` to the user in plain language. Do not try to diagnose CEP by hand.
+
+**A timeout is not proof the bridge is dead.** The error that says the panel did not answer in time is a different thing from the one that says the panel cannot be reached. Because ExtendScript is single-threaded, a busy After Effects cannot answer anything — so a long script, or a modal dialog nobody has clicked, is indistinguishable from a crash at this layer. It normally recovers on its own within a minute.
+
+So when a call times out: do not re-send it (you would queue the same work twice), do not restart After Effects, and do not run `setup_panel`. Poll `check_setup` for about a minute first. Two causes worth asking about directly:
+
+- **A dialog is waiting.** Ask the user to check After Effects for a prompt hiding behind another window.
+- **They changed desktop.** On macOS, calls have been reported to stall while the user is on a different Space and to complete as soon as they return. If they have wandered off, ask them to switch back to the desktop After Effects is on before you diagnose anything else.
+
+If a specific operation of yours legitimately needs longer than the limit, the user can raise it by setting `AE_MCP_OP_TIMEOUT_MS` in the server's environment.

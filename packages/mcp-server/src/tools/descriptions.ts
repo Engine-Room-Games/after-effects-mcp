@@ -49,11 +49,11 @@ export const descriptions: Record<string, string> = {
 
   // ---------- effects ----------
   list_effects: "All effects on a layer with current param values + keyframes/expressions.",
-  add_effect: "Add effect by matchName (use list_available_effects — matchNames are stable across AE versions; display names aren't).",
+  add_effect: "Add effect by matchName (use list_available_effects — matchNames are stable across AE versions; display names aren't). A wrong matchName fails immediately and cheaply, so try the standard one (ADBE Gaussian Blur 2, ADBE Slider Control) before searching.",
   remove_effect: "Remove effect by 1-based index.",
   set_effect_param: "Set an effect param by name/matchName. keyframe:true+time for keyframed value.",
   set_effect_enabled: "Toggle an effect on/off without removing.",
-  list_available_effects: "All effects installed in this AE: displayName, matchName, category.",
+  list_available_effects: "Effects installed in this AE: displayName, matchName, category. Pass `filter` to substring-search instead of pulling ~250 entries; `refresh:true` re-reads after installing a plugin. Cached per AE session — this is the only cheap way to search effects. Never loop over `app.effects` in run_jsx: it is slow enough to block the bridge past its timeout and looks like a crash.",
 
   // ---------- text ----------
   set_text: "Set text content + styling (font, size, fill/stroke, tracking, leading, justification). Undefined fields unchanged.",

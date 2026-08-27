@@ -203,7 +203,14 @@ export const SetEffectParam = z.object({
   keyframe: z.boolean().default(false).optional(),
 });
 export const SetEffectEnabled = z.object({ compId: z.number(), layerId: z.number(), effectIndex: z.number().int().positive(), enabled: z.boolean() });
-export const ListAvailableEffects = z.object({}).strict();
+// The result is cached for the AE session because enumerating app.effects is
+// slow enough to time the bridge out (issue #26). `filter` is a case-insensitive
+// substring match over displayName + matchName + category, so an agent looking
+// for one effect never has to pull ~250 entries into its context.
+export const ListAvailableEffects = z.object({
+  filter: z.string().optional(),
+  refresh: z.boolean().optional(),
+}).strict();
 
 // ---------- text ----------
 export const SetText = z.object({
