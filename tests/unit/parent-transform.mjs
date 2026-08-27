@@ -23,7 +23,13 @@ import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const source = fs.readFileSync(path.join(root, "packages", "jsx", "layers.jsx"), "utf8");
+const jsxDir = path.join(root, "packages", "jsx");
+const read = (f) => fs.readFileSync(path.join(jsxDir, f), "utf8");
+// layers.jsx is not self-contained: __layerSummary calls __wantsSection, which
+// comps.jsx declares. In the shipped bundle every module shares one scope, so
+// this loads both rather than stubbing the helper — a stub would be free to
+// drift from the scoping the ops actually apply.
+const sources = [["comps.jsx", read("comps.jsx")], ["layers.jsx", read("layers.jsx")]];
 
 // ---------- the mock DOM ----------
 
@@ -165,7 +171,7 @@ function loadOps(layers) {
     },
   };
   vm.createContext(ctx);
-  vm.runInContext(source, ctx, { filename: "layers.jsx" });
+  for (const [filename, src] of sources) vm.runInContext(src, ctx, { filename });
   return ctx.OPS;
 }
 
