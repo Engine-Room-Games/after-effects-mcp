@@ -63,8 +63,10 @@ export const CreateTextLayer = z.object({
   size: z.number().positive().optional(),
   color: Color.optional(),
   position: VecAny.optional(),
+  tracking: z.number().optional()
+    .describe("Letter-spacing. Omit it and the layer is created with tracking 0, because AE's addText() otherwise inherits whatever the user's Character panel was last left on (-20 is common) and the same call then renders differently on two machines. Not normalised when anchorAlign is 'none'."),
   anchorAlign: z.enum(["left", "center", "right", "none"]).default("left").optional()
-    .describe("Where the anchor point sits on the rendered text. Default 'left' makes `position` mean the visible left edge of the first character's baseline — the natural assumption. AE's addText() defaults to a centered anchor, which surprises agents; use 'none' to keep AE's raw default."),
+    .describe("How the text aligns to `position`, implemented as live paragraph justification with the anchor point left at [0,0]. Default 'left' makes `position` the start of the first baseline; 'center' and 'right' put it at the centre/end. Because it is justification rather than a measured anchor offset, the alignment stays correct when the Source Text changes later — retyped, driven by an expression, or edited through Essential Graphics. 'none' leaves AE's raw defaults alone: no justification, no anchor move, no tracking reset."),
   name: z.string().optional(),
 });
 export const CreateShapeLayer = z.object({
@@ -332,6 +334,8 @@ export const AddShapeContent = z.object({
   layerId: z.number(),
   parentGroupPath: PropertyPath.optional(),
   content: ShapeContent,
+  zOrder: z.enum(["front", "back"]).optional()
+    .describe("Where the new node sits in its group's render stack. Index 1 renders in FRONT, and AE appends new content to the end — so the default, 'back', puts each node behind everything already there. 'front' moves it to index 1. Prefer ordering your calls front-to-back (details first, background rects last) over reaching for 'front': it needs an internal moveTo, which has been seen to disturb nested renders of the comp in AE 26.3."),
 });
 export const SetShapeProperty = z.object({
   compId: z.number(),

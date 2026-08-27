@@ -87,7 +87,9 @@ Set parameters with `set_effect_param` by parameter name (e.g. `"Blurriness"`).
 
 ## Text
 
-`create_text_layer` places **point text anchored at the bounding-box centre**, which is not where you would expect from the visible left edge. The tool defaults to `anchorAlign: "left"` so that `position` lines up with the left edge as a designer would read it. Pass `"center"` or `"right"` when you want those, `"none"` for AE's raw behaviour.
+`create_text_layer` defaults to `anchorAlign: "left"`, which sets **paragraph justification** and leaves the anchor point at `[0,0]`, so `position` is the start of the first baseline. Pass `"center"` or `"right"` for those, `"none"` for AE's raw behaviour. Because the alignment is justification rather than a measured offset, it stays correct when the text changes later — retyped, driven by an expression, or edited through Essential Graphics in Premiere. Never "fix" alignment by writing an anchor point computed from `sourceRectAtTime()`: it is right once and wrong from the next edit onward.
+
+Tracking is set to `0` unless you pass one, because AE's `addText()` otherwise inherits whatever the user's Character panel was last left on.
 
 `set_text` controls font, size, colour, tracking, leading and justification. To auto-fit a background to text, read `sourceRect` from `get_layer_full` and size the shape from its width and height plus padding.
 
@@ -98,6 +100,10 @@ Set parameters with `set_effect_param` by parameter name (e.g. `"Blurriness"`).
 This tool is **all-or-nothing**: if a key cannot be applied, the whole node is removed and you get an error naming the bad key. A success result therefore means everything landed. Don't add defensive re-reads for it, but do read the error carefully — it usually means the property is named differently on that node type, and `get_layer_full` will show you the real name.
 
 For a custom path, use `{type: "path", vertices: [[x,y], …], closed: true}`. The key is `vertices`, not `points`.
+
+**Render order is the opposite of the layer stack.** Inside `Contents`, index 1 renders in *front*, and each `add_shape_content` call appends behind the previous one. So build **front-to-back**: details, text plates and traffic-light dots first, the big background rectangle last. Getting it backwards is silent — no error, just a solid slab where your artwork should be. `zOrder: "front"` will place a node at index 1 for you, but it needs an internal `moveTo`, which has been seen to disturb *nested* renders of the comp in AE 26.3; prefer ordering your calls. If an existing layer is already in the wrong order, rebuild it rather than reordering, and verify with a screenshot of a comp that **nests** it, not just the comp that owns it.
+
+**Node references go stale.** Adding a sibling to a group invalidates a reference you already hold to another node in it — add a Stroke and an earlier Fill reference starts throwing `Object is invalid`. Add every node first, then set values and expressions by addressing nodes by name.
 
 ## The escape hatch
 

@@ -129,6 +129,42 @@ OPS.add_shape_content = function (args) {
   }
 
   var node = parent.addProperty(match);
+
+  // Render order. addProperty always appends to the END of the group, and in a
+  // shape layer index 1 renders in FRONT — so an appended node lands at the back
+  // and the first thing added is the thing on top. That is the opposite of the
+  // layer stack, and building back-to-front silently produces a solid slab.
+  //
+  // "back" is therefore what already happened and needs no move. "front" is the
+  // only case that reorders, and moveTo is the only primitive AE offers for it —
+  // see the note in the tool description about nested renders. Do it here, on a
+  // node with nothing in it yet, so a failure costs an empty node and nothing
+  // else, and re-fetch afterwards: a structural change invalidates references
+  // into the group (the same trap that makes a Fill reference go stale when a
+  // Stroke is added beside it).
+  if (args.zOrder === "front" && node.propertyIndex !== 1) {
+    try {
+      node.moveTo(1);
+    } catch (eMove) {
+      try { node.remove(); } catch (eRm) {}
+      throw new Error(
+        "add_shape_content created the '" + type + "' node but could not move it to the front of the " +
+        "render stack: " + eMove.message + ". The node was removed, so nothing changed."
+      );
+    }
+    node = parent.property(1);
+    // Cheap identity check on the re-fetch. If moveTo ever lands the node
+    // somewhere other than index 1, setting properties on whatever is there
+    // would corrupt a node the caller never asked about.
+    if (!node || node.matchName !== match) {
+      throw new Error(
+        "add_shape_content moved the '" + type + "' node towards the front of the render stack but did not " +
+        "find it at index 1 afterwards. No properties were set on it. Read the layer back with get_layer_full " +
+        "before retrying, and add contents front-to-back instead of using zOrder."
+      );
+    }
+  }
+
   var applied = [];
   var failed = [];
 
