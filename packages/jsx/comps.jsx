@@ -1,26 +1,41 @@
 // comps.jsx — composition ops.
 
-function __compSummary(c) {
-  return {
-    id: c.id,
-    name: c.name,
-    width: c.width,
-    height: c.height,
-    duration: c.duration,
-    frameRate: c.frameRate,
-    pixelAspect: c.pixelAspect,
-    bgColor: [c.bgColor[0], c.bgColor[1], c.bgColor[2]],
-    numLayers: c.numLayers,
-    workAreaStart: c.workAreaStart,
-    workAreaDuration: c.workAreaDuration,
-  };
+// The section filter every read op shares. `sections` is the caller's `include`
+// array: null/undefined means "all of them", which is what every caller written
+// before `include` existed passes. An empty array means the identifying core
+// only. Defined here because comps.jsx is the first module in the bundle that
+// needs it; layers.jsx and explore.jsx use the same one.
+function __wantsSection(sections, name) {
+  if (!sections) return true;
+  for (var i = 0; i < sections.length; i++) if (sections[i] === name) return true;
+  return false;
+}
+
+function __compSummary(c, sections) {
+  // id and name are the map an agent orients with, so they are never optional.
+  var out = { id: c.id, name: c.name };
+  if (__wantsSection(sections, "size")) {
+    out.width = c.width;
+    out.height = c.height;
+    out.pixelAspect = c.pixelAspect;
+  }
+  if (__wantsSection(sections, "timing")) {
+    out.duration = c.duration;
+    out.frameRate = c.frameRate;
+    out.workAreaStart = c.workAreaStart;
+    out.workAreaDuration = c.workAreaDuration;
+  }
+  if (__wantsSection(sections, "bg")) out.bgColor = [c.bgColor[0], c.bgColor[1], c.bgColor[2]];
+  if (__wantsSection(sections, "counts")) out.numLayers = c.numLayers;
+  return out;
 }
 
 OPS.list_comps = noUndo(function (args) {
+  var sections = (args && args.include) ? args.include : null;
   var out = [];
   for (var i = 1; i <= app.project.numItems; i++) {
     var it = app.project.item(i);
-    if (it instanceof CompItem) out.push(__compSummary(it));
+    if (it instanceof CompItem) out.push(__compSummary(it, sections));
   }
   return out;
 });

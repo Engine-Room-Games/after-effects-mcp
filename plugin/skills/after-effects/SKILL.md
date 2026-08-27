@@ -32,6 +32,15 @@ Never guess at project state. Cheap reads exist for exactly this:
 
 `get_layer_full` is the one to reach for. It returns transforms **with their keyframes and expressions**, effects with every parameter, masks, markers, and `sourceRect` (the layer's visible bounds) in a single call. Prefer one `get_layer_full` over four narrow queries — it is faster and it shows you context you did not know to ask for.
 
+### Ask for what you need
+
+A tool result stays in your context for the rest of the session, so a read you cannot bound is paid for on every later call. All of these reads take an `include` list:
+
+- `list_comps` / `list_layers` with `include: []` return the id-to-name map alone, which is what orientation actually needs.
+- `get_layer_full` takes `include` (`transform`, `effects`, `masks`, `markers`, `bounds`, `text`, `shape`, `source`), plus `maxKeyframes` to cap the keyframes per property and `shapeDepth` to limit the Contents walk on a heavy shape layer.
+
+Omit them all and you get everything, as before. Whatever they leave out is named and counted in the response — a bounded read never looks like a complete one.
+
 ## Identify things by ID, never by index
 
 Every comp and layer has a stable numeric `id`. Layer `index` is a 1-based position that **shifts whenever layers are added, deleted, or reordered**. Store `(compId, layerId)` and pass those. An index captured before a `create_*` call may point at a different layer by the time you use it.
@@ -49,8 +58,8 @@ Property values are the ground truth. A screenshot tells you something *looks* w
 `screenshot_frame` and `screenshot_layer` are **one-off checks**. Do not screenshot every frame, do not scrub through time, do not screenshot after every edit.
 
 - Take at most 2–3 across an animation — typically start, middle, end.
-- **Always pass `downsample`** on large comps: `2` for 1080p, `3`–`4` for 4K. A full-resolution 4K frame is large enough to blow out your context in one call.
-- The result reports the dimensions actually returned and warns if the downsample could not be applied — trust those numbers rather than assuming.
+- **The `downsample` is picked from the comp size** unless you pass one — 2 at 1080p, 3 at 4K, aiming at a long edge around 1280px. Pass `downsample: 1` only when you genuinely need full resolution: a full 4K frame is large enough to blow out your context in one call.
+- The result reports the dimensions actually returned and the factor actually applied — trust those numbers rather than assuming.
 - **Space them out.** Rapid back-to-back requests are far more likely to come back stale than requests a few seconds apart.
 
 Two results are not images, and both are information rather than something to retry blindly:
@@ -149,7 +158,10 @@ exist so that each one is only paid for once.
 
 **`list_known_issues`** — what earlier sessions hit and how they got past it.
 Read it when a tool fails in a way you do not immediately understand, before you
-start guessing. The answer is often already there.
+start guessing. The answer is often already there. It comes back as a one-line
+index, so open the entry that looks like your failure with
+`list_known_issues({id})` — the cause and the workaround are in the entry, not in
+the index. `tool` and `query` narrow it further.
 
 **`log_issue`** — write down what you worked out, the moment you work it out.
 

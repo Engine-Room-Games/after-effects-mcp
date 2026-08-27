@@ -14,6 +14,27 @@ function __clampDownsample(v) {
   return n > 8 ? 8 : n;
 }
 
+// The long edge we aim a screenshot at. ~1280px is still legible for checking
+// type and layout, and costs roughly 1.2k image tokens instead of the 11k a
+// full-resolution 4K frame costs.
+var __SCREENSHOT_TARGET_PX = 1280;
+
+// The correct downsample was always derivable from the comp, and an agent that
+// forgot it got a full-resolution 4K frame — the most expensive accident
+// available through these tools. So derive it, and let an explicit value win.
+// 1080p -> 2 (960px), 4K -> 3 (1280px), and anything already small -> 1.
+function __autoDownsample(comp) {
+  var longEdge = comp.width > comp.height ? comp.width : comp.height;
+  var n = Math.ceil(longEdge / __SCREENSHOT_TARGET_PX);
+  if (!(n > 1)) return 1;
+  return n > 8 ? 8 : n;
+}
+
+function __resolveDownsample(comp, requested) {
+  if (requested === undefined || requested === null) return __autoDownsample(comp);
+  return __clampDownsample(requested);
+}
+
 // saveFrameToPng honours the comp's resolutionFactor, so AE can render the
 // reduced frame directly instead of writing full size and resampling
 // afterwards. That is faster (a quarter of the pixels at factor 2) and needs no
@@ -37,7 +58,7 @@ function __saveFrameAt(comp, time, file, factor) {
 OPS.screenshot_frame = noUndo(function (args) {
   var c = getCompById(args.compId);
   var t = (args.time !== undefined && args.time !== null) ? args.time : c.time;
-  var ds = __clampDownsample(args.downsample);
+  var ds = __resolveDownsample(c, args.downsample);
   var path = __tmpPngPath();
   var f = new File(path);
   // saveFrameToPng is async-ish; the panel polls the file's existence/size.
@@ -62,7 +83,7 @@ OPS.screenshot_layer = noUndo(function (args) {
     ll.solo = false;
   }
   l.solo = true;
-  var ds = __clampDownsample(args.downsample);
+  var ds = __resolveDownsample(c, args.downsample);
   var path = __tmpPngPath();
   var f = new File(path);
   try {

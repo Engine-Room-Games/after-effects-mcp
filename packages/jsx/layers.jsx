@@ -15,32 +15,40 @@ function __layerKind(l) {
   return "unknown";
 }
 
-function __layerSummary(l) {
-  var parent = l.parent ? l.parent.id : null;
-  return {
+// `sections` is the caller's `include` array (see __wantsSection in comps.jsx).
+// Null means every section, so every existing caller is unaffected; the core —
+// the id/index/name/type map an agent orients with — is always present.
+function __layerSummary(l, sections) {
+  var out = {
     id: l.id,
     index: l.index,
     name: l.name,
-    enabled: l.enabled,
-    solo: l.solo,
-    locked: l.locked,
-    shy: l.shy,
-    threeDLayer: l.threeDLayer,
-    label: l.label,
-    inPoint: l.inPoint,
-    outPoint: l.outPoint,
-    startTime: l.startTime,
-    stretch: l.stretch,
     sourceType: __layerKind(l),
-    parent: parent,
-    blendingMode: l.blendingMode,
   };
+  if (__wantsSection(sections, "flags")) {
+    out.enabled = l.enabled;
+    out.solo = l.solo;
+    out.locked = l.locked;
+    out.shy = l.shy;
+    out.threeDLayer = l.threeDLayer;
+    out.label = l.label;
+    out.blendingMode = l.blendingMode;
+  }
+  if (__wantsSection(sections, "timing")) {
+    out.inPoint = l.inPoint;
+    out.outPoint = l.outPoint;
+    out.startTime = l.startTime;
+    out.stretch = l.stretch;
+  }
+  if (__wantsSection(sections, "parent")) out.parent = l.parent ? l.parent.id : null;
+  return out;
 }
 
 OPS.list_layers = noUndo(function (args) {
   var c = getCompById(args.compId);
+  var sections = (args && args.include) ? args.include : null;
   var out = [];
-  for (var i = 1; i <= c.numLayers; i++) out.push(__layerSummary(c.layer(i)));
+  for (var i = 1; i <= c.numLayers; i++) out.push(__layerSummary(c.layer(i), sections));
   return out;
 });
 

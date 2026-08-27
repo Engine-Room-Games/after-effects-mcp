@@ -50,8 +50,7 @@ Six things that are not obvious from the tool list:
 3. Identify by id, never by index. Layer \`index\` shifts whenever layers are
    added, deleted or reordered. Carry \`(compId, layerId)\`.
 4. Verify by reading properties back, not by screenshotting. Screenshots are
-   one-off diagnostics: 2-3 across an animation, and always pass \`downsample\`
-   (2 for 1080p, 3-4 for 4K) or a single frame can fill your context.
+   one-off diagnostics: 2-3 across an animation, never per frame.
 5. Bulk work goes through \`run_batch\` — one ExtendScript pass, one undo step.
 6. When a tool fails in a way you do not understand, call \`list_known_issues\`
    before guessing; an earlier session may have solved it already. When you solve
