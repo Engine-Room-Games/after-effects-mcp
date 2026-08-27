@@ -27,7 +27,8 @@ export const descriptions: Record<string, string> = {
   duplicate_layer: "Duplicate a layer N times; each has a fresh id.",
   delete_layer: "Remove a layer.",
   set_layer: "Update layer metadata (name/enabled/locked/shy/solo/3D/blend/label/in-out/stretch/trackMatte). Undefined fields unchanged.",
-  parent_layer: "Set/clear a layer's parent (parentLayerId=null to unparent).",
+  parent_layer:
+    "Set/clear a layer's parent (parentLayerId=null to unparent). The layer stays visually put: AE's own compensation double-counts when the parent was itself re-parented in the same call, so this recomputes the world transform and corrects position/scale/rotation, reporting any correction in `correction`. Read `correction.notes` — 3D layers, cameras and lights are not corrected, and with a keyframed ancestor the fix is only exact at the comp's current time. Pass preserveTransform:false to let the layer jump instead.",
   reorder_layer: "Move layer to 1-based stack index.",
 
   // ---------- transforms ----------
@@ -81,11 +82,13 @@ export const descriptions: Record<string, string> = {
   run_batch: "Many ops in one ExtendScript pass, one undo step. >500 ops returns a jobId + streams progress; use await_job. transactional:true (default) rolls back on first error.",
 
   // ---------- explore ----------
-  get_project_summary: "Project state: path, item count, active item, flat item list with type.",
+  get_project_summary: "Project state: path, item count, active item, flat item list with type (comp | footage | solid | folder | unknown — same vocabulary as a layer's sourceType).",
   find_layers: "Search across one or all comps for layers matching name/type/effect filters.",
 
   // ---------- raw ----------
-  run_jsx: "Escape hatch: arbitrary ExtendScript in an undo group. `comp`/`app`/`OPS`/helpers in scope. Use `return X` to send a value back; complex AE objects are coerced to plain props.",
+  run_jsx:
+    "Escape hatch: arbitrary ExtendScript in an undo group. `comp`/`app`/`OPS`/helpers in scope. `return X` sends a value back — arrays and nested objects come back whole. Anything that cannot be JSON is replaced in place by a marker string, never dropped: `\"[function]\"`, `\"[undefined]\"`, `\"[circular]\"`, `\"[max depth]\"`, `\"[NaN]\"`, and live AE objects as `\"[CompItem \\\"Main\\\" #12]\"` — a handle to pass to a real read tool, not a walk of the object. An empty result therefore means the script really returned nothing. " +
+    "AE refuses copyToComp for a layer with a parent or a linked expression while an undo group is open: call `withoutUndoGroup(function(){ … })` around just that part, or pass undoGroup:false for the whole script (its changes then land as whatever undo steps AE records on its own, not one). Keep loops short — ExtendScript is single-threaded and freezes the user's UI.",
 
   // ---------- house style ----------
   get_house_style:

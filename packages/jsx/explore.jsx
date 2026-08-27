@@ -190,6 +190,24 @@ OPS.get_layer_full = noUndo(function (args) {
   return out;
 });
 
+// Project item kind. An if/else chain, not a chained ternary: this build of
+// ExtendScript parses `a ? x : b ? y : z` left-associatively, so the first
+// truthy branch became the next condition and every item fell through to
+// "folder" (issues #21/#22). tests/unit/jsx-ternary.mjs keeps it that way.
+// "solid" mirrors __layerKind in layers.jsx so an item and a layer that share a
+// source describe it with the same word.
+function __itemKind(it) {
+  if (it instanceof CompItem) return "comp";
+  if (it instanceof FolderItem) return "folder";
+  if (it instanceof FootageItem) {
+    try {
+      if (it.mainSource && it.mainSource.color !== undefined) return "solid";
+    } catch (e) {}
+    return "footage";
+  }
+  return "unknown";
+}
+
 OPS.get_project_summary = noUndo(function (args) {
   var p = app.project;
   var items = [];
@@ -198,7 +216,7 @@ OPS.get_project_summary = noUndo(function (args) {
     items.push({
       id: it.id,
       name: it.name,
-      type: (it instanceof CompItem) ? "comp" : (it instanceof FootageItem) ? "footage" : (it instanceof FolderItem) ? "folder" : "unknown",
+      type: __itemKind(it),
     });
   }
   return {

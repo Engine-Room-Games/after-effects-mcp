@@ -115,7 +115,13 @@ export const SetLayer = z.object({
   preserveTransparency: z.boolean().optional(),
   trackMatte: z.object({ type: z.string(), layerId: z.number().optional() }).optional(),
 });
-export const ParentLayer = z.object({ compId: z.number(), layerId: z.number(), parentLayerId: z.number().nullable() });
+export const ParentLayer = z.object({
+  compId: z.number(),
+  layerId: z.number(),
+  parentLayerId: z.number().nullable(),
+  preserveTransform: z.boolean().default(true).optional()
+    .describe("Keep the layer visually where it is (what AE's UI does). Leave on unless you want the layer to jump into the parent's coordinate space."),
+});
 export const ReorderLayer = z.object({ compId: z.number(), layerId: z.number(), toIndex: z.number().int().positive() });
 
 // ---------- transforms ----------
@@ -417,7 +423,11 @@ export const FindLayers = z.object({
 });
 
 // ---------- raw ----------
-export const RunJsx = z.object({ code: z.string() });
+export const RunJsx = z.object({
+  code: z.string(),
+  undoGroup: z.boolean().default(true).optional()
+    .describe("Wrap the script in one undo step. Set false only for the operations AE refuses while an undo group is open — copyToComp on a layer with a parent or a linked expression. The script's changes then land as whatever undo steps AE records on its own."),
+});
 
 // ---------- house style (a markdown file beside the .aep, read over the bridge) ----------
 export const GetHouseStyle = z.object({}).strict();
