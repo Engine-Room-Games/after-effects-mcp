@@ -11,18 +11,25 @@
 //
 // What this measures, and why each part is the discriminator:
 //
-//   1. A `/health` poll every second, timed. This is a bare HTTP round trip
-//      that never enters ExtendScript. If these stall, nothing in After
-//      Effects is to blame — the panel's own event loop is being throttled.
-//   2. A long `run_batch`, which the panel drives in chunks and reports over
-//      the WebSocket. If WS progress keeps arriving while the HTTP reply does
-//      not, the problem is not ExtendScript starvation at all. If both stop
-//      together, it is.
+//   1. The gap between WebSocket progress events during a long `run_batch`.
+//      This is the discriminator. The panel drives chunks on `setTimeout(0)`,
+//      and a backgrounded Chromium renderer clamps that to about one tick a
+//      second — which would turn a 600-op batch into a ten-minute one and show
+//      up here as seconds-long gaps.
+//   2. A `/health` poll every second, timed. Note what this does *not* prove:
+//      a slow /health while the batch is running is expected, because each
+//      evalScript chunk blocks the CEP renderer and the panel cannot answer
+//      until it returns. Only a stall while nothing is running counts.
 //   3. Whether After Effects is frontmost, sampled each second, so the log
 //      says exactly when you left and came back without you timing anything.
 //
 // Run it, switch Spaces when it tells you to, come back when it tells you to,
-// and paste the summary into the issue.
+// and compare against a `--baseline` run. One run alone proves nothing: the
+// question is whether being away changes the numbers, not what they are.
+//
+// Measured once already, on 2026-08-27, with AE backgrounded on another Space
+// for the whole run: 600 ops finished in 47.9s with no progress gap over 6s.
+// That is the reported condition, and it did not reproduce.
 //
 //   node scripts/diagnose-spaces.mjs                 # default: 45s away
 //   node scripts/diagnose-spaces.mjs --ops 400 --away 60
@@ -133,11 +140,22 @@ function openEvents() {
     }
     let progressCount = 0;
     let lastProgressAt = null;
+    let completedAt = null;
+    let biggestGap = 0;
+    const waiters = [];
     ws.addEventListener("open", () => {
       record("ws", "connected");
       resolve({
         close: () => ws.close(),
-        stats: () => ({ progressCount, lastProgressAt }),
+        stats: () => ({ progressCount, lastProgressAt, completedAt, biggestGap }),
+        // The panel announces completion over the WebSocket. That is the only
+        // signal available here: get_job is server-resident and the panel has
+        // never heard of it, so polling /op for it can only ever time out.
+        whenComplete: (ms) => new Promise((resolve) => {
+          if (completedAt !== null) return resolve(completedAt);
+          const timer = setTimeout(() => resolve(null), ms);
+          waiters.push(() => { clearTimeout(timer); resolve(completedAt); });
+        }),
       });
     });
     ws.addEventListener("message", (ev) => {
@@ -145,10 +163,18 @@ function openEvents() {
       try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.type === "progress") {
         progressCount++;
-        lastProgressAt = (Date.now() - t0) / 1000;
+        const now = (Date.now() - t0) / 1000;
+        // The gap between chunks is the number that matters: a throttled panel
+        // shows up as one long silence, not as a lower total.
+        if (lastProgressAt !== null) biggestGap = Math.max(biggestGap, now - lastProgressAt);
+        lastProgressAt = now;
         // Every chunk would be noise; a heartbeat is enough to see a gap.
         if (progressCount % 5 === 1) record("ws-progress", `${msg.progress}/${msg.total}`);
       } else {
+        if (msg.type === "complete" || msg.type === "error") {
+          completedAt = (Date.now() - t0) / 1000;
+          while (waiters.length) waiters.pop()();
+        }
         record("ws-" + msg.type, JSON.stringify(msg).slice(0, 120));
       }
     });
@@ -245,19 +271,16 @@ async function main() {
   const batchMs = Date.now() - batchStarted;
   record("batch", batchError ? `FAILED after ${batchMs}ms: ${batchError.message}` : `replied in ${batchMs}ms`);
 
-  // The batch is async past the inline cutoff: the HTTP reply is a jobId and
-  // the work continues. Wait for the completion event before drawing any
-  // conclusion about when it finished.
+  // The batch is async past the inline cutoff: the HTTP reply is only a jobId
+  // and the work continues, so the reply time says nothing about when it
+  // finished. The panel broadcasts completion on the WebSocket — wait for that.
+  let workFinishedAt = null;
   if (batchResult?.result?.jobId && !batchResult.result.done) {
-    record("batch", `async job ${batchResult.result.jobId}; waiting for completion`);
-    const deadline = Date.now() + 600000;
-    while (Date.now() < deadline) {
-      const j = await postOp({ op: "get_job", args: { jobId: batchResult.result.jobId }, requestId: "probe-job" }, 10000)
-        .catch(() => null);
-      if (j?.result?.done || j?.result?.status === "complete") break;
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-    record("batch", "job finished");
+    record("batch", `async job ${batchResult.result.jobId}; waiting for the completion event`);
+    workFinishedAt = await ws?.whenComplete(600000);
+    record("batch", workFinishedAt === null ? "no completion event within 600s" : `work finished at ${workFinishedAt.toFixed(1)}s`);
+  } else {
+    workFinishedAt = (Date.now() - t0) / 1000;
   }
 
   polling = false;
@@ -292,17 +315,21 @@ async function main() {
   const wsStats = ws?.stats?.() ?? { progressCount: 0, lastProgressAt: null };
 
   console.log("\n──────── summary ────────");
-  console.log(`batch wall clock        ${(batchMs / 1000).toFixed(1)}s for ${OPS} ops`);
+  console.log(`work finished           ${workFinishedAt === null ? "never" : workFinishedAt.toFixed(1) + "s"} for ${OPS} ops`);
+  console.log(`  (HTTP reply came back at ${(batchMs / 1000).toFixed(1)}s — that is just the jobId)`);
   console.log(`HTTP /health polls      ${health.length}, ${stalls.length} stalled, slowest ${slowest.ms}ms`);
-  console.log(`WS progress events      ${wsStats.progressCount}, last at ${wsStats.lastProgressAt ?? "never"}s`);
+  console.log(`WS progress events      ${wsStats.progressCount}, largest gap ${wsStats.biggestGap.toFixed(1)}s, last at ${wsStats.lastProgressAt ?? "never"}s`);
   console.log(`frontmost changes       ${events.filter((e) => e.kind === "frontmost").map((e) => `${e.t.toFixed(0)}s:${e.detail}`).join("  ")}`);
   console.log("");
-  console.log("Reading it:");
-  console.log("  * /health stalled while you were away  -> the panel's own event loop is throttled;");
-  console.log("    nothing in ExtendScript is involved, so the fix is App Nap / renderer throttling.");
-  console.log("  * /health fine but WS progress stopped -> ExtendScript is being starved.");
-  console.log("  * both fine, only the batch slowed     -> AE is just slow; not this issue.");
-  console.log("  * nothing stalled at all               -> not reproduced on this run.");
+  console.log("Reading it — compare the away run against the --baseline run, never one alone:");
+  console.log("  * A slow /health *during the batch* is expected and is not this issue: each");
+  console.log("    evalScript chunk blocks the CEP renderer, so the panel cannot answer while");
+  console.log("    ExtendScript is running. Only a stall while nothing is running counts.");
+  console.log("  * The number that decides it is the largest gap between WS progress events.");
+  console.log("    The panel drives chunks on setTimeout(0); a backgrounded Chromium renderer");
+  console.log("    clamps that to ~1/sec, which would show up here as seconds-long gaps and a");
+  console.log("    work-finished time several times the baseline.");
+  console.log("  * Same finish time and same gaps away as at home -> not reproduced.");
   console.log("");
   console.log("Run again with --baseline (staying put) to get the control, then paste both into issue #25.");
 }
