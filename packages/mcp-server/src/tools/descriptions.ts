@@ -74,8 +74,8 @@ export const descriptions: Record<string, string> = {
   remove_marker: "Remove a marker by 1-based index.",
 
   // ---------- vision ----------
-  screenshot_frame: "ONE-OFF visual check of a comp at a time. Base64 PNG. Use only at key moments — never per-frame or in a loop. For motion, 2-3 snapshots + get_layer_full property values. Set downsample:2 (or 3-4 on 4K comps) to keep the image small — full-res 4K frames are large enough to exhaust the context. The result reports the dimensions actually returned, and warns if a requested downsample could not be applied.",
-  screenshot_layer: "ONE-OFF visual check of a single layer (solo'd) at a time. Same one-off rule and same downsample guidance as screenshot_frame.",
+  screenshot_frame: "ONE-OFF visual check of a comp at a time. Base64 PNG. Use only at key moments — never per-frame or in a loop. For motion, 2-3 snapshots + get_layer_full property values. Set downsample:2 (or 3-4 on 4K comps) to keep the image small — full-res 4K frames are large enough to exhaust the context. The result reports the dimensions actually returned, and warns if a requested downsample could not be applied. Not every result is an image: a 'Stale frame' error means AE re-served an earlier render — space calls a few seconds apart, retry with a higher downsample, and confirm motion by reading keyframes instead; `empty:true` means every pixel is transparent, so check the time, in/out points and enabled state. Never disable layers to make a frame render.",
+  screenshot_layer: "ONE-OFF visual check of a single layer (solo'd) at a time. Same one-off rule and same downsample guidance as screenshot_frame. The same 'Stale frame' and `empty:true` non-image results apply.",
 
   // ---------- batch ----------
   run_batch: "Many ops in one ExtendScript pass, one undo step. >500 ops returns a jobId + streams progress; use await_job. transactional:true (default) rolls back on first error.",
