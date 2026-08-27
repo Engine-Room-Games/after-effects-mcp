@@ -34,9 +34,15 @@ const order = [
   "raw.jsx",
 ];
 
+// No build timestamp in here, deliberately. This file is hashed on both sides
+// of the panel version gate — sha256 of the installed copy against the panel's
+// own `bundleHash` — so whatever goes in defines what "the same bundle" means.
+// A timestamp made that build identity rather than code identity: two builds of
+// an unchanged tree disagreed, and an upgrade that touched no JSX still told
+// the user to restart After Effects. The file's mtime already records when it
+// was written. `tests/unit/bundle-determinism.mjs` holds this.
 const parts = [];
 parts.push("// Auto-generated bundle. Do not edit directly — edit files in packages/jsx/.");
-parts.push("// Generated " + new Date().toISOString());
 for (const f of order) {
   const p = path.join(srcDir, f);
   if (!fs.existsSync(p)) {
@@ -49,7 +55,7 @@ for (const f of order) {
 
 fs.mkdirSync(path.dirname(outFile), { recursive: true });
 fs.writeFileSync(outFile, parts.join("\n"), "utf8");
-console.log(`Wrote ${outFile} (${parts.length - 2} modules concatenated)`);
+console.log(`Wrote ${outFile} (${order.length} modules concatenated)`);
 
 // Sync the bundle into the installed panel (mac copy installs only — symlink
 // installs already point at outFile). Without this, `/reload-jsx` would

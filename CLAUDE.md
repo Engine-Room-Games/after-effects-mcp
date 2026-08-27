@@ -159,6 +159,15 @@ which is exactly when calls break. **Only the running hash is worth gating on.**
 matters most to a user is `restart-needed` — telling someone to run
 `setup_panel` again there wastes their time, so the message says so explicitly.
 
+**Both hashes must identify the code, not the build.** `bundle-jsx.mjs` used to
+stamp `// Generated <ISO timestamp>` into the header, which put a moving value
+inside the thing being compared: two builds of an unchanged tree disagreed, and
+an upgrade touching no ExtendScript still told the user to quit AE and relaunch.
+Nothing in `packages/jsx/` may reach the bundle unless a source changed, so keep
+the concatenation a pure function of the sources — no timestamps, no ids, and no
+unsorted directory reads. `tests/unit/bundle-determinism.mjs` builds twice and
+compares the bytes, and also checks the hash still moves when a source does.
+
 The fifth state, `partial-install`, is checked *before* any of the others,
 because all of them reason from `bundle.jsx` alone and a current bundle says
 nothing about the client files beside it. Callers pass `installComplete` from
