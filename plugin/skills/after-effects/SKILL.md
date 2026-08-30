@@ -41,6 +41,10 @@ A tool result stays in your context for the rest of the session, so a read you c
 
 Omit them all and you get everything, as before. Whatever they leave out is named and counted in the response — a bounded read never looks like a complete one.
 
+**Reading a shape layer, use `shapeDetail: "compact"`.** It returns one indented line per group — the group's name, its matchName, then its own properties as `name=value`, with `[3 keys]` or `[expr]` on the animated ones and `(at defaults)` for a group Transform nobody has touched. Every name the write tools address a node by is still on the line, and it costs a fraction of the full JSON form. Reach for `"full"` when you need exact values, keyframe detail or indices.
+
+One thing is left out of both forms: **Material Options**, the 48-property 3D extrusion block AE hangs off every vector group. It only means anything for an extruded shape under the Cinema 4D renderer, and on the 2D shape layers that are nearly all of them it was most of the weight of the read — a single 68px circle cost 4,400 tokens, of which the geometry was about 40. `materialsOmitted` counts what was skipped; `shapeMaterials: true` brings it back.
+
 ## Identify things by ID, never by index
 
 Every comp and layer has a stable numeric `id`. Layer `index` is a 1-based position that **shifts whenever layers are added, deleted, or reordered**. Store `(compId, layerId)` and pass those. An index captured before a `create_*` call may point at a different layer by the time you use it.
@@ -133,6 +137,8 @@ For a custom path, use `{type: "path", vertices: [[x,y], …], closed: true}`. T
 ExtendScript is **single-threaded**, so a long synchronous loop freezes the user's AE UI. Keep the script short.
 
 `return X` sends the whole value back — arrays and nested objects included. Values that cannot be represented (functions, live AE objects, cycles) come back as a marker string in place, never dropped — a live object as `"[AVLayer \"Hero\" #616]"`, which is a handle to pass to `get_layer_full`, not a copy of the layer. So an empty result genuinely means the script returned nothing; never read one as "nothing happened".
+
+**A bare expression is not a return.** `"ping";` as the last line yields nothing, and so does any script that just does its work. That case comes back as `{ok: true, returned: null, undoGroup, note}` — an envelope that says *the script ran to completion*. Do not re-run it. Nothing rolls back, so a second run of a script that duplicated a layer, reordered content or wrote keyframes applies all of it twice; read the state back instead, and add an explicit `return` if you want a value.
 
 AE refuses `copyToComp` for a layer with a parent or a linked expression **while an undo group is open**, which is exactly the rig you wanted to copy. Wrap that one call in `withoutUndoGroup(function () { … })`, or pass `undoGroup: false` for the whole script. Nothing rolls back on error, so a script that fails halfway leaves its earlier changes applied — read the state back before re-running one that mutates.
 

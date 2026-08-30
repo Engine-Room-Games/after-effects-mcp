@@ -96,6 +96,21 @@ export const GetLayerFull = z.object({
     .max(4)
     .optional()
     .describe("How deep to walk a shape layer's Contents tree. Default 4; drop to 1-2 on heavy shape layers."),
+  // Not a member of `include`: that list's contract is that omitting it returns
+  // everything, and materials have to be off unless asked for.
+  shapeMaterials: z
+    .boolean()
+    .default(false)
+    .optional()
+    .describe(
+      "Include each shape group's Material Options — the 48-property 3D extrusion block. Off by default: it applies only to an extruded shape under the Cinema 4D renderer, and on an ordinary 2D shape layer it is most of the bytes of the read. What was skipped is counted in the response."
+    ),
+  shapeDetail: z
+    .enum(["full", "compact"])
+    .optional()
+    .describe(
+      "How to serialize a shape layer's Contents. 'full' (default) is one JSON node per property. 'compact' is one indented line per group with that group's own properties folded onto it as name=value — several times smaller, and enough to see what a layer is made of and address its nodes by name."
+    ),
 });
 
 export const CreateTextLayer = z.object({
