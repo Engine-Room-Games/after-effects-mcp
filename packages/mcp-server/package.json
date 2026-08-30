@@ -1,6 +1,6 @@
 {
   "name": "@engine-room/after-effects-mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "Control Adobe After Effects with AI — describe the animation you want and it gets built: layers, keyframes, effects, expressions and text, all editable afterwards.",
   "license": "MIT",
