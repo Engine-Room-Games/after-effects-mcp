@@ -171,14 +171,97 @@ function __serializeText(layer) {
   } catch (e) { return null; }
 }
 
-function __serializeShapeContents(group, depth) {
+// ---------- shape contents ----------
+//
+// Two of the groups hanging off every vector group are fixed-shape and almost
+// never the reason anyone reads a shape layer.
+//
+// Material Options is the 48-property 3D extrusion model. It means something
+// only for an extruded shape under the Cinema 4D renderer, and on the 2D shape
+// layers that are nearly all of them it is inert — while being most of the
+// weight of a shape read: one 68x68 circle in one group came back as 13KB of
+// shape JSON, 10KB of it material properties (issue #42). Skipped unless
+// `shapeMaterials` asks for it, and the skip is counted and explained in the
+// response rather than being silent.
+var __SHAPE_MATERIALS = "ADBE Vector Materials Group";
+var __SHAPE_TRANSFORM = "ADBE Vector Transform Group";
+
+// A group Transform still at its creation values says nothing that
+// `atDefaults: true` does not. Tested by value rather than through
+// PropertyBase.isModified: the values are the contract, they can be asserted
+// with no AE to run in, and a property this table does not know about — a
+// future AE adding one — has to fail the test rather than be folded away
+// unread.
+var __VECTOR_TRANSFORM_DEFAULTS = [
+  ["ADBE Vector Anchor", [0, 0]],
+  ["ADBE Vector Position", [0, 0]],
+  ["ADBE Vector Scale", [100, 100]],
+  ["ADBE Vector Skew", 0],
+  ["ADBE Vector Skew Axis", 0],
+  ["ADBE Vector Rotation", 0],
+  ["ADBE Vector Group Opacity", 100]
+];
+
+function __isPropertyGroup(p) {
+  return p.propertyType === PropertyType.NAMED_GROUP || p.propertyType === PropertyType.INDEXED_GROUP;
+}
+
+function __vectorTransformDefault(matchName) {
+  for (var i = 0; i < __VECTOR_TRANSFORM_DEFAULTS.length; i++) {
+    if (__VECTOR_TRANSFORM_DEFAULTS[i][0] === matchName) return __VECTOR_TRANSFORM_DEFAULTS[i][1];
+  }
+  return null;
+}
+
+function __sameVectorValue(a, b) {
+  if (b instanceof Array) {
+    if (!(a instanceof Array) || a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) { if (a[i] !== b[i]) return false; }
+    return true;
+  }
+  return a === b;
+}
+
+function __isIdentityVectorTransform(tg) {
+  if (!tg || !tg.numProperties) return false;
+  for (var i = 1; i <= tg.numProperties; i++) {
+    var p = tg.property(i);
+    // Animated or expression-driven is never "at defaults", whatever it reads
+    // at this instant.
+    if (p.numKeys > 0) return false;
+    try { if (p.canSetExpression && p.expression) return false; } catch (e) {}
+    var def = __vectorTransformDefault(p.matchName);
+    if (def === null) return false;
+    var v;
+    try { v = p.value; } catch (e2) { return false; }
+    if (!__sameVectorValue(v, def)) return false;
+  }
+  return true;
+}
+
+// Carries the caller's choices down the walk and collects what was left out, so
+// the omissions can be named once at the top of the section instead of being
+// repeated on every group.
+function __shapeOpts(args) {
+  return {
+    materials: !!(args && args.shapeMaterials),
+    compact: !!(args && args.shapeDetail === "compact"),
+    materialsOmitted: 0
+  };
+}
+
+function __serializeShapeContents(group, depth, opts) {
   if (!group || !group.numProperties) return [];
   var out = [];
   for (var i = 1; i <= group.numProperties; i++) {
     var p = group.property(i);
+    if (p.matchName === __SHAPE_MATERIALS && !opts.materials) { opts.materialsOmitted += 1; continue; }
+    // `index` stays the real one whatever was skipped, so a path built from
+    // this response still addresses the node it names.
     var entry = { name: p.name, matchName: p.matchName, index: i };
-    if (p.propertyType === PropertyType.NAMED_GROUP || p.propertyType === PropertyType.INDEXED_GROUP) {
-      if (depth > 0) entry.children = __serializeShapeContents(p, depth - 1);
+    if (__isPropertyGroup(p)) {
+      if (p.matchName === __SHAPE_TRANSFORM && __isIdentityVectorTransform(p)) entry.atDefaults = true;
+      else if (depth > 0) entry.children = __serializeShapeContents(p, depth - 1, opts);
       // Say where the walk stopped. A group that simply has no `children` key
       // reads as empty, which for a deep shape tree is a lie.
       else if (p.numProperties > 0) entry.childrenOmitted = p.numProperties;
@@ -188,6 +271,120 @@ function __serializeShapeContents(group, depth) {
     out.push(entry);
   }
   return out;
+}
+
+// ---------- compact shape serialization ----------
+//
+// One line per group, with that group's own leaf properties folded onto it.
+// The full form spends four JSON lines on every property it reports; the same
+// lamp layer is around 450 characters here against 2,800 full (and 13,000
+// before the material groups came out). It is a reading format, not a lesser
+// one: the write tools address nodes by name, and every name is still on the
+// line. `shapeDetail` stays "full" by default all the same — a caller that
+// never heard of it has to keep getting exactly what it always got.
+
+function __compactNumber(n) {
+  if (typeof n !== "number") return String(n);
+  if (isNaN(n) || !isFinite(n)) return String(n);
+  // Four decimals round-trips an 8-bit colour channel and keeps float noise
+  // (0.6627450980392157 for one byte) out of a format whose point is brevity.
+  return String(Math.round(n * 10000) / 10000);
+}
+
+function __compactLeafValue(p) {
+  var v;
+  try { v = p.value; } catch (e) { return "?"; }
+  // A path's value is a Shape object, which is a wall of vertex arrays in full
+  // and unreadable in one line. Its size and closedness are what you check.
+  try {
+    if (v && v.vertices && v.vertices.length !== undefined) {
+      return "path(" + v.vertices.length + (v.closed ? " verts, closed)" : " verts, open)");
+    }
+  } catch (e2) {}
+  if (v instanceof Array) {
+    var parts = [];
+    for (var i = 0; i < v.length; i++) parts.push(__compactNumber(v[i]));
+    return "[" + parts.join(",") + "]";
+  }
+  if (typeof v === "number") return __compactNumber(v);
+  return String(v);
+}
+
+function __compactLeaves(g) {
+  var parts = [];
+  for (var i = 1; i <= g.numProperties; i++) {
+    var p = g.property(i);
+    if (__isPropertyGroup(p)) continue;
+    var s = p.name + "=" + __compactLeafValue(p);
+    if (p.numKeys > 0) s += " [" + p.numKeys + " keys]";
+    try { if (p.canSetExpression && p.expression) s += " [expr]"; } catch (e) {}
+    parts.push(s);
+  }
+  return parts.join("  ");
+}
+
+// Only the "ADBE " prefix comes off: "ADBE Vector Group" and "ADBE Vectors
+// Group" are different nodes, so anything cleverer would collide.
+function __compactKind(matchName) {
+  return (matchName.substring(0, 5) === "ADBE ") ? matchName.substring(5) : matchName;
+}
+
+function __hasGroupChild(g) {
+  for (var i = 1; i <= g.numProperties; i++) { if (__isPropertyGroup(g.property(i))) return true; }
+  return false;
+}
+
+function __compactShapeContents(group, depth, indent, lines, opts) {
+  if (!group || !group.numProperties) return lines;
+  // Leaves sitting directly on the group being walked have no line of their
+  // own to fold onto; at the root, give them one.
+  if (indent === "") {
+    var rootLeaves = __compactLeaves(group);
+    if (rootLeaves) lines.push(rootLeaves);
+  }
+  for (var i = 1; i <= group.numProperties; i++) {
+    var p = group.property(i);
+    if (!__isPropertyGroup(p)) continue;
+    if (p.matchName === __SHAPE_MATERIALS && !opts.materials) { opts.materialsOmitted += 1; continue; }
+    var line = indent + p.name + "  " + __compactKind(p.matchName);
+    if (p.matchName === __SHAPE_TRANSFORM && __isIdentityVectorTransform(p)) {
+      lines.push(line + "  (at defaults)");
+      continue;
+    }
+    var leaves = __compactLeaves(p);
+    lines.push(leaves ? line + "  " + leaves : line);
+    if (depth > 0) __compactShapeContents(p, depth - 1, indent + "  ", lines, opts);
+    // The leaves are already on the line above, so only unwalked sub-groups
+    // are missing — and saying so is the same rule as `childrenOmitted`.
+    else if (__hasGroupChild(p)) lines.push(indent + "  (sub-groups not walked — raise shapeDepth)");
+  }
+  return lines;
+}
+
+// The whole `shape` section, with its own omissions named on it.
+function __serializeShape(layer, depth, args) {
+  var opts = __shapeOpts(args);
+  var shape = { depth: depth };
+  try {
+    var contents = layer.property("Contents");
+    if (opts.compact) {
+      shape.detail = "compact";
+      shape.contents = __compactShapeContents(contents, depth, "", [], opts);
+    } else {
+      shape.contents = __serializeShapeContents(contents, depth, opts);
+    }
+  } catch (e) {
+    // An unreadable Contents used to leave the section off entirely, which
+    // reads as "this shape layer has no shapes".
+    shape.error = (e && e.message) ? String(e.message) : String(e);
+  }
+  if (opts.materialsOmitted > 0) {
+    shape.materialsOmitted = opts.materialsOmitted;
+    shape.materialsNote = "Material Options omitted on " + opts.materialsOmitted + " shape group" +
+      (opts.materialsOmitted === 1 ? "" : "s") + " — 48 3D-extrusion properties each, meaningful only for an " +
+      "extruded shape under the Cinema 4D renderer. Pass shapeMaterials:true to read them.";
+  }
+  return shape;
 }
 
 OPS.get_layer_full = noUndo(function (args) {
@@ -233,8 +430,7 @@ OPS.get_layer_full = noUndo(function (args) {
   if (l instanceof TextLayer && __wantsSection(want, "text")) out.text = __serializeText(l);
   if (l instanceof ShapeLayer && __wantsSection(want, "shape")) {
     var depth = (args && args.shapeDepth !== undefined && args.shapeDepth !== null) ? args.shapeDepth : 4;
-    try { out.shape = { depth: depth, contents: __serializeShapeContents(l.property("Contents"), depth) }; }
-    catch (e) {}
+    out.shape = __serializeShape(l, depth, args);
   }
   if (__wantsSection(want, "source")) {
     if (l.source && l.source instanceof CompItem) {

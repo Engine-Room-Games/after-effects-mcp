@@ -141,8 +141,8 @@ jobs:
       # There is no AE and no ExtendScript runtime on a runner, so these run the
       # .jsx sources under node against stubs: the ban on chained ternaries
       # (which AE parses left-associatively and returns the wrong answer for),
-      # undo-group balance, run_jsx's result serialization, and parent_layer's
-      # transform arithmetic. The last one builds the bundle twice and compares
+      # undo-group balance, run_jsx's result serialization, the shape walk's
+      # omissions, and parent_layer's transform arithmetic. The last one builds the bundle twice and compares
       # the bytes, because the panel version gate is only meaningful if the
       # bundle hash identifies the code rather than the build.
       - name: ExtendScript sources behave
@@ -150,6 +150,7 @@ jobs:
           node tests/unit/jsx-ternary.mjs
           node tests/unit/jsx-undo-group.mjs
           node tests/unit/run-jsx-result.mjs
+          node tests/unit/shape-read.mjs
           node tests/unit/parent-transform.mjs
           node tests/unit/svg-import.mjs
           node tests/unit/bundle-determinism.mjs

@@ -34,7 +34,7 @@ vm.runInContext(source, ctx, { filename: "raw.jsx" });
 // Everything under test has to build its values inside the VM realm, or
 // `instanceof Array` and `constructor === Object` compare across realms.
 const make = (expr) => vm.runInContext(`(${expr})`, ctx);
-const ser = (v) => vm.runInContext("__rjResult", ctx)(v);
+const ser = (v) => vm.runInContext("__rjResult", ctx)(v, "AE MCP: run_jsx");
 const wrap = vm.runInContext("(function (k, v) { var o = {}; o[k] = v; return o; })", ctx);
 
 let passed = 0;
@@ -61,8 +61,29 @@ check(
 check("a bare number", 42, 42);
 check("a bare string", "hi", "hi");
 check("a bare array", make("[1, [2, [3]]]"), [1, [2, [3]]]);
-check("no return at all", undefined, null);
-check("an explicit null", null, null);
+// Issue #43: a bare `null` is indistinguishable from "the script never ran",
+// and the natural response to that is to run the script again — which for a
+// non-idempotent one applies every mutation twice. Nothing rolls back, so the
+// envelope has to say the script finished.
+{
+  const envelope = (label, value) => {
+    const out = JSON.parse(JSON.stringify(ser(value)));
+    assert.equal(out.ok, true, `${label}: must report completion`);
+    assert.equal(out.returned, null, `${label}: the value really was nothing`);
+    assert.equal(out.undoGroup, "AE MCP: run_jsx", `${label}: name the undo step that backs it out`);
+    assert.match(out.note, /not a failure/i, `${label}: say so in words, since the caller acts on this`);
+    passed += 4;
+  };
+  envelope("no return at all", undefined);
+  envelope("an explicit null", null);
+
+  // The other half of the contract: a script that did return something must
+  // still get that value bare, not wrapped.
+  assert.deepEqual(JSON.parse(JSON.stringify(ser(0))), 0, "a falsy value is not an empty result");
+  assert.deepEqual(JSON.parse(JSON.stringify(ser(false))), false, "false is a value, not nothing");
+  assert.deepEqual(JSON.parse(JSON.stringify(ser(""))), "", "the empty string is a value, not nothing");
+  passed += 3;
+}
 
 // Values JSON cannot hold become markers rather than disappearing.
 check("undefined inside an object", make("({a: 1, b: undefined})"), { a: 1, b: "[undefined]" });

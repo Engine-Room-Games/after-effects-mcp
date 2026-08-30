@@ -97,11 +97,28 @@ function __rjSerialize(v, depth, stack, budget) {
   return out;
 }
 
-function __rjResult(result) {
-  // A script with no `return` returns undefined at the top level; that is
-  // genuinely "nothing", not an unserializable value.
-  if (typeof result === "undefined") return null;
-  return __rjSerialize(result, 0, [], { n: 0 });
+// A script whose last statement is a bare expression completes and yields
+// undefined — with every side effect already applied. Handing back a bare
+// `null` for that made "ran fine, returned nothing" identical on the wire to
+// "did not run", and the natural response to a suspected failure is to run the
+// script again. Nothing here rolls back, so a second run of a non-idempotent
+// script duplicates layers, re-applies moveTo, writes keyframes on top of
+// keyframes (issue #43) — and the guidance to prefer few large scripts means
+// the ones most likely to be re-run are the most destructive to re-run.
+//
+// So a null result is never returned bare: it comes back as an envelope that
+// says the script finished. An explicit `return null` is folded into the same
+// envelope, because the ambiguity is in the value, not in how it was produced.
+function __rjResult(result, undoGroupName) {
+  var serialized = (typeof result === "undefined") ? null : __rjSerialize(result, 0, [], { n: 0 });
+  if (serialized !== null) return serialized;
+  return {
+    ok: true,
+    returned: null,
+    undoGroup: undoGroupName,
+    note: "Completed with no `return` value — this is not a failure. Use `return X` to send a value back. " +
+      "Anything the script changed is already applied and nothing rolls back, so read the state back rather than re-running it."
+  };
 }
 
 // undoGroup:false is a per-call opt-out, read by dispatch() through the
@@ -112,5 +129,9 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
   var code = args.code || "";
   // We wrap in a function so `return` works.
   var wrapper = "(function(){ " + code + " })()";
-  return __rjResult(eval(wrapper));
+  // Which undo step to look for in AE if the script has to be backed out. The
+  // name mirrors dispatch()'s default ("AE MCP: " + op); false means the caller
+  // asked for no group and the changes landed as whatever steps AE recorded.
+  var undoGroupName = (args.undoGroup === false) ? false : "AE MCP: run_jsx";
+  return __rjResult(eval(wrapper), undoGroupName);
 });
