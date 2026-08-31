@@ -25,6 +25,7 @@ import { assessPanel, installedBundleHash, unknownOpMessage } from "./setup/pane
 import { installedPanelDir, panelInstallDiff, panelSourceDir } from "./setup/paths.js";
 import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./generated/content.js";
 import { listIssues, logIssue, markReported } from "./issues/journal.js";
+import { applyHouseStyleDetail } from "./style/summary.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
 import { fileURLToPath } from "node:url";
@@ -248,7 +249,9 @@ export function createServer() {
         }
         if (name === "log_issue") {
           const a = schemas.LogIssue.parse(rawArgs);
-          return textResult(logIssue(a));
+          // The project journal stays the default: an entry is about this
+          // project's work unless the agent says it is about the tools.
+          return textResult(logIssue({ ...a, scope: a.scope ?? "project" }));
         }
         if (name === "list_known_issues") {
           const a = schemas.ListKnownIssues.parse(rawArgs);
@@ -261,13 +264,19 @@ export function createServer() {
               // Compact unless asked otherwise: the full corpus is thousands of
               // tokens that stay in the transcript for the rest of the session.
               detail: a.detail ?? "index",
+              // Both journals by default — the whole point of the user one is
+              // that a fresh project folder does not start ignorant.
+              scope: a.scope ?? "all",
+              limit: a.limit,
             })
           );
         }
         if (name === "mark_issue_reported") {
           const a = schemas.MarkIssueReported.parse(rawArgs);
           const entry = markReported(a.id, a.url);
-          return textResult({ ok: true, id: entry.id, reported: true, issueUrl: entry.issueUrl });
+          // The scope goes back too: a bare id can name an entry in either
+          // journal, and the caller has to be able to say which one moved.
+          return textResult({ ok: true, id: entry.id, scope: entry.scope, reported: true, issueUrl: entry.issueUrl });
         }
       } catch (e) {
         return errorResult((e as Error).message);
@@ -392,6 +401,15 @@ export function createServer() {
           },
           v.base64
         );
+      }
+
+      // The style guide is read over the bridge and summarised here: the panel
+      // does not update itself, so a summariser shipped in the .jsx bundle would
+      // answer `detail: "summary"` with the whole document until the user
+      // reinstalled the panel and relaunched AE. See style/summary.ts.
+      if (name === "get_house_style") {
+        const detail = (args as { detail?: "summary" | "full" }).detail ?? "summary";
+        return textResult(applyHouseStyleDetail(result, detail), wait);
       }
 
       return textResult(result, wait);
