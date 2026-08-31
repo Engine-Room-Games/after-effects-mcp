@@ -103,6 +103,45 @@ function __brokenSvgAdvice() {
   );
 }
 
+/**
+ * The bare import — ImportOptions, importFile, and the two ways AE can decline.
+ * Kept as its own function because it is the only import in the codebase and
+ * anything else that needs a file in the project (audio.jsx) must go through
+ * exactly this, not a second copy that drifts.
+ */
+function __importFile(file, path, sequence) {
+  var opts = new ImportOptions(file);
+  if (sequence === true) {
+    if (!opts.canImportAs(ImportAsType.FOOTAGE)) throw new Error("Cannot import " + path + " as footage, so it cannot be a sequence either");
+    opts.importAs = ImportAsType.FOOTAGE;
+    opts.sequence = true;
+  }
+  var item = app.project.importFile(opts);
+  if (!item) throw new Error("After Effects returned no item for " + path);
+  return item;
+}
+
+/**
+ * fsName -> project item, for every item in the project that came from a file.
+ * One pass: the caller with N paths to resolve would otherwise walk the project
+ * N times, and a project with a few hundred items makes that visible.
+ */
+function __itemPathMap() {
+  var map = {};
+  var proj = app.project;
+  for (var i = 1; i <= proj.numItems; i++) {
+    var it = proj.item(i);
+    var key = null;
+    try {
+      if (it.mainSource && it.mainSource.file) key = String(it.mainSource.file.fsName);
+    } catch (e) {}
+    // First one wins: two items on the same file are a duplicate import, and
+    // reusing the earlier is what the user would have done by hand.
+    if (key && !map.hasOwnProperty(key)) map[key] = it;
+  }
+  return map;
+}
+
 OPS.import_footage = function (args) {
   var path = args && args.path;
   if (typeof path !== "string" || path.length === 0) throw new Error("path is required");
@@ -110,15 +149,7 @@ OPS.import_footage = function (args) {
   var file = new File(path);
   if (!file.exists) throw new Error("No file at " + path);
 
-  var opts = new ImportOptions(file);
-  if (args.sequence === true) {
-    if (!opts.canImportAs(ImportAsType.FOOTAGE)) throw new Error("Cannot import " + path + " as footage, so it cannot be a sequence either");
-    opts.importAs = ImportAsType.FOOTAGE;
-    opts.sequence = true;
-  }
-
-  var item = app.project.importFile(opts);
-  if (!item) throw new Error("After Effects returned no item for " + path);
+  var item = __importFile(file, path, args.sequence);
 
   if (typeof args.name === "string" && args.name.length > 0) item.name = args.name;
 

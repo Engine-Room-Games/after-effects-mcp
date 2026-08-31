@@ -21,9 +21,10 @@ const DEFAULT_OP_TIMEOUT_MS = 120_000;
  * server's limit has to sit *above* the panel's, not on it.
  *
  * `run_jsx` and `run_batch` are here because their duration is chosen by the
- * caller, not by us.
+ * caller, not by us. `place_audio_cues` for the same reason — one call can
+ * import dozens of files and build a layer for each, all synchronously.
  */
-const SLOW_OPS = new Set(["run_batch", "run_jsx", "screenshot_frame", "screenshot_layer", "export_mogrt", "import_footage"]);
+const SLOW_OPS = new Set(["run_batch", "run_jsx", "screenshot_frame", "screenshot_layer", "export_mogrt", "import_footage", "place_audio_cues"]);
 const SLOW_OP_TIMEOUT_MS = 300_000;
 
 /**

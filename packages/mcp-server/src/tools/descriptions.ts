@@ -18,7 +18,7 @@ export const descriptions: Record<string, string> = {
   get_layer_full: "Full state of one layer: transform + keyframes + expressions, effects, masks, markers, parenting, text/shape/footage extras, and sourceRect (visible bounds). Always prefer over multiple smaller queries. Bound the answer on a heavy layer: `include` picks the sections you need, `maxKeyframes` caps the keyframes per property, `shapeDepth` limits the Contents walk. Anything dropped is named and counted in the response, so a bounded read is never mistaken for a complete one. " +
     "On a shape layer, `shapeDetail: 'compact'` returns one indented line per group — `name  matchName  prop=value prop=value`, with `[3 keys]`/`[expr]` marking animated properties and `(at defaults)` a group Transform nobody has touched — which is a fraction of the size and still names every node the write tools address. Material Options (48 3D-extrusion properties per group, inert on a 2D shape layer) is left out of both forms and counted in `materialsOmitted`; pass `shapeMaterials:true` for the extruded-3D case.",
   create_text_layer: "Text layer with optional font/size/color/position/tracking. anchorAlign (default 'left') aligns the text by setting paragraph justification and leaving the anchor at [0,0], so position means the start of the baseline AND stays right when the text is changed later. Tracking is set to 0 unless you pass one, because AE otherwise inherits the user's Character panel. anchorAlign 'none' keeps AE's raw defaults.",
-  create_shape_layer: "Empty shape layer; fill via add_shape_content.",
+  create_shape_layer: "Empty shape layer; fill via add_shape_content. Position defaults to [0,0] with Anchor Point [0,0], so the layer's coordinate space IS the comp's and every vertex, rect/ellipse position and path you add afterwards is in comp pixels. (After Effects' own default is the comp centre, which silently offsets a drawing authored in comp coordinates by half a frame — pass position:'center' if you want that, or any [x,y] to place the origin yourself.) The result echoes the position and anchor point it ended up with.",
   create_solid_layer: "Solid-color layer. color is RGB 0..1.",
   create_null_layer: "Null parent layer.",
   create_adjustment_layer: "Adjustment layer — effects on it apply to layers below.",
@@ -36,11 +36,12 @@ export const descriptions: Record<string, string> = {
   set_transform: "Set any of position/scale/rotation/anchorPoint/opacity (+3D orientation/per-axis on 3D). keyframe:true + time sets keyframes.",
 
   // ---------- keyframes ----------
-  add_keyframe: "Keyframe at `time` on propertyPath (e.g. ['Transform','Position']). Optional in/out interpolation + ease.",
+  add_keyframe: "Keyframe at `time` on propertyPath (e.g. ['Transform','Position']). Optional in/out interpolation + ease — one influence/speed pair, expanded to however many entries the property needs (see set_temporal_ease). The count used comes back as `easeDimensions`.",
   remove_keyframe: "Remove keyframe at `time`.",
   get_keyframes: "All keyframes on a property: time, value, interpolation, ease, spatial tangents.",
   set_interpolation: "Set in/out interpolation type of a specific keyframe.",
-  set_temporal_ease: "Set influence+speed for in/out ease of a keyframe.",
+  set_temporal_ease:
+    "Set influence+speed for the in/out ease of one keyframe. Pass ONE {influence, speed} pair per side and it is applied to every dimension of the property — you never size the ease array yourself. That matters because AE's own setTemporalEaseAtKey wants a per-property number of entries that is not derivable from the value (2D Scale takes 2, a shape Ellipse Size takes 3, Opacity and sliders take 1, and spatial Position takes 1 whether the layer is 2D or 3D), and the wrong count throws a bare 'parameter 2'. This derives the count, retries the alternatives, and reports what worked as `easeDimensions` — worth reading if you are also easing that property from run_jsx.",
   set_spatial_tangents: "Set in/out spatial tangents for a position-style keyframe.",
 
   // ---------- expressions ----------
@@ -100,6 +101,12 @@ export const descriptions: Record<string, string> = {
   import_footage:
     "Import a file (video, image, audio, SVG, PSD/AI) into the project. Returns the item id — pass it to create_footage_layer to place it. Validates what AE actually produced: an SVG whose viewBox asks for one aspect ratio and imports at another is a known AE bug that renders as nothing with no error, so the item is deleted and the call throws with the workaround. `force:true` keeps it and reports the problem in `validation` instead.",
   create_footage_layer: "Place an imported project item into a comp as a layer. Takes the itemId from import_footage or get_project_summary. For a comp use create_precomp_layer instead.",
+
+  // ---------- audio ----------
+  place_audio_cues:
+    "Score a scene in one call: a list of cues, each a sound at a comp time with a level in dB, becomes one audio layer each — imported if needed, named, trimmed, labelled — in a single undo step. Reach for it whenever you are placing more than two or three sound effects; the alternative is dozens of round trips or a run_jsx loop that has to know that `layer.property('ADBE Audio Levels')` returns null on an audio layer. " +
+    "A `path` names a file to use (imported once however many cues name it, and an item already in the project from that path is reused); a `footageId` names one already imported. `time` is when the cue starts; `levelDb` is decibels (0 = the file as recorded, negative = quieter), defaulting to 0. `inPoint`/`outPoint` trim in COMP time, not file time. " +
+    "It is all-or-nothing: every cue is validated — file exists, item has audio, time inside the comp — before a single layer is made, and if a later one still fails, everything this call created is removed and the error names the cue. Use `dryRun:true` to check a cue list against the project without touching anything, including the undo stack; it reports which paths do not exist. Max 200 cues per call.",
 
   // ---------- motion graphics templates ----------
   export_mogrt:

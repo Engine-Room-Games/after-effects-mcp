@@ -133,6 +133,8 @@ export const CreateShapeLayer = z.object({
   fill: Color.optional(),
   stroke: Color.optional(),
   strokeWidth: z.number().nonnegative().optional(),
+  position: z.union([Vec2, Vec3, z.literal("center")]).optional()
+    .describe("Where the layer's origin goes. Defaults to [0,0], which makes the layer's coordinate space the comp's — so vertices and shape positions you write afterwards are in comp pixels. 'center' is After Effects' own spawn point (the comp centre), which offsets every path you add by half a frame. The Anchor Point stays at [0,0] either way. A new shape layer is 2D, so use [x,y]; a three-component position needs set_layer threeDLayer:true first."),
 });
 export const CreateSolidLayer = z.object({
   compId: z.number(),
@@ -235,8 +237,10 @@ export const SetTemporalEase = z.object({
   layerId: z.number(),
   propertyPath: PropertyPath,
   keyIndex: z.number().int().positive(),
-  easeIn: z.object({ influence: z.number(), speed: z.number() }).optional(),
-  easeOut: z.object({ influence: z.number(), speed: z.number() }).optional(),
+  easeIn: z.object({ influence: z.number(), speed: z.number() }).optional()
+    .describe("One influence/speed pair, applied to every dimension of the property. At least one of easeIn/easeOut is required."),
+  easeOut: z.object({ influence: z.number(), speed: z.number() }).optional()
+    .describe("One influence/speed pair, applied to every dimension of the property."),
 });
 export const SetSpatialTangents = z.object({
   compId: z.number(),
@@ -538,6 +542,34 @@ export const CreateFootageLayer = z.object({
   startTime: z.number().optional(),
 });
 
+// ---------- audio ----------
+export const AudioCue = z
+  .object({
+    footageId: z.number().optional()
+      .describe("Project item id of an already-imported sound. Give this or `path`, not both."),
+    path: z.string().min(1).optional()
+      .describe("Absolute path to a sound file. Imported once per call however many cues name it, and an item already in the project from that path is reused rather than imported again."),
+    time: z.number().describe("Comp time in seconds where the cue starts."),
+    levelDb: z.number().optional()
+      .describe("Level in decibels, the same unit After Effects shows. 0 is the file untouched, -6 is roughly half as loud, negative is quieter. Defaults to 0, written explicitly so the result is the same on every machine."),
+    name: z.string().optional().describe("Layer name. Defaults to namePrefix + the file's basename without its extension."),
+    inPoint: z.number().optional().describe("Trim the layer's in point to this COMP time. Must not be earlier than `time`. Omit to play from the start of the file."),
+    outPoint: z.number().optional().describe("Trim the layer's out point to this COMP time. Omit to play to the end of the file."),
+    label: z.union([z.number().int().min(0).max(16), z.string()]).optional()
+      .describe("AE label colour, as an index 0-16 or a name (red, yellow, aqua, pink, lavender, peach, seafoam, blue, green, purple, orange, brown, fuchsia, cyan, sandstone, darkgreen)."),
+  })
+  .strict();
+export const PlaceAudioCues = z
+  .object({
+    compId: z.number(),
+    cues: z.array(AudioCue).min(1).max(200),
+    namePrefix: z.string().default("SFX_").optional()
+      .describe("Prefix for cues that do not name themselves. Pass \"\" for no prefix."),
+    dryRun: z.boolean().default(false).optional()
+      .describe("Resolve and check the whole list without importing, creating or changing anything — not even an undo step. Reports which paths do not exist and what would be placed."),
+  })
+  .strict();
+
 // ---------- motion graphics templates ----------
 export const ExportMogrt = z
   .object({
@@ -726,6 +758,8 @@ export const OpSchemas = {
   // footage
   import_footage: ImportFootage,
   create_footage_layer: CreateFootageLayer,
+  // audio
+  place_audio_cues: PlaceAudioCues,
   // motion graphics templates
   export_mogrt: ExportMogrt,
   // raw
@@ -849,6 +883,8 @@ export const OpMutation = {
   // footage
   import_footage: "write",
   create_footage_layer: "write",
+  // audio cues — imports footage and adds layers.
+  place_audio_cues: "write",
   // motion graphics templates — saves the project before exporting.
   export_mogrt: "write",
   // raw — the script is the caller's and may do anything. Assume the worst.
