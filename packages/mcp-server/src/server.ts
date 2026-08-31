@@ -16,7 +16,7 @@ import { JobManager } from "./jobs/manager.js";
 import { SnapshotStore } from "./snapshots/store.js";
 import type { CompFingerprint } from "./snapshots/store.js";
 import { descriptions } from "./tools/descriptions.js";
-import { AeError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText } from "./util/errors.js";
+import { AeError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
 import { resolveRunJsxSource, type RunJsxArgs } from "./tools/runJsxSource.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
@@ -118,18 +118,11 @@ export function createServer() {
 
   // ---------- tools/list ----------
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = Object.keys(OpSchemas).map((name) => {
-      const schema = OpSchemas[name as keyof typeof OpSchemas];
-      const jsonSchema = zodToJsonSchema(schema, {
-        target: "jsonSchema7",
-        $refStrategy: "none",
-      });
-      return {
-        name,
-        description: descriptions[name] ?? `AE op: ${name}`,
-        inputSchema: toDraft2020(jsonSchema) as any,
-      };
-    });
+    const tools = Object.keys(OpSchemas).map((name) => ({
+      name,
+      description: descriptions[name] ?? `AE op: ${name}`,
+      inputSchema: toolInputSchema(name) as any,
+    }));
     return { tools };
   });
 
@@ -279,7 +272,10 @@ export function createServer() {
           return textResult({ ok: true, id: entry.id, scope: entry.scope, reported: true, issueUrl: entry.issueUrl });
         }
       } catch (e) {
-        return errorResult((e as Error).message);
+        // A zod rejection here is the same class of thing as one below, and gets
+        // the same prose treatment; `invalidArgsText` passes anything else
+        // through unchanged.
+        return errorResult(invalidArgsText(name, e));
       }
     }
 
@@ -288,7 +284,7 @@ export function createServer() {
     try {
       args = (OpSchemas[name as keyof typeof OpSchemas] as z.ZodTypeAny).parse(rawArgs);
     } catch (e) {
-      return errorResult(`Invalid arguments for ${name}: ${(e as Error).message}`);
+      return errorResult(invalidArgsText(name, e));
     }
 
     // run_jsx can take its script, and its helper libraries, from files rather
@@ -649,11 +645,23 @@ function errorResult(message: string) {
   };
 }
 
+/** The dialect these schemas are, and the one the Anthropic API reads them as. */
+export const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
+
 // Rewrite a JSON Schema (draft-07 output from zod-to-json-schema) into draft 2020-12.
 // The Anthropic API validates tool input_schema against draft 2020-12, which rejects
 // the draft-07 tuple form `{ type: "array", items: [<schemas>] }` — that shape is
 // only valid in 2020-12 as `prefixItems`, with `items` (singular) covering trailing
 // positions. We also drop the legacy `additionalItems` keyword (renamed to `items`).
+//
+// The `$schema` rewrite is part of the same correction and not cosmetic.
+// zod-to-json-schema stamps the draft-07 URI, which after this pass is a false
+// claim: `prefixItems` does not exist in draft-07, and `items: false` means
+// something else entirely there ("no array items at all"). A consumer that
+// honoured the declared dialect would reject every tuple in these schemas —
+// every colour, every 2D point. It works today only because the API reads tool
+// schemas as 2020-12 whatever they say about themselves. Saying so makes the
+// document self-describing and lets a validator check what actually ships.
 function toDraft2020(node: any): any {
   if (Array.isArray(node)) return node.map(toDraft2020);
   if (!node || typeof node !== "object") return node;
@@ -668,7 +676,71 @@ function toDraft2020(node: any): any {
       out.items = false;
     }
   }
+  if (typeof out.$schema === "string") out.$schema = JSON_SCHEMA_DIALECT;
   return out;
+}
+
+/**
+ * Put a schema's cross-field rules — "exactly one of these three" — into the
+ * JSON Schema the model is shown.
+ *
+ * `zod-to-json-schema` drops refinements, so without this pass the rule exists
+ * only on the server and the only way to learn it is to break it. See the
+ * cross-field section of `schemas.ts` for the vocabulary; the shapes injected
+ * are `oneOf` / `anyOf` / `not` over `required`, which is plain composition and
+ * valid in every draft.
+ *
+ * **Nothing is injected silently, and nothing here throws.** The enforcement
+ * point for a rule that cannot be surfaced is `tests/unit/schema-constraints.mjs`,
+ * which fails the build. At runtime this logs and carries on, for the same
+ * reason `isWriteOp()` falls back to `"write"` rather than raising: `tools/list`
+ * is the one call every session begins with, so a throw here would replace one
+ * under-specified tool with *no tools at all*. Fail the build loudly; fail the
+ * session towards the behaviour that shipped before.
+ */
+function withCrossFieldConstraints(zodSchema: unknown, jsonSchema: any, opName: string): any {
+  for (const { path, rule } of schemas.crossFieldRulesIn(zodSchema)) {
+    const where = path.join(".") || "(root)";
+    if (!rule) {
+      logger.warn(
+        `${opName} carries a refinement at ${where} that is not a declared cross-field rule. ` +
+          `It is enforced on every call and absent from the schema the model is shown, so an agent ` +
+          `can only learn it by having a call rejected. Declare it with crossField() in ` +
+          `packages/shared/src/schemas.ts.`
+      );
+      continue;
+    }
+    let node = jsonSchema;
+    for (const step of path) {
+      node = step === schemas.ARRAY_ELEMENT ? node?.items : node?.properties?.[step];
+      if (!node || typeof node !== "object") break;
+    }
+    if (!node || typeof node !== "object") {
+      logger.warn(
+        `${opName}: the cross-field rule at ${where} has no matching node in the emitted JSON ` +
+          `Schema, so it ships enforced but invisible.`
+      );
+      continue;
+    }
+    const fragment = schemas.crossFieldJsonSchema(rule);
+    // Merge only where nothing is being overwritten; anything else goes under
+    // `allOf`, which composes without either rule losing.
+    const collides = Object.keys(fragment).some((k) => k in node);
+    if (collides) (node.allOf ??= []).push(fragment);
+    else Object.assign(node, fragment);
+  }
+  return jsonSchema;
+}
+
+/**
+ * The `inputSchema` one tool ships with. Exported so
+ * `tests/unit/schema-constraints.mjs` validates the exact document the client
+ * receives rather than a reconstruction of it.
+ */
+export function toolInputSchema(opName: string): Record<string, unknown> {
+  const schema = OpSchemas[opName as keyof typeof OpSchemas] as z.ZodTypeAny;
+  const jsonSchema = zodToJsonSchema(schema, { target: "jsonSchema7", $refStrategy: "none" });
+  return withCrossFieldConstraints(schema, toDraft2020(jsonSchema), opName);
 }
 
 function isAsyncEnvelope(v: unknown): boolean {

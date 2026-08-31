@@ -37,6 +37,240 @@ const includeParam = <T extends [string, ...string[]]>(sections: T, hint: string
     .optional()
     .describe(`Sections to return: ${sections.join(", ")}. Omit for all of them; [] for ${hint}.`);
 
+// ---------- cross-field rules ----------
+/**
+ * The rules about which *combinations* of fields are legal — "exactly one of
+ * these three", "at least one of these two".
+ *
+ * **`zod-to-json-schema` drops refinements.** A `.refine()` is invisible in the
+ * JSON Schema the model is shown, so the only way an agent learns the rule is
+ * by breaking it: the call goes out, the server rejects it, and a turn is spent
+ * on something the tool definition could have said up front. Three separate
+ * 0.4.0 features landed on that edge independently (`reorder_layer`'s three
+ * destinations, `screenshot_frame`'s `time`/`times`, `run_jsx`'s
+ * `code`/`scriptPath`), and two more rules were being enforced further down
+ * still — `set_temporal_ease` inside After Effects, `set_effect_param` as a
+ * bare "Effect param not found".
+ *
+ * So a rule is **declared once, here**, and three things are generated from
+ * that single declaration:
+ *
+ *   1. the zod check that rejects the call (`crossField`, below),
+ *   2. the JSON Schema keywords the model sees before it calls
+ *      (`crossFieldJsonSchema`, applied in `server.ts`'s emission pass),
+ *   3. the sentence in the error when it is broken anyway
+ *      (`crossFieldMessage`).
+ *
+ * Declaring it in one place is the point. A rule enforced in zod and described
+ * in prose somewhere else is two statements that drift; the drift is invisible,
+ * because the schema keeps working and only the *advice* goes stale.
+ *
+ * `tests/unit/schema-constraints.mjs` enumerates every `ZodEffects` in every op
+ * schema and fails on any that is not one of these — a refinement it cannot
+ * classify is the exact thing it exists to catch, so it throws rather than
+ * skipping.
+ */
+export type CrossFieldKind =
+  /** Exactly one field present. Neither zero nor two. */
+  | "exactlyOne"
+  /** Zero or one. Both together are two readings of the same question. */
+  | "atMostOne"
+  /** One or more. Zero means the call would do nothing. */
+  | "atLeastOne";
+
+export interface CrossFieldRule {
+  kind: CrossFieldKind;
+  /** At least two — a rule about one field is just `.optional()` or not. */
+  fields: readonly [string, string, ...string[]];
+  /**
+   * Appended to the error. Say what to pass *instead*, not what went wrong —
+   * the rest of the message already covers that.
+   */
+  then?: string;
+}
+
+/** Where `crossField` stashes the rule so the emission pass can find it again. */
+export const CROSS_FIELD_RULE = Symbol.for("engineRoom.aeMcp.crossFieldRule");
+
+const backticked = (fields: readonly string[]) => fields.map((f) => "`" + f + "`");
+
+const joinWith = (parts: readonly string[], conjunction: string) => {
+  if (parts.length <= 1) return parts.join("");
+  if (parts.length === 2) return `${parts[0]} ${conjunction} ${parts[1]}`;
+  return `${parts.slice(0, -1).join(", ")} ${conjunction} ${parts[parts.length - 1]}`;
+};
+
+/**
+ * The sentence an agent gets when it breaks the rule.
+ *
+ * It has to do two things a raw zod dump does not: name **which** fields
+ * arrived, and say what to do next. "Pass exactly one of a, b or c" is the same
+ * sentence whether you passed none or all three, and an agent that cannot tell
+ * those apart re-sends the same mistake.
+ */
+export function crossFieldMessage(rule: CrossFieldRule, present: readonly string[]): string {
+  const want = joinWith(backticked(rule.fields), "or");
+  const got = joinWith(backticked(present), "and");
+  const head =
+    rule.kind === "exactlyOne"
+      ? `Pass exactly one of ${want}`
+      : rule.kind === "atLeastOne"
+        ? `Pass at least one of ${want}`
+        : `Pass at most one of ${want}`;
+  const body =
+    present.length === 0
+      ? rule.fields.length === 2
+        ? " — neither was passed."
+        : " — none of them was passed."
+      : ` — got ${got}. Keep the one you meant and drop ${present.length === 2 ? "the other" : "the others"}.`;
+  return head + body + (rule.then ? " " + rule.then : "");
+}
+
+/** Which of the rule's fields the caller actually sent. */
+export function crossFieldPresent(rule: CrossFieldRule, value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const obj = value as Record<string, unknown>;
+  return rule.fields.filter((f) => obj[f] !== undefined);
+}
+
+export function crossFieldSatisfied(rule: CrossFieldRule, value: unknown): boolean {
+  const n = crossFieldPresent(rule, value).length;
+  if (rule.kind === "exactlyOne") return n === 1;
+  if (rule.kind === "atLeastOne") return n >= 1;
+  return n <= 1;
+}
+
+/**
+ * The JSON Schema form of a rule, in draft 2020-12 and nothing else.
+ *
+ * All three shapes are plain composition over `required`, which is the oldest
+ * and most portable part of JSON Schema — no `if`/`then`, no `dependentRequired`,
+ * nothing a converter or a client is likely to have skipped. `oneOf` means
+ * exactly one subschema matches, and a subschema that only says
+ * `{"required": ["x"]}` matches precisely when `x` is present, so `oneOf` over
+ * one-element `required` lists *is* exclusive choice.
+ *
+ * Nothing here narrows what was already legal in a way the zod check does not:
+ * `tests/unit/schema-constraints.mjs` probes every combination of the rule's
+ * fields against both and fails if the two disagree on a single one.
+ */
+export function crossFieldJsonSchema(rule: CrossFieldRule): Record<string, unknown> {
+  const each = rule.fields.map((f) => ({ required: [f] }));
+  if (rule.kind === "exactlyOne") return { oneOf: each };
+  if (rule.kind === "atLeastOne") return { anyOf: each };
+  // "at most one" is the absence of every pair. Written as a negated `anyOf`
+  // rather than as `oneOf` + an all-absent branch, because the negation is what
+  // the rule actually says and reads that way to anything parsing it.
+  const pairs: { required: string[] }[] = [];
+  for (let i = 0; i < rule.fields.length; i++) {
+    for (let j = i + 1; j < rule.fields.length; j++) {
+      pairs.push({ required: [rule.fields[i], rule.fields[j]] });
+    }
+  }
+  return { not: pairs.length === 1 ? pairs[0] : { anyOf: pairs } };
+}
+
+/**
+ * Attach a rule to an object schema.
+ *
+ * Returns a `ZodEffects`, so anything reaching for `.shape` on the result needs
+ * `objectShapeOf()` instead — that is the one cost of this, and it is why the
+ * helper exists.
+ */
+function crossField<T extends z.ZodTypeAny>(schema: T, rule: CrossFieldRule) {
+  const refined = schema.superRefine((value, ctx) => {
+    if (crossFieldSatisfied(rule, value)) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: crossFieldMessage(rule, crossFieldPresent(rule, value)),
+      // The first field of the rule, so the issue has somewhere to point. The
+      // message names all of them, which is the part that matters.
+      path: [rule.fields[0]],
+    });
+  });
+  Object.defineProperty(refined, CROSS_FIELD_RULE, { value: rule, enumerable: false });
+  return refined;
+}
+
+/** The rule attached to a schema node by `crossField`, if it carries one. */
+export function crossFieldRuleOf(node: unknown): CrossFieldRule | undefined {
+  if (!node || typeof node !== "object") return undefined;
+  return (node as Record<symbol, CrossFieldRule | undefined>)[CROSS_FIELD_RULE];
+}
+
+/**
+ * Where a rule sits inside a schema. `[]` is "into this array's element", so
+ * `["cues", "[]"]` is the object inside `cues: z.array(...)`. An empty path is
+ * the op's own arguments object.
+ */
+export const ARRAY_ELEMENT = "[]";
+
+/**
+ * Every refinement in a schema, located.
+ *
+ * **A refinement with no rule on it is returned with `rule: undefined`**, and
+ * that is the whole reason this returns a list rather than a map. The emission
+ * pass and the guard test both need to see an unclassified `ZodEffects` — one
+ * is a constraint that will not reach the model, and silently walking past it
+ * is the failure both of them exist to catch.
+ */
+export function crossFieldRulesIn(
+  schema: unknown
+): { path: string[]; rule: CrossFieldRule | undefined }[] {
+  const found: { path: string[]; rule: CrossFieldRule | undefined }[] = [];
+  const walk = (node: unknown, path: string[], depth: number): void => {
+    const def = (node as { _def?: { typeName?: string; [k: string]: unknown } } | undefined)?._def;
+    if (!def || depth > 16) return;
+    switch (def.typeName) {
+      case "ZodEffects":
+        found.push({ path: [...path], rule: crossFieldRuleOf(node) });
+        return walk(def.schema, path, depth + 1);
+      case "ZodOptional":
+      case "ZodDefault":
+      case "ZodNullable":
+      case "ZodReadonly":
+        return walk(def.innerType, path, depth + 1);
+      case "ZodObject": {
+        const shape = (def.shape as () => Record<string, unknown>)();
+        for (const key of Object.keys(shape)) walk(shape[key], [...path, key], depth + 1);
+        return;
+      }
+      case "ZodArray":
+        return walk(def.type, [...path, ARRAY_ELEMENT], depth + 1);
+      case "ZodUnion":
+      case "ZodDiscriminatedUnion": {
+        const options = def.options as unknown[] | Map<unknown, unknown>;
+        const list = Array.isArray(options) ? options : [...(options as Map<unknown, unknown>).values()];
+        // Union branches share one JSON Schema location, so a rule inside one
+        // has nowhere unambiguous to be injected. None exists today; the walk
+        // still descends so the guard test can refuse one that appears.
+        for (const opt of list) walk(opt, path, depth + 1);
+        return;
+      }
+      default:
+        return;
+    }
+  };
+  walk(schema, [], 0);
+  return found;
+}
+
+/**
+ * The object shape under any number of `.superRefine()` wrappers.
+ *
+ * `ZodEffects` has no `.shape`, so a schema gains one the day a cross-field
+ * rule is attached to it — and the caller that broke is never the one that
+ * added the rule.
+ */
+export function objectShapeOf(schema: unknown): Record<string, z.ZodTypeAny> | undefined {
+  let cur = schema as { _def?: { typeName?: string; schema?: unknown }; shape?: unknown };
+  for (let i = 0; i < 16 && cur?._def?.typeName === "ZodEffects"; i++) {
+    cur = cur._def.schema as typeof cur;
+  }
+  const shape = (cur as z.ZodObject<z.ZodRawShape> | undefined)?.shape;
+  return shape as Record<string, z.ZodTypeAny> | undefined;
+}
+
 // ---------- comps ----------
 export const ListComps = z
   .object({
@@ -200,14 +434,24 @@ export const SetLayer = z.object({
   shy: z.boolean().optional(),
   solo: z.boolean().optional(),
   threeDLayer: z.boolean().optional(),
-  blendingMode: z.string().optional(),
+  // These two are keys into After Effects' own `BlendingMode` and
+  // `TrackMatteType` enumerations, looked up by name in `layers.jsx`. A name
+  // that is not in the enumeration is **ignored**, and the call still reports
+  // success — so the accepted spelling has to be visible here, and a value you
+  // are unsure of has to be read back off the layer rather than assumed.
+  blendingMode: z.string().optional()
+    .describe("After Effects' BlendingMode constant name, upper case with underscores: NORMAL, MULTIPLY, SCREEN, OVERLAY, ADD, SUBTRACT, DIFFERENCE, DARKEN, LIGHTEN, COLOR_DODGE, COLOR_BURN, LINEAR_DODGE, LINEAR_BURN, SOFT_LIGHT, HARD_LIGHT, VIVID_LIGHT, LINEAR_LIGHT, PIN_LIGHT, HUE, SATURATION, COLOR, LUMINOSITY, STENCIL_ALPHA, STENCIL_LUMA, ALPHA_ADD, DISSOLVE. A name After Effects does not recognise leaves the mode unchanged without erroring, so read it back with get_layer_full if you are guessing."),
   label: z.number().int().min(0).max(16).optional(),
   inPoint: z.number().optional(),
   outPoint: z.number().optional(),
   startTime: z.number().optional(),
   stretch: z.number().optional(),
   preserveTransparency: z.boolean().optional(),
-  trackMatte: z.object({ type: z.string(), layerId: z.number().optional() }).optional(),
+  trackMatte: z.object({
+    type: z.string()
+      .describe("NO_TRACK_MATTE, ALPHA, ALPHA_INVERTED, LUMA or LUMA_INVERTED. Anything else leaves the matte unchanged without erroring."),
+    layerId: z.number().optional(),
+  }).optional(),
 });
 export const ParentLayer = z.object({
   compId: z.number(),
@@ -223,8 +467,8 @@ export const ParentLayer = z.object({
  * therefore first-class here rather than sugar, and `toIndex` stays for the
  * cases where the position is genuinely absolute ("put it on top").
  */
-export const ReorderLayer = z
-  .object({
+export const ReorderLayer = crossField(
+  z.object({
     compId: z.number(),
     layerId: z.number(),
     toIndex: z.number().int().positive().optional()
@@ -233,14 +477,15 @@ export const ReorderLayer = z
       .describe("Put this layer directly IN FRONT OF (above) the layer with this id."),
     afterLayerId: z.number().optional()
       .describe("Put this layer directly BEHIND (below) the layer with this id."),
-  })
+  }),
   // One destination, resolved before it can reach ExtendScript — two readings of
   // "where does it go" are a contract the schema should never let through.
-  .refine(
-    (v) =>
-      [v.toIndex, v.beforeLayerId, v.afterLayerId].filter((x) => x !== undefined).length === 1,
-    { message: "Pass exactly one of `toIndex`, `beforeLayerId` or `afterLayerId`.", path: ["toIndex"] },
-  );
+  {
+    kind: "exactlyOne",
+    fields: ["toIndex", "beforeLayerId", "afterLayerId"],
+    then: "`beforeLayerId`/`afterLayerId` are the safer two: this is the op that shifts every index below it, so an index read before the move may already be stale.",
+  }
+);
 
 // ---------- transforms ----------
 export const SetTransform = z.object({
@@ -289,16 +534,26 @@ export const SetInterpolation = z.object({
   in: z.enum(["linear", "bezier", "hold"]).optional(),
   out: z.enum(["linear", "bezier", "hold"]).optional(),
 });
-export const SetTemporalEase = z.object({
-  compId: z.number(),
-  layerId: z.number(),
-  propertyPath: PropertyPath,
-  keyIndex: z.number().int().positive(),
-  easeIn: z.object({ influence: z.number(), speed: z.number() }).optional()
-    .describe("One influence/speed pair, applied to every dimension of the property. At least one of easeIn/easeOut is required."),
-  easeOut: z.object({ influence: z.number(), speed: z.number() }).optional()
-    .describe("One influence/speed pair, applied to every dimension of the property."),
-});
+export const SetTemporalEase = crossField(
+  z.object({
+    compId: z.number(),
+    layerId: z.number(),
+    propertyPath: PropertyPath,
+    keyIndex: z.number().int().positive(),
+    easeIn: z.object({ influence: z.number(), speed: z.number() }).optional()
+      .describe("One influence/speed pair, applied to every dimension of the property. At least one of easeIn/easeOut is required."),
+    easeOut: z.object({ influence: z.number(), speed: z.number() }).optional()
+      .describe("One influence/speed pair, applied to every dimension of the property."),
+  }),
+  // `keyframes.jsx` has always refused this, and still does — but it refused
+  // from inside After Effects, which meant a round trip and a write lease spent
+  // on a call that was never going to change anything.
+  {
+    kind: "atLeastOne",
+    fields: ["easeIn", "easeOut"],
+    then: "Each is one {influence, speed} pair; this tool sizes the ease array for the property itself.",
+  }
+);
 export const SetSpatialTangents = z.object({
   compId: z.number(),
   layerId: z.number(),
@@ -318,16 +573,29 @@ export const ClearExpression = z.object({ compId: z.number(), layerId: z.number(
 export const ListEffects = z.object({ compId: z.number(), layerId: z.number() });
 export const AddEffect = z.object({ compId: z.number(), layerId: z.number(), matchName: z.string() });
 export const RemoveEffect = z.object({ compId: z.number(), layerId: z.number(), effectIndex: z.number().int().positive() });
-export const SetEffectParam = z.object({
-  compId: z.number(),
-  layerId: z.number(),
-  effectIndex: z.number().int().positive(),
-  paramName: z.string().optional(),
-  paramMatchName: z.string().optional(),
-  value: VecAny,
-  time: z.number().optional(),
-  keyframe: z.boolean().default(false).optional(),
-});
+export const SetEffectParam = crossField(
+  z.object({
+    compId: z.number(),
+    layerId: z.number(),
+    effectIndex: z.number().int().positive(),
+    paramName: z.string().optional()
+      .describe("The parameter's display name as list_effects reports it, e.g. 'Blurriness'."),
+    paramMatchName: z.string().optional()
+      .describe("The parameter's matchName, e.g. 'ADBE Gaussian Blur 2-0001'. Tried before paramName when both are given, so it is the one to use when a display name is ambiguous or localised."),
+    value: VecAny,
+    time: z.number().optional(),
+    keyframe: z.boolean().default(false).optional(),
+  }),
+  // Neither one is not a call with a default — it is a call that resolves no
+  // property at all, and `effects.jsx` answers it with a bare "Effect param not
+  // found", which reads like the *name* was wrong rather than absent.
+  // Both together is legal and useful: matchName wins, name is the fallback.
+  {
+    kind: "atLeastOne",
+    fields: ["paramName", "paramMatchName"],
+    then: "list_effects on the layer reports both for every parameter of every effect.",
+  }
+);
 export const SetEffectEnabled = z.object({ compId: z.number(), layerId: z.number(), effectIndex: z.number().int().positive(), enabled: z.boolean() });
 // The result is cached for the AE session because enumerating app.effects is
 // slow enough to time the bridge out (issue #26). `filter` is a case-insensitive
@@ -486,7 +754,10 @@ export const AddMask = z.object({
   inTangents: z.array(Vec2).optional(),
   outTangents: z.array(Vec2).optional(),
   closed: z.boolean().default(true).optional(),
-  mode: z.string().default("ADD").optional(),
+  // A key into AE's `MaskMode`, looked up by name in `masks.jsx`; an
+  // unrecognised one leaves the mode alone rather than erroring.
+  mode: z.string().default("ADD").optional()
+    .describe("Mask blend mode: ADD (default), NONE, SUBTRACT, INTERSECT, LIGHTEN, DARKEN or DIFFERENCE. Anything else leaves the mode unchanged without erroring."),
 });
 export const SetMask = z.object({
   compId: z.number(),
@@ -496,7 +767,8 @@ export const SetMask = z.object({
   inTangents: z.array(Vec2).optional(),
   outTangents: z.array(Vec2).optional(),
   closed: z.boolean().optional(),
-  mode: z.string().optional(),
+  mode: z.string().optional()
+    .describe("Mask blend mode: ADD, NONE, SUBTRACT, INTERSECT, LIGHTEN, DARKEN or DIFFERENCE. Anything else leaves the mode unchanged without erroring."),
   inverted: z.boolean().optional(),
   expansion: z.number().optional(),
   feather: Vec2.optional(),
@@ -538,8 +810,8 @@ const downsampleParam = z
   .describe(
     "Render at 1/N resolution. Omit and one is chosen from the comp size (long edge ~1280px: 2 at 1080p, 3 at 4K). Pass 1 for a full-resolution frame. The factor is always exactly what you asked for: the render sets the comp's resolution and puts it back, so a viewer left on Quarter or Third does not change the size of the frame you get."
   );
-export const ScreenshotFrame = z
-  .object({
+export const ScreenshotFrame = crossField(
+  z.object({
     compId: z.number(),
     time: z.number().optional(),
     /**
@@ -560,14 +832,17 @@ export const ScreenshotFrame = z
         "2-6 times to render into one tiled contact sheet, in order, with the time burned into each tile. Cheaper than one call per frame and the whole point of it is judging motion. Mutually exclusive with `time`."
       ),
     downsample: downsampleParam,
-  })
+  }),
   // Enforced here rather than in the panel: two readings of "which frame did
   // you want" reaching ExtendScript at all is a contract the schema should
-  // never have let through.
-  .refine((v) => !(v.time !== undefined && v.times !== undefined), {
-    message: "Pass either `time` (one frame) or `times` (a contact sheet), not both.",
-    path: ["times"],
-  });
+  // never have let through. `atMostOne` and not `exactlyOne` — neither is a
+  // legal call, and means the comp's current time.
+  {
+    kind: "atMostOne",
+    fields: ["time", "times"],
+    then: "`time` is one frame, `times` is a contact sheet of 2-6 of them; omit both for the comp's current time.",
+  }
+);
 export const ScreenshotLayer = z.object({
   compId: z.number(),
   layerId: z.number(),
@@ -616,18 +891,30 @@ export const FindLayers = z.object({
 });
 
 // ---------- raw ----------
-export const RunJsx = z.object({
-  code: z.string().optional()
-    .describe("The ExtendScript to run. Exactly one of `code` or `scriptPath`."),
-  scriptPath: z.string().optional()
-    .describe("Absolute path to a .jsx file to run instead of `code`. The server reads it, so a long script never enters the conversation. Exactly one of `code` or `scriptPath`."),
-  libraries: z.array(z.string()).optional()
-    .describe("Absolute paths to .jsx files inlined ahead of the script, sharing its scope, so their functions are callable from it. The server reads them, so their text never enters the conversation. They are re-evaluated on every call — keep them to declarations, not to work. Put shared helpers here rather than pasting them into every script."),
-  undoGroup: z.boolean().default(true).optional()
-    .describe("Wrap the script in one undo step. Set false only for the operations AE refuses while an undo group is open — copyToComp on a layer with a parent or a linked expression. The script's changes then land as whatever undo steps AE records on its own."),
-  diff: diffParam,
-  diffCompId: diffCompIdParam,
-});
+export const RunJsx = crossField(
+  z.object({
+    code: z.string().optional()
+      .describe("The ExtendScript to run. Exactly one of `code` or `scriptPath`."),
+    scriptPath: z.string().optional()
+      .describe("Absolute path to a .jsx file to run instead of `code`. The server reads it, so a long script never enters the conversation. Exactly one of `code` or `scriptPath`."),
+    libraries: z.array(z.string()).optional()
+      .describe("Absolute paths to .jsx files inlined ahead of the script, sharing its scope, so their functions are callable from it. The server reads them, so their text never enters the conversation. They are re-evaluated on every call — keep them to declarations, not to work. Put shared helpers here rather than pasting them into every script."),
+    undoGroup: z.boolean().default(true).optional()
+      .describe("Wrap the script in one undo step. Set false only for the operations AE refuses while an undo group is open — copyToComp on a layer with a parent or a linked expression. The script's changes then land as whatever undo steps AE records on its own."),
+    diff: diffParam,
+    diffCompId: diffCompIdParam,
+  }),
+  // `resolveRunJsxSource` refuses both and neither too, and keeps doing so —
+  // it is reachable from `run_batch`, whose steps are never zod-validated. What
+  // the rule buys here is the half that runs *before* the call: declared, it
+  // reaches the emitted JSON Schema, so the model sees the choice rather than
+  // discovering it.
+  {
+    kind: "exactlyOne",
+    fields: ["code", "scriptPath"],
+    then: "Prefer `scriptPath` for anything long — the server reads the file, so the script never enters the conversation.",
+  }
+);
 
 // ---------- footage ----------
 export const ImportFootage = z

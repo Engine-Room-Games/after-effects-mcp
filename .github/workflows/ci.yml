@@ -262,6 +262,16 @@ jobs:
           node tests/unit/write-queue.mjs
           node tests/unit/write-queue-server.mjs
 
+      # Two failures at once, and the first one takes the whole server down with
+      # it: the Anthropic API rejects a tool schema that is not valid draft
+      # 2020-12, and a rejected schema breaks every tool in the session rather
+      # than the one it belongs to. So all 74 are validated against the real
+      # metaschema here. The second is quieter and was the reason for the
+      # change: zod-to-json-schema drops refinements, so a "pass exactly one of
+      # these" rule can be enforced by the server and invisible to the model.
+      - name: Tool schemas are valid 2020-12 and hide no constraints
+        run: node tests/unit/schema-constraints.mjs
+
       - name: check_setup resolves platform paths without throwing
         shell: bash
         run: |

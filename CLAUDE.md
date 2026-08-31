@@ -42,7 +42,7 @@ The MCP server is stateless except for an in-memory `JobManager`, the `SnapshotS
 
 | Path | Purpose |
 |---|---|
-| `packages/shared/src/schemas.ts` | **Source of truth for op contracts.** Adding an op = adding a zod schema here. |
+| `packages/shared/src/schemas.ts` | **Source of truth for op contracts.** Adding an op = adding a zod schema here. Also holds `OpMutation` (write/read/server) and the `crossField()` vocabulary for rules `zod-to-json-schema` cannot express — see "Cross-field rules". |
 | `packages/shared/src/ipc.ts` | HTTP envelope + WS event types. |
 | `packages/jsx/*.jsx` | ExtendScript handlers. Each module attaches functions to the global `OPS` table. ES3-ish — no `let`/`const`/arrow/templates. |
 | `packages/jsx/core.jsx` | JSON polyfill, `dispatch(payloadJson)` router, `withUndo()` wrapper, `JOBS` table for chunked async. |
@@ -62,7 +62,7 @@ The MCP server is stateless except for an in-memory `JobManager`, the `SnapshotS
 | `packages/ae-panel/client/contactsheet.js` | Tiles several frames into one labelled sheet, bitmap font included. Everything `times[]` needs that ExtendScript cannot do. |
 | `packages/ae-panel/client/framecache.js` | The window of recently delivered frames that makes a re-served render buffer visible. |
 | `packages/ae-panel/client/mogrt.js` | Zip surgery + box-filter resample that replaces `thumb.png` inside an exported `.mogrt`. Node builtins and `pngcodec.js` only — no third-party dependencies, so a test can require it. |
-| `packages/mcp-server/src/server.ts` | Tool registry, vision/async-envelope branching, error mapping. |
+| `packages/mcp-server/src/server.ts` | Tool registry, vision/async-envelope branching, error mapping. `toolInputSchema()` is the whole of what a client sees as a tool's contract: zod → draft-07 → `toDraft2020()` → the cross-field constraints put back. Exported so a test can validate the exact document that ships. |
 | `packages/mcp-server/src/tools/descriptions.ts` | All tool descriptions in one file — including the verbatim screenshot guidance. |
 | `packages/mcp-server/src/tools/runJsxSource.ts` | `run_jsx`'s `scriptPath` and `libraries`. The **server** reads those files, never the panel — same reasoning as `init_project`. `OPS.run_jsx` throws if a `scriptPath` still reaches it, and likewise for a library with a path and no `text`: that means the call came through `run_batch` (whose steps are never validated) or a direct `/op`, and running the empty script — or skipping the library — would report success for a file nobody read. `MAX_TOTAL_BYTES` caps the script and its libraries together, because since they are inlined every byte travels on every call. It resolves those two fields and **spreads everything else through untouched** — see "The only op whose input is rewritten" below. |
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. |
@@ -94,7 +94,7 @@ The MCP server is stateless except for an in-memory `JobManager`, the `SnapshotS
 
 Adding a new op = touching six places. In order:
 
-1. **Schema** — `packages/shared/src/schemas.ts`: add zod schema and an entry in `OpSchemas`.
+1. **Schema** — `packages/shared/src/schemas.ts`: add zod schema and an entry in `OpSchemas`. If two fields are alternatives ("exactly one of these"), declare it with `crossField()` rather than `.refine()` — a bare refinement is dropped by the converter and `tests/unit/schema-constraints.mjs` fails the build. See "Cross-field rules".
 2. **Classification** — the `OpMutation` table at the bottom of the same file: `"write"`, `"read"` or `"server"`. `tests/unit/write-queue.mjs` fails the build if you skip it, on purpose — see "Serializing writes".
 3. **ExtendScript handler** — add to the matching module in `packages/jsx/` as `OPS.your_op = function(args){ ... }`. Use `noUndo(fn)` for read-only ops (skips the undo group wrapper).
 4. **Description** — `packages/mcp-server/src/tools/descriptions.ts`: add an entry keyed by op name. Write it for an LLM agent reading the tool list cold.
@@ -135,10 +135,83 @@ Two rules, and they are the whole of it:
 
 Verification recipe 29 is the live half.
 
+### Cross-field rules ("pass exactly one of these")
+
+**A `.refine()` is invisible to the model.** `zod-to-json-schema` drops
+refinements without a word, so a rule written that way is enforced on the
+server and absent from the schema the agent is shown — and the only way it
+learns the rule is by making the call and having it rejected. That is a wasted
+turn in every session that hits it, and three 0.4.0 features landed on the same
+edge independently: `reorder_layer`'s three destinations, `screenshot_frame`'s
+`time`/`times`, `run_jsx`'s `code`/`scriptPath`. Two more rules were being
+enforced further down still — `set_temporal_ease` from inside After Effects
+(a round trip and a write lease spent on a call that was never going to change
+anything) and `set_effect_param` as a bare `Effect param not found`, which
+reads as though the *name* was wrong rather than absent.
+
+So a rule is **declared once**, with `crossField()` in `schemas.ts`, and three
+things are generated from that one declaration:
+
+| Generated | By | Reaches |
+|---|---|---|
+| the zod check | `crossField` | the server, on every call |
+| `oneOf` / `anyOf` / `not` in the emitted schema | `crossFieldJsonSchema`, applied by `toolInputSchema()` | every client, before the call |
+| the sentence in the rejection | `crossFieldMessage` | the agent, when it breaks anyway |
+
+Three kinds cover everything so far: `exactlyOne`, `atMostOne`, `atLeastOne`.
+Five ops use them — `reorder_layer`, `screenshot_frame`, `run_jsx`,
+`set_temporal_ease`, `set_effect_param`.
+
+Four things hold it together, and each is a way it could rot quietly:
+
+- **The declaration is the only copy.** A rule enforced in zod and described in
+  prose somewhere else is two statements that drift, and the drift is invisible
+  because the schema keeps working while only the *advice* goes stale.
+- **An unclassified refinement fails the build.** `tests/unit/schema-constraints.mjs`
+  enumerates every `ZodEffects` in every op schema and refuses any that is not a
+  declared rule — same shape of guard as the `OpMutation` classification test
+  and `run-jsx-args.mjs`, and for the same reason: what it cannot classify, it
+  must not pass over. At *runtime* `toolInputSchema()` logs and carries on
+  instead of throwing, for the reason `isWriteOp()` falls back to `"write"`:
+  `tools/list` is the call every session begins with, so raising there would
+  turn one under-specified tool into no tools at all. Fail the build loudly;
+  fail the session towards what shipped before.
+- **The two enforcers are proved to agree.** For a rule over N fields there are
+  2^N ways to pass them, and the test probes every one against both the compiled
+  JSON Schema and `safeParse`. A schema *stricter* than the server would
+  advertise working calls as illegal; one *looser* is the invisible constraint
+  this exists to end.
+- **The description says it too.** Belt and braces on purpose — the keyword is
+  machine-readable, the sentence is what a model actually reads, and a converter
+  or a client can drop the first but never the second. The test requires both
+  the field names and a phrase matching the rule kind.
+
+`crossField` returns a `ZodEffects`, which has no `.shape`. Use `objectShapeOf()`
+rather than reaching into `_def` — a schema loses `.shape` the day a rule is
+added to it, and the caller that breaks is never the one that added the rule.
+
+The runtime half is `invalidArgsText()` in `util/errors.ts`. `ZodError.message`
+is `JSON.stringify(issues)`, so every carefully written message used to arrive
+buried in an array of `code`/`expected`/`received` objects; it is now one line
+per problem, naming the field. Passing *none* of a rule's fields and passing
+*two* must read differently — an agent that cannot tell which mistake it made
+re-sends the same call.
+
+**Two constraints deliberately left as prose.** `place_audio_cues` requires
+exactly one of `footageId`/`path` *per cue*, and `audio.jsx` reports every
+offending cue index at once so `dryRun` can answer for the whole list; a zod
+rule would reject the call through a different, less structured channel and
+change what `dryRun` is for. And `blendingMode`, `trackMatte.type` and a mask's
+`mode` are keys into After Effects' own enumerations, looked up by name — an
+unrecognised one is **ignored** and the call still reports success. That is a
+swallowed error rather than a hidden constraint, and fixing it means changing
+what the .jsx does with no AE to test against; for now the accepted names are
+in the field descriptions, along with the fact that a wrong one changes nothing.
+
 ## Special return shapes
 
 - **Vision** (`screenshot_frame`, `screenshot_layer`): JSX returns `{path, width, height, time, compId, layerId?}`. Panel waits for the file to be a *complete* PNG (`framereader.js`), normalises it to 8-bit, base64-encodes, returns `{base64, bytes, ...}`. Server packages as MCP `image` content block. Four outcomes are deliberately *not* images: a fully transparent frame comes back as `{empty:true, reason}` and goes through `textResult`; a frame whose pixels match a different earlier request is refused as `STALE_FRAME`; a file After Effects wrote and abandoned is refused as `FRAME_INCOMPLETE`; and a render that never finished is refused as `RENDER_TIMEOUT`. Those last two must never share a sentence — see "Known fragile areas".
-- **Contact sheet** (`screenshot_frame` with `times`): 2-6 times in one call, exclusive with `time` (enforced by a zod `.refine`, so two readings of "which frame" can never reach ExtendScript). JSX renders one temp PNG per time at a shared per-tile factor and returns `{contactSheet:true, tiles:[{path,time}|{error}], downsample, ...}`; the panel reads each, composites them into one labelled image (`contactsheet.js`) and returns the same `base64` shape plus `tiles`, `cols`, `rows`, `cellWidth`/`cellHeight`. Three properties hold it together: **every requested time keeps its cell**, so a failed tile is a marked block rather than a gap that renumbers the rest; **the time is burned into the picture**, because metadata beside an image is not what a model compares; and **a bad tile never invalidates the sheet** — it is named and counted in `warning`, and only a sheet where *nothing* rendered is refused outright. Inside one sheet, two tiles with identical pixels are a static comp, not the #29 stale buffer, so they are flagged in `note` rather than refused; a match against a frame from *outside* the sheet is still a stale tile and is drawn as a block.
+- **Contact sheet** (`screenshot_frame` with `times`): 2-6 times in one call, exclusive with `time` — a declared `atMostOne` cross-field rule, so two readings of "which frame" can never reach ExtendScript *and* the exclusion is in the emitted JSON Schema rather than only in the rejection. JSX renders one temp PNG per time at a shared per-tile factor and returns `{contactSheet:true, tiles:[{path,time}|{error}], downsample, ...}`; the panel reads each, composites them into one labelled image (`contactsheet.js`) and returns the same `base64` shape plus `tiles`, `cols`, `rows`, `cellWidth`/`cellHeight`. Three properties hold it together: **every requested time keeps its cell**, so a failed tile is a marked block rather than a gap that renumbers the rest; **the time is burned into the picture**, because metadata beside an image is not what a model compares; and **a bad tile never invalidates the sheet** — it is named and counted in `warning`, and only a sheet where *nothing* rendered is refused outright. Inside one sheet, two tiles with identical pixels are a static comp, not the #29 stale buffer, so they are flagged in `note` rather than refused; a match against a frame from *outside* the sheet is still a stale tile and is drawn as a block.
 - **Long batch** (`run_batch` >500 ops): JSX returns `{jobId, async:true, total, chunkSize, undoStepsEstimate, undoGroupName, note}`. Panel drives `_continue_job` in chunks of `chunkSize` in the background, broadcasting `progress` events on WS. Server forwards WS progress as `notifications/progress` keyed by the request's `progressToken`. The undo fields ride the envelope because it is the only message the agent sees before it starts describing the work — the *measured* `undoSteps` arrives much later, on the completion event. `singleUndo:true` takes the inline path instead, so no envelope and no progress at all.
 - **Server-resident** (`await_job`, `get_job`, `cancel_job`, `check_setup`, `setup_panel`, `init_project`, `ae_guide`, `log_issue`, `list_known_issues`, `mark_issue_reported`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag). They're still listed in `OpSchemas` so `tools/list` picks them up — membership in `SERVER_OPS` is what stops the forwarding.
 - **Half server-resident** (`snapshot_comp`, `diff_comp`): the panel gathers, the server remembers. `SNAPSHOT_OPS` in `server.ts` routes them to `runSnapshotOp`, which forwards an internal read op (`_comp_fingerprint` / `_comp_diff`) and keeps the answer in `SnapshotStore`. Deliberately *not* in `SERVER_OPS` — unlike those, these do touch the bridge, and they are dispatched from inside the same `try` as `bridge.runOp` so the timeout, `AeError` and Unknown-op mappings all apply unchanged.
@@ -577,6 +650,36 @@ The user-facing half is the offer to report. It now lives in exactly two places:
 - CEP manifest's `<AutoVisible>false</AutoVisible>` was unreliable in early CEP 12 builds. Current manifest uses `AutoVisible=true` with a small geometry — the panel still auto-loads invisibly enough; the user can dock the small status panel out of the way.
 - CEP panels installed without signing require `PlayerDebugMode=1`. The user does this once via `npm run enable:debug` and a reboot.
 - **Anthropic API requires JSON Schema draft 2020-12** for tool input schemas. `zod-to-json-schema` 3.x has no 2020-12 target — `openApi3` emits `nullable` (rejected) and `jsonSchema7` emits draft-07 tuple form `items:[...]` (rejected; 2020-12 wants `prefixItems`). `server.ts` uses `jsonSchema7` + `$refStrategy:"none"` + a `toDraft2020()` post-pass that rewrites tuples. Don't switch back to `openApi3`.
+
+  **What the rejection is, exactly.** Both known rejections are *invalid draft
+  2020-12*, not "valid but unsupported": `nullable` is an OpenAPI extension and
+  the draft-07 tuple form means something else in 2020-12. There is no keyword
+  whitelist to stay inside — the emitted document has to be a valid schema in
+  that dialect, and composition keywords are fine. This server already ships 16
+  `anyOf` sites and 56 `prefixItems`. **Validate, do not guess:**
+  `tests/unit/schema-constraints.mjs` checks all 74 emitted schemas against the
+  real 2020-12 metaschema and compiles each one with `ajv/dist/2020`, and CI
+  runs it. A schema the API refuses takes down *every* tool in the session, not
+  the one it belongs to, so nothing goes into that emission pass unvalidated.
+
+  **`$schema` used to be a lie, and the lie was load-bearing in the wrong
+  direction.** zod-to-json-schema stamps `http://json-schema.org/draft-07/schema#`,
+  and `toDraft2020` then writes `prefixItems` — which does not exist in draft-07
+  — and `items: false`, which there means "no array items at all". Anything
+  honouring the declared dialect would have rejected every colour and every 2D
+  point in this API; it worked only because tool schemas are read as 2020-12
+  whatever they claim. `toDraft2020` now rewrites `$schema` to
+  `https://json-schema.org/draft/2020-12/schema` (`JSON_SCHEMA_DIALECT`). That
+  also lets the test validate **exactly what ships** rather than a copy with
+  the header stripped — ajv refuses to compile a document declaring a dialect
+  it was not built for, so before this the test would have had to mutate its
+  own subject.
+
+  **`zod-to-json-schema` silently drops `.refine()` / `.superRefine()`.** Not an
+  error, not a warning — the constraint is enforced on the server and absent
+  from the document the model reads, so the only way an agent learns the rule
+  is by having a call rejected. See "Cross-field rules" below; `toolInputSchema()`
+  in `server.ts` is where declared rules are put back.
 - **`setTemporalEaseAtKey`'s array length belongs to the property, and cannot be read off the value.** Spatial properties (Position, Anchor Point) take a single entry regardless of 2D/3D, because the ease runs along the motion path. Non-spatial multi-dimensional properties take one per dimension — Scale 2 or 3, Color 4. And then a shape **Ellipse Size** takes 3 while its value reads `[w, h]`, which is the case that proves no table derived from the outside is going to be right everywhere (issue #50). AE's own diagnosis for a wrong count is the string `parameter 2` — no property name, no expected length — so an agent easing three properties in a row hits it three times and ends up writing a try/catch ladder by hand. `__applyTemporalEase` in `keyframes.jsx` is the one implementation: it derives a count from `isSpatial` first and `propertyValueType` second (falling back to the value's length), tries that, and then tries 1 → 2 → 3 → 4. **The derivation is the fast path and the retry is the safety net, not the other way round** — an ordinary property must cost one call, or a long batch pays a ladder per keyframe. Callers pass one `{influence, speed}` pair and it is expanded to every entry; the count AE accepted comes back as `easeDimensions`, which is the only way the real answer for a property ever becomes knowable. Everything that sets ease (`add_keyframe`, `set_temporal_ease`, and anything in run_jsx that wants it) must go through that function rather than sizing an array itself. `tests/unit/ease-arity.mjs` covers the table, the ordering and the retry.
 - **`saveFrameToPng` is asynchronous, and "the file stopped growing" is not the same statement as "the file is finished".** It returns before the bytes are on disk, so anything reading the PNG has to decide for itself when the write is done. Until 0.4.0 that decision was *settling*: two `stat` calls 30ms apart reporting the same size. What that let through is every writer pause longer than 30ms — which on a heavy comp (the report was ~88 layers, a full-frame background precomp plus several shot precomps) is routine. The panel read the file mid-flight, shipped it, and the agent got `truncated PNG: chunk IDAT runs past the end of the file` for a render that was still happening. Completion is now *structural*: the file is finished when it ends in a zero-length IEND chunk and every chunk length from the signature adds up to exactly that (`pngCodec.inspectPngStructure`), so a partial write cannot be delivered at all — only waited on. `framereader.js` polls for that, with a cheap tail probe in front of the full read because IEND is the last chunk in the format and a file that does not end in one does not need reading. Three numbers: 120s of render budget (a cold 4K render was measured over 15 seconds; the original 5s silently failed screenshots that were merely still rendering), a 6s stall window after which a file that has stopped changing and still is not a PNG is declared abandoned, and one automatic re-render. The retry is safe because both screenshot ops are read-only and leave nothing in the project — unlike `run_jsx`, where re-running duplicates side effects (#43) — and it fires **only** on a corrupt read, never on a timeout: a timeout has already spent the 120s budget and a second one would push the op past the server's 300s ceiling, turning a precise diagnosis into a bridge timeout with the opposite remedy. `growable` in `inspectPngStructure` is what keeps the fast cases fast: a wrong signature or a missing IHDR can never be fixed by more bytes, so it fails immediately instead of waiting out the stall. Reported as issue #45.
 - **A failed frame read must never be cached, and the two failures must never share a message.** The other half of #45 was the diagnosis, not the read: the old passthrough path hashed the *truncated* bytes into `framecache.js`, so the next truncation at the same byte count came back as `Stale frame` — the reported symptom was "the same 73,877 bytes for different times and downsamples". Only a frame that decoded and was delivered reaches `frameCache.remember` now. And `FRAME_INCOMPLETE` ("the file After Effects wrote is not a whole PNG"; retry at a higher downsample) and `RENDER_TIMEOUT` ("it did not finish in time"; wait, do not retry immediately) get completely separate messages, for the same reason `BridgeTimeoutError` and `BridgeUnreachableError` do: the remedies point in opposite directions. Neither message may ever suggest restarting After Effects or re-running `setup_panel`, and `tests/unit/frame-integrity.mjs` asserts that.
@@ -648,7 +751,7 @@ Linux is impossible, not merely unimplemented — Adobe has never shipped AE for
 
 All `packages/jsx/*.jsx` is AE's own scripting API and is platform-neutral; never add platform branching there. Host differences are confined to `setup/platform.ts` (PlayerDebugMode via `defaults` vs `reg`, AE process via `pgrep` vs `tasklist`) and `cepExtensionsDir()` in `setup/paths.ts` (`~/Library/Application Support/...` vs `%APPDATA%\...`).
 
-CI (`.github/workflows/ci.yml`) builds and smoke-tests on macos-latest and windows-latest: server starts, ≥70 tools, `instructions`/prompts/resources are served and `$ARGUMENTS` substitutes, `check_setup` resolves paths, and both scaffold entry points write files and refuse to clobber. It cannot exercise the CEP install — no AE on a runner — so the Windows install path is the least-proven part of the project. macOS is the daily-driven platform.
+CI (`.github/workflows/ci.yml`) builds and smoke-tests on macos-latest and windows-latest: server starts, ≥70 tools, every emitted tool schema is valid draft 2020-12 and hides no cross-field constraint, `instructions`/prompts/resources are served and `$ARGUMENTS` substitutes, `check_setup` resolves paths, and both scaffold entry points write files and refuse to clobber. It cannot exercise the CEP install — no AE on a runner — so the Windows install path is the least-proven part of the project. macOS is the daily-driven platform.
 
 ## Releasing
 

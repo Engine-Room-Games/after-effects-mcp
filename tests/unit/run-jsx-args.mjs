@@ -31,9 +31,13 @@ const sharedDist = (...p) =>
   pathToFileURL(path.join(root, "packages", "shared", "dist", ...p)).href;
 
 const { resolveRunJsxSource } = await import(serverDist("tools", "runJsxSource.js"));
-const { OpSchemas } = await import(sharedDist("schemas.js"));
+const { OpSchemas, objectShapeOf } = await import(sharedDist("schemas.js"));
 
 const RunJsx = OpSchemas.run_jsx;
+// `RunJsx` carries a cross-field rule (`code` xor `scriptPath`), which makes it
+// a `ZodEffects` — and a `ZodEffects` has no `.shape`. `objectShapeOf` peels the
+// wrappers off, so this enumeration keeps working the next time a rule is added.
+const runJsxShape = objectShapeOf(RunJsx);
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ae-run-jsx-args-"));
 const write = (name, text) => {
@@ -101,7 +105,7 @@ try {
     );
   };
 
-  const declared = Object.keys(RunJsx.shape);
+  const declared = Object.keys(runJsxShape);
 
   check("RunJsx still declares the fields this guard is built around", () => {
     for (const k of ["code", "scriptPath", "libraries"]) {
@@ -122,7 +126,7 @@ try {
         }
         args[key] = SOURCE_FIELDS[key];
       } else {
-        args[key] = sampleFor(key, RunJsx.shape[key]);
+        args[key] = sampleFor(key, runJsxShape[key]);
       }
     }
     // Through zod first, exactly as server.ts does it: the sample has to be a
