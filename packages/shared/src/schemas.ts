@@ -618,7 +618,7 @@ export const RunJsx = z.object({
   scriptPath: z.string().optional()
     .describe("Absolute path to a .jsx file to run instead of `code`. The server reads it, so a long script never enters the conversation. Exactly one of `code` or `scriptPath`."),
   libraries: z.array(z.string()).optional()
-    .describe("Absolute paths to .jsx files evaluated at global scope before the script, once per After Effects session. Re-passing an unchanged file is free; editing it re-evaluates it. Put shared helpers here rather than pasting them into every script."),
+    .describe("Absolute paths to .jsx files inlined ahead of the script, sharing its scope, so their functions are callable from it. The server reads them, so their text never enters the conversation. They are re-evaluated on every call — keep them to declarations, not to work. Put shared helpers here rather than pasting them into every script."),
   undoGroup: z.boolean().default(true).optional()
     .describe("Wrap the script in one undo step. Set false only for the operations AE refuses while an undo group is open — copyToComp on a layer with a parent or a linked expression. The script's changes then land as whatever undo steps AE records on its own."),
   diff: diffParam,

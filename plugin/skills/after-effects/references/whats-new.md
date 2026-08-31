@@ -70,8 +70,9 @@ back. Two existing calls answer differently, so read those first.
   honestly when the number cannot be mapped rather than guessing. The old advice
   to ignore the line number is gone.
 - **`scriptPath` and `libraries`** keep a long script and its shared helpers out
-  of the conversation entirely. Libraries are evaluated at global scope once per
-  After Effects session; re-passing an unchanged file is free.
+  of the conversation entirely. Libraries are inlined ahead of the script in the
+  same scope, so their functions are callable from it; they are re-evaluated on
+  every call, so keep them to declarations rather than to work.
 - **Helpers in scope**, each wrapping a trap: `compById`, `layerById`,
   `walkProperty`, `addKeys`, `ease` (which sizes the KeyframeEase array using the
   same code `set_temporal_ease` uses, not a copy), `shape` (which lands at

@@ -128,16 +128,21 @@ function __rjResult(result, undoGroupName) {
 // calls (issue #46). Nothing rolls back, so an agent that cannot locate the
 // throw has to read the whole project back to find out where the script stopped.
 //
-// Two halves, and the second is the one that actually helps. The wrapper is
-// built so the caller's first line IS line 1 of the evaluated source — the
-// prefix carries no newline, so the offset is zero — and __RJ_PREAMBLE_LINES
-// *counts* the prefix rather than asserting it, so the offset can never drift
-// from the string it describes. Then the mapped line is reported with its
-// TEXT, which an agent can act on without trusting any numbering at all.
+// Two halves, and the second is the one that actually helps. The caller's line
+// 1 sits a *counted* distance down the evaluated source: with no libraries the
+// prefix carries no newline and the distance is zero, and with libraries it is
+// however many lines of library text were inlined ahead of the script.
+// __rjBuildSource measures the preamble it actually built rather than asserting
+// a constant, so the number can never drift from the string it describes —
+// a hand-written constant beside a string is exactly how the two came apart the
+// first time. Then the mapped line is reported with its TEXT, which an agent
+// can act on without trusting any numbering at all.
 //
 // The mapping refuses to guess: a line that falls outside the submitted source
-// is reported as unmappable, never clamped. A confident wrong line number is
-// worse than none — it sends the reader to a statement that did not fail.
+// is reported as unmappable, never clamped — unless it lands in a library that
+// was inlined ahead of it, which is a real file with real lines and is named.
+// A confident wrong line number is worse than none — it sends the reader to a
+// statement that did not fail.
 var __RJ_WRAP_PREFIX = "(function(){ ";
 // The closer sits on its own line. Appended to the caller's last line, a script
 // ending in a `//` comment commented out its own `})()` and failed to parse for
@@ -150,6 +155,10 @@ function __rjLines(s) {
   return String(s).split("\r\n").join("\n").split("\r").join("\n").split("\n");
 }
 
+// The preamble of a call with no libraries: the bare wrapper opener, which
+// carries no newline, so zero. __rjBuildSource recomputes this per call once
+// libraries are in it; this is the default __rjSourceInfo falls back on when a
+// caller hands it no layout.
 var __RJ_PREAMBLE_LINES = __rjLines(__RJ_WRAP_PREFIX).length - 1;
 
 function __rjTrim(s) {
@@ -170,7 +179,15 @@ function __rjClip(s, max) {
 // What After Effects reported, mapped onto the source the caller submitted.
 // Nothing here is fabricated: when the number does not land inside the script,
 // sourceLine stays null and the server says the number could not be mapped.
-function __rjSourceInfo(e, code, scriptPath) {
+//
+// `layout` is what __rjBuildSource returned for this call — how many lines of
+// preamble sit ahead of the caller's line 1, and where each inlined library
+// landed in the evaluated source. Omitted, it means the bare wrapper: no
+// libraries and a zero-line preamble, which is every call without `libraries`.
+function __rjSourceInfo(e, code, scriptPath, layout) {
+  var lay = layout ? layout : { preambleLines: __RJ_PREAMBLE_LINES, segments: [] };
+  var preamble = lay.preambleLines;
+  var segs = lay.segments ? lay.segments : [];
   var lines = __rjLines(code);
   var info = {
     lineCount: lines.length,
@@ -186,25 +203,70 @@ function __rjSourceInfo(e, code, scriptPath) {
   } catch (e1) {}
   info.rawLine = raw;
 
-  var mapped = null;
-  // ExtendScript also records the source text an error was raised in and the
-  // character offset into it. When that source is our own wrapper it answers
-  // the question directly, with no assumption about what `line` counts from.
+  // Which line of the *evaluated source* — the wrapper, the inlined libraries
+  // and the caller's script together — the failure sits on. After Effects' own
+  // `line` already counts from there, which is what makes it usable at all.
+  var wrapperLine = null;
+
+  // ExtendScript's Error also carries `source` (the text the error was raised
+  // in) with `start`/`end` character offsets into it, and the documentation
+  // presents those as the better answer, because they need no assumption about
+  // what `line` counts from. On After Effects 2026 they are not offsets at all.
+  //
+  // Probed inside AE, catching from a four-line script that throws on line 4:
+  //
+  //   eval("(function(){ var a=1;\nvar b=2;\nvar c=3;\nnope.boom();\n})()")
+  //   caught -> { "line": 4, "start": 0, "end": 0, "srcLen": 57 }
+  //
+  // `line` is already correct. `start` and `end` came back 0 on every error
+  // measured, however far into the source it was raised. Read as an offset, a
+  // zero start puts *every* failure on line 1 and prints line 1's text — which
+  // is exactly what issue #46 still did after it was reported fixed, with the
+  // true number demoted to the parenthetical afterwards.
+  //
+  // So the branch survives only for offsets that could actually be real: 0/0 is
+  // After Effects declining to say, not After Effects pointing at the first
+  // character. Do not restore this from the documentation.
   try {
     var src = null;
     if (e && typeof e.source === "string") src = e.source;
     var start = null;
-    if (e && typeof e.start === "number") start = e.start;
-    if (src !== null && start !== null && start >= 0 &&
+    if (e && typeof e.start === "number" && isFinite(e.start)) start = e.start;
+    var end = null;
+    if (e && typeof e.end === "number" && isFinite(e.end)) end = e.end;
+    var offsetsUsable = false;
+    if (start !== null && start > 0) offsetsUsable = true;
+    if (start === 0 && end !== null && end > 0) offsetsUsable = true;
+    if (offsetsUsable && src !== null &&
         src.substring(0, __RJ_WRAP_PREFIX.length) === __RJ_WRAP_PREFIX) {
-      mapped = __rjLines(src.substring(0, start)).length - __RJ_PREAMBLE_LINES;
+      wrapperLine = __rjLines(src.substring(0, start)).length;
     }
   } catch (e2) {}
-  if (mapped === null && raw !== null) mapped = raw - __RJ_PREAMBLE_LINES;
+  if (wrapperLine === null) wrapperLine = raw;
+  if (wrapperLine === null) return info;
 
-  if (mapped !== null && mapped >= 1 && mapped <= lines.length) {
+  var mapped = wrapperLine - preamble;
+  if (mapped >= 1 && mapped <= lines.length) {
     info.sourceLine = mapped;
     info.sourceText = __rjClip(__rjTrim(lines[mapped - 1]), 200);
+    return info;
+  }
+
+  // Not the caller's script. A library inlined ahead of it is a real file with
+  // real lines, so name it and point into it rather than reporting the number
+  // as unmappable: that file is where the reader has to look, and naming the
+  // script instead would send them to a line that did not fail.
+  for (var s = 0; s < segs.length; s++) {
+    var seg = segs[s];
+    var count = seg.lines.length - 1;
+    var within = wrapperLine - seg.firstLine + 1;
+    if (within >= 1 && within <= count) {
+      info.sourceName = seg.path;
+      info.lineCount = count;
+      info.sourceLine = within;
+      info.sourceText = __rjClip(__rjTrim(seg.lines[within - 1]), 200);
+      return info;
+    }
   }
   return info;
 }
@@ -214,8 +276,8 @@ function __rjSourceInfo(e, code, scriptPath) {
 // the server prints the line's text. A plain object rather than an Error
 // because ExtendScript will not reliably let us write `line` on one, and
 // __mkError only ever reads message/stack/line.
-function __rjThrowWithSource(e, code, scriptPath) {
-  var info = __rjSourceInfo(e, code, scriptPath);
+function __rjThrowWithSource(e, code, scriptPath, layout) {
+  var info = __rjSourceInfo(e, code, scriptPath, layout);
   var msg = "";
   try { if (e && e.message) msg = String(e.message); } catch (e1) {}
   if (!msg) {
@@ -227,57 +289,155 @@ function __rjThrowWithSource(e, code, scriptPath) {
 }
 
 // ---------- Helper libraries ----------
-// Libraries go through $.evalFile, never eval: eval runs in the *calling*
-// function's scope, so a library's `function helper(){}` would be visible only
-// inside this loader and gone by the time the script runs. $.evalFile evaluates
-// at global scope, which is the whole point — load once, call for the rest of
-// the After Effects session (issue #53).
+// A library's source is inlined into the SAME eval as the caller's script,
+// ahead of it. That is not the obvious design, and it is the only one that
+// works.
 //
-// The cache is keyed path -> content hash, and the hash is computed by the
-// server when it read the file. Re-passing an unchanged library is free;
-// editing it changes the hash and it is re-evaluated. Nothing expires:
-// ExtendScript globals live as long as AE does, and so does this table. An
-// entry is written only after a successful eval, so a library that failed
-// halfway is never recorded as loaded.
-var __RJ_LIBS = __RJ_LIBS || {};
+// The first version used $.evalFile, on the documented premise that it
+// evaluates at global scope — load once, call for the rest of the After Effects
+// session (issue #53). Probed inside AE 2026, calling $.evalFile from the body
+// of an eval'd script, on a library declaring `function rig2()` and
+// `var RIGVAR = 3`:
+//
+//   {"exists":true, "typeofRig2_local":"function", "typeofRIGVAR_local":"number",
+//    "globalRig2":"undefined", "viaGlobal":null}
+//   // and on the next run_jsx call, in the same AE session:
+//   {"typeofRig2":"undefined", "viaGlobal":"undefined"}
+//
+// $.evalFile evaluates into the *calling function's* scope, exactly as eval
+// does. Everything a library defined therefore lived inside the loader and was
+// gone before the wrapper ran, so `libraries` answered "Function rig is
+// undefined" every time, for every library, in every session. The per-session
+// cache keyed on a content hash has gone with it: nothing was ever left loaded
+// to reuse, so the only work it ever skipped was work whose result had already
+// been discarded.
+//
+// One eval means one scope: a library's `function helper(){}` is a declaration
+// in the same function body as the script, so the script can call it. Two
+// consequences, both handled here rather than left to surprise someone:
+//
+//  * A library is re-evaluated on every call. That is the price of the scoping
+//    After Effects actually has. Keep libraries to declarations, not to work.
+//  * The library text shifts the caller's line 1 down, which is precisely the
+//    failure issue #46 was about. __rjBuildSource *counts* the preamble it
+//    built rather than asserting a constant, and __rjSourceInfo subtracts that
+//    count — so a caller's line 1 is line 1 of their own script whether they
+//    passed libraries or not.
 
-function __rjLoadLibraries(libs) {
-  if (!libs || !libs.length) return;
-  for (var i = 0; i < libs.length; i++) {
-    var lib = libs[i];
-    var p = null;
-    var h = null;
-    // The server sends {path, hash}. A bare string is what a caller POSTing
-    // /op by hand would send; honour it, but with no hash there is nothing to
-    // key a cache on, so it is re-evaluated every time.
-    if (typeof lib === "string") {
-      p = lib;
-    } else if (lib) {
-      p = lib.path;
-      h = lib.hash;
+// No regex literal, for the same reason __rjLines has none.
+function __rjIsBlank(s) {
+  var t = String(s);
+  for (var i = 0; i < t.length; i++) {
+    var c = t.charAt(i);
+    if (c !== " " && c !== "\t" && c !== "\n" && c !== "\r") return false;
+  }
+  return true;
+}
+
+// Every library ends in a newline before the next one — or the caller's script
+// — follows it. Appended directly, a library whose last line is a `//` comment
+// would comment out whatever came after it: the same trap __RJ_WRAP_SUFFIX
+// exists for at the other end of the wrapper.
+function __rjEndWithNewline(s) {
+  var t = String(s);
+  if (t.length === 0) return "\n";
+  var last = t.charAt(t.length - 1);
+  if (last === "\n" || last === "\r") return t;
+  return t + "\n";
+}
+
+// The server reads library files and sends {path, text}, exactly as it does for
+// scriptPath — one place reads files, and its errors can name the path it was
+// given. Arriving with a path and no text means the call did not come through
+// the run_jsx tool: a run_batch step, whose args are never validated, or a
+// hand-rolled POST /op.
+function __rjLibrarySource(lib) {
+  var p = null;
+  var text = null;
+  if (typeof lib === "string") {
+    p = lib;
+  } else if (lib) {
+    p = lib.path;
+    if (typeof lib.text === "string") text = lib.text;
+  }
+  if (!p) throw new Error("run_jsx: a libraries entry has no path.");
+  if (text === null) {
+    throw new Error(
+      "run_jsx library \"" + p + "\" arrived with no source text. The server reads library files " +
+      "and substitutes their contents, so this call did not go through the run_jsx tool — " +
+      "run_batch steps and direct /op posts must pass {path, text} themselves."
+    );
+  }
+  if (__rjIsBlank(text)) throw new Error("run_jsx library is empty: " + p);
+  return { path: String(p), text: __rjEndWithNewline(text) };
+}
+
+// Parse each library on its own before any of it reaches the shared eval.
+// Inlining means a library that does not parse takes the whole wrapper with it,
+// and the line After Effects reports for a syntax error is wherever its parser
+// gave up — frequently inside the caller's script, which would blame the wrong
+// file for someone else's missing brace. An uncalled function expression forces
+// a full parse of exactly this library and nothing else, so the failure names
+// it and counts from its own line 1.
+function __rjCheckLibraryParses(lib) {
+  try {
+    eval("(function(){ " + lib.text + "})");
+  } catch (e) {
+    var m = "";
+    try { m = (e && e.message) ? String(e.message) : String(e); } catch (e1) { m = "unknown error"; }
+    var ln = null;
+    try { if (e && typeof e.line === "number" && isFinite(e.line)) ln = e.line; } catch (e2) {}
+    var libLines = __rjLines(lib.text);
+    var count = libLines.length - 1;
+    var detail = {
+      lineCount: count,
+      rawLine: ln,
+      sourceLine: null,
+      sourceText: null,
+      sourceName: lib.path
+    };
+    if (ln !== null && ln >= 1 && ln <= count) {
+      detail.sourceLine = ln;
+      detail.sourceText = __rjClip(__rjTrim(libLines[ln - 1]), 200);
     }
-    if (!p) throw new Error("run_jsx: a libraries entry has no path.");
-    if (h && __RJ_LIBS[p] === h) continue;
-    var f = new File(p);
-    if (!f.exists) throw new Error("run_jsx library not found by After Effects: " + p);
-    try {
-      $.evalFile(f);
-    } catch (e) {
-      // Loud, and the cache is left alone. A half-evaluated library reported as
-      // loaded would hand the script a scope missing exactly the function it
-      // was about to call.
-      var m = "";
-      try { m = (e && e.message) ? String(e.message) : String(e); } catch (e2) { m = "unknown error"; }
-      var at = "";
-      try { if (e && typeof e.line === "number") at = " (line " + e.line + ")"; } catch (e3) {}
-      throw new Error("run_jsx library failed to evaluate: " + p + at + " — " + m);
-    }
-    if (h) {
-      __RJ_LIBS[p] = h;
-    } else if (__RJ_LIBS[p]) {
-      delete __RJ_LIBS[p];
+    throw {
+      message: "run_jsx library failed to parse: " + lib.path + " — " + m,
+      stack: "",
+      line: ln,
+      aeDetail: detail
+    };
+  }
+}
+
+// The evaluated source for one call, plus the map that turns any line of it
+// back into a line of a file the caller knows about.
+//
+// `preambleLines` is COUNTED from the text that precedes the script rather than
+// assumed. That is the invariant issue #46 turned on, and it now has to hold
+// for a preamble whose length changes from call to call: it can never drift
+// from the string it describes, however many libraries there are.
+function __rjBuildSource(code, libraries) {
+  var prefix = __RJ_WRAP_PREFIX;
+  var segments = [];
+  if (libraries && libraries.length) {
+    for (var i = 0; i < libraries.length; i++) {
+      var lib = __rjLibrarySource(libraries[i]);
+      __rjCheckLibraryParses(lib);
+      segments.push({
+        path: lib.path,
+        // The wrapper opener carries no newline, so the first library's line 1
+        // shares line 1 of the evaluated source with it.
+        firstLine: __rjLines(prefix).length,
+        lines: __rjLines(lib.text)
+      });
+      prefix = prefix + lib.text;
     }
   }
+  return {
+    wrapper: prefix + code + __RJ_WRAP_SUFFIX,
+    preambleLines: __rjLines(prefix).length - 1,
+    segments: segments
+  };
 }
 
 // undoGroup:false is a per-call opt-out, read by dispatch() through the
@@ -299,11 +459,11 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
     );
   }
   if (!code) throw new Error("run_jsx needs `code` — an empty script would report success for nothing.");
-  // Libraries first, and outside the try below: a library that fails to parse
-  // is not a line in the caller's script and must not be reported as one.
-  __rjLoadLibraries(args.libraries);
-  // We wrap in a function so `return` works.
-  var wrapper = __RJ_WRAP_PREFIX + code + __RJ_WRAP_SUFFIX;
+  // We wrap in a function so `return` works, with any libraries inlined ahead
+  // of the script so they share its scope. Assembled and parse-checked before
+  // anything runs, and outside the try below: a library that fails to parse is
+  // not a line in the caller's script and must not be reported as one.
+  var built = __rjBuildSource(code, args.libraries);
   // Which undo step to look for in AE if the script has to be backed out. The
   // name mirrors dispatch()'s default ("AE MCP: " + op); false means the caller
   // asked for no group and the changes landed as whatever steps AE recorded.
@@ -313,13 +473,13 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
   var __d = __diffStart(args, null);
   var __value;
   try {
-    __value = eval(wrapper);
+    __value = eval(built.wrapper);
   } catch (e) {
     // Annotate before mapping the line: __rjThrowWithSource reads e.message,
     // so the diff note has to be on it by then, and the source mapping is what
     // makes the reported line the caller's own (#46).
     __diffAnnotateError(e, __d);
-    __rjThrowWithSource(e, code, args.scriptPath);
+    __rjThrowWithSource(e, code, args.scriptPath, built);
   }
   var __out = __rjResult(__value, undoGroupName);
   if (__d) return __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
