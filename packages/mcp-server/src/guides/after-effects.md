@@ -7,6 +7,18 @@ description: How to drive Adobe After Effects well through the AE MCP tools — 
 
 You have direct control of a live After Effects session. The user sees every change immediately, and every tool call is a real undo step in their project. Work like a motion designer at the keyboard, not like a script that fires blind.
 
+Two things sit *behind* this guide rather than in it, so they are not resident in
+every session. Both are reachable either way — `ae_guide({topic: …})` from any
+client, or the file beside this one if you loaded this as a skill:
+
+- **`extendscript-gotchas`** (`references/extendscript-gotchas.md`) — read it
+  before writing any raw ExtendScript for `run_jsx`. Property lookups that return
+  null, what `copyToComp` really does, comp time versus layer time, the reserved
+  words that stop a script before its first line.
+- **`whats-new`** (`references/whats-new.md`) — what changed recently. Read it
+  when a call behaves differently from what you expected, or the user says a tool
+  used to work another way.
+
 ## Read the house style first
 
 `get_house_style` returns the style guide for the project that is currently open
@@ -49,7 +61,7 @@ One thing is left out of both forms: **Material Options**, the 48-property 3D ex
 
 Every comp and layer has a stable numeric `id`. Layer `index` is a 1-based position that **shifts whenever layers are added, deleted, or reordered**. Store `(compId, layerId)` and pass those. An index captured before a `create_*` call may point at a different layer by the time you use it.
 
-The same trap bites inside `run_jsx`: a `comp.layer(1)` wrapper is index-bound, not a handle. After a `copyToComp` inserts the copy at index 1, a reference you took earlier silently resolves to the *new* layer — which is how a script ends up parenting a layer to itself. Re-resolve by id or name after anything that inserts a layer.
+The same trap bites inside `run_jsx`: a `comp.layer(1)` wrapper is index-bound, not a handle. Once a `copyToComp` or a `duplicate()` has shifted the destination's indices, a reference you took earlier silently resolves to a *different* layer — which is how a script ends up parenting a layer to itself. Re-resolve by id or name after anything that inserts a layer.
 
 ## Read, then write, then verify
 
@@ -64,6 +76,7 @@ Property values are the ground truth. A screenshot tells you something *looks* w
 `screenshot_frame` and `screenshot_layer` are **one-off checks**. Do not screenshot every frame, do not scrub through time, do not screenshot after every edit.
 
 - Take at most 2–3 across an animation — typically start, middle, end.
+- **An image is the most expensive result this server returns**, and like every result it stays in your context for the rest of the session. Two or three frames is a budget for a whole build, not for one edit.
 - **The `downsample` is picked from the comp size** unless you pass one — 2 at 1080p, 3 at 4K, aiming at a long edge around 1280px. Pass `downsample: 1` only when you genuinely need full resolution: a full 4K frame is large enough to blow out your context in one call.
 - The result reports the dimensions actually returned and the factor actually applied — trust those numbers rather than assuming.
 - **Space them out.** Rapid back-to-back requests are far more likely to come back stale than requests a few seconds apart.
@@ -93,6 +106,33 @@ Building 40 layers with 40 separate calls is slow and produces 40 undo steps. `r
 - `set_spatial_tangents` — the shape of a motion path through a position keyframe.
 
 **The array-size trap.** `set_temporal_ease` wants one ease entry *per dimension* for ordinary multi-dimensional properties (Scale, Color), but exactly **one** entry for spatial properties (Position, Anchor Point) regardless of whether the layer is 2D or 3D — because the ease applies along the motion path, not per axis. If you see `Value array does not have 1 elements`, you fed a spatial property one entry per axis.
+
+## Rigging
+
+Nulls, parents and retimed layers. Parenting carries less than people expect, and
+each of the four below has cost a review round more than once.
+
+**Opacity does not propagate through parenting.** Scale, rotation and position
+ride the parent; opacity never does. Every text or child layer under a shape that
+pops or stamps in needs its own matching opacity keys, or it sits there on screen
+before its parent has revealed anything.
+
+**Parent world layers to a camera null *before* you key the null, at a time where
+it is still at identity** — anchor and position at the comp centre, scale 100.
+Parenting compensation is a no-op there, so the children keep plain world
+coordinates and the keyframes they already had. To look at a world target `T` at
+zoom `s`: key the null's scale to `s` and its position to `C + (C − T)·s/100`,
+with `C` the comp centre. Children of a precomp layer get parented while that
+parent is at rest, and AE rewrites their position and divides their scale for you.
+
+**Anything flown out of frame is still there when the camera moves.** A layer
+parked at y = −900 comes straight back into shot on a whip-up. Cut its opacity
+once it is clear rather than trusting the frame edge to hide it.
+
+**Expressions run on comp time, not layer time.** Retiming a layer with
+`startTime` moves its keyframes and leaves its expressions exactly where they
+were, so a freeze written against `time` replays from zero. Offset `time` inside
+the expression, or key the value instead.
 
 ## Expressions
 
@@ -134,15 +174,15 @@ For a custom path, use `{type: "path", vertices: [[x,y], …], closed: true}`. T
 
 `run_jsx` executes arbitrary ExtendScript with `app`, `comp`, `OPS` and the helper functions in scope. Reach for it when a needed operation has no tool — duplicating a comp, driving the render queue, batch-renaming.
 
+**Read the gotchas before you write one** — `ae_guide({topic: "extendscript-gotchas"})`, or `references/extendscript-gotchas.md` beside this file. It is the list of things that fail while naming something else: a property lookup that returns null and surfaces twenty lines later, a `copyToComp` that does not insert where you think, a reserved word that stops the whole script before its first line. Every item on it has already cost somebody an aborted run.
+
 ExtendScript is **single-threaded**, so a long synchronous loop freezes the user's AE UI. Keep the script short.
 
 `return X` sends the whole value back — arrays and nested objects included. Values that cannot be represented (functions, live AE objects, cycles) come back as a marker string in place, never dropped — a live object as `"[AVLayer \"Hero\" #616]"`, which is a handle to pass to `get_layer_full`, not a copy of the layer. So an empty result genuinely means the script returned nothing; never read one as "nothing happened".
 
 **A bare expression is not a return.** `"ping";` as the last line yields nothing, and so does any script that just does its work. That case comes back as `{ok: true, returned: null, undoGroup, note}` — an envelope that says *the script ran to completion*. Do not re-run it. Nothing rolls back, so a second run of a script that duplicated a layer, reordered content or wrote keyframes applies all of it twice; read the state back instead, and add an explicit `return` if you want a value.
 
-AE refuses `copyToComp` for a layer with a parent or a linked expression **while an undo group is open**, which is exactly the rig you wanted to copy. Wrap that one call in `withoutUndoGroup(function () { … })`, or pass `undoGroup: false` for the whole script. Nothing rolls back on error, so a script that fails halfway leaves its earlier changes applied — read the state back before re-running one that mutates.
-
-Set the parent first and the transform after, never the reverse. `parent_layer` keeps the layer where it is; raw `layer.parent = x` inside a script does not do so reliably two levels deep, so after scripted parenting audit scale and rotation as well as position.
+The same holds after an error: a script that fails halfway leaves everything before the failure applied, and the reported line number does not reliably map to your source. Read the state back to find where it stopped.
 
 ### Exporting a Motion Graphics template
 
