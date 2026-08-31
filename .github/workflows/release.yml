@@ -96,7 +96,7 @@ jobs:
               c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
               const t=await send("tools/list",{});
               const n=t.result.tools.length;
-              if(n<67){console.error(`expected >=67 tools, got ${n}`);process.exit(1);}
+              if(n<74){console.error(`expected >=74 tools, got ${n}`);process.exit(1);}
               const r=await send("tools/call",{name:"check_setup",arguments:{}});
               const rep=JSON.parse(r.result.content[0].text);
               const assets=rep.checks.find(x=>x.name==="panelAssetsPresent");

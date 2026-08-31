@@ -110,6 +110,14 @@ node scripts/sync-version.mjs
 step "Building"
 npm run build >/dev/null
 
+# The release cut nothing but a build until now, and trusted that CI had been
+# green on main beforehand. That trust was misplaced twice over: ci.yml ran only
+# some of the suites, and a release can be cut from a main whose last CI run
+# predates the commit being released. Tests are cheap, they need no After
+# Effects, and this is still on the safe side of the tag.
+step "Running the tests"
+npm test >/dev/null || die "tests failed — nothing has been tagged or pushed"
+
 step "Verifying the package"
 node scripts/sync-version.mjs --check
 # Same guard the release workflow applies: npm silently rewriting the manifest
