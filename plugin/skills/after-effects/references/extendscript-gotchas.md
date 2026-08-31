@@ -157,7 +157,7 @@ turns a misleading error twenty lines away into an accurate one here.
 ## Keyframes and expressions
 
 - **`setTemporalEaseAtKey` sizes its ease array per property, not per value
-  dimension.** A 2D layer's Scale wants 2, a shape Ellipse Size wants 3, a slider
+  dimension.** A 2D layer's Scale wants 3, a shape Ellipse Size wants 2, a slider
   or Opacity wants 1, and a *spatial* property — Position, Anchor Point — wants
   exactly 1 whether the layer is 2D or 3D, because the ease runs along the motion
   path rather than per axis. The wrong count throws about `parameter 2` or

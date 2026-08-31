@@ -46,7 +46,7 @@ function __hEaseSpec(spec) {
 // setTemporalEaseAtKey wants one KeyframeEase per dimension and the count is
 // NOT derivable from the value: a spatial property takes exactly one whatever
 // its dimension (the ease runs along the motion path), a 2D layer's Scale takes
-// two, a shape's Ellipse Size takes three, Opacity and sliders take one. The
+// three, a shape's Ellipse Size takes two, Opacity and sliders take one. The
 // wrong count throws "parameter 2" and says nothing else (issue #50).
 //
 // The sizing lives in `__applyTemporalEase` in keyframes.jsx, which is what

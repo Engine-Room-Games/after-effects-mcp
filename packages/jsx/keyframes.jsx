@@ -18,7 +18,7 @@ function __findKeyIndexAtTime(prop, time, eps) {
 //
 // setTemporalEaseAtKey wants an array of KeyframeEase whose length belongs to
 // the *property*, and it is not derivable from the value: a 2D layer Scale
-// wants 2, a shape Ellipse Size wants 3 while its value reads [w,h], Opacity
+// wants 3, a shape Ellipse Size wants 2 while its value reads [w,h], Opacity
 // and a slider want 1, and a spatial Position wants 1 whether the layer is 2D
 // or 3D because the ease runs along the motion path. Get it wrong and AE throws
 // "parameter 2" and says nothing else — no property name, no expected count.
