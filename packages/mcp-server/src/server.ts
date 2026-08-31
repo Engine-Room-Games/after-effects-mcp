@@ -13,7 +13,8 @@ import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
 import { JobManager } from "./jobs/manager.js";
 import { descriptions } from "./tools/descriptions.js";
-import { AeError, BridgeTimeoutError, BridgeUnreachableError } from "./util/errors.js";
+import { AeError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText } from "./util/errors.js";
+import { resolveRunJsxSource, type RunJsxArgs } from "./tools/runJsxSource.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
@@ -255,6 +256,18 @@ export function createServer() {
       return errorResult(`Invalid arguments for ${name}: ${(e as Error).message}`);
     }
 
+    // run_jsx can take its script, and its helper libraries, from files rather
+    // than from the conversation. The server reads them — see runJsxSource.ts;
+    // the short version is that Claude Desktop's agent has no filesystem tools
+    // and is exactly the client this saves the most context for.
+    if (name === "run_jsx") {
+      try {
+        args = resolveRunJsxSource(args as RunJsxArgs);
+      } catch (e) {
+        return errorResult((e as Error).message);
+      }
+    }
+
     // Refuse to forward to a panel that predates this server. Without this the
     // agent gets `Unknown op: …` for anything added since the panel was
     // installed and has no way to know an update is the fix.
@@ -335,7 +348,10 @@ export function createServer() {
           panelGate.invalidate();
           return errorResult(unknownOpMessage(name));
         }
-        return errorResult(`AE: ${e.message}${e.line ? ` (line ${e.line})` : ""}`);
+        // The line number on its own counts from something the caller cannot
+        // see, so this prints the failing line's text where the handler could
+        // map it, and says so plainly where it could not (issue #46).
+        return errorResult(aeErrorText(e));
       }
       return errorResult((e as Error).message);
     }

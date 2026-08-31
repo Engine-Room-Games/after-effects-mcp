@@ -91,11 +91,24 @@ function withoutUndoGroup(fn) {
 }
 
 // ---------- Error helper ----------
+// A handler that can say more about *where* it failed than "an error happened"
+// attaches that on `aeDetail` and it is copied onto the result verbatim —
+// run_jsx maps After Effects' line number back onto the script the caller
+// actually submitted (issue #46). The bag is free-form here on purpose; the
+// panel forwards a named list of fields, which is where the contract is kept.
 function __mkError(e) {
   var msg = e && e.message ? String(e.message) : String(e);
   var stack = e && e.stack ? String(e.stack) : "";
   var line = e && typeof e.line !== "undefined" ? e.line : null;
-  return { ok: false, error: msg, stack: stack, line: line };
+  var out = { ok: false, error: msg, stack: stack, line: line };
+  var detail = null;
+  try { if (e && e.aeDetail) detail = e.aeDetail; } catch (ed) {}
+  if (detail) {
+    for (var k in detail) {
+      if (detail.hasOwnProperty(k)) out[k] = detail[k];
+    }
+  }
+  return out;
 }
 
 // ---------- Main dispatch ----------
