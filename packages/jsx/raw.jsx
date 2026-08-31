@@ -133,5 +133,13 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
   // name mirrors dispatch()'s default ("AE MCP: " + op); false means the caller
   // asked for no group and the changes landed as whatever steps AE recorded.
   var undoGroupName = (args.undoGroup === false) ? false : "AE MCP: run_jsx";
-  return __rjResult(eval(wrapper), undoGroupName);
+  // diff:true fingerprints the comp before and after, inside this one call —
+  // see snapshot.jsx. Null unless asked for, so the ordinary path is untouched.
+  var __d = __diffStart(args, null);
+  var __value;
+  try { __value = eval(wrapper); }
+  catch (__e) { __diffAnnotateError(__e, __d); throw __e; }
+  var __out = __rjResult(__value, undoGroupName);
+  if (__d) return __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
+  return __out;
 });

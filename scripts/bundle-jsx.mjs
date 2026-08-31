@@ -17,6 +17,7 @@ const order = [
   "ids.jsx",
   "comps.jsx",
   "layers.jsx",
+  "snapshot.jsx",
   "transforms.jsx",
   "keyframes.jsx",
   "expressions.jsx",
