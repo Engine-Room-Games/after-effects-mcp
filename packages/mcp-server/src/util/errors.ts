@@ -91,6 +91,27 @@ export function isTimeoutError(e: unknown, depth = 0): boolean {
   return cause === e ? false : isTimeoutError(cause, depth + 1);
 }
 
+/**
+ * Where a failure sits in the script the caller actually submitted.
+ *
+ * Only `run_jsx` can produce this, because it is the only op whose input is
+ * source code. `sourceLine` is null whenever the mapping could not be made —
+ * it is never clamped into range, since a confident wrong line number sends the
+ * reader to a statement that did not fail. See issue #46 and `raw.jsx`.
+ */
+export interface AeSourceInfo {
+  /** 1-based line in the caller's own script, or null when it could not be mapped. */
+  sourceLine?: number | null;
+  /** The text of that line, trimmed and clipped. The part that needs no trust in numbering. */
+  sourceText?: string | null;
+  /** The file it came from, when the script was passed as `scriptPath`. */
+  sourceName?: string | null;
+  /** What After Effects itself reported, kept because the mapping can fail. */
+  rawLine?: number | null;
+  /** Lines in the submitted script, which is what makes an out-of-range number visible. */
+  lineCount?: number | null;
+}
+
 export class AeError extends Error {
   /**
    * `code` is set only when the panel diagnosed the failure itself rather than
@@ -98,8 +119,51 @@ export class AeError extends Error {
    * already read as complete instructions, so the caller uses this to decide
    * whether an `AE:` prefix would help or just obscure them.
    */
-  constructor(message: string, public stack_?: string, public line?: number, public code?: string) {
+  constructor(
+    message: string,
+    public stack_?: string,
+    public line?: number,
+    public code?: string,
+    public source?: AeSourceInfo
+  ) {
     super(message);
     this.name = "AeError";
   }
+}
+
+/**
+ * The one rendering of an ExtendScript failure into text for the agent.
+ *
+ * A bare line number was actively misleading: it counts from something the
+ * caller cannot see, and there is no rollback, so an agent that mislocates the
+ * throw re-runs a script whose first half already landed (issues #43, #46).
+ * Three things earn their place here — the line's *text*, which needs no trust
+ * in the numbering; an explicit admission when the number could not be mapped;
+ * and the reminder that the work before the failure is still in the project.
+ */
+export function aeErrorText(e: AeError): string {
+  const head = `AE: ${e.message}`;
+  const s = e.source;
+  if (!s) return e.line ? `${head} (line ${e.line})` : head;
+
+  const where = s.sourceName ?? "the script you submitted";
+  const total = s.lineCount ? `, ${s.lineCount} lines` : "";
+  const lines = [head];
+  if (s.sourceLine) {
+    lines.push(`  at line ${s.sourceLine} of ${where}${total}:`);
+    if (s.sourceText) lines.push(`    ${s.sourceText}`);
+    // Only worth saying when the two disagree; with the wrapper's preamble at
+    // zero lines they normally do not.
+    if (s.rawLine != null && s.rawLine !== s.sourceLine) {
+      lines.push(`  (After Effects reported line ${s.rawLine}.)`);
+    }
+  } else if (s.rawLine != null) {
+    lines.push(
+      `  After Effects reported line ${s.rawLine}, which does not fall inside ${where}${total} — trust the message, not the number.`
+    );
+  }
+  lines.push(
+    "  Everything before the failure already ran and nothing rolls back: read the state back rather than re-running the script."
+  );
+  return lines.join("\n");
 }

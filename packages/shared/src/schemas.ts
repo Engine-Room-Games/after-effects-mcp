@@ -507,7 +507,12 @@ export const FindLayers = z.object({
 
 // ---------- raw ----------
 export const RunJsx = z.object({
-  code: z.string(),
+  code: z.string().optional()
+    .describe("The ExtendScript to run. Exactly one of `code` or `scriptPath`."),
+  scriptPath: z.string().optional()
+    .describe("Absolute path to a .jsx file to run instead of `code`. The server reads it, so a long script never enters the conversation. Exactly one of `code` or `scriptPath`."),
+  libraries: z.array(z.string()).optional()
+    .describe("Absolute paths to .jsx files evaluated at global scope before the script, once per After Effects session. Re-passing an unchanged file is free; editing it re-evaluates it. Put shared helpers here rather than pasting them into every script."),
   undoGroup: z.boolean().default(true).optional()
     .describe("Wrap the script in one undo step. Set false only for the operations AE refuses while an undo group is open — copyToComp on a layer with a parent or a linked expression. The script's changes then land as whatever undo steps AE records on its own."),
 });

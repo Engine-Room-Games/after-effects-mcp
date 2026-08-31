@@ -148,6 +148,20 @@
         var err = new Error(msg);
         err.aeStack = parsed.stack;
         err.aeLine = parsed.line;
+        // Where the failure sits in the caller's *own* source, when the handler
+        // could work it out — run_jsx maps AE's line number back onto the
+        // script that was submitted (issue #46). Forwarded field by field on
+        // purpose: the server prints these, and relaying a free-form bag would
+        // let the two drift apart with nothing to notice.
+        if (parsed.sourceLine !== undefined || parsed.rawLine !== undefined) {
+          err.aeSource = {
+            sourceLine: parsed.sourceLine,
+            sourceText: parsed.sourceText,
+            sourceName: parsed.sourceName,
+            rawLine: parsed.rawLine,
+            lineCount: parsed.lineCount
+          };
+        }
         throw err;
       }
       return parsed.result;
@@ -547,7 +561,7 @@
                 // `code` marks a failure the panel diagnosed itself rather than
                 // one ExtendScript raised, so the server can present it as what
                 // it is instead of prefixing it as an After Effects error.
-                res.end(JSON.stringify({ ok: false, error: err.message, code: err.code, stack: err.aeStack, line: err.aeLine }));
+                res.end(JSON.stringify({ ok: false, error: err.message, code: err.code, stack: err.aeStack, line: err.aeLine, source: err.aeSource }));
               });
             return;
           }

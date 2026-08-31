@@ -31,6 +31,7 @@ const order = [
   "style.jsx",
   "batch.jsx",
   "explore.jsx",
+  "helpers.jsx",
   "raw.jsx",
 ];
 
