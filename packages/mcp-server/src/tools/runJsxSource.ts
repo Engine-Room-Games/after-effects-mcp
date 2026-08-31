@@ -76,7 +76,7 @@ export interface ResolvedRunJsxArgs {
   code: string;
   /** Echoed to the panel so a failure can name the file rather than "your script". */
   scriptPath?: string;
-  /** `{path, hash, bytes}` — never the source text. */
+  /** `{path, text, bytes}` — the source travels, because the panel inlines it. */
   libraries?: RunJsxLibrary[];
 }
 
@@ -99,7 +99,9 @@ function readScriptFile(p: string, what: string): { text: string; bytes: number 
   if (stat.size > MAX_SCRIPT_BYTES) {
     throw new Error(
       `${what} is ${stat.size} bytes, over the ${MAX_SCRIPT_BYTES}-byte limit: ${p}. ` +
-        `Split it, or move the bulk into a \`libraries\` file that loads once per After Effects session.`
+        `Split it into smaller scripts and run them in sequence. Moving the bulk into a \`libraries\` ` +
+        `file does not help: libraries are inlined ahead of the script on every call, so they count ` +
+        `against the same budget.`
     );
   }
   let text: string;
@@ -154,7 +156,7 @@ export function resolveRunJsxSource(args: RunJsxArgs): ResolvedRunJsxArgs {
   // a second place that decides.
   //
   // `libraries` is lifted out of the spread rather than overwritten after it:
-  // the caller's `string[]` is not the `{path, hash, bytes}[]` the panel is
+  // the caller's `string[]` is not the `{path, text, bytes}[]` the panel is
   // promised, and lifting it makes that a type error rather than a convention.
   const { libraries: requestedLibraries, ...passthrough } = args;
   const out: ResolvedRunJsxArgs = { ...passthrough, code: "" };

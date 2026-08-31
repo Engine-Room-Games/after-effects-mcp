@@ -65,9 +65,11 @@ function __newJobId() {
 }
 
 // ---------- Undo wrapper ----------
-// __UNDO_OPEN tracks only the group *dispatch* opened. Nothing else may set it:
-// it is what lets withoutUndoGroup() reopen exactly what it closed, and leave
-// undo state alone entirely when we never opened a group in the first place.
+// __UNDO_OPEN tracks whether a group *this bundle* opened is currently open.
+// withUndo() is the only thing that may set it — dispatch and run_batch both
+// group through there — because it is what lets withoutUndoGroup() reopen
+// exactly what it closed, and leave undo state alone entirely when we never
+// opened a group in the first place.
 var __UNDO_OPEN = false;
 
 // Every undo group this bundle opens is counted here, and __beginUndoGroup is
