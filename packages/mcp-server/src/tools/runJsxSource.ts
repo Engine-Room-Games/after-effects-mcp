@@ -1,34 +1,49 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 /**
- * `run_jsx` reading its script from a file instead of from the conversation.
+ * `run_jsx` reading its script, and its helper libraries, from files instead of
+ * from the conversation.
  *
  * Every `run_jsx` body stays in the transcript for the rest of the session, and
  * a scene build is four to ten scripts of 100-300 lines. By the end, a large
  * share of the context is scripts that have already run and will never be read
  * again (issue #53).
  *
- * **The server reads the file, not the panel.** This is the same call as
+ * **The server reads the files, not the panel.** This is the same call as
  * `init_project`: Claude Desktop gives its agent no filesystem tools at all, so
  * "have the agent paste the file" fails there entirely, and it is the client
- * with the smallest context that needs this most. Reading it here also means
+ * with the smallest context that needs this most. Reading them here also means
  * one place produces the errors, and they can name the path.
  *
- * Libraries are the other half. Those are *not* inlined — the server reads each
- * one only to validate it and hash it, and sends `{path, hash}`. The panel
- * evaluates them with `$.evalFile`, which is the only way to get them into
- * global scope: `eval` runs in the calling function's scope, so a library's
- * functions would vanish the moment the loader returned, and "load once, call
- * for the rest of the session" would be a lie. The hash is what makes
- * re-passing an unchanged library free and an edited one re-evaluate.
+ * Libraries carry their **text** to the panel, not just their path. The first
+ * version sent `{path, hash}` and had the panel `$.evalFile` each one, on the
+ * premise that `$.evalFile` evaluates at global scope. Measured inside AE 2026,
+ * it evaluates into the *calling function's* scope — so every library's
+ * functions died with the loader and `libraries` never once worked. The panel
+ * now inlines the source ahead of the script in one eval, which is the only
+ * scoping that puts a library's `function helper(){}` where the script can call
+ * it, so the source has to travel. See `packages/jsx/raw.jsx` for the probe.
+ *
+ * That costs payload, not context: what this feature is worth is keeping long
+ * scripts out of the *conversation*, and the server-to-panel hop was never in
+ * it. The hash went with the cache it keyed — inlining re-evaluates every call
+ * by construction, so there was nothing left for it to decide.
  */
 
 /** Big enough for any hand-written script; small enough that a wrong path fails loudly. */
 export const MAX_SCRIPT_BYTES = 512 * 1024;
 /** A helper set, not a dependency tree. Past this something has gone wrong upstream. */
 export const MAX_LIBRARIES = 16;
+/**
+ * Script and libraries together, because they now travel together.
+ *
+ * Every byte reaches the panel and then ExtendScript inside a single
+ * `evalScript` string literal, where the old `{path, hash}` payload was a few
+ * hundred bytes however large the file was. Sixteen libraries at the per-file
+ * limit would be 8MB of source pushed through that on every call.
+ */
+export const MAX_TOTAL_BYTES = 1024 * 1024;
 
 export interface RunJsxArgs {
   code?: string;
@@ -39,8 +54,8 @@ export interface RunJsxArgs {
 
 export interface RunJsxLibrary {
   path: string;
-  /** sha256 of the file's bytes, truncated. The panel's per-session cache key. */
-  hash: string;
+  /** The file's contents. The panel inlines this ahead of the script. */
+  text: string;
   bytes: number;
 }
 
@@ -127,18 +142,26 @@ export function resolveRunJsxSource(args: RunJsxArgs): ResolvedRunJsxArgs {
     const seen = new Set<string>();
     for (const raw of args.libraries) {
       // Duplicates within one call are the caller repeating itself, not a
-      // second load — the panel's cache would collapse them anyway, and
-      // collapsing them here keeps the payload honest about what is sent.
+      // second load. Inlining the same source twice would redeclare everything
+      // in it and shift the caller's line numbers for nothing.
       if (seen.has(raw)) continue;
       seen.add(raw);
       const { text, bytes } = readScriptFile(raw, `run_jsx library "${raw}"`);
-      libs.push({
-        path: raw,
-        hash: crypto.createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16),
-        bytes,
-      });
+      libs.push({ path: raw, text, bytes });
     }
     out.libraries = libs;
+  }
+
+  const total =
+    Buffer.byteLength(out.code, "utf8") +
+    (out.libraries ?? []).reduce((n, l) => n + l.bytes, 0);
+  if (total > MAX_TOTAL_BYTES) {
+    throw new Error(
+      `run_jsx would send ${total} bytes of source (script plus ${out.libraries?.length ?? 0} ` +
+        `libraries), over the ${MAX_TOTAL_BYTES}-byte limit for one call. Libraries are inlined ` +
+        `ahead of the script — they have to be, or their functions are not in its scope — so every ` +
+        `byte travels on every call. Pass only the libraries this script actually uses.`
+    );
   }
 
   return out;

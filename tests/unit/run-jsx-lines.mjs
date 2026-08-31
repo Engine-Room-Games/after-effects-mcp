@@ -17,6 +17,16 @@
 // the failing line's TEXT, and an explicit admission when the number could not
 // be mapped rather than a plausible wrong one.
 //
+// It shipped broken anyway, and the gap is worth naming because it is the kind
+// a test suite invites. Every stub error below described an error the way the
+// code under test *wanted* one described: `{message, line}`, with `start` and
+// `end` simply absent, so the branch that reads offsets was never entered by
+// anything but the one check that set `start` deliberately. A real AE 2026
+// error carries `start: 0, end: 0` on every throw — the branch fired, measured
+// zero characters, and reported line 1 for everything. Stubs assembled from the
+// happy path cannot find that; only a stub built from a *measurement* can, so
+// the probe output is written into the checks that use it.
+//
 //   node tests/unit/run-jsx-lines.mjs
 
 import assert from "node:assert/strict";
@@ -139,6 +149,33 @@ check("Error.source + Error.start answer directly when ExtendScript provides the
   assert.equal(out.rawLine, 99, "AE's own number is still carried through");
 });
 
+check("start:0 and end:0 mean AE said nothing, not that the error is at character 0", () => {
+  // Probed inside After Effects 26.x, catching from a four-line script whose
+  // last line throws:
+  //
+  //   eval("(function(){ var a=1;\nvar b=2;\nvar c=3;\nnope.boom();\n})()")
+  //   caught -> { "line": 4, "start": 0, "end": 0, "srcLen": 57 }
+  //
+  // `line` is already right. The offsets are 0 on every error measured, however
+  // far into the source it was raised — they are not character offsets at all,
+  // whatever the ExtendScript documentation says. Believing them put every
+  // failure on line 1 with line 1's text, and demoted the true number to the
+  // parenthetical: issue #46, still doing it after it was reported fixed.
+  const wrapper = get("__RJ_WRAP_PREFIX") + script + get("__RJ_WRAP_SUFFIX");
+  const out = info({ message: "Function c.property is undefined", line: 4, source: wrapper, start: 0, end: 0 });
+  assert.equal(out.sourceLine, 4, "0/0 must fall through to AE's line, which is already correct");
+  assert.equal(out.sourceText, "return layer.name;");
+});
+
+check("an offset that could be real is still believed — the branch is guarded, not deleted", () => {
+  const wrapper = get("__RJ_WRAP_PREFIX") + script + get("__RJ_WRAP_SUFFIX");
+  // A non-zero end is After Effects saying something about a failure at the head
+  // of the source, which is a different claim from saying nothing.
+  const out = info({ message: "boom", line: 99, source: wrapper, start: 0, end: 12 });
+  assert.equal(out.sourceLine, 1);
+  assert.equal(out.rawLine, 99);
+});
+
 check("a source that is not our wrapper is ignored rather than mis-measured", () => {
   const out = info({ message: "boom", line: 2, source: "some other file\nline two\n", start: 20 });
   assert.equal(out.sourceLine, 2, "falls back to the line number rather than measuring a foreign source");
@@ -198,6 +235,146 @@ check("a successful script is untouched by any of this", () => {
   const r = call("run_jsx", { code: "return {a: [1, 2]};" });
   assert.equal(r.ok, true);
   assert.deepEqual(JSON.parse(JSON.stringify(r.result)), { a: [1, 2] });
+});
+
+// ---------- libraries, which share the script's scope and shift its lines ----------
+//
+// `libraries` never once worked. It used $.evalFile, on the documented premise
+// that $.evalFile evaluates at global scope; measured in AE 2026 it evaluates
+// into the *calling function's* scope, so every library's declarations died
+// with the loader and every script got "Function rig is undefined".
+//
+// Nothing here caught that either, and the reason is structural rather than
+// careless: the old loader called `new File(p)` and `$.evalFile`, neither of
+// which exists in this harness, so the JSX half of the feature had no test at
+// all — only the server half, which passed because it was asserting the same
+// false premise. Inlining the source has no host dependency, which is what
+// makes the checks below possible.
+
+const lib = (p, text) => ({ path: p, text });
+
+check("a library's functions are in scope for the script", () => {
+  const r = call("run_jsx", {
+    code: "return rig(3);",
+    libraries: [lib("/tmp/rig.jsx", "function rig(n){ return n * 7; }")],
+  });
+  assert.equal(r.ok, true, `a library has to reach the script's scope: ${r.error}`);
+  assert.equal(r.result, 21);
+});
+
+check("libraries load in order and can see each other", () => {
+  const r = call("run_jsx", {
+    code: "return two();",
+    libraries: [
+      lib("/tmp/one.jsx", "function one(){ return 1; }"),
+      lib("/tmp/two.jsx", "function two(){ return one() + 1; }"),
+    ],
+  });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result, 2);
+});
+
+check("a library ending in a // comment cannot eat the script's first line", () => {
+  // The same trap __RJ_WRAP_SUFFIX exists for, now at the other end.
+  const r = call("run_jsx", {
+    code: "return rig();",
+    libraries: [lib("/tmp/rig.jsx", "function rig(){ return 5; } // the rig")],
+  });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result, 5);
+});
+
+check("no libraries means no preamble — an ordinary call is byte-identical to before", () => {
+  const built = get("__rjBuildSource")("return 1;", null);
+  assert.equal(built.preambleLines, 0);
+  assert.equal(built.segments.length, 0);
+  assert.equal(built.wrapper, get("__RJ_WRAP_PREFIX") + "return 1;" + get("__RJ_WRAP_SUFFIX"));
+});
+
+check("the preamble is counted from what was built, not asserted, once libraries are in it", () => {
+  // This is the #46 invariant with the constant removed: the preamble's length
+  // now changes per call, so it can only ever be right if it is measured off
+  // the same string the caller's script was appended to.
+  const code = "var a = 1;\nreturn a;";
+  const built = get("__rjBuildSource")(code, [
+    lib("/tmp/a.jsx", "function a1(){}\nfunction a2(){}"),
+    lib("/tmp/b.jsx", "function b1(){}"),
+  ]);
+  assert.equal(built.preambleLines, 3, "two lines of one library and one of the other");
+  assert.equal(
+    built.wrapper.split("\n")[built.preambleLines],
+    "var a = 1;",
+    "the caller's line 1 does not sit preambleLines down the evaluated source",
+  );
+});
+
+check("every line of the caller's script maps back to itself with libraries above it", () => {
+  const code = ["var comp = app.project.activeItem;", "var l = comp.layer(1);", "return l.name;"].join("\n");
+  const built = get("__rjBuildSource")(code, [lib("/tmp/rig.jsx", "function rig(){}\nfunction rag(){}")]);
+  for (let k = 1; k <= 3; k++) {
+    const out = get("__rjSourceInfo")({ line: built.preambleLines + k }, code, null, built);
+    assert.equal(out.sourceLine, k, `AE's line ${built.preambleLines + k} is the caller's line ${k}`);
+    assert.equal(out.sourceText, code.split("\n")[k - 1]);
+  }
+});
+
+check("a throw in the script reports the script's own line, with the shift visible", () => {
+  const r = call("run_jsx", {
+    code: "var a = 1;\nthrow {message: 'exploded', line: 4};\n",
+    libraries: [lib("/tmp/rig.jsx", "function rig(){}\nfunction rag(){}")],
+  });
+  // Two lines of library sit above the script, so AE counts the throw as line 4
+  // of what it evaluated. The caller wrote it on line 2, and that is the number
+  // they are given — with AE's own still there, so the shift is not a mystery.
+  assert.equal(r.ok, false);
+  assert.equal(r.sourceLine, 2);
+  assert.equal(r.sourceText, "throw {message: 'exploded', line: 4};");
+  assert.equal(r.rawLine, 4);
+});
+
+check("a failure inside a library names the library and its line, not the script", () => {
+  const r = call("run_jsx", {
+    code: "return 1;",
+    libraries: [lib("/tmp/rig.jsx", "function rig(){}\nthrow {message: 'lib blew up', line: 2};")],
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.sourceName, "/tmp/rig.jsx", "the file the reader has to open is the library");
+  assert.equal(r.sourceLine, 2);
+  assert.equal(r.sourceText, "throw {message: 'lib blew up', line: 2};");
+  assert.equal(r.lineCount, 2, "the count belongs to the file that was named");
+});
+
+check("a library that does not parse names it, and the script never runs", () => {
+  // Inlined, a library with a missing brace takes the whole wrapper down and
+  // AE reports wherever its parser gave up — often a line of the caller's
+  // script. Parsing each library alone first is what keeps the blame honest.
+  const r = call("run_jsx", {
+    code: "return 1;",
+    libraries: [lib("/tmp/broken.jsx", "function rig(){ return 1;")],
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /failed to parse/);
+  assert.match(r.error, /broken\.jsx/);
+  assert.equal(r.sourceName, "/tmp/broken.jsx");
+});
+
+check("a library path with no source text is refused rather than silently skipped", () => {
+  // run_batch steps and hand-rolled /op posts are never validated, so they can
+  // reach here with the path the server would have substituted. Skipping it
+  // would fail later as "Function rig is undefined" — the exact symptom of the
+  // bug this replaced.
+  const r = call("run_jsx", { code: "return 1;", libraries: ["/tmp/rig.jsx"] });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /\/tmp\/rig\.jsx/);
+  assert.match(r.error, /no source text/);
+  assert.match(r.error, /run_batch|POST/);
+});
+
+check("an empty library is refused, naming it", () => {
+  const r = call("run_jsx", { code: "return 1;", libraries: [lib("/tmp/blank.jsx", "  \n\n")] });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /blank\.jsx/);
+  assert.match(r.error, /empty/);
 });
 
 // ---------- how the server prints it ----------

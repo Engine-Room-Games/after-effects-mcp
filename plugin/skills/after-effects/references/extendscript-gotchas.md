@@ -184,6 +184,9 @@ trap on this page, and a version you write yourself re-derives the bug.
 
 And two arguments rather than more code: **`scriptPath`** runs an absolute `.jsx`
 path so a long script never enters the conversation at all, and **`libraries`**
-evaluates absolute `.jsx` paths at global scope first, once per After Effects
-session — re-passing an unchanged file is free, editing it re-evaluates it. Keep
-shared helpers in a library instead of pasting them into every script.
+takes absolute `.jsx` paths and inlines them ahead of the script, in the same
+scope, so their functions are callable from it. The server reads both, so
+neither file's text enters the conversation. A library is re-evaluated on every
+call — keep libraries to declarations rather than to work — and a failure inside
+one is reported against that file, by name and line. Keep shared helpers in a
+library instead of pasting them into every script.

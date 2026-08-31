@@ -104,7 +104,10 @@ export interface AeSourceInfo {
   sourceLine?: number | null;
   /** The text of that line, trimmed and clipped. The part that needs no trust in numbering. */
   sourceText?: string | null;
-  /** The file it came from, when the script was passed as `scriptPath`. */
+  /**
+   * The file the reported line belongs to: the caller's `scriptPath`, or the
+   * library the failure landed in when one was inlined ahead of the script.
+   */
   sourceName?: string | null;
   /** What After Effects itself reported, kept because the mapping can fail. */
   rawLine?: number | null;
@@ -152,8 +155,10 @@ export function aeErrorText(e: AeError): string {
   if (s.sourceLine) {
     lines.push(`  at line ${s.sourceLine} of ${where}${total}:`);
     if (s.sourceText) lines.push(`    ${s.sourceText}`);
-    // Only worth saying when the two disagree; with the wrapper's preamble at
-    // zero lines they normally do not.
+    // Only worth saying when the two disagree. Without `libraries` the
+    // wrapper's preamble is zero lines and they do not; with them, the shift is
+    // the library source inlined ahead of the script, and showing both numbers
+    // is what lets a reader see that rather than doubt the mapped one.
     if (s.rawLine != null && s.rawLine !== s.sourceLine) {
       lines.push(`  (After Effects reported line ${s.rawLine}.)`);
     }

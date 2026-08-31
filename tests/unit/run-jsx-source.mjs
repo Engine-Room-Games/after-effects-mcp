@@ -10,6 +10,17 @@
 // with no After Effects anywhere. Everything below is a failure an agent could
 // hit on its first attempt, and each one has to name the path it was given.
 //
+// One check here used to assert the opposite of what it should have. It pinned
+// the payload to `{path, hash}` and explained, in its own failure message, that
+// $.evalFile was the only way to get a library into global scope — a premise
+// nobody had measured. $.evalFile evaluates into the calling function's scope,
+// so `libraries` never worked at all, and this file was green the whole time
+// because it was testing that the wrong thing was being sent correctly. A test
+// that restates the implementation's assumption cannot fail when the assumption
+// is what is wrong; the replacement asserts the property that survives being
+// wrong about the mechanism — the source reaches the panel, and the *script*
+// stays out of the conversation, which was always the point of the feature.
+//
 //   node tests/unit/run-jsx-source.mjs
 
 import assert from "node:assert/strict";
@@ -21,7 +32,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) =>
   pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
-const { resolveRunJsxSource, MAX_SCRIPT_BYTES, MAX_LIBRARIES } = await import(
+const { resolveRunJsxSource, MAX_SCRIPT_BYTES, MAX_LIBRARIES, MAX_TOTAL_BYTES } = await import(
   dist("tools", "runJsxSource.js")
 );
 
@@ -118,33 +129,40 @@ try {
   const libA = write("rig.jsx", "function rig() { return 1; }\n");
   const libB = write("style.jsx", "function palette() { return []; }\n");
 
-  check("libraries become {path, hash, bytes}, in the order given", () => {
+  check("libraries become {path, text, bytes}, in the order given", () => {
     const out = resolveRunJsxSource({ code: "rig();", libraries: [libA, libB] });
     assert.equal(out.libraries.length, 2);
     assert.equal(out.libraries[0].path, libA);
     assert.equal(out.libraries[1].path, libB);
-    assert.ok(out.libraries[0].hash.length >= 8, "the panel keys its per-session cache on this");
     assert.equal(out.libraries[0].bytes, fs.statSync(libA).size);
+    // Order is load order, and the panel inlines them in it: a library that
+    // calls into an earlier one has to see it already declared.
+    assert.match(out.libraries[0].text, /function rig/);
+    assert.match(out.libraries[1].text, /function palette/);
   });
 
-  check("the source is NOT inlined into the payload", () => {
+  check("the source IS carried to the panel, because nothing else puts it in scope", () => {
     const out = resolveRunJsxSource({ code: "rig();", libraries: [libA] });
     assert.equal(
       JSON.stringify(out).includes("function rig"),
-      false,
-      "libraries go to the panel as a path and a hash. $.evalFile is the only way to\n" +
-        "get them into global scope — eval would scope them to the loader and they\n" +
-        "would be gone before the script ran.",
+      true,
+      "the panel inlines library source ahead of the script so they share one scope.\n" +
+        "$.evalFile — which the first version relied on — evaluates into the calling\n" +
+        "function's scope, so a path alone was never enough for the script to call it.\n",
     );
+    // The property that actually matters is about the transcript, not the wire:
+    // neither file's text ever reaches the conversation, because the server is
+    // what reads them.
+    assert.equal("hash" in out.libraries[0], false, "the cache it keyed is gone; so is it");
   });
 
-  check("the hash is stable across calls and moves when the file changes", () => {
-    const first = resolveRunJsxSource({ code: "x();", libraries: [libA] }).libraries[0].hash;
-    const again = resolveRunJsxSource({ code: "x();", libraries: [libA] }).libraries[0].hash;
-    assert.equal(again, first, "an unchanged library must be a no-op on the panel, not a re-eval");
+  check("the text sent is the text on disk, and moves when the file is edited", () => {
+    const first = resolveRunJsxSource({ code: "x();", libraries: [libA] }).libraries[0].text;
+    assert.equal(first, fs.readFileSync(libA, "utf8"));
     fs.writeFileSync(libA, "function rig() { return 2; }\n", "utf8");
-    const edited = resolveRunJsxSource({ code: "x();", libraries: [libA] }).libraries[0].hash;
-    assert.notEqual(edited, first, "editing a library must re-evaluate it");
+    const edited = resolveRunJsxSource({ code: "x();", libraries: [libA] }).libraries[0].text;
+    assert.notEqual(edited, first, "an edited library must reach After Effects edited");
+    assert.match(edited, /return 2/);
   });
 
   check("a path repeated in one call is sent once", () => {
@@ -171,6 +189,21 @@ try {
     { code: "x();", libraries: new Array(MAX_LIBRARIES + 1).fill(libB) },
     new RegExp(`at most ${MAX_LIBRARIES}`),
   );
+
+  check("script plus libraries is capped as a whole, not only file by file", () => {
+    // Every byte now travels: to the panel, and from there through evalScript
+    // as one JSON string literal. Sixteen libraries under the per-file limit
+    // would each pass on their own and add up to 8MB of ExtendScript per call.
+    const big = [];
+    for (let i = 0; i < 4; i += 1) big.push(write(`big${i}.jsx`, `// ${"z".repeat(400 * 1024)}\n`));
+    assert.throws(
+      () => resolveRunJsxSource({ code: "x();", libraries: big }),
+      (e) => new RegExp(String(MAX_TOTAL_BYTES)).test(e.message) && /inlined/.test(e.message),
+      "the limit and the reason every byte counts both belong in the message",
+    );
+    // Each one on its own is fine — the cap is on the sum, not on the file.
+    assert.equal(resolveRunJsxSource({ code: "x();", libraries: [big[0]] }).libraries.length, 1);
+  });
 
   check("a script file and libraries compose", () => {
     const p = write("scene.jsx", "return rig();\n");
