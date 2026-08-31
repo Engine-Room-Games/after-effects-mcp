@@ -80,12 +80,28 @@ function makeProp(opts) {
   };
   return p;
 }
+
+// keyframes.jsx expects these at load time. \`ease()\` delegates to its
+// __applyTemporalEase rather than carrying a second copy of the arity ladder,
+// so the helper realm has to be the realm that module loads into.
+var OPS = {};
+function noUndo(f) { return f; }
+function getCompById() { throw new Error("not stubbed"); }
+function getLayerById() { throw new Error("not stubbed"); }
+function walkProperty() { throw new Error("not stubbed"); }
+var KeyframeInterpolationType = { LINEAR: "linear", BEZIER: "bezier", HOLD: "hold" };
+var PropertyValueType = {
+  OneD: "OneD", TwoD: "TwoD", TwoD_SPATIAL: "TwoD_SPATIAL",
+  ThreeD: "ThreeD", ThreeD_SPATIAL: "ThreeD_SPATIAL",
+  COLOR: "COLOR", SHAPE: "SHAPE"
+};
 `;
 
 const ctx = {};
 vm.createContext(ctx);
 vm.runInContext(HOST, ctx, { filename: "host.js" });
 vm.runInContext(src("ids.jsx"), ctx, { filename: "ids.jsx" });
+vm.runInContext(src("keyframes.jsx"), ctx, { filename: "keyframes.jsx" });
 vm.runInContext(src("helpers.jsx"), ctx, { filename: "helpers.jsx" });
 
 const run = (expr) => vm.runInContext(expr, ctx);
@@ -166,10 +182,12 @@ check("a property that accepts nothing throws, naming itself and what was tried"
   const prop = run("makeProp({name: 'Weird', value: [1, 2], wants: 9})");
   assert.throws(
     () => fn("ease")(prop, 1, 33),
-    (e) => /Weird/.test(e.message) && /1, 2 or 3/.test(e.message) && /parameter 2/.test(e.message),
+    (e) => /Weird/.test(e.message) && /2, 1, 3, 4 entries/.test(e.message) && /parameter 2/.test(e.message),
     "the last AE error is the only clue to what went wrong, so it has to be carried out",
   );
-  assert.deepEqual([...prop.attempts], [2, 1, 3], "every size is tried before giving up");
+  // 4 is in the ladder because a COLOR property wants one ease per channel;
+  // the helper shares set_temporal_ease's ladder rather than keeping its own.
+  assert.deepEqual([...prop.attempts], [2, 1, 3, 4], "every size is tried before giving up");
 });
 
 // ---------- addKeys ----------

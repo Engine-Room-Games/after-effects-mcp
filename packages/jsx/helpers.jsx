@@ -41,62 +41,26 @@ function __hEaseSpec(spec) {
   return { influence: inf, speed: spd };
 }
 
-// The array sizes to try, best guess first.
+// ease(prop, keyIndex, easeIn, easeOut) — sizes its own ease array.
 //
 // setTemporalEaseAtKey wants one KeyframeEase per dimension and the count is
 // NOT derivable from the value: a spatial property takes exactly one whatever
 // its dimension (the ease runs along the motion path), a 2D layer's Scale takes
 // two, a shape's Ellipse Size takes three, Opacity and sliders take one. The
-// wrong count throws "parameter 2" and says nothing else (issue #50). So guess
-// from what we can read, then fall back to trying the rest — the call validates
-// its arguments before it mutates anything, which is what makes retrying safe.
-function __hEaseSizes(prop) {
-  var guess = 1;
-  try {
-    if (prop.isSpatial) {
-      guess = 1;
-    } else {
-      var v = prop.value;
-      if (v && typeof v.length === "number" && v.length > 0) guess = v.length;
-    }
-  } catch (e) {}
-  var order = [guess];
-  var rest = [1, 2, 3];
-  for (var i = 0; i < rest.length; i++) {
-    if (rest[i] !== guess) order.push(rest[i]);
-  }
-  return order;
-}
-
-// ease(prop, keyIndex, easeIn, easeOut) — sizes its own ease array.
+// wrong count throws "parameter 2" and says nothing else (issue #50).
+//
+// The sizing lives in `__applyTemporalEase` in keyframes.jsx, which is what
+// `set_temporal_ease` and `add_keyframe` use. This helper is the same function
+// with a friendlier signature — deliberately not a second implementation, so a
+// script written through run_jsx and the same work done through the tools can
+// never disagree about what a property wanted.
+//
 // easeOut omitted means the same ease on both sides. Returns the number of
 // entries that worked, so a caller can see what the property actually wanted.
 function ease(prop, keyIndex, easeIn, easeOut) {
   var inSpec = __hEaseSpec(easeIn);
   var outSpec = __hEaseSpec(easeOut === undefined ? easeIn : easeOut);
-  var sizes = __hEaseSizes(prop);
-  var last = "";
-  for (var s = 0; s < sizes.length; s++) {
-    var n = sizes[s];
-    var ins = [];
-    var outs = [];
-    for (var d = 0; d < n; d++) {
-      ins.push(new KeyframeEase(inSpec.speed, inSpec.influence));
-      outs.push(new KeyframeEase(outSpec.speed, outSpec.influence));
-    }
-    try {
-      prop.setTemporalEaseAtKey(keyIndex, ins, outs);
-      return n;
-    } catch (e) {
-      try { last = (e && e.message) ? String(e.message) : String(e); } catch (e2) { last = "unknown error"; }
-    }
-  }
-  var nm = "property";
-  try { nm = String(prop.name); } catch (e3) {}
-  throw new Error(
-    "ease(): could not set a temporal ease on \"" + nm + "\" at key " + keyIndex +
-    " with 1, 2 or 3 entries — last error: " + last
-  );
+  return __applyTemporalEase(prop, keyIndex, inSpec, outSpec);
 }
 
 // addKeys(prop, [[time, value], ...]) — or [{time, value}, ...].
