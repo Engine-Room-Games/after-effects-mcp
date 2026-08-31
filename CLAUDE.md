@@ -66,7 +66,7 @@ The MCP server is stateless except for an in-memory `JobManager`. The panel is t
 | `scripts/lib/setup.mjs` | Loads the compiled setup module so the dev scripts (`doctor`, `install-panel`, `enable-debug`) reuse the same platform logic the MCP tools use instead of keeping a second copy. |
 | `packages/mcp-server/src/setup/scaffold.ts` | **The one definition of what a project folder is.** Client-aware layout, target resolution, never-overwrite. Used by both `init_project` and the CLI. |
 | `packages/mcp-server/src/cli/init.ts` | `npx … init <dir>` — the terminal front end to `scaffold()`. Holds no templates of its own. |
-| `packages/mcp-server/src/guides/*.md` | **Source of truth for agent guidance.** Frontmatter + markdown. Generated into resources, `ae_guide`, `instructions` and Claude Code skills. |
+| `packages/mcp-server/src/guides/*.md` | **Source of truth for agent guidance.** Frontmatter + markdown. Generated into resources, `ae_guide` topics and Claude Code skills. A `reference: <parent>` line makes one a reference file under the parent skill rather than a skill of its own — see "Guidance and how it reaches an agent". |
 | `packages/mcp-server/src/prompts/*.md` | Source of truth for user-invoked flows. Generated into MCP prompts and Claude Code commands. `$ARGUMENTS` is substituted at `prompts/get`. |
 | `packages/mcp-server/src/generated/content.ts` | Generated. Never hand-edit — `build-guides.mjs --check` fails the build if you do. |
 | `packages/jsx/style.jsx` | `get_house_style` / `set_house_style`. Reads `house-style.md` beside the .aep over the bridge, which is the only channel every client has. |
@@ -75,7 +75,7 @@ The MCP server is stateless except for an in-memory `JobManager`. The panel is t
 | `scripts/bundle-jsx.mjs` | Concatenates `packages/jsx/*.jsx` in dependency order into `packages/ae-panel/jsx/bundle.jsx`. Run via `npm run build:jsx`. |
 | `scripts/prepare-package.mjs` | `prepack` hook. esbuild-bundles the server to `bin/server.js` (inlining `@engineroom/shared`, which is never published separately) and vendors the panel to `panel/`. |
 | `scripts/install-panel.mjs` | Dev equivalent of `setup_panel`. Copies (or symlinks with `--symlink`) the panel into `~/Library/Application Support/Adobe/CEP/extensions/`. |
-| `scripts/build-guides.mjs` | Generates every copy of the guidance prose from `src/{guides,prompts}/*.md`. `--check` mode runs in CI. Also asserts `GUIDE_TOPICS` in `schemas.ts` matches the guides on disk. |
+| `scripts/build-guides.mjs` | Generates every copy of the guidance prose from `src/{guides,prompts}/*.md`. Holds the hand-written `instructions` text. `--check` mode runs in CI. Also asserts `GUIDE_TOPICS` in `schemas.ts` matches the guides on disk, and that every `reference:` guide has a parent that points at it. |
 | `scripts/build-mcpb.mjs` | The Claude Desktop bundle. Reproduces the runtime layout `setup/paths.ts` expects: `package.json`, `server/index.js`, real `node_modules/ws`, vendored `panel/`. |
 | `scripts/build-binaries.mjs` | `bun build --compile` for mac arm64/x64 and win x64. Each target is a *folder* — the binary alone cannot find the panel. |
 | `scripts/sign-and-notarize.sh` | codesign (hardened runtime + `scripts/entitlements.plist`) then `notarytool submit --wait`. Local-only; reads credentials from the environment and never from the repo. |
@@ -113,8 +113,8 @@ The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring 
 
 Tool descriptions cover one tool each. The knowledge that actually costs people
 time is cross-cutting — ids not indexes, read then write then verify, the
-spatial-ease array trap — and belongs to no single tool. There are four carriers
-for it, in descending order of reach:
+spatial-ease array trap — and belongs to no single tool. The carriers for it, in
+descending order of reach:
 
 | Carrier | Reaches | Cost |
 |---|---|---|
@@ -122,22 +122,44 @@ for it, in descending order of reach:
 | `instructions` (initialize result) | every client that honours it | always resident — keep it short |
 | `ae_guide` tool | every client | on demand |
 | MCP resources (`ae://guide/…`) | clients with resource support | on demand |
-| Claude Code skills | Claude Code, claude.ai | on demand |
+| Claude Code skills | Claude Code, claude.ai | on demand, whole skill at once |
+| Claude Code skill references | Claude Code, claude.ai | on demand, one file at a time |
 
 All of them except the tool descriptions come from
 `packages/mcp-server/src/guides/*.md` via `scripts/build-guides.mjs`. **Edit the
 markdown, never the outputs.** The same script generates
 `packages/mcp-server/src/prompts/*.md` into MCP prompts and Claude Code commands.
 
-Two rules that keep this honest:
+Three rules that keep this honest:
 
 - **`instructions` is always resident in every session, so it stays short.** It
-  is the six things an agent cannot infer from the tool list, and a pointer to
-  `ae_guide` for the rest. Adding a paragraph there is a tax on every request
-  the user ever makes. Add it to a guide instead.
+  says three things: that the session is live, where the real guidance is, and
+  the two or three habits that decide whether the *first* calls do damage before
+  an agent has read any of it. Everything else is a tax on every request the user
+  ever makes — put it in a guide. It was six numbered items and 1,395 characters
+  until 0.4.0, restating what `after-effects.md` already said in full; issue #60
+  is what that cost. `tests/unit/guide-references.mjs` and the CI smoke test both
+  fail it past 1,500 characters, which is a ceiling and not a target.
 - **`ae_guide` exists because the better carriers are not universal.** Some
   clients drop `instructions`; fewer support resources. Tools are the floor
   every client reaches, so the guidance has to be available as one.
+- **Only the skill has a per-session cost, so only the skill splits.** A guide
+  with `reference: <parent>` in its frontmatter is still a full `ae_guide` topic
+  and a full `ae://guide/…` resource — narrowing that half would be a reach
+  regression for every non-Claude client — but on the skill side it generates
+  into `plugin/skills/<parent>/references/<name>.md` instead of a skill of its
+  own, so Claude Code opens it only when the parent points at it. That pointer is
+  load-bearing: the generator refuses to build a reference whose parent does not
+  name `references/<name>.md`, because a reference nothing points at is a file
+  that is never read and never noticed. Two ship today, both under
+  `after-effects`: `extendscript-gotchas` (issue #48 — seven KB of `run_jsx`
+  traps that only matter to an agent about to script) and `whats-new` (issue #60
+  — the version deltas users were otherwise keeping in their own project notes).
+
+Where a fact goes, in one line: an agent cannot infer it from the tool list *and*
+getting it wrong on the first call costs real work → `instructions`; it is part
+of doing the job well → the relevant guide; it only matters once you have already
+decided to do something specific → a reference under that guide.
 
 ## Panel version gating
 
@@ -327,7 +349,7 @@ The user-facing half is the offer to report. It now lives in exactly two places:
 - **The hardened runtime blocks JIT.** Bun embeds JavaScriptCore, so `scripts/entitlements.plist` must grant `allow-jit` and `allow-unsigned-executable-memory`. Without them the binary signs and verifies fine and then refuses to launch — on someone else's machine, not yours.
 - **Shape `Contents` renders index 1 in front, and `addProperty` appends to the end.** So the *first* node added is the one on top, which is the opposite of the layer stack, and building back-to-front (body, then title bar, then dots) produces a silent solid slab with no error. The fix an agent reaches for is worse than the bug: `property.moveTo()` looks correct when the comp is rendered standalone and leaves it serving a stale buffer in every **nested** render. `add_shape_content` therefore takes `zOrder` rather than an index — `"back"` is the append AE already does and touches nothing, and `"front"` is the single `moveTo(1)` call site in the codebase, done on the empty node before any property is set so a failure costs an empty node. The guidance everywhere (tool description, guide) is to order the calls front-to-back and never need it. Reported as issue #32; if `moveTo` is ever proven safe, the note in the description comes out, not the option.
 - **A shape node reference goes stale when a sibling is added.** Hold a Fill, add a Stroke to the same group, and the Fill reference starts throwing `Object is invalid`. Add every node first, then re-fetch by name before setting values or expressions. `add_shape_content` re-fetches from the parent after its own `moveTo` for exactly this reason. Reported in issue #24.
-- **Generated files under `plugin/` will be overwritten.** `plugin/skills/**` and `plugin/commands/**` come from `src/{guides,prompts}/*.md`. Hand-edits survive until the next `npm run build`. CI runs `build-guides.mjs --check` to catch this at review time rather than in a release.
+- **Generated files under `plugin/` will be overwritten.** `plugin/skills/**` — SKILL.md and `references/*.md` alike — and `plugin/commands/**` come from `src/{guides,prompts}/*.md`. Hand-edits survive until the next `npm run build`. Every generated directory is owned *wholesale*, down to each skill folder, so a renamed or re-parented source cannot leave a second copy behind for an agent to read. CI runs `build-guides.mjs --check` to catch this at review time rather than in a release.
 - **AE hangs a 48-property `ADBE Vector Materials Group` off every vector group, and it is inert on a 2D shape layer.** It is the 3D extrusion model — Front/Bevel/Side/Back × twelve attributes — and it only means anything for an extruded shape under the Cinema 4D renderer. It was around 75% of the bytes of a shape read: one 68×68 circle in one group cost 4,400 tokens, of which the geometry was about 40 (issue #42). `explore.jsx` skips it unless `shapeMaterials` asks, which is the one place `include`-absent-means-everything does not hold — hence `materialsOmitted` and a note in the response, and hence a separate flag rather than a member of `include`, whose contract would otherwise have to bend. The group Transform beside it is elided by the same walk when every property is still at its creation value, tested against `__VECTOR_TRANSFORM_DEFAULTS` rather than through `PropertyBase.isModified`: the values can be asserted with no AE to run in, and a property that table has never heard of has to fail the test rather than be folded away unread.
 
 - **A scoped read must say what it left out.** `include`, `maxKeyframes` and `shapeDepth` on the read ops exist because a tool result is re-sent on every later request — a 65k-token `get_layer_full` is paid for once per call and then again on every request until the session ends. Two rules keep them honest: absent means *everything*, so no existing caller changes behaviour; and anything dropped is named and counted in the response (`included`, `keyframesOmitted` + `keyframesTruncated`, `childrenOmitted`), because a short answer that looks complete is the same class of lie as a swallowed error. Note what the call sites depend on: `args.include ? args.include : null` works because an empty array is truthy in JS, which is exactly what makes `include: []` mean "core fields only". Adding a `.length` guard there would quietly turn it back into "everything".

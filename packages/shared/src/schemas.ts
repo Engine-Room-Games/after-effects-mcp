@@ -581,11 +581,11 @@ export const SetupPanel = z.object({
  * names are part of the tool contract, so they are declared here and
  * `scripts/build-guides.mjs` fails the build if the two ever disagree.
  */
-export const GUIDE_TOPICS = ["ae-setup", "after-effects", "style-guide"] as const;
+export const GUIDE_TOPICS = ["ae-setup", "after-effects", "extendscript-gotchas", "style-guide", "whats-new"] as const;
 export const AeGuide = z
   .object({
     topic: z.enum(GUIDE_TOPICS).describe(
-      "after-effects: building, animating, easing, expressions, the traps. style-guide: capturing the user's look. ae-setup: connecting to AE when a tool cannot reach it."
+      "after-effects: building, animating, easing, expressions, the traps — start here. extendscript-gotchas: read before writing raw ExtendScript for run_jsx. whats-new: what changed recently, when a call behaves differently from what you expected. style-guide: capturing the user's look. ae-setup: connecting to AE when a tool cannot reach it."
     ),
   })
   .strict();

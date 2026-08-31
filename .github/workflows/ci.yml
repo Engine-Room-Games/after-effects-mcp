@@ -78,7 +78,8 @@ jobs:
             (async()=>{
               const init=await send("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"ci",version:"1"}});
               c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
-              if(!init.result.instructions?.includes("get_house_style")) fail("initialize did not carry instructions");
+              if(!init.result.instructions?.includes("ae_guide")) fail("initialize did not carry instructions");
+              if(init.result.instructions.length>1500) fail(`instructions is ${init.result.instructions.length} chars and resident in every session — put the detail in a guide`);
               for(const k of ["prompts","resources"]) if(!init.result.capabilities[k]) fail(`capability ${k} missing`);
               const prompts=(await send("prompts/list",{})).result.prompts;
               if(prompts.length<3) fail(`expected 3 prompts, got ${prompts.length}`);
