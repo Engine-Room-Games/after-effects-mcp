@@ -117,12 +117,59 @@ OPS.create_adjustment_layer = function (args) {
   return __layerSummary(l);
 };
 
+// Where a new shape layer's origin goes (issue #51).
+//
+// AE's addShape() leaves Position at the comp centre with the Anchor Point at
+// [0,0], so layer space is offset from comp space by half a frame. Every path
+// this toolset can write — set_shape_path vertices, add_shape_content vertices,
+// a rect/ellipse `position` — is expressed in *layer* space, and nothing in the
+// response says where that space starts. An agent authoring in comp pixels gets
+// the whole drawing shifted by (width/2, height/2), and the check that would
+// catch it is a downsampled screenshot.
+//
+// Default [0,0] makes layer space and comp space the same space for a fresh
+// shape layer, which is the only arrangement in which a vertex list means what
+// it says. "center" is AE's own spawn point, kept as one word so the old
+// behaviour is still one argument away.
+function __shapeSpawnPosition(comp, position) {
+  if (position === undefined || position === null) return [0, 0];
+  if (position === "center") return [comp.width / 2, comp.height / 2];
+  if (position instanceof Array && position.length >= 2) {
+    if (position.length === 3) return [position[0], position[1], position[2]];
+    return [position[0], position[1]];
+  }
+  throw new Error(
+    "create_shape_layer: position must be [x,y], [x,y,z] or the string \"center\" (After Effects' own " +
+    "spawn point, the comp centre). Got: " + String(position)
+  );
+}
+
 OPS.create_shape_layer = function (args) {
   var c = getCompById(args.compId);
+  var pos = __shapeSpawnPosition(c, args.position);
   var l = c.layers.addShape();
   if (args.name) l.name = args.name;
+  try {
+    l.property("Transform").property("Position").setValue(pos);
+  } catch (ePos) {
+    // The shape that can still get here is three components on a 2D layer, which
+    // AE refuses. Leaving an empty shape layer in the timeline behind a thrown
+    // error is the half-built failure add_shape_content refuses to produce.
+    try { l.remove(); } catch (eRm) {}
+    throw new Error(
+      "create_shape_layer could not set position to [" + pos.join(", ") + "]: " + ePos.message +
+      ". (A three-component position needs a 3D layer; create it 2D and set threeDLayer with set_layer first.) " +
+      "The empty layer was removed, so nothing changed."
+    );
+  }
   // shapes payload kept loose for v1 — the agent can use add_shape_content for detail
-  return __layerSummary(l);
+  var out = __layerSummary(l);
+  // Read both back rather than echoing what we asked for: together they are the
+  // coordinate space every subsequent path on this layer is measured in, and a
+  // caller should never have to render a frame to find out what it is.
+  out.position = l.property("Transform").property("Position").value;
+  out.anchorPoint = l.property("Transform").property("Anchor Point").value;
+  return out;
 };
 
 OPS.create_precomp_layer = function (args) {
@@ -526,9 +573,66 @@ OPS.parent_layer = function (args) {
   return out;
 };
 
+// Layers do not reorder with moveTo. `moveTo` is a PropertyBase method for
+// re-ranking a property inside an indexed group, and calling it on a Layer
+// throws "parent is not an INDEXED_GROUP" — which is every call this op has
+// ever served (issue #70). AE's layer-level primitives are moveBefore,
+// moveAfter, moveToBeginning and moveToEnd, and all four take a *layer*, never
+// an index. (The one legitimate moveTo in this codebase is the shape-property
+// one in shapes.jsx; it is on a PropertyBase and stays.)
+//
+// Two ways in, because reorder is the op that invalidates indexes:
+//
+//   * `beforeLayerId` / `afterLayerId` — place this layer relative to another
+//     one by id. Nothing about the answer depends on the stack not having moved
+//     since the caller last read it, which is why these are the preferred form.
+//   * `toIndex` — the index the layer ends up at, counting from the front.
+//     Stated as the *landing* index because "the index it displaces" and "the
+//     index it lands on" differ by one when moving down the stack and the
+//     caller cannot tell which one a tool meant.
+//
+// The two directions need different primitives, and swapping them is off by one
+// with no error. Moving up (toIndex < from), the layer currently at the target
+// is pushed down, so moveBefore lands exactly on it. Moving down, that layer
+// shifts up by one as this one leaves, so moveAfter is what lands on the target.
 OPS.reorder_layer = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
-  l.moveTo(args.toIndex);
-  return __layerSummary(l);
+  var from = l.index;
+  var n = c.numLayers;
+  var to;
+
+  if (args.beforeLayerId !== undefined && args.beforeLayerId !== null) {
+    var b = getLayerById(c, args.beforeLayerId);
+    if (b.id === l.id) throw new Error("reorder_layer: beforeLayerId is the layer being moved (" + l.id + ").");
+    l.moveBefore(b);
+  } else if (args.afterLayerId !== undefined && args.afterLayerId !== null) {
+    var a = getLayerById(c, args.afterLayerId);
+    if (a.id === l.id) throw new Error("reorder_layer: afterLayerId is the layer being moved (" + l.id + ").");
+    l.moveAfter(a);
+  } else if (args.toIndex !== undefined && args.toIndex !== null) {
+    to = Math.round(args.toIndex);
+    if (to < 1) to = 1;
+    if (to > n) to = n;
+    if (to === from) {
+      // Nothing to do. Saying so beats an AE call that is a no-op anyway.
+    } else if (to === 1) {
+      l.moveToBeginning();
+    } else if (to === n) {
+      l.moveToEnd();
+    } else if (to < from) {
+      l.moveBefore(c.layer(to));
+    } else {
+      l.moveAfter(c.layer(to));
+    }
+  } else {
+    throw new Error("reorder_layer: pass one of toIndex, beforeLayerId or afterLayerId.");
+  }
+
+  // Report both ends of the move. The landing index is read back off the layer
+  // rather than assumed, so a result can never claim a position AE did not
+  // give it — and `movedFrom === index` is how a caller sees a no-op.
+  var out = __layerSummary(l);
+  out.movedFrom = from;
+  return out;
 };

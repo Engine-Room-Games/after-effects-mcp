@@ -65,13 +65,33 @@ function __newJobId() {
 }
 
 // ---------- Undo wrapper ----------
-// __UNDO_OPEN tracks only the group *dispatch* opened. Nothing else may set it:
-// it is what lets withoutUndoGroup() reopen exactly what it closed, and leave
-// undo state alone entirely when we never opened a group in the first place.
+// __UNDO_OPEN tracks whether a group *this bundle* opened is currently open.
+// withUndo() is the only thing that may set it — dispatch and run_batch both
+// group through there — because it is what lets withoutUndoGroup() reopen
+// exactly what it closed, and leave undo state alone entirely when we never
+// opened a group in the first place.
 var __UNDO_OPEN = false;
 
-function withUndo(name, fn) {
+// Every undo group this bundle opens is counted here, and __beginUndoGroup is
+// the only place allowed to call app.beginUndoGroup. run_batch reports the
+// number of undo steps it cost as the *delta* of this counter, so the number an
+// agent repeats to the user as "press Cmd-Z N times" is measured rather than
+// predicted — a chunk that threw still opened its group, and a batched op that
+// called withoutUndoGroup() really did split itself into two steps.
+var __UNDO_GROUPS = 0;
+
+function __beginUndoGroup(name) {
+  __UNDO_GROUPS += 1;
   app.beginUndoGroup(name || "AE MCP");
+}
+
+function __undoGroupsOpened() { return __UNDO_GROUPS; }
+
+// An undo group must open and close inside ONE evalScript call. After Effects
+// discards one that spans two — see the note in CLAUDE.md; measured, not
+// inferred. Everything that groups goes through here for that reason.
+function withUndo(name, fn) {
+  __beginUndoGroup(name || "AE MCP");
   __UNDO_OPEN = true;
   try { return fn(); }
   finally { __UNDO_OPEN = false; app.endUndoGroup(); }
@@ -87,15 +107,28 @@ function withoutUndoGroup(fn) {
   app.endUndoGroup();
   __UNDO_OPEN = false;
   try { return fn(); }
-  finally { app.beginUndoGroup("AE MCP: continue"); __UNDO_OPEN = true; }
+  finally { __beginUndoGroup("AE MCP: continue"); __UNDO_OPEN = true; }
 }
 
 // ---------- Error helper ----------
+// A handler that can say more about *where* it failed than "an error happened"
+// attaches that on `aeDetail` and it is copied onto the result verbatim —
+// run_jsx maps After Effects' line number back onto the script the caller
+// actually submitted (issue #46). The bag is free-form here on purpose; the
+// panel forwards a named list of fields, which is where the contract is kept.
 function __mkError(e) {
   var msg = e && e.message ? String(e.message) : String(e);
   var stack = e && e.stack ? String(e.stack) : "";
   var line = e && typeof e.line !== "undefined" ? e.line : null;
-  return { ok: false, error: msg, stack: stack, line: line };
+  var out = { ok: false, error: msg, stack: stack, line: line };
+  var detail = null;
+  try { if (e && e.aeDetail) detail = e.aeDetail; } catch (ed) {}
+  if (detail) {
+    for (var k in detail) {
+      if (detail.hasOwnProperty(k)) out[k] = detail[k];
+    }
+  }
+  return out;
 }
 
 // ---------- Main dispatch ----------

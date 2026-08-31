@@ -77,6 +77,120 @@ function crc32(bytes) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
+// ---------- Structural completeness ----------
+/**
+ * Is this byte range a whole PNG file yet?
+ *
+ * Answered by walking the chunk table alone — no inflate, no pixels — because
+ * the caller is asking about a file After Effects may still be writing, and the
+ * question has to be cheap enough to ask repeatedly.
+ *
+ * It exists because "the file stopped growing" was never the same statement as
+ * "the file is finished". `saveFrameToPng` returns before the bytes are on disk,
+ * and the panel used to accept a frame the moment two `stat` calls 30ms apart
+ * reported the same size. A writer that pauses for 30ms — which on a heavy comp
+ * it routinely does — was read mid-flight and shipped, and the agent got
+ * `truncated PNG: chunk IDAT runs past the end of the file` for a render that
+ * was merely still happening. Issue #45.
+ *
+ * `growable` matters as much as `complete`: it separates "not finished yet,
+ * keep waiting" from "no number of further bytes can make this a PNG, stop
+ * now". A truncated chunk is the first; a wrong signature or a missing IHDR is
+ * the second, and waiting out a 120s render budget for one of those only turns
+ * a precise diagnosis into a timeout.
+ *
+ * Returns { complete, growable, reason, bytes, lastChunk, trailingBytes }.
+ */
+function inspectPngStructure(buf) {
+  var n = buf.length;
+  var prefix = n < SIGNATURE.length ? n : SIGNATURE.length;
+  for (var i = 0; i < prefix; i++) {
+    if (buf[i] !== SIGNATURE[i]) {
+      return {
+        complete: false,
+        growable: false,
+        bytes: n,
+        reason: "not a PNG: signature mismatch at byte " + i,
+      };
+    }
+  }
+  if (n < SIGNATURE.length) {
+    return {
+      complete: false,
+      growable: true,
+      bytes: n,
+      reason: "only " + n + " of the 8 signature bytes are on disk",
+    };
+  }
+
+  var pos = SIGNATURE.length;
+  var first = true;
+  while (true) {
+    if (pos + 8 > n) {
+      return {
+        complete: false,
+        growable: true,
+        bytes: n,
+        reason: "the chunk header at byte " + pos + " is incomplete",
+      };
+    }
+    var len = buf.readUInt32BE(pos);
+    var type = buf.toString("ascii", pos + 4, pos + 8);
+    if (!/^[A-Za-z]{4}$/.test(type)) {
+      return {
+        complete: false,
+        growable: false,
+        bytes: n,
+        reason: "the chunk type at byte " + pos + " is not four letters",
+      };
+    }
+    // The format caps a chunk at 2^31-1. A larger figure is garbage, not a
+    // chunk still arriving, and calling it growable would spend the whole
+    // render budget waiting for a file that is already wrong.
+    if (len > 0x7fffffff) {
+      return {
+        complete: false,
+        growable: false,
+        bytes: n,
+        lastChunk: type,
+        reason: "chunk " + type + " declares " + len + " bytes, past the format's limit",
+      };
+    }
+    if (first && type !== "IHDR") {
+      return {
+        complete: false,
+        growable: false,
+        bytes: n,
+        lastChunk: type,
+        reason: "malformed PNG: the first chunk is " + type + ", not IHDR",
+      };
+    }
+    first = false;
+    var end = pos + 8 + len + 4;
+    if (end > n) {
+      return {
+        complete: false,
+        growable: true,
+        bytes: n,
+        lastChunk: type,
+        reason: "chunk " + type + " declares " + len + " bytes and " +
+          Math.max(0, n - pos - 8) + " of them are on disk",
+      };
+    }
+    if (type === "IEND") {
+      return {
+        complete: true,
+        growable: false,
+        bytes: n,
+        lastChunk: "IEND",
+        reason: null,
+        trailingBytes: n - end,
+      };
+    }
+    pos = end;
+  }
+}
+
 // ---------- Reading ----------
 function readChunks(buf) {
   if (buf.length < 8) throw new Error("not a PNG: only " + buf.length + " bytes");
@@ -260,6 +374,7 @@ function everyPixelTransparent(data8, channels, alphaIndex, pixelCount) {
  *   width/height  from IHDR, so they can never disagree with the pixels
  *   bitDepth      of the *source*, before any conversion
  *   converted     true when the bytes were re-encoded from 16-bit
+ *   channels      samples per pixel, for a caller that composites hashInput
  *   decoded       true when the pixels were actually interpreted
  *   empty         true when every pixel is fully transparent
  *   hashInput     bytes to hash for the stale-render check
@@ -291,6 +406,9 @@ function normalizePng(buf) {
     height: h.height,
     bitDepth: h.bitDepth,
     colorType: h.colorType,
+    // Samples per pixel, so a caller compositing `hashInput` into a contact
+    // sheet does not have to re-derive it from the colour type.
+    channels: channels,
     converted: false,
     decoded: false,
     empty: false,
@@ -393,6 +511,10 @@ function decodePng8(buf) {
 
 module.exports = {
   normalizePng: normalizePng,
+  // For main.js, which has to know whether the file After Effects is writing is
+  // finished before it reads it. It lives here because the chunk walk and the
+  // signature it walks from are already defined once, above.
+  inspectPngStructure: inspectPngStructure,
   // For mogrt.js, which resamples a rendered frame into a template's thumbnail
   // and needs the same decoder, encoder and CRC rather than a second copy of
   // each. The zip format's CRC-32 is the one PNG uses, bit for bit.

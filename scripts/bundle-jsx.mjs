@@ -17,6 +17,7 @@ const order = [
   "ids.jsx",
   "comps.jsx",
   "layers.jsx",
+  "snapshot.jsx",
   "transforms.jsx",
   "keyframes.jsx",
   "expressions.jsx",
@@ -27,10 +28,12 @@ const order = [
   "markers.jsx",
   "vision.jsx",
   "footage.jsx",
+  "audio.jsx",
   "mogrt.jsx",
   "style.jsx",
   "batch.jsx",
   "explore.jsx",
+  "helpers.jsx",
   "raw.jsx",
 ];
 
@@ -60,7 +63,16 @@ console.log(`Wrote ${outFile} (${order.length} modules concatenated)`);
 // Sync the bundle into the installed panel (mac copy installs only — symlink
 // installs already point at outFile). Without this, `/reload-jsx` would
 // re-evaluate the stale installed bundle and silently no-op the JSX change.
-if (process.platform === "darwin" || process.platform === "win32") {
+//
+// Opt-in, because a build must not write outside the repo by default. The
+// installed bundle is one half of the panel version gate, so an ordinary
+// `npm run build` used to change what a *live* After Effects session compares
+// itself against — a second session on the same machine, mid-project, would
+// start being told to restart AE by a build it never ran. `install:panel` and
+// the `setup_panel` tool remain the explicit ways to update an install; this
+// flag is for the tight `build:jsx` -> `/reload-jsx` loop against your own AE.
+const syncToInstalledPanel = process.env.AE_MCP_SYNC_PANEL === "1";
+if (syncToInstalledPanel && (process.platform === "darwin" || process.platform === "win32")) {
   const extensionsDir = process.platform === "win32"
     ? path.join(process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"), "Adobe", "CEP", "extensions")
     : path.join(os.homedir(), "Library", "Application Support", "Adobe", "CEP", "extensions");

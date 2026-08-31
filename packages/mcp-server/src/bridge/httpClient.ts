@@ -1,9 +1,10 @@
+import type { AeSourceInfo } from "../util/errors.js";
 import { AeError, BridgeTimeoutError, BridgeUnreachableError, isTimeoutError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { discoverPort } from "./discovery.js";
 
 interface OpResultOk { ok: true; result: unknown; }
-interface OpResultErr { ok: false; error: string; code?: string; stack?: string; line?: number; }
+interface OpResultErr { ok: false; error: string; code?: string; stack?: string; line?: number; source?: AeSourceInfo; }
 type OpResult = OpResultOk | OpResultErr;
 
 /** Long enough that a normal op never trips it; short enough to be a signal. */
@@ -20,9 +21,10 @@ const DEFAULT_OP_TIMEOUT_MS = 120_000;
  * server's limit has to sit *above* the panel's, not on it.
  *
  * `run_jsx` and `run_batch` are here because their duration is chosen by the
- * caller, not by us.
+ * caller, not by us. `place_audio_cues` for the same reason — one call can
+ * import dozens of files and build a layer for each, all synchronously.
  */
-const SLOW_OPS = new Set(["run_batch", "run_jsx", "screenshot_frame", "screenshot_layer", "export_mogrt", "import_footage"]);
+const SLOW_OPS = new Set(["run_batch", "run_jsx", "screenshot_frame", "screenshot_layer", "export_mogrt", "import_footage", "place_audio_cues"]);
 const SLOW_OP_TIMEOUT_MS = 300_000;
 
 /**
@@ -93,7 +95,7 @@ export class HttpClient {
       throw new AeError(`Bridge returned non-JSON (HTTP ${resp.status})`);
     }
     if (!data.ok) {
-      throw new AeError(data.error, data.stack, data.line, data.code);
+      throw new AeError(data.error, data.stack, data.line, data.code, data.source);
     }
     return data.result;
   }

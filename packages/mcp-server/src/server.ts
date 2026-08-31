@@ -11,9 +11,13 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import { schemas } from "@engineroom/shared";
 import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
+import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge/writeQueue.js";
 import { JobManager } from "./jobs/manager.js";
+import { SnapshotStore } from "./snapshots/store.js";
+import type { CompFingerprint } from "./snapshots/store.js";
 import { descriptions } from "./tools/descriptions.js";
-import { AeError, BridgeTimeoutError, BridgeUnreachableError } from "./util/errors.js";
+import { AeError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
+import { resolveRunJsxSource, type RunJsxArgs } from "./tools/runJsxSource.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
@@ -21,6 +25,7 @@ import { assessPanel, installedBundleHash, unknownOpMessage } from "./setup/pane
 import { installedPanelDir, panelInstallDiff, panelSourceDir } from "./setup/paths.js";
 import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./generated/content.js";
 import { listIssues, logIssue, markReported } from "./issues/journal.js";
+import { applyHouseStyleDetail } from "./style/summary.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
 import { fileURLToPath } from "node:url";
@@ -36,7 +41,7 @@ const ASYNC_OPS = new Set(["run_batch"]);
 // especially must never touch the bridge — they exist precisely for the case
 // where the panel is not installed yet, which is also when the issue journal is
 // most likely to be written to.
-const SERVER_OPS = new Set([
+export const SERVER_OPS = new Set([
   "await_job",
   "get_job",
   "cancel_job",
@@ -48,6 +53,25 @@ const SERVER_OPS = new Set([
   "list_known_issues",
   "mark_issue_reported",
 ]);
+// Half server-resident: only the panel can read After Effects, only the server
+// can remember anything between calls. These forward an internal read op to
+// gather a fingerprint and keep the result in `SnapshotStore` — they are not in
+// SERVER_OPS, because unlike those they do touch the bridge.
+const SNAPSHOT_OPS = new Set(["snapshot_comp", "diff_comp"]);
+
+/**
+ * True for an op that changes the After Effects session, from the one table
+ * that is checked against `OpSchemas` at test time (`schemas.OpMutation`).
+ *
+ * A hand-kept list here would go stale the first time somebody added a tool,
+ * and the failure would be silent — a new writing op classified by omission as
+ * a read, interleaving with a batch. Anything this cannot classify is treated
+ * as a write, which costs a little serialization and never costs correctness.
+ */
+export function isWriteOp(name: string): boolean {
+  const effect = (schemas.OpMutation as Record<string, string | undefined>)[name];
+  return effect === undefined ? true : effect === "write";
+}
 
 /**
  * `ae_guide` exists because the two better carriers are not universal. The
@@ -78,6 +102,10 @@ export function createServer() {
 
   const bridge = new HttpClient();
   const jobs = new JobManager();
+  // One writer at a time. See bridge/writeQueue.ts for why the panel's own
+  // evalScript mutex is not enough.
+  const writes = new WriteQueue();
+  const snapshots = new SnapshotStore();
   const ws = new WsClient(bridge.port, jobs);
   ws.start();
   const panelGate = createPanelGate(bridge);
@@ -90,18 +118,11 @@ export function createServer() {
 
   // ---------- tools/list ----------
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = Object.keys(OpSchemas).map((name) => {
-      const schema = OpSchemas[name as keyof typeof OpSchemas];
-      const jsonSchema = zodToJsonSchema(schema, {
-        target: "jsonSchema7",
-        $refStrategy: "none",
-      });
-      return {
-        name,
-        description: descriptions[name] ?? `AE op: ${name}`,
-        inputSchema: toDraft2020(jsonSchema) as any,
-      };
-    });
+    const tools = Object.keys(OpSchemas).map((name) => ({
+      name,
+      description: descriptions[name] ?? `AE op: ${name}`,
+      inputSchema: toolInputSchema(name) as any,
+    }));
     return { tools };
   });
 
@@ -221,7 +242,9 @@ export function createServer() {
         }
         if (name === "log_issue") {
           const a = schemas.LogIssue.parse(rawArgs);
-          return textResult(logIssue(a));
+          // The project journal stays the default: an entry is about this
+          // project's work unless the agent says it is about the tools.
+          return textResult(logIssue({ ...a, scope: a.scope ?? "project" }));
         }
         if (name === "list_known_issues") {
           const a = schemas.ListKnownIssues.parse(rawArgs);
@@ -234,16 +257,25 @@ export function createServer() {
               // Compact unless asked otherwise: the full corpus is thousands of
               // tokens that stay in the transcript for the rest of the session.
               detail: a.detail ?? "index",
+              // Both journals by default — the whole point of the user one is
+              // that a fresh project folder does not start ignorant.
+              scope: a.scope ?? "all",
+              limit: a.limit,
             })
           );
         }
         if (name === "mark_issue_reported") {
           const a = schemas.MarkIssueReported.parse(rawArgs);
           const entry = markReported(a.id, a.url);
-          return textResult({ ok: true, id: entry.id, reported: true, issueUrl: entry.issueUrl });
+          // The scope goes back too: a bare id can name an entry in either
+          // journal, and the caller has to be able to say which one moved.
+          return textResult({ ok: true, id: entry.id, scope: entry.scope, reported: true, issueUrl: entry.issueUrl });
         }
       } catch (e) {
-        return errorResult((e as Error).message);
+        // A zod rejection here is the same class of thing as one below, and gets
+        // the same prose treatment; `invalidArgsText` passes anything else
+        // through unchanged.
+        return errorResult(invalidArgsText(name, e));
       }
     }
 
@@ -252,7 +284,19 @@ export function createServer() {
     try {
       args = (OpSchemas[name as keyof typeof OpSchemas] as z.ZodTypeAny).parse(rawArgs);
     } catch (e) {
-      return errorResult(`Invalid arguments for ${name}: ${(e as Error).message}`);
+      return errorResult(invalidArgsText(name, e));
+    }
+
+    // run_jsx can take its script, and its helper libraries, from files rather
+    // than from the conversation. The server reads them — see runJsxSource.ts;
+    // the short version is that Claude Desktop's agent has no filesystem tools
+    // and is exactly the client this saves the most context for.
+    if (name === "run_jsx") {
+      try {
+        args = resolveRunJsxSource(args as RunJsxArgs);
+      } catch (e) {
+        return errorResult((e as Error).message);
+      }
     }
 
     // Refuse to forward to a panel that predates this server. Without this the
@@ -261,13 +305,39 @@ export function createServer() {
     const staleness = await panelGate.check();
     if (staleness) return errorResult(staleness);
 
+    // Serialize writes. Acquiring *before* runOp is what keeps the op timeout
+    // honest: `AbortSignal.timeout` is created inside `runOp`, so the clock
+    // starts when the call executes and not when it entered the queue. A queued
+    // call that timed out having never run would report a bridge failure for a
+    // bridge that was working, which is the one way this feature could make
+    // things worse than they were.
+    let lease: WriteLease | null = null;
+    if (isWriteOp(name)) {
+      try {
+        lease = await writes.acquire(name, extra?.signal);
+      } catch (e) {
+        // Full, timed out in the queue, or cancelled — all three mean the call
+        // never reached After Effects, and all three say so.
+        return errorResult((e as Error).message);
+      }
+    }
+    const wait: QueueWait | null = lease?.wait ?? null;
+
     // Forward to panel.
     try {
+      // Inside this try so the panel's own error mapping — timeouts, AeError,
+      // the Unknown-op backstop — applies to the internal ops these forward.
+      if (SNAPSHOT_OPS.has(name)) return await runSnapshotOp(name, args, bridge, snapshots);
+
       const result = await bridge.runOp(name, args, progressToken);
 
       // Async envelope handling for run_batch
       if (ASYNC_OPS.has(name) && isAsyncEnvelope(result)) {
-        const env = result as { jobId: string; async: true; total: number };
+        const env = result as {
+          jobId: string; async: true; total: number;
+          chunkSize?: number; undoStepsEstimate?: number;
+          undoGroupName?: string; note?: string;
+        };
         jobs.register(env.jobId, env.total);
         if (progressToken !== undefined) {
           jobs.bindProgressEmitter(env.jobId, (jid, progress, total, message) => {
@@ -277,7 +347,39 @@ export function createServer() {
             });
           });
         }
-        return textResult({ jobId: env.jobId, async: true, total: env.total });
+        // This is the gap the panel's own mutex leaves, and the reason this
+        // queue exists at all. `run_batch` handed back a jobId and the panel now
+        // drives `_continue_job` chunk by chunk; each chunk is its own turn on
+        // the panel's evalScript chain, so releasing the lock here would let the
+        // next write land *between* two chunks. That is still wrong even now
+        // that each chunk carries its own undo group (issue #69 removed the
+        // group that used to span them): the batch is one thing the caller
+        // asked for, and another write interleaved into the middle of it runs
+        // out of the order it was issued in. Hold the lock until the job
+        // reports done.
+        //
+        // `await_job` is server-resident and never takes this lock, so an agent
+        // waiting on the job it queued behind cannot deadlock against it.
+        //
+        // `waitFor`'s own timeout has to sit at the queue's hold ceiling, not
+        // below it — a shorter one here would release the lock mid-batch while
+        // a writer that queued at the same moment was still waiting.
+        lease?.extendUntil(jobs.waitFor(env.jobId, writes.holdCeilingMs));
+        // The undo fields travel with the envelope because this is the only
+        // message the agent sees before it starts describing the work to the
+        // user; the measured count arrives much later, with the job's result.
+        return textResult(
+          {
+            jobId: env.jobId,
+            async: true,
+            total: env.total,
+            chunkSize: env.chunkSize,
+            undoStepsEstimate: env.undoStepsEstimate,
+            undoGroupName: env.undoGroupName,
+            note: env.note,
+          },
+          wait
+        );
       }
 
       // An empty frame is reported, never shipped. The panel found every pixel
@@ -293,6 +395,13 @@ export function createServer() {
           downsample?: number; time: number; compId: number; layerId?: number;
           base64: string; bytes: number; warning?: string;
           converted?: boolean; sourceBitDepth?: number;
+          // A contact sheet is the same image content block with a map of what
+          // is in it. The per-tile record is the only thing that tells the agent
+          // which cell is which time, and which cells are marked blocks rather
+          // than frames.
+          contactSheet?: boolean; cols?: number; rows?: number;
+          cellWidth?: number; cellHeight?: number;
+          tiles?: unknown[];
         };
         return imageContent(
           {
@@ -312,12 +421,30 @@ export function createServer() {
             // Surfaced when a requested downsample could not be applied, so the
             // agent knows it is looking at a full-resolution frame.
             warning: v.warning,
+            // Present only for a `times` call. `tiles` is what makes the sheet
+            // readable as data as well as a picture — cell rectangle, time and
+            // status per tile, in the order they were asked for.
+            contactSheet: v.contactSheet,
+            cols: v.cols,
+            rows: v.rows,
+            cellWidth: v.cellWidth,
+            cellHeight: v.cellHeight,
+            tiles: v.tiles,
           },
           v.base64
         );
       }
 
-      return textResult(result);
+      // The style guide is read over the bridge and summarised here: the panel
+      // does not update itself, so a summariser shipped in the .jsx bundle would
+      // answer `detail: "summary"` with the whole document until the user
+      // reinstalled the panel and relaunched AE. See style/summary.ts.
+      if (name === "get_house_style") {
+        const detail = (args as { detail?: "summary" | "full" }).detail ?? "summary";
+        return textResult(applyHouseStyleDetail(result, detail), wait);
+      }
+
+      return textResult(result, wait);
     } catch (e) {
       // Checked before BridgeUnreachableError because the remedies are
       // opposites: one says restart After Effects, the other says do not.
@@ -335,14 +462,90 @@ export function createServer() {
           panelGate.invalidate();
           return errorResult(unknownOpMessage(name));
         }
-        return errorResult(`AE: ${e.message}${e.line ? ` (line ${e.line})` : ""}`);
+        // The line number on its own counts from something the caller cannot
+        // see, so this prints the failing line's text where the handler could
+        // map it, and says so plainly where it could not (issue #46).
+        return errorResult(aeErrorText(e));
       }
       return errorResult((e as Error).message);
+    } finally {
+      // No-op unless a lease was taken, and deferred by `extendUntil` when a
+      // long batch is still running behind the envelope we just returned.
+      lease?.release();
     }
   });
 
   return server;
 }
+
+/**
+ * `snapshot_comp` and `diff_comp`.
+ *
+ * The split is the point: the panel gathers a fingerprint because only it can
+ * read After Effects, and the server keeps it because a snapshot must not be
+ * written into the user's project (see snapshots/store.ts). Neither tool sends
+ * the fingerprint back unless asked — returning it by default would reintroduce
+ * exactly the context cost the snapshot exists to avoid, since a tool result is
+ * re-sent on every later request for the rest of the session.
+ */
+async function runSnapshotOp(
+  name: string,
+  args: unknown,
+  bridge: HttpClient,
+  snapshots: SnapshotStore
+) {
+  if (name === "snapshot_comp") {
+    const a = args as { compId: number; includeFingerprint?: boolean };
+    const fingerprint = (await bridge.runOp("_comp_fingerprint", { compId: a.compId })) as CompFingerprint;
+    const snap = snapshots.store(fingerprint);
+    return textResult({
+      snapshotId: snap.id,
+      compId: snap.compId,
+      compName: snap.compName,
+      layers: snap.layerCount,
+      takenAt: new Date(snap.takenAt).toISOString(),
+      next: `Do the work, then diff_comp({ since: "${snap.id}" }).`,
+      lifetime:
+        "Held in this MCP server's memory for the length of the session, not written into the After Effects project.",
+      covers: SNAPSHOT_COVERS,
+      fingerprint: a.includeFingerprint ? fingerprint : undefined,
+    });
+  }
+
+  const d = args as { since: string; compId?: number; includeFingerprint?: boolean };
+  const previous = snapshots.get(d.since);
+  if (!previous) return errorResult(snapshots.missingMessage(d.since));
+  if (d.compId !== undefined && d.compId !== previous.compId) {
+    return errorResult(
+      `Snapshot ${d.since} is of comp ${previous.compId} ("${previous.compName}"), not comp ${d.compId}. ` +
+        `A diff only means anything against a snapshot of the same comp — omit compId, or snapshot_comp(${d.compId}) first.`
+    );
+  }
+  const res = (await bridge.runOp("_comp_diff", {
+    compId: previous.compId,
+    since: previous.fingerprint,
+  })) as { diff: Record<string, unknown>; fingerprint: CompFingerprint };
+  // The fresh fingerprint becomes a snapshot of its own, so a verify-as-you-go
+  // loop can keep diffing forward without a second call per step.
+  const next = snapshots.store(res.fingerprint);
+  return textResult({
+    ...res.diff,
+    since: d.since,
+    snapshotId: next.id,
+    fingerprint: d.includeFingerprint ? res.fingerprint : undefined,
+  });
+}
+
+/**
+ * What a snapshot is and is not, quoted back on every one taken. A diff can
+ * only report a field it records, so "no differences" has to be readable as
+ * "none of these moved" and never as "identical" — the same rule that makes
+ * every other scoped read here name what it left out.
+ */
+const SNAPSHOT_COVERS =
+  "Records layer id/name/index/type, in/out/start, parent, enabled, keyframe counts, expression count and " +
+  "effect count, plus comp size/duration/frame rate/work area/markers. Property values, expression text, " +
+  "effect parameters and shape contents are not recorded.";
 
 /**
  * Caches the panel-version verdict so it costs one /health per session rather
@@ -415,10 +618,24 @@ async function clientRoots(server: Server): Promise<string[] | undefined> {
   }
 }
 
-function textResult(value: unknown) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
-  };
+/**
+ * `wait` is present only when the call actually sat in the write queue, so the
+ * ordinary result is byte-identical to what it has always been.
+ *
+ * It is folded into the result object where there is one — which is every
+ * writing op but `run_jsx`, whose result is whatever the caller's script
+ * returned. Arrays and bare numbers get a second text block instead: rewrapping
+ * them would change what every existing caller reads, and #43 is the standing
+ * reminder that changing what a `run_jsx` answer looks like is expensive.
+ * Vision results never come through here with a wait — screenshots are reads
+ * and are never queued — so the image envelope cannot be touched by this.
+ */
+function textResult(value: unknown, wait?: QueueWait | null) {
+  const json = (v: unknown) => ({ type: "text" as const, text: JSON.stringify(v, null, 2) });
+  if (!wait) return { content: [json(value)] };
+  const merged = mergeWait(value, wait);
+  if (merged) return { content: [json(merged)] };
+  return { content: [json(value), json(wait)] };
 }
 
 function errorResult(message: string) {
@@ -428,11 +645,23 @@ function errorResult(message: string) {
   };
 }
 
+/** The dialect these schemas are, and the one the Anthropic API reads them as. */
+export const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
+
 // Rewrite a JSON Schema (draft-07 output from zod-to-json-schema) into draft 2020-12.
 // The Anthropic API validates tool input_schema against draft 2020-12, which rejects
 // the draft-07 tuple form `{ type: "array", items: [<schemas>] }` — that shape is
 // only valid in 2020-12 as `prefixItems`, with `items` (singular) covering trailing
 // positions. We also drop the legacy `additionalItems` keyword (renamed to `items`).
+//
+// The `$schema` rewrite is part of the same correction and not cosmetic.
+// zod-to-json-schema stamps the draft-07 URI, which after this pass is a false
+// claim: `prefixItems` does not exist in draft-07, and `items: false` means
+// something else entirely there ("no array items at all"). A consumer that
+// honoured the declared dialect would reject every tuple in these schemas —
+// every colour, every 2D point. It works today only because the API reads tool
+// schemas as 2020-12 whatever they say about themselves. Saying so makes the
+// document self-describing and lets a validator check what actually ships.
 function toDraft2020(node: any): any {
   if (Array.isArray(node)) return node.map(toDraft2020);
   if (!node || typeof node !== "object") return node;
@@ -447,7 +676,71 @@ function toDraft2020(node: any): any {
       out.items = false;
     }
   }
+  if (typeof out.$schema === "string") out.$schema = JSON_SCHEMA_DIALECT;
   return out;
+}
+
+/**
+ * Put a schema's cross-field rules — "exactly one of these three" — into the
+ * JSON Schema the model is shown.
+ *
+ * `zod-to-json-schema` drops refinements, so without this pass the rule exists
+ * only on the server and the only way to learn it is to break it. See the
+ * cross-field section of `schemas.ts` for the vocabulary; the shapes injected
+ * are `oneOf` / `anyOf` / `not` over `required`, which is plain composition and
+ * valid in every draft.
+ *
+ * **Nothing is injected silently, and nothing here throws.** The enforcement
+ * point for a rule that cannot be surfaced is `tests/unit/schema-constraints.mjs`,
+ * which fails the build. At runtime this logs and carries on, for the same
+ * reason `isWriteOp()` falls back to `"write"` rather than raising: `tools/list`
+ * is the one call every session begins with, so a throw here would replace one
+ * under-specified tool with *no tools at all*. Fail the build loudly; fail the
+ * session towards the behaviour that shipped before.
+ */
+function withCrossFieldConstraints(zodSchema: unknown, jsonSchema: any, opName: string): any {
+  for (const { path, rule } of schemas.crossFieldRulesIn(zodSchema)) {
+    const where = path.join(".") || "(root)";
+    if (!rule) {
+      logger.warn(
+        `${opName} carries a refinement at ${where} that is not a declared cross-field rule. ` +
+          `It is enforced on every call and absent from the schema the model is shown, so an agent ` +
+          `can only learn it by having a call rejected. Declare it with crossField() in ` +
+          `packages/shared/src/schemas.ts.`
+      );
+      continue;
+    }
+    let node = jsonSchema;
+    for (const step of path) {
+      node = step === schemas.ARRAY_ELEMENT ? node?.items : node?.properties?.[step];
+      if (!node || typeof node !== "object") break;
+    }
+    if (!node || typeof node !== "object") {
+      logger.warn(
+        `${opName}: the cross-field rule at ${where} has no matching node in the emitted JSON ` +
+          `Schema, so it ships enforced but invisible.`
+      );
+      continue;
+    }
+    const fragment = schemas.crossFieldJsonSchema(rule);
+    // Merge only where nothing is being overwritten; anything else goes under
+    // `allOf`, which composes without either rule losing.
+    const collides = Object.keys(fragment).some((k) => k in node);
+    if (collides) (node.allOf ??= []).push(fragment);
+    else Object.assign(node, fragment);
+  }
+  return jsonSchema;
+}
+
+/**
+ * The `inputSchema` one tool ships with. Exported so
+ * `tests/unit/schema-constraints.mjs` validates the exact document the client
+ * receives rather than a reconstruction of it.
+ */
+export function toolInputSchema(opName: string): Record<string, unknown> {
+  const schema = OpSchemas[opName as keyof typeof OpSchemas] as z.ZodTypeAny;
+  const jsonSchema = zodToJsonSchema(schema, { target: "jsonSchema7", $refStrategy: "none" });
+  return withCrossFieldConstraints(schema, toDraft2020(jsonSchema), opName);
 }
 
 function isAsyncEnvelope(v: unknown): boolean {

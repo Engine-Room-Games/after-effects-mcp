@@ -222,13 +222,13 @@ If you forget the second step, nothing breaks silently: the next thing you ask f
 ---
 
 <details>
-<summary><b>🧰 All 70 tools</b></summary>
+<summary><b>🧰 All 74 tools</b></summary>
 
 <br>
 
 | Group | Tools |
 |---|---|
-| Comps (7) | `list_comps`, `get_comp`, `get_comp_tree`, `create_comp`, `set_comp`, `delete_comp`, `set_active_comp` |
+| Comps (10) | `list_comps`, `get_comp`, `get_comp_tree`, `create_comp`, `set_comp`, `delete_comp`, `set_active_comp`, `duplicate_comp`, `snapshot_comp`, `diff_comp` |
 | Layers (15) | `list_layers`, `get_layer_full`, `create_{text,shape,solid,null,adjustment,precomp,camera,light}_layer`, `duplicate_layer`, `delete_layer`, `set_layer`, `parent_layer`, `reorder_layer` |
 | Transforms (1) | `set_transform` — position, scale, rotation, anchor, opacity; 2D and 3D; optionally keyframed |
 | Keyframes (6) | `add_keyframe`, `remove_keyframe`, `get_keyframes`, `set_interpolation`, `set_temporal_ease`, `set_spatial_tangents` |
@@ -241,6 +241,7 @@ If you forget the second step, nothing breaks silently: the next thing you ask f
 | Vision (2) | `screenshot_frame`, `screenshot_layer` |
 | Batch (1) | `run_batch` |
 | Footage (2) | `import_footage`, `create_footage_layer` |
+| Audio (1) | `place_audio_cues` — a whole cue list placed as one undo step |
 | Motion Graphics (1) | `export_mogrt` — export a comp as a `.mogrt` template for Premiere |
 | Explore (2) | `get_project_summary`, `find_layers` |
 | Raw (1) | `run_jsx` |
@@ -253,11 +254,12 @@ If you forget the second step, nothing breaks silently: the next thing you ask f
 A few behave differently from the rest:
 
 - **`get_layer_full`** returns a layer's transforms with their keyframes and expressions, every effect with every parameter, masks, markers and visible bounds — in one call.
-- **`run_batch`** runs many operations in a single pass and counts as one undo step. Long batches stream progress.
-- **`screenshot_frame`** and **`screenshot_layer`** are for occasional checks, not for reviewing motion frame by frame. On large comps, `downsample: 2` renders at half resolution.
+- **`run_batch`** runs many operations in a single pass. Up to 500 of them that is one undo step; past that it runs in the background, streams progress, and lands as one undo step per chunk — After Effects will not keep a single undo group across a long job, so the result tells the assistant exactly how many steps the work took. Ask for a single undo step at any size with `singleUndo`, at the cost of freezing After Effects until it finishes.
+- **`screenshot_frame`** and **`screenshot_layer`** are for occasional checks, not for reviewing motion frame by frame. To judge movement, `screenshot_frame` takes several times at once and returns them as one labelled contact sheet — one image instead of several. On large comps it renders at reduced resolution unless you ask otherwise.
 - **`import_footage`** checks what After Effects actually produced. An SVG whose `viewBox` asks for one shape and imports at another is a known After Effects bug that renders as nothing at all, with no error — so the import is refused and explained rather than left to fail silently later.
 - **`export_mogrt`** writes a Motion Graphics template for Premiere. It suppresses the modal dialogs that would otherwise sit there waiting for a click, and can set the thumbnail from any frame you choose, rather than the first one — which is usually black if the comp fades up.
-- **`run_jsx`** runs arbitrary ExtendScript for anything the other tools don't cover.
+- **`snapshot_comp`** and **`diff_comp`** answer "what did that change actually do" without reading the whole comp back — the assistant fingerprints it before the change and asks afterwards what moved.
+- **`run_jsx`** runs arbitrary ExtendScript for anything the other tools don't cover. Long scripts can be run from a file so they never fill up the conversation.
 - **`ae_guide`** is how the assistant reads its own working guidance — the same text this server publishes as MCP resources and ships to Claude Code as skills.
 
 </details>

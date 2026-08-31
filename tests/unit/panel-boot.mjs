@@ -48,7 +48,7 @@ function installLayout() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ae-panel-boot-"));
   fs.mkdirSync(path.join(dir, "client"), { recursive: true });
   fs.mkdirSync(path.join(dir, "jsx"), { recursive: true });
-  for (const f of ["main.js", "csinterface.js", "pngcodec.js", "framecache.js", "mogrt.js", "index.html"]) {
+  for (const f of ["main.js", "csinterface.js", "pngcodec.js", "framecache.js", "mogrt.js", "contactsheet.js", "framereader.js", "index.html"]) {
     fs.copyFileSync(path.join(panelSrc, "client", f), path.join(dir, "client", f));
   }
   fs.copyFileSync(path.join(panelSrc, "jsx", "bundle.jsx"), path.join(dir, "jsx", "bundle.jsx"));

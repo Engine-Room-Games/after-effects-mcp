@@ -42,7 +42,13 @@ jobs:
       - name: Generated guides and prompts are in sync
         run: node scripts/build-guides.mjs --check
 
-      - name: Server starts and lists its tools
+      # A floor alone cannot catch the realistic regression, which is one tool
+      # silently dropped: at >=70 with 74 defined, four could vanish and this
+      # stayed green. So the count is checked against OpSchemas — the registry
+      # tools/list is built from — which catches a schema that never reaches the
+      # wire, and the floor is raised to the real number, which catches a tool
+      # deleted from OpSchemas itself. Raise the floor when tools are added.
+      - name: Server starts and lists every tool it defines
         shell: bash
         run: |
           node -e '
@@ -53,22 +59,38 @@ jobs:
               if(!l.trim())continue;try{const m=JSON.parse(l);if(m.id&&pend.has(m.id)){pend.get(m.id)(m);pend.delete(m.id);}}catch{}}});
             const send=(m,p)=>new Promise(r=>{const my=++id;pend.set(my,r);c.stdin.write(JSON.stringify({jsonrpc:"2.0",id:my,method:m,params:p})+"\n");});
             (async()=>{
+              const {OpSchemas}=await import("./packages/shared/dist/schemas.js");
+              const defined=Object.keys(OpSchemas).length;
               await send("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"ci",version:"1"}});
               c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
               const t=await send("tools/list",{});
               const n=t.result.tools.length;
-              if(n<70){console.error(`expected >=70 tools, got ${n}`);process.exit(1);}
+              const served=new Set(t.result.tools.map(x=>x.name));
+              const missing=Object.keys(OpSchemas).filter(op=>!served.has(op));
+              if(missing.length){console.error(`defined in OpSchemas but not served: ${missing.join(", ")}`);process.exit(1);}
+              if(n!==defined){console.error(`tools/list served ${n} but OpSchemas defines ${defined}`);process.exit(1);}
+              if(n<74){console.error(`expected >=74 tools, got ${n} — a tool was removed from OpSchemas`);process.exit(1);}
               console.log(`${n} tools on ${process.platform}`);
               c.kill();process.exit(0);
             })();'
 
       # The carriers that reach non-Claude clients: without these, everyone
       # outside Claude Code gets the tools and none of the guidance.
+      #
+      # The prompt and resource counts are checked against the markdown that
+      # generates them rather than against a number written here. A literal
+      # went stale the moment 0.4.0 added two guides — it asserted >=3 while
+      # five were served, so two could have been dropped unnoticed — and a
+      # literal also has to be edited by whoever adds the next guide.
       - name: Instructions, prompts and resources are served
         shell: bash
         run: |
           node -e '
             const {spawn}=require("child_process");
+            const fs=require("fs");
+            const count=d=>fs.readdirSync(d).filter(f=>f.endsWith(".md")).length;
+            const guideSources=count("packages/mcp-server/src/guides");
+            const promptSources=count("packages/mcp-server/src/prompts");
             const c=spawn(process.execPath,["packages/mcp-server/dist/index.js"],{stdio:["pipe","pipe","inherit"]});
             let buf="",id=0;const pend=new Map();
             c.stdout.on("data",d=>{buf+=d;let i;while((i=buf.indexOf("\n"))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);
@@ -78,15 +100,16 @@ jobs:
             (async()=>{
               const init=await send("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"ci",version:"1"}});
               c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
-              if(!init.result.instructions?.includes("get_house_style")) fail("initialize did not carry instructions");
+              if(!init.result.instructions?.includes("ae_guide")) fail("initialize did not carry instructions");
+              if(init.result.instructions.length>1500) fail(`instructions is ${init.result.instructions.length} chars and resident in every session — put the detail in a guide`);
               for(const k of ["prompts","resources"]) if(!init.result.capabilities[k]) fail(`capability ${k} missing`);
               const prompts=(await send("prompts/list",{})).result.prompts;
-              if(prompts.length<3) fail(`expected 3 prompts, got ${prompts.length}`);
+              if(prompts.length!==promptSources) fail(`${promptSources} files in src/prompts but ${prompts.length} prompts served`);
               const got=await send("prompts/get",{name:"report-ae-issue",arguments:{arguments:"xyzzy"}});
               const text=got.result.messages[0].content.text;
               if(text.includes("$ARGUMENTS")||!text.includes("xyzzy")) fail("prompt arguments were not substituted");
               const res=(await send("resources/list",{})).result.resources;
-              if(res.length<3) fail(`expected 3 resources, got ${res.length}`);
+              if(res.length!==guideSources) fail(`${guideSources} files in src/guides but ${res.length} resources served`);
               const read=await send("resources/read",{uri:"ae://guide/after-effects"});
               if(!read.result.contents[0].text.startsWith("# Driving After Effects")) fail("resource body wrong");
               const guide=await send("tools/call",{name:"ae_guide",arguments:{topic:"style-guide"}});
@@ -112,6 +135,12 @@ jobs:
       - name: Panel boots from the layout setup_panel installs
         run: node tests/unit/panel-boot.mjs
 
+      # Installing while AE holds the client files open updates the bundle and
+      # fails on the rest, and a check that hashed only the bundle went green on
+      # a mix of two versions. This is the per-file diff that outranks it.
+      - name: A half-written panel install is detected
+        run: node tests/unit/panel-install.mjs
+
       # A busy AE and a dead bridge are the same event at the socket layer, and
       # the only difference the user sees is which remedy we prescribe.
       - name: Bridge timeouts are diagnosed apart from disconnections
@@ -127,6 +156,31 @@ jobs:
       # alarm on every screenshot of a title card.
       - name: Panel tells a stale render from a repeated request
         run: node tests/unit/frame-cache.mjs
+
+      # saveFrameToPng returns before the bytes are on disk, and the panel used
+      # to call a frame finished once its size stopped changing for 30ms. On a
+      # heavy comp that is a pause, not an ending, so half-written PNGs went out
+      # as successful screenshots (#45). Completion is structural now, and this
+      # runs the real poll loop over files the test grows by hand.
+      - name: A half-written frame is never delivered
+        run: node tests/unit/frame-integrity.mjs
+
+      # Every requested time keeps its cell even when its render failed, and the
+      # time is burned into the picture rather than only reported beside it.
+      - name: Contact sheets tile and label what was asked for
+        run: node tests/unit/contact-sheet.mjs
+
+      # The wiring neither of those two can see: a failed read must never be
+      # delivered and never cached, while a genuinely re-served buffer must still
+      # be caught. Boots the real client/main.js against a stub CEP host.
+      - name: The screenshot pipeline holds end to end
+        run: node tests/unit/screenshot-pipeline.mjs
+
+      # Rendering smaller is how downsampling works at all on Windows, and the
+      # factor is derived when the caller omits one. A default of 1 in the zod
+      # schema would reach the panel as an explicit 1 and silently disable it.
+      - name: Screenshot downsampling derives and restores the comp resolution
+        run: node tests/unit/screenshot-resolution.mjs
 
       # Archive surgery on a file the user is about to hand to an editor: a
       # thumbnail worth looking at is not worth a corrupt .mogrt, so every
@@ -154,6 +208,69 @@ jobs:
           node tests/unit/parent-transform.mjs
           node tests/unit/svg-import.mjs
           node tests/unit/bundle-determinism.mjs
+
+      # run_jsx is the tool an agent reaches for when nothing else fits, so the
+      # thing that matters most is that a failure reads as a failure: the line
+      # number points at the line the reader has to open, a library's error
+      # names the library, and arguments and helpers land in the script's scope.
+      - name: run_jsx reports where a script actually broke
+        run: |
+          node tests/unit/run-jsx-lines.mjs
+          node tests/unit/run-jsx-source.mjs
+          node tests/unit/run-jsx-args.mjs
+          node tests/unit/run-jsx-helpers.mjs
+
+      # The 0.4.0 ops, none of which any gate ran before this: the comp
+      # snapshot/diff pair, duplicate_comp, audio cue placement, the shape spawn
+      # point, reorder_layer's move methods, the ease array arity that decides
+      # spatial from non-spatial, the batch undo guarantee, and the mogrt
+      # preconditions that refuse an export rather than blaming a dialog.
+      - name: The ops added in 0.4.0 behave
+        run: |
+          node tests/unit/comp-snapshot.mjs
+          node tests/unit/duplicate-comp.mjs
+          node tests/unit/audio-cues.mjs
+          node tests/unit/shape-spawn.mjs
+          node tests/unit/reorder-layer.mjs
+          node tests/unit/ease-arity.mjs
+          node tests/unit/batch-undo.mjs
+          node tests/unit/mogrt-preconditions.mjs
+
+      # The guidance carriers, from the other side: that the guide sources
+      # cross-reference files that exist, and that a house style is digested to
+      # something small enough to be worth returning by default.
+      - name: Guidance is internally consistent
+        run: |
+          node tests/unit/guide-references.mjs
+          node tests/unit/house-style-summary.mjs
+
+      # Three distributions carry the panel and none of them is built on a pull
+      # request, so what ships is asserted from the source tree and the build
+      # scripts instead. This also holds ci.yml's own test list against the one
+      # in package.json — before it, 16 of the 36 suites ran nowhere.
+      - name: What ships is complete
+        run: node tests/unit/package-layout.mjs
+
+      # Concurrency is invisible when it breaks: a queue that lets two writes
+      # overlap looks identical to one that does not until an undo group is
+      # corrupted in someone's real project. The second file drives the real
+      # server over an in-memory transport against a stub bridge on an
+      # ephemeral port, and also fails the build when an op in OpSchemas has
+      # not been classified in OpMutation.
+      - name: Writes are serialized and every op is classified
+        run: |
+          node tests/unit/write-queue.mjs
+          node tests/unit/write-queue-server.mjs
+
+      # Two failures at once, and the first one takes the whole server down with
+      # it: the Anthropic API rejects a tool schema that is not valid draft
+      # 2020-12, and a rejected schema breaks every tool in the session rather
+      # than the one it belongs to. So all 74 are validated against the real
+      # metaschema here. The second is quieter and was the reason for the
+      # change: zod-to-json-schema drops refinements, so a "pass exactly one of
+      # these" rule can be enforced by the server and invisible to the model.
+      - name: Tool schemas are valid 2020-12 and hide no constraints
+        run: node tests/unit/schema-constraints.mjs
 
       - name: check_setup resolves platform paths without throwing
         shell: bash

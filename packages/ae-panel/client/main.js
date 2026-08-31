@@ -100,13 +100,15 @@
     }
     throw new Error("could not load " + name + " from any of: " + failures.join("; "));
   }
-  var pngCodec, frameCacheModule, mogrtModule;
+  var pngCodec, frameCacheModule, mogrtModule, contactSheetModule, frameReaderModule;
   try {
     pngCodec = requireSibling("pngcodec.js");
     frameCacheModule = requireSibling("framecache.js");
     mogrtModule = requireSibling("mogrt.js");
+    contactSheetModule = requireSibling("contactsheet.js");
+    frameReaderModule = requireSibling("framereader.js");
   } catch (e) {
-    setStatus("cannot start — pngcodec.js, framecache.js or mogrt.js is missing", "err");
+    setStatus("cannot start — one of the panel's file-processing modules is missing", "err");
     log("error", "loading the panel's file-processing modules from " + __dirname + " failed: " + e.message);
     log("error", "Quit After Effects, run the setup_panel tool, then reopen it.");
     return;
@@ -148,6 +150,20 @@
         var err = new Error(msg);
         err.aeStack = parsed.stack;
         err.aeLine = parsed.line;
+        // Where the failure sits in the caller's *own* source, when the handler
+        // could work it out — run_jsx maps AE's line number back onto the
+        // script that was submitted (issue #46). Forwarded field by field on
+        // purpose: the server prints these, and relaying a free-form bag would
+        // let the two drift apart with nothing to notice.
+        if (parsed.sourceLine !== undefined || parsed.rawLine !== undefined) {
+          err.aeSource = {
+            sourceLine: parsed.sourceLine,
+            sourceText: parsed.sourceText,
+            sourceName: parsed.sourceName,
+            rawLine: parsed.rawLine,
+            lineCount: parsed.lineCount
+          };
+        }
         throw err;
       }
       return parsed.result;
@@ -212,39 +228,16 @@
   }
 
   // ---------- Vision: read PNG and base64-encode (for screenshot_* ops) ----------
-  function waitForPngFile(file, maxMs) {
-    var deadline = Date.now() + (maxMs || 3000);
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        try {
-          if (fs.existsSync(file)) {
-            var stat = fs.statSync(file);
-            // Reasonable size + ensure not currently being written (re-check)
-            if (stat.size > 64) {
-              setTimeout(function () {
-                try {
-                  var stat2 = fs.statSync(file);
-                  if (stat2.size === stat.size) return resolve(stat2.size);
-                } catch (e) {}
-                if (Date.now() > deadline) return reject(new Error("PNG file write timed out"));
-                poll();
-              }, 30);
-              return;
-            }
-          }
-        } catch (e) {}
-        if (Date.now() > deadline) return reject(new Error("PNG file did not appear: " + file));
-        setTimeout(poll, 40);
-      })();
-    });
-  }
-  // Read the true pixel dimensions out of the PNG's IHDR chunk rather than
-  // computing them, so what we report is always what the client received.
-  function pngDimensions(buf) {
-    if (buf.length < 24) return null;
-    if (buf.readUInt32BE(12) !== 0x49484452) return null; // "IHDR"
-    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
-  }
+  // Deciding when After Effects has finished writing a frame is issue #45, and
+  // it lives in framereader.js so a unit test can drive it with a file it grows
+  // by hand. What matters here: `waitForCompletePng` resolves only with bytes
+  // that parse end-to-end as a PNG, deletes the temp file on every path, and
+  // rejects with FRAME_INCOMPLETE or RENDER_TIMEOUT — never with one message
+  // covering both.
+  var waitForCompletePng = frameReaderModule.waitForCompletePng;
+  var dressFrameError = frameReaderModule.dressFrameError;
+  var frameError = frameReaderModule.frameError;
+  var unlinkQuietly = frameReaderModule.unlinkQuietly;
 
   function sha256(bytes) {
     return crypto.createHash("sha256").update(bytes).digest("hex");
@@ -259,19 +252,25 @@
   // and hands back the decoded samples so a frame can be recognised if After
   // Effects serves the same buffer again for a different request.
   function readPngFrame(file) {
-    // A cold render of a heavy 4K comp can take well over 15s — measured on a
-    // real project. Five seconds silently failed screenshots that were simply
-    // still rendering.
-    return waitForPngFile(file, 120000).then(function () {
-      var buf = fs.readFileSync(file);
-      try { fs.unlinkSync(file); } catch (e) {}
+    // waitForCompletePng owns the temp file and removes it on every path,
+    // success or failure. A file left behind is one a later read could find,
+    // which is how a corrupt frame would start coming back for free.
+    return waitForCompletePng(file).then(function (buf) {
       var norm;
       try {
         norm = pngCodec.normalizePng(buf);
       } catch (e) {
-        // A PNG this parser cannot read is still a PNG the client might. Ship
-        // it unchanged rather than throwing away a render that did happen — but
-        // say so, and fall back to hashing the file so the stale check survives.
+        // The completeness gate above guarantees this file ends in a well-formed
+        // IEND, so a truncation error here would mean the gate is broken. Refuse
+        // rather than ship: "never report success for work that didn't happen"
+        // outranks the fallback below.
+        if (/truncated PNG/.test(e.message)) {
+          throw frameError("FRAME_INCOMPLETE", "the file passed the completeness check and then failed to parse (" + e.message + ")");
+        }
+        // A complete PNG this parser cannot read is still a PNG the client
+        // might. Ship it unchanged rather than throwing away a render that did
+        // happen — but say so, and fall back to hashing the file so the stale
+        // check survives.
         log("warn", "could not normalise the frame (" + e.message + "); sending it unconverted");
         var dims = pngDimensions(buf);
         return {
@@ -299,6 +298,11 @@
         empty: false,
         converted: norm.converted,
         sourceBitDepth: norm.bitDepth,
+        // Decoded samples, kept only so the contact sheet can composite them
+        // without decoding the same PNG a second time. Null on the passthrough
+        // path, where the pixels were never interpreted.
+        pixels: norm.decoded ? norm.hashInput : null,
+        channels: norm.channels,
         hash: sha256(norm.hashInput),
         // The pixels could not be read, so "empty" was never evaluated and the
         // hash is of the compressed stream. Both are still better than nothing;
@@ -308,6 +312,55 @@
             "), so it was sent exactly as After Effects wrote it."
           : undefined,
       };
+    });
+  }
+
+  // Read the true pixel dimensions out of the PNG's IHDR chunk rather than
+  // computing them, so what we report is always what the client received.
+  function pngDimensions(buf) {
+    if (buf.length < 24) return null;
+    if (buf.readUInt32BE(12) !== 0x49484452) return null; // "IHDR"
+    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+  }
+
+  // ---------- Rendering one frame, with one bounded retry ----------
+  function renderFrameOnce(op, args) {
+    return runOp(op, args).then(function (info) {
+      return readPngFrame(info.path).then(function (img) {
+        return { info: info, img: img };
+      });
+    });
+  }
+
+  /**
+   * Render a frame, and re-render exactly once if what came back was corrupt.
+   *
+   * Safe to repeat, which is the only reason this is here. Both screenshot ops
+   * are read-only: `screenshot_frame` renders to a temp file, `screenshot_layer`
+   * additionally solos a layer and restores every solo state in a `finally`.
+   * Neither leaves anything in the project, so a second run is
+   * indistinguishable from one run — this is not `run_jsx`, where re-running a
+   * script that already had its side effects duplicates them (issue #43).
+   *
+   * Only on FRAME_INCOMPLETE, never on RENDER_TIMEOUT. A timeout has already
+   * spent the 120s budget; a second one would take the op past the server's
+   * 300s ceiling and turn a precise "the render did not finish" into a bridge
+   * timeout, whose remedy ("do not restart anything, wait") is a different
+   * remedy for a different problem. A corrupt read, by contrast, fails within
+   * FRAME_STALL_MS, and the evidence in #45 is that a retry sometimes succeeds
+   * — a light comp returned one truncated frame and then rendered.
+   *
+   * The temp file of a failed attempt is deleted before the retry (in
+   * `waitForCompletePng`), and ExtendScript names a fresh one per call, so a
+   * retry can never be handed the previous attempt's bytes.
+   */
+  function renderFrameWithRetry(op, args) {
+    return renderFrameOnce(op, args).catch(function (first) {
+      if (first.code !== "FRAME_INCOMPLETE") throw dressFrameError(first, 1);
+      log("warn", op + ": " + first.detail + " — re-rendering once");
+      return renderFrameOnce(op, args).catch(function (second) {
+        throw dressFrameError(second, 2);
+      });
     });
   }
 
@@ -350,10 +403,17 @@
   }
 
   // ---------- Long job continuation loop ----------
-  function driveJob(jobId, progressToken) {
+  // Each turn of this loop is one evalScript, and each one now opens and closes
+  // its own undo group inside itself — a group cannot span two calls, because
+  // After Effects discards one that does (issue #69). So the chunk size is not
+  // only a pacing knob any more: it decides how many undo steps a long batch
+  // costs the user. It comes off the job envelope so the JSX side owns the
+  // number and the two cannot drift.
+  function driveJob(jobId, progressToken, chunkSize) {
     var totalGuess = null;
+    var size = chunkSize || 25;
     function step() {
-      return runOp("_continue_job", { jobId: jobId, chunkSize: 25 }).then(function (res) {
+      return runOp("_continue_job", { jobId: jobId, chunkSize: size }).then(function (res) {
         if (res.total) totalGuess = res.total;
         if (!res.done) {
           broadcast({ type: "progress", jobId: jobId, progress: res.progress, total: res.total, message: "running" });
@@ -361,11 +421,37 @@
           return new Promise(function (r) { setTimeout(r, 0); }).then(step);
         }
         if (res.failed) {
-          broadcast({ type: "error", jobId: jobId, error: res.error || "batch failed" });
-          return { done: true, failed: true, jobId: jobId, error: res.error, results: res.results, errors: res.errors, atIndex: res.atIndex };
+          // A failed job reaches the server as an error string and nothing else,
+          // so what the batch cost has to travel inside it or it is lost: the
+          // ops before the failure are applied and stay applied.
+          var failedMsg = (res.error || "batch failed") + (res.note ? " || " + res.note : "");
+          broadcast({ type: "error", jobId: jobId, error: failedMsg });
+          return { done: true, failed: true, jobId: jobId, error: res.error, results: res.results, errors: res.errors, atIndex: res.atIndex, undoSteps: res.undoSteps, note: res.note };
         }
-        broadcast({ type: "complete", jobId: jobId, result: { results: res.results, errors: res.errors, total: res.total || totalGuess, cancelled: !!res.cancelled } });
-        return { done: true, jobId: jobId, results: res.results, errors: res.errors, total: res.total || totalGuess, cancelled: !!res.cancelled };
+        // `undoSteps` is the measured number of undo groups the batch opened,
+        // and `diff` is the batch's own before/after — both are only ever seen
+        // by the agent if they are carried on this event.
+        broadcast({
+          type: "complete",
+          jobId: jobId,
+          result: {
+            results: res.results,
+            errors: res.errors,
+            total: res.total || totalGuess,
+            cancelled: !!res.cancelled,
+            undoSteps: res.undoSteps,
+            undoGroupName: res.undoGroupName,
+            note: res.note,
+            diff: res.diff,
+          },
+        });
+        return {
+          done: true, jobId: jobId,
+          results: res.results, errors: res.errors,
+          total: res.total || totalGuess, cancelled: !!res.cancelled,
+          undoSteps: res.undoSteps, undoGroupName: res.undoGroupName,
+          note: res.note, diff: res.diff,
+        };
       });
     }
     return step();
@@ -380,9 +466,12 @@
   // successful export because its thumbnail could not be improved would be the
   // worse trade. The result says plainly that the thumbnail is still AE's.
   function patchMogrtThumbnail(info) {
-    return waitForPngFile(info.posterPngPath, 120000).then(function () {
-      var poster = fs.readFileSync(info.posterPngPath);
-      try { fs.unlinkSync(info.posterPngPath); } catch (e) {}
+    // The same completeness gate the screenshot path uses. The poster frame is
+    // written by the same asynchronous `saveFrameToPng`, so a half-written one
+    // is just as possible here — and it would be resampled into the template's
+    // thumbnail rather than merely displayed.
+    // It takes the poster file with it, on success and on failure alike.
+    return waitForCompletePng(info.posterPngPath).then(function (poster) {
       var patched = mogrtModule.patchThumbnail(fs.readFileSync(info.path), poster);
       // Write via a sibling temp file and rename, so an interrupted write
       // cannot leave a half-rewritten template where a valid one used to be.
@@ -399,7 +488,7 @@
         letterboxed: patched.letterboxed || undefined,
       };
     }).catch(function (e) {
-      try { fs.unlinkSync(info.posterPngPath); } catch (e2) {}
+      unlinkQuietly(info.posterPngPath);
       log("warn", "could not patch the .mogrt thumbnail: " + e.message);
       return {
         patched: false,
@@ -407,6 +496,203 @@
         reason: "The template exported correctly, but its thumbnail could not be replaced (" +
           e.message + "). It still shows the one After Effects wrote.",
       };
+    });
+  }
+
+  // ---------- Contact sheet ----------
+  //
+  // ExtendScript renders every requested time and hands back one temp path per
+  // tile; everything from here on is pixels, which `packages/jsx` has no way to
+  // touch. One tile that fails is drawn as a marked block rather than dropped —
+  // the sheet has to keep mapping onto the times that were asked for, or an
+  // agent counting frames left to right reads the wrong one as the right one.
+
+  /** One line, for a note inside a tile rather than a whole error message. */
+  function shortReason(err) {
+    var s = err && err.detail ? err.detail : (err && err.message ? err.message : String(err));
+    return String(s).split("\n")[0];
+  }
+
+  function readSheetTile(info, tile) {
+    if (tile.error) {
+      return Promise.resolve({ time: tile.time, status: "failed", note: tile.error });
+    }
+    return readPngFrame(tile.path).then(function (img) {
+      return { time: tile.time, status: "ok", img: img };
+    }, function (err) {
+      if (err.code !== "FRAME_INCOMPLETE") {
+        return { time: tile.time, status: "failed", note: shortReason(err) };
+      }
+      // The same bounded retry the single-frame path gets, and safe for the same
+      // reason — but re-rendering only this one time. The already-derived
+      // downsample is passed explicitly so the per-tile factor cannot drift from
+      // the rest of the sheet.
+      log("warn", "contact sheet tile at " + tile.time + "s: " + shortReason(err) + " — re-rendering once");
+      return runOp("screenshot_frame", {
+        compId: info.compId,
+        time: tile.time,
+        downsample: info.downsample,
+      }).then(function (retry) {
+        return readPngFrame(retry.path).then(function (img) {
+          return { time: tile.time, status: "ok", img: img };
+        });
+      }).catch(function (again) {
+        return { time: tile.time, status: "failed", note: shortReason(again) };
+      });
+    });
+  }
+
+  function finishContactSheet(info, read) {
+    var i;
+    var ds = info.downsample;
+    // Pass one: classify. Every `match` is computed before any `remember`, so a
+    // sheet's own tiles cannot collide with each other through the cache.
+    var seen = {};
+    for (i = 0; i < read.length; i++) {
+      var t = read[i];
+      if (t.status !== "ok") continue;
+      if (t.img.empty) { t.status = "empty"; t.img = null; continue; }
+      var ident = { compId: info.compId, layerId: null, time: t.time, downsample: ds };
+      t.key = frameKey("screenshot_frame", ident);
+      var match = frameCache.match(t.key, t.img.hash);
+      if (match) {
+        // Pixels identical to an *earlier, different* request are the #29 stale
+        // buffer, and a tile of them is not a picture of this time. Mark the
+        // block rather than showing it: an agent that can see a frame believes
+        // the frame.
+        t.status = "stale";
+        t.note = "identical to " + match.label + ", rendered " +
+          Math.max(1, Math.round(match.ageMs / 1000)) + "s earlier";
+        t.img = null;
+        continue;
+      }
+      // Two tiles of one sheet matching each other is what a static comp looks
+      // like — the caller asked for several times on purpose, and refusing the
+      // second would be a false alarm on a correct answer. Flagged, not refused.
+      if (seen[t.img.hash] !== undefined) {
+        t.note = "pixel-identical to the " + contactSheetModule.formatTime(seen[t.img.hash]) +
+          " tile — nothing changed between them";
+      } else {
+        seen[t.img.hash] = t.time;
+      }
+    }
+
+    var specs = [];
+    var ok = 0;
+    for (i = 0; i < read.length; i++) {
+      var r = read[i];
+      var spec = { time: r.time, status: r.status, note: r.note };
+      if (r.status === "ok") {
+        var px = r.img.pixels;
+        var channels = r.img.channels;
+        if (!px) {
+          // The passthrough path never interpreted the pixels. A sheet needs
+          // them, so decode strictly here; a frame that cannot be decoded
+          // becomes a marked block rather than a wrong one.
+          try {
+            var dec = pngCodec.decodePng8(r.img.buffer);
+            px = dec.pixels;
+            channels = dec.channels;
+          } catch (e) {
+            // Both records move together: `spec` is what gets drawn, `r` is what
+            // the cache loop below reads, and a frame that is not delivered must
+            // not be remembered as if it were.
+            spec.status = "failed";
+            r.status = "failed";
+            spec.note = "the frame could not be decoded for tiling (" + e.message + ")";
+          }
+        }
+        if (spec.status === "ok") {
+          spec.pixels = px;
+          spec.channels = channels;
+          spec.width = r.img.width;
+          spec.height = r.img.height;
+          ok++;
+        }
+      }
+      specs.push(spec);
+    }
+
+    if (!ok) {
+      var why = [];
+      for (i = 0; i < specs.length; i++) {
+        why.push(contactSheetModule.formatTime(specs[i].time) + ": " + specs[i].status +
+          (specs[i].note ? " (" + specs[i].note + ")" : ""));
+      }
+      var dead = new Error(
+        "No tile of the contact sheet rendered, so there is no sheet to send. Per time:\n" +
+        why.join("\n") + "\n\n" +
+        "A sheet of coloured blocks is not a screenshot. Retry at a higher `downsample`, " +
+        "or screenshot the shot precomps one at a time; if it repeats, read keyframes " +
+        "(get_keyframes / get_layer_full) instead."
+      );
+      dead.code = "CONTACT_SHEET_FAILED";
+      throw dead;
+    }
+
+    // The expected cell size, used only for the cells with no picture. A tile
+    // that rendered is the authority on its own dimensions.
+    var sheet = contactSheetModule.composeContactSheet(specs, {
+      cellWidth: Math.round(info.width / ds),
+      cellHeight: Math.round(info.height / ds),
+    });
+
+    // Only what is actually being delivered goes into the cache.
+    for (i = 0; i < read.length; i++) {
+      if (read[i].status === "ok" && read[i].key) {
+        frameCache.remember(read[i].key, read[i].img.hash, {
+          label: frameLabel("screenshot_frame", { compId: info.compId, time: read[i].time, downsample: ds }),
+          bytes: read[i].img.buffer.length,
+        });
+      }
+    }
+
+    var bad = [];
+    for (i = 0; i < sheet.tiles.length; i++) {
+      if (sheet.tiles[i].status !== "ok") {
+        bad.push(sheet.tiles[i].label + (sheet.tiles[i].note ? " — " + sheet.tiles[i].note : ""));
+      }
+    }
+
+    return {
+      contactSheet: true,
+      width: sheet.width,
+      height: sheet.height,
+      cols: sheet.cols,
+      rows: sheet.rows,
+      cellWidth: sheet.cellWidth,
+      cellHeight: sheet.cellHeight,
+      fullWidth: info.width,
+      fullHeight: info.height,
+      downsample: ds,
+      compId: info.compId,
+      tiles: sheet.tiles,
+      mimeType: "image/png",
+      base64: sheet.buffer.toString("base64"),
+      bytes: sheet.buffer.length,
+      // Named and counted, because a sheet that looks complete and is not is the
+      // same class of lie as a swallowed error.
+      warning: bad.length
+        ? bad.length + " of " + sheet.tiles.length + " tiles are marked blocks, not frames: " + bad.join("; ")
+        : undefined,
+    };
+  }
+
+  function renderContactSheet(args) {
+    return runOp("screenshot_frame", args).then(function (info) {
+      var jsxTiles = info.tiles || [];
+      // Sequentially: `evalScript` is a mutex anyway, a per-tile retry re-enters
+      // ExtendScript, and reading them in order keeps the panel log legible.
+      var read = [];
+      var chain = Promise.resolve();
+      for (var i = 0; i < jsxTiles.length; i++) {
+        chain = chain.then(function (tile) {
+          return function () {
+            return readSheetTile(info, tile).then(function (res) { read.push(res); });
+          };
+        }(jsxTiles[i]));
+      }
+      return chain.then(function () { return finishContactSheet(info, read); });
     });
   }
 
@@ -430,36 +716,19 @@
     }
     // Vision ops: run JSX, then read PNG and base64-encode on Node side.
     if (op === "screenshot_frame" || op === "screenshot_layer") {
-      return runOp(op, args).then(function (info) {
-        return readPngFrame(info.path).then(function (img) {
-          // A frame with nothing in it is a fact about the composition, not a
-          // failure — and the ~5KB PNG that encodes it is the one decoders
-          // reject. Report it, cheaply, instead of shipping an image nobody can
-          // read and calling that a successful screenshot.
-          if (img.empty) {
-            return {
-              empty: true,
-              width: img.width,
-              height: img.height,
-              fullWidth: info.width,
-              fullHeight: info.height,
-              downsample: info.downsample,
-              time: info.time,
-              compId: info.compId,
-              layerId: info.layerId,
-              reason: "Every pixel of this frame is fully transparent — the frame is empty. " +
-                "No image was sent because there is nothing in it to see. Usually this means " +
-                "the time is outside the layers' in/out points, the layers are disabled or " +
-                "have zero opacity, or the wrong comp was addressed.",
-            };
-          }
-          var key = frameKey(op, info);
-          var match = frameCache.match(key, img.hash);
-          if (match) throw staleFrameError(frameLabel(op, info), match, img.buffer.length);
-          frameCache.remember(key, img.hash, { label: frameLabel(op, info), bytes: img.buffer.length });
+      if (op === "screenshot_frame" && args && args.times && args.times.length) {
+        return renderContactSheet(args);
+      }
+      return renderFrameWithRetry(op, args).then(function (r) {
+        var info = r.info;
+        var img = r.img;
+        // A frame with nothing in it is a fact about the composition, not a
+        // failure — and the ~5KB PNG that encodes it is the one decoders
+        // reject. Report it, cheaply, instead of shipping an image nobody can
+        // read and calling that a successful screenshot.
+        if (img.empty) {
           return {
-            // Dimensions come from the PNG itself, not from arithmetic on the
-            // comp size, so they cannot disagree with the image sent.
+            empty: true,
             width: img.width,
             height: img.height,
             fullWidth: info.width,
@@ -468,16 +737,41 @@
             time: info.time,
             compId: info.compId,
             layerId: info.layerId,
-            mimeType: "image/png",
-            base64: img.buffer.toString("base64"),
-            bytes: img.buffer.length,
-            // Only present when the frame was not 8-bit as rendered, so the
-            // metadata stays quiet on the ordinary path.
-            converted: img.converted ? true : undefined,
-            sourceBitDepth: img.converted ? img.sourceBitDepth : undefined,
-            warning: img.warning,
+            reason: "Every pixel of this frame is fully transparent — the frame is empty. " +
+              "No image was sent because there is nothing in it to see. Usually this means " +
+              "the time is outside the layers' in/out points, the layers are disabled or " +
+              "have zero opacity, or the wrong comp was addressed.",
           };
-        });
+        }
+        // Only a frame that read cleanly ever reaches the cache. A corrupt read
+        // is rejected above and never remembered — before the completeness gate
+        // existed, a truncated file was hashed and recorded here, so the next
+        // truncation at the same byte count was reported as a stale buffer and
+        // the real fault was hidden behind the wrong diagnosis.
+        var key = frameKey(op, info);
+        var match = frameCache.match(key, img.hash);
+        if (match) throw staleFrameError(frameLabel(op, info), match, img.buffer.length);
+        frameCache.remember(key, img.hash, { label: frameLabel(op, info), bytes: img.buffer.length });
+        return {
+          // Dimensions come from the PNG itself, not from arithmetic on the
+          // comp size, so they cannot disagree with the image sent.
+          width: img.width,
+          height: img.height,
+          fullWidth: info.width,
+          fullHeight: info.height,
+          downsample: info.downsample,
+          time: info.time,
+          compId: info.compId,
+          layerId: info.layerId,
+          mimeType: "image/png",
+          base64: img.buffer.toString("base64"),
+          bytes: img.buffer.length,
+          // Only present when the frame was not 8-bit as rendered, so the
+          // metadata stays quiet on the ordinary path.
+          converted: img.converted ? true : undefined,
+          sourceBitDepth: img.converted ? img.sourceBitDepth : undefined,
+          warning: img.warning,
+        };
       });
     }
     // Long batches: returns {jobId, async, total}. We kick off background drive
@@ -485,10 +779,21 @@
     if (op === "run_batch") {
       return runOp(op, args).then(function (res) {
         if (res && res.async && res.jobId) {
-          driveJob(res.jobId, progressToken).catch(function (e) {
+          driveJob(res.jobId, progressToken, res.chunkSize).catch(function (e) {
             broadcast({ type: "error", jobId: res.jobId, error: e.message });
           });
-          return { jobId: res.jobId, async: true, total: res.total };
+          // The undo fields ride out with the envelope so the agent is told the
+          // batch will be several steps *before* it goes and says otherwise —
+          // the final count arrives much later, on the completion event.
+          return {
+            jobId: res.jobId,
+            async: true,
+            total: res.total,
+            chunkSize: res.chunkSize,
+            undoStepsEstimate: res.undoStepsEstimate,
+            undoGroupName: res.undoGroupName,
+            note: res.note,
+          };
         }
         return res; // small batch: inline result already
       });
@@ -547,7 +852,7 @@
                 // `code` marks a failure the panel diagnosed itself rather than
                 // one ExtendScript raised, so the server can present it as what
                 // it is instead of prefixing it as an After Effects error.
-                res.end(JSON.stringify({ ok: false, error: err.message, code: err.code, stack: err.aeStack, line: err.aeLine }));
+                res.end(JSON.stringify({ ok: false, error: err.message, code: err.code, stack: err.aeStack, line: err.aeLine, source: err.aeSource }));
               });
             return;
           }

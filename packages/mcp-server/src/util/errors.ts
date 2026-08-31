@@ -91,6 +91,30 @@ export function isTimeoutError(e: unknown, depth = 0): boolean {
   return cause === e ? false : isTimeoutError(cause, depth + 1);
 }
 
+/**
+ * Where a failure sits in the script the caller actually submitted.
+ *
+ * Only `run_jsx` can produce this, because it is the only op whose input is
+ * source code. `sourceLine` is null whenever the mapping could not be made —
+ * it is never clamped into range, since a confident wrong line number sends the
+ * reader to a statement that did not fail. See issue #46 and `raw.jsx`.
+ */
+export interface AeSourceInfo {
+  /** 1-based line in the caller's own script, or null when it could not be mapped. */
+  sourceLine?: number | null;
+  /** The text of that line, trimmed and clipped. The part that needs no trust in numbering. */
+  sourceText?: string | null;
+  /**
+   * The file the reported line belongs to: the caller's `scriptPath`, or the
+   * library the failure landed in when one was inlined ahead of the script.
+   */
+  sourceName?: string | null;
+  /** What After Effects itself reported, kept because the mapping can fail. */
+  rawLine?: number | null;
+  /** Lines in the submitted script, which is what makes an out-of-range number visible. */
+  lineCount?: number | null;
+}
+
 export class AeError extends Error {
   /**
    * `code` is set only when the panel diagnosed the failure itself rather than
@@ -98,8 +122,177 @@ export class AeError extends Error {
    * already read as complete instructions, so the caller uses this to decide
    * whether an `AE:` prefix would help or just obscure them.
    */
-  constructor(message: string, public stack_?: string, public line?: number, public code?: string) {
+  constructor(
+    message: string,
+    public stack_?: string,
+    public line?: number,
+    public code?: string,
+    public source?: AeSourceInfo
+  ) {
     super(message);
     this.name = "AeError";
   }
+}
+
+/**
+ * The one rendering of an ExtendScript failure into text for the agent.
+ *
+ * A bare line number was actively misleading: it counts from something the
+ * caller cannot see, and there is no rollback, so an agent that mislocates the
+ * throw re-runs a script whose first half already landed (issues #43, #46).
+ * Three things earn their place here — the line's *text*, which needs no trust
+ * in the numbering; an explicit admission when the number could not be mapped;
+ * and the reminder that the work before the failure is still in the project.
+ */
+export function aeErrorText(e: AeError): string {
+  const head = `AE: ${e.message}`;
+  const s = e.source;
+  if (!s) return e.line ? `${head} (line ${e.line})` : head;
+
+  const where = s.sourceName ?? "the script you submitted";
+  const total = s.lineCount ? `, ${s.lineCount} lines` : "";
+  const lines = [head];
+  if (s.sourceLine) {
+    lines.push(`  at line ${s.sourceLine} of ${where}${total}:`);
+    if (s.sourceText) lines.push(`    ${s.sourceText}`);
+    // Only worth saying when the two disagree. Without `libraries` the
+    // wrapper's preamble is zero lines and they do not; with them, the shift is
+    // the library source inlined ahead of the script, and showing both numbers
+    // is what lets a reader see that rather than doubt the mapped one.
+    if (s.rawLine != null && s.rawLine !== s.sourceLine) {
+      lines.push(`  (After Effects reported line ${s.rawLine}.)`);
+    }
+  } else if (s.rawLine != null) {
+    lines.push(
+      `  After Effects reported line ${s.rawLine}, which does not fall inside ${where}${total} — trust the message, not the number.`
+    );
+  }
+  lines.push(
+    "  Everything before the failure already ran and nothing rolls back: read the state back rather than re-running the script."
+  );
+  return lines.join("\n");
+}
+
+/**
+ * The third case, and it must not be read as either of the first two.
+ *
+ * `BridgeUnreachableError` means the panel is not there. `BridgeTimeoutError`
+ * means it is there and busy — and it forbids re-sending, because the call did
+ * reach After Effects and may still be running. This one is the opposite of
+ * both: the call never left the server, nothing was written, and re-sending is
+ * the correct next move once the queue drains. Collapsing it into the timeout
+ * message would tell the reader not to re-send work that never happened, and
+ * collapsing it into the unreachable message would send them off restarting a
+ * bridge that is answering perfectly well.
+ */
+export class WriteQueueWaitError extends Error {
+  constructor(public op: string, public waitedMs: number, public behind: string) {
+    super(WriteQueueWaitError.message(op, waitedMs, behind));
+    this.name = "WriteQueueWaitError";
+  }
+  static message(op: string, waitedMs: number, behind: string): string {
+    const secs = Math.round(waitedMs / 1000);
+    return [
+      `\`${op}\` waited ${secs}s behind \`${behind}\` for the After Effects write queue and was dropped without running.`,
+      "",
+      "This is neither a lost connection nor a busy bridge. The panel is fine and this",
+      "call never reached After Effects, so nothing in the project was changed.",
+      "",
+      "Writes are serialized because After Effects runs one script at a time and applies",
+      "changes in the order it receives them; two in flight block each other and land in",
+      "an order nobody chose. Something in front of this call is taking a very long time",
+      "— most often a long run_batch, occasionally a modal dialog in After Effects",
+      "blocking the script in front.",
+      "",
+      "What to do, in order:",
+      "1. Nothing was written, so re-sending this call is safe — unlike a bridge timeout.",
+      "   Wait for the work in front to finish first, or it will just queue again.",
+      "2. Find out what is in front: get_job or await_job for a batch. Reads are not",
+      "   queued, so list_/get_ calls still work and will tell you the current state.",
+      "3. Ask the user to look at After Effects for a dialog nobody has clicked.",
+      `4. If the work in front is legitimately this long, raise the limit: start the`,
+      "   server with AE_MCP_WRITE_QUEUE_WAIT_MS set to a larger number of milliseconds.",
+    ].join("\n");
+  }
+}
+
+/** Backpressure, so a client that fires writes in a loop cannot grow the queue without bound. */
+export class WriteQueueFullError extends Error {
+  constructor(public op: string, public maxDepth: number, public behind: string) {
+    super(WriteQueueFullError.message(op, maxDepth, behind));
+    this.name = "WriteQueueFullError";
+  }
+  static message(op: string, maxDepth: number, behind: string): string {
+    return [
+      `The After Effects write queue is full — ${maxDepth} calls are already waiting, so \`${op}\` was refused.`,
+      "",
+      `Nothing was written. Writes are serialized so they land in the order you sent them,`,
+      `and \`${behind}\` is holding the queue up.`,
+      "",
+      "Stop issuing writes and let it drain — reads are not queued, so list_/get_ calls",
+      "still work. If you have this much independent work to do, send it as one",
+      "run_batch instead of as many calls: that is one ExtendScript pass and one place in",
+      "the queue, and its result reports how many undo steps it actually made.",
+      "AE_MCP_WRITE_QUEUE_DEPTH raises the limit if you really need it raised.",
+    ].join("\n");
+  }
+}
+
+/**
+ * The request was cancelled while its write was still queued.
+ *
+ * Reported rather than swallowed: the client has usually stopped listening by
+ * now, but if it has not, "this never ran" is the one thing it needs to know.
+ */
+export class WriteQueueCancelledError extends Error {
+  constructor(public op: string) {
+    super(`\`${op}\` was cancelled while waiting for the After Effects write queue. It never ran, and nothing was changed.`);
+    this.name = "WriteQueueCancelledError";
+  }
+}
+
+/**
+ * A rejected tool call, said in sentences.
+ *
+ * `ZodError.message` is `JSON.stringify(issues, null, 2)` — an array of objects
+ * with `code`, `expected`, `received` and a `path` array, wrapped around the one
+ * sentence worth reading. Every carefully written cross-field message in
+ * `schemas.ts` arrived buried in that, and the machine-readable parts say
+ * nothing an agent can act on that the prose does not.
+ *
+ * Same rule the rest of this file follows for After Effects' own errors: an
+ * agent can only correct a failure it is told about, so the message names the
+ * field and says what to pass. Anything that is not a `ZodError` passes through
+ * untouched — this must never swallow an error whose shape it does not know.
+ */
+export function invalidArgsText(op: string, e: unknown): string {
+  const issues = (e as { issues?: unknown } | null | undefined)?.issues;
+  if (!Array.isArray(issues) || issues.length === 0) {
+    return `Invalid arguments for ${op}: ${(e as Error).message}`;
+  }
+  const lines = issues.map((raw) => {
+    const issue = raw as {
+      path?: unknown[];
+      message?: string;
+      code?: string;
+      expected?: string;
+      received?: string;
+    };
+    const where = Array.isArray(issue.path) && issue.path.length ? issue.path.join(".") : null;
+    // A custom message is the whole reason for writing one, so it wins. The
+    // type-error forms are rebuilt because zod's own reads "Required" with the
+    // field name only in `path`, which is exactly the half that used to be lost.
+    let text = issue.message ?? "invalid";
+    if (issue.code === "invalid_type" && issue.received === "undefined") {
+      text = "required, and was not passed";
+    } else if (issue.code === "invalid_type" && issue.expected) {
+      text = `expected ${issue.expected}, got ${issue.received ?? "something else"}`;
+    }
+    return where ? `  - ${where}: ${text}` : `  - ${text}`;
+  });
+  const head =
+    issues.length === 1
+      ? `Invalid arguments for ${op}:`
+      : `Invalid arguments for ${op} (${issues.length} problems):`;
+  return [head, ...lines].join("\n");
 }
