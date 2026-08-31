@@ -11,6 +11,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import { schemas } from "@engineroom/shared";
 import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
+import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge/writeQueue.js";
 import { JobManager } from "./jobs/manager.js";
 import { descriptions } from "./tools/descriptions.js";
 import { AeError, BridgeTimeoutError, BridgeUnreachableError } from "./util/errors.js";
@@ -36,7 +37,7 @@ const ASYNC_OPS = new Set(["run_batch"]);
 // especially must never touch the bridge — they exist precisely for the case
 // where the panel is not installed yet, which is also when the issue journal is
 // most likely to be written to.
-const SERVER_OPS = new Set([
+export const SERVER_OPS = new Set([
   "await_job",
   "get_job",
   "cancel_job",
@@ -48,6 +49,20 @@ const SERVER_OPS = new Set([
   "list_known_issues",
   "mark_issue_reported",
 ]);
+
+/**
+ * True for an op that changes the After Effects session, from the one table
+ * that is checked against `OpSchemas` at test time (`schemas.OpMutation`).
+ *
+ * A hand-kept list here would go stale the first time somebody added a tool,
+ * and the failure would be silent — a new writing op classified by omission as
+ * a read, interleaving with a batch. Anything this cannot classify is treated
+ * as a write, which costs a little serialization and never costs correctness.
+ */
+export function isWriteOp(name: string): boolean {
+  const effect = (schemas.OpMutation as Record<string, string | undefined>)[name];
+  return effect === undefined ? true : effect === "write";
+}
 
 /**
  * `ae_guide` exists because the two better carriers are not universal. The
@@ -78,6 +93,9 @@ export function createServer() {
 
   const bridge = new HttpClient();
   const jobs = new JobManager();
+  // One writer at a time. See bridge/writeQueue.ts for why the panel's own
+  // evalScript mutex is not enough.
+  const writes = new WriteQueue();
   const ws = new WsClient(bridge.port, jobs);
   ws.start();
   const panelGate = createPanelGate(bridge);
@@ -261,6 +279,24 @@ export function createServer() {
     const staleness = await panelGate.check();
     if (staleness) return errorResult(staleness);
 
+    // Serialize writes. Acquiring *before* runOp is what keeps the op timeout
+    // honest: `AbortSignal.timeout` is created inside `runOp`, so the clock
+    // starts when the call executes and not when it entered the queue. A queued
+    // call that timed out having never run would report a bridge failure for a
+    // bridge that was working, which is the one way this feature could make
+    // things worse than they were.
+    let lease: WriteLease | null = null;
+    if (isWriteOp(name)) {
+      try {
+        lease = await writes.acquire(name, extra?.signal);
+      } catch (e) {
+        // Full, timed out in the queue, or cancelled — all three mean the call
+        // never reached After Effects, and all three say so.
+        return errorResult((e as Error).message);
+      }
+    }
+    const wait: QueueWait | null = lease?.wait ?? null;
+
     // Forward to panel.
     try {
       const result = await bridge.runOp(name, args, progressToken);
@@ -277,7 +313,23 @@ export function createServer() {
             });
           });
         }
-        return textResult({ jobId: env.jobId, async: true, total: env.total });
+        // This is the gap the panel's own mutex leaves, and the reason this
+        // queue exists at all. `run_batch` opened `app.beginUndoGroup` and
+        // handed back a jobId; the panel now drives `_continue_job` chunk by
+        // chunk with that group still OPEN. Each chunk is its own turn on the
+        // panel's evalScript chain, so releasing the lock here lets the next
+        // write land between two chunks — inside the batch's undo group, whose
+        // `endUndoGroup()` then closes it early. Hold the lock until the job
+        // reports done.
+        //
+        // `await_job` is server-resident and never takes this lock, so an agent
+        // waiting on the job it queued behind cannot deadlock against it.
+        //
+        // `waitFor`'s own timeout has to sit at the queue's hold ceiling, not
+        // below it — a shorter one here would release the lock mid-batch while
+        // a writer that queued at the same moment was still waiting.
+        lease?.extendUntil(jobs.waitFor(env.jobId, writes.holdCeilingMs));
+        return textResult({ jobId: env.jobId, async: true, total: env.total }, wait);
       }
 
       // An empty frame is reported, never shipped. The panel found every pixel
@@ -317,7 +369,7 @@ export function createServer() {
         );
       }
 
-      return textResult(result);
+      return textResult(result, wait);
     } catch (e) {
       // Checked before BridgeUnreachableError because the remedies are
       // opposites: one says restart After Effects, the other says do not.
@@ -338,6 +390,10 @@ export function createServer() {
         return errorResult(`AE: ${e.message}${e.line ? ` (line ${e.line})` : ""}`);
       }
       return errorResult((e as Error).message);
+    } finally {
+      // No-op unless a lease was taken, and deferred by `extendUntil` when a
+      // long batch is still running behind the envelope we just returned.
+      lease?.release();
     }
   });
 
@@ -415,10 +471,24 @@ async function clientRoots(server: Server): Promise<string[] | undefined> {
   }
 }
 
-function textResult(value: unknown) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
-  };
+/**
+ * `wait` is present only when the call actually sat in the write queue, so the
+ * ordinary result is byte-identical to what it has always been.
+ *
+ * It is folded into the result object where there is one — which is every
+ * writing op but `run_jsx`, whose result is whatever the caller's script
+ * returned. Arrays and bare numbers get a second text block instead: rewrapping
+ * them would change what every existing caller reads, and #43 is the standing
+ * reminder that changing what a `run_jsx` answer looks like is expensive.
+ * Vision results never come through here with a wait — screenshots are reads
+ * and are never queued — so the image envelope cannot be touched by this.
+ */
+function textResult(value: unknown, wait?: QueueWait | null) {
+  const json = (v: unknown) => ({ type: "text" as const, text: JSON.stringify(v, null, 2) });
+  if (!wait) return { content: [json(value)] };
+  const merged = mergeWait(value, wait);
+  if (merged) return { content: [json(merged)] };
+  return { content: [json(value), json(wait)] };
 }
 
 function errorResult(message: string) {
