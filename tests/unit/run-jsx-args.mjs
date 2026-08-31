@@ -2,7 +2,7 @@
 //
 // `run_jsx` is the only op whose arguments the server rewrites on the way
 // through: `resolveRunJsxSource` turns `scriptPath` into `code` and `libraries`
-// into `{path, hash}`. Until this test existed it did that by *building a fresh
+// into `{path, text, bytes}`. Until this test existed it did that by *building a fresh
 // object* and copying the fields it happened to know about — which made it a
 // hand-maintained second copy of the schema, and the two diverged the moment
 // the schema grew. `diff` and `diffCompId` were added to `RunJsx` and

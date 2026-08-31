@@ -150,7 +150,9 @@ var __RJ_WRAP_PREFIX = "(function(){ ";
 var __RJ_WRAP_SUFFIX = "\n})()";
 
 // No regex literal: tests/unit/jsx-ternary.mjs strips string and comment
-// literals from these sources and there are none anywhere else in packages/jsx.
+// literals from these sources and does not understand regex literals, so one
+// here could desynchronise its scan of this file. (audio.jsx and footage.jsx do
+// carry a few; they survive only because their contents happen to pair up.)
 function __rjLines(s) {
   return String(s).split("\r\n").join("\n").split("\r").join("\n").split("\n");
 }
