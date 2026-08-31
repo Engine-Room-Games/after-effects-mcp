@@ -293,6 +293,13 @@ export function createServer() {
           downsample?: number; time: number; compId: number; layerId?: number;
           base64: string; bytes: number; warning?: string;
           converted?: boolean; sourceBitDepth?: number;
+          // A contact sheet is the same image content block with a map of what
+          // is in it. The per-tile record is the only thing that tells the agent
+          // which cell is which time, and which cells are marked blocks rather
+          // than frames.
+          contactSheet?: boolean; cols?: number; rows?: number;
+          cellWidth?: number; cellHeight?: number;
+          tiles?: unknown[];
         };
         return imageContent(
           {
@@ -312,6 +319,15 @@ export function createServer() {
             // Surfaced when a requested downsample could not be applied, so the
             // agent knows it is looking at a full-resolution frame.
             warning: v.warning,
+            // Present only for a `times` call. `tiles` is what makes the sheet
+            // readable as data as well as a picture — cell rectangle, time and
+            // status per tile, in the order they were asked for.
+            contactSheet: v.contactSheet,
+            cols: v.cols,
+            rows: v.rows,
+            cellWidth: v.cellWidth,
+            cellHeight: v.cellHeight,
+            tiles: v.tiles,
           },
           v.base64
         );

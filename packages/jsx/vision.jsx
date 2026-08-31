@@ -22,10 +22,26 @@ var __SCREENSHOT_TARGET_PX = 1280;
 // The correct downsample was always derivable from the comp, and an agent that
 // forgot it got a full-resolution 4K frame — the most expensive accident
 // available through these tools. So derive it, and let an explicit value win.
+function __autoDownsampleFor(comp, targetPx) {
+  var longEdge = comp.width > comp.height ? comp.width : comp.height;
+  var n = Math.ceil(longEdge / targetPx);
+  if (!(n > 1)) return 1;
+  return n > 8 ? 8 : n;
+}
+
 // 1080p -> 2 (960px), 4K -> 3 (1280px), and anything already small -> 1.
 function __autoDownsample(comp) {
-  var longEdge = comp.width > comp.height ? comp.width : comp.height;
-  var n = Math.ceil(longEdge / __SCREENSHOT_TARGET_PX);
+  return __autoDownsampleFor(comp, __SCREENSHOT_TARGET_PX);
+}
+
+// A contact sheet of N frames has to cost about what one frame costs, so each
+// tile gets 1/sqrt(N) of the single-frame long edge — N tiles of 1/N the area
+// each. Expressed as a multiple of what this comp's *single* frame would have
+// used rather than as its own target, for two reasons: it cannot drift from
+// __autoDownsample, and the factor is an integer, so deriving from the target
+// instead would let the rounding leave a 1080p sheet at nearly twice the budget.
+function __tileDownsample(comp, count) {
+  var n = Math.ceil(__autoDownsample(comp) * Math.sqrt(count));
   if (!(n > 1)) return 1;
   return n > 8 ? 8 : n;
 }
@@ -55,8 +71,44 @@ function __saveFrameAt(comp, time, file, factor) {
   }
 }
 
+// Several times in one call. Every requested time gets an entry, in order,
+// whether or not it rendered — the panel draws a marked block for the ones that
+// did not, so the sheet it composes still lines up with the times that were
+// asked for. Dropping a failed tile would silently renumber the rest, which is
+// the same class of lie as swallowing an error.
+function __contactSheetFrames(comp, args) {
+  var times = args.times;
+  var ds;
+  if (args.downsample === undefined || args.downsample === null) {
+    ds = __tileDownsample(comp, times.length);
+  } else {
+    ds = __clampDownsample(args.downsample);
+  }
+  var tiles = [];
+  for (var i = 0; i < times.length; i++) {
+    var entry = { time: times[i], downsample: ds };
+    try {
+      var p = __tmpPngPath();
+      __saveFrameAt(comp, times[i], new File(p), ds);
+      entry.path = p;
+    } catch (e) {
+      // One time that will not render must not cost the other five.
+      entry.error = String(e && e.message ? e.message : e);
+    }
+    tiles.push(entry);
+  }
+  return {
+    contactSheet: true,
+    tiles: tiles,
+    downsample: ds,
+    width: comp.width, height: comp.height,
+    times: times, compId: comp.id
+  };
+}
+
 OPS.screenshot_frame = noUndo(function (args) {
   var c = getCompById(args.compId);
+  if (args.times && args.times.length) return __contactSheetFrames(c, args);
   var t = (args.time !== undefined && args.time !== null) ? args.time : c.time;
   var ds = __resolveDownsample(c, args.downsample);
   var path = __tmpPngPath();
