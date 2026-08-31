@@ -83,8 +83,11 @@ offer to write the text out for them to send another way.
 ## 5. Close the loop
 
 On success, call `mark_issue_reported` with the entry `id` and the URL, so no
-later session asks them to report the same thing twice. Then tell them where it
-went, in one sentence, with the link.
+later session asks them to report the same thing twice. Use the same
+scope-qualified id the listing gave you (`user:…`, `project:…`): the two
+journals can hold the same slug, reporting one says nothing about the other, and
+an unqualified id leaves which one moved to chance. Then tell them where it went,
+in one sentence, with the link.
 
 If they decline, leave the entry alone — it stays unreported and can be offered
 again another day. Do not mark it.

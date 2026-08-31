@@ -15,20 +15,102 @@ refreshed at each release and a build in between can be ahead of it.
 
 ## 0.4.0
 
+The release where verifying a change stopped meaning reading the whole thing
+back. Two existing calls answer differently, so read those first.
+
+### Two calls changed under you
+
+- **`create_shape_layer` now spawns at `[0,0]`**, with the anchor at `[0,0]`, so
+  the layer's coordinate space *is* the comp's and every vertex, rect position
+  and path you add afterwards is in comp pixels. After Effects' own spawn point
+  is the comp centre, which silently offsets a drawing authored in comp
+  coordinates by half a frame — easy to miss on a downsampled screenshot.
+  `position: "center"` restores AE's behaviour, and any `[x,y]` places the origin
+  yourself. The result echoes what it ended up with.
+- **`get_house_style` returns a digest, not the document.** A few hundred tokens:
+  palette as named hexes, type, motion, layout, and a note naming anything it
+  could not summarise. Pass `detail: "full"` for the whole thing — you need it
+  before `set_house_style`, which replaces the file rather than patching it. An
+  unstructured guide comes back `structured: false` with its opening text, which
+  is an honest "I could not read this as a spec" rather than an empty answer.
+
+### Verify with a diff instead of a second read
+
+- **`snapshot_comp` and `diff_comp`.** Fingerprint a comp before a write, then
+  ask what moved: layers added, removed, renamed, retimed, re-parented, keyframe
+  counts, expressions and effects gained or lost — and a count of the layers that
+  did not move. Tens of tokens where two full reads were thousands. It does
+  **not** record property values, expression text, effect parameters, masks or
+  shape contents, so `changeCount: 0` means none of the recorded fields moved,
+  not that the comp is identical.
+- **`diff: true` on `run_jsx` and `run_batch`** does the same inside the call, so
+  there is no window between the write and the fingerprint — and on a failure the
+  diff rides on the error, which is how you find where a half-applied script
+  stopped.
+
+### Screenshots
+
+- **`screenshot_frame` takes `times` (2–6) and returns one tiled contact sheet**,
+  each tile labelled with its own time, held to roughly the pixel budget of a
+  single frame. Judging motion is one call now, not three: one image in your
+  context instead of three, and one render request instead of three back-to-back
+  ones, which is the pattern that provoked stale frames. `time` and `times` are
+  mutually exclusive; there is no `times` on `screenshot_layer`.
+- **Three distinct failures, with opposite remedies.** `Stale frame` (AE served
+  an earlier render — wait, retry higher), `Corrupt frame` (the file is not a
+  whole PNG; not a timeout — retry at downsample 6–8 or shoot the precomps
+  separately), `Render timed out` (still rendering — wait before retrying, or a
+  retry queues behind it). A frame that is genuinely all-transparent is still
+  `empty: true` with no image. On a sheet, one bad tile is drawn as a marked
+  block and named in `warning`; the rest of the sheet is good.
+
+### run_jsx
+
+- **A failure names the line of *your* script and prints its text**, and says so
+  honestly when the number cannot be mapped rather than guessing. The old advice
+  to ignore the line number is gone.
+- **`scriptPath` and `libraries`** keep a long script and its shared helpers out
+  of the conversation entirely. Libraries are evaluated at global scope once per
+  After Effects session; re-passing an unchanged file is free.
+- **Helpers in scope**, each wrapping a trap: `compById`, `layerById`,
+  `walkProperty`, `addKeys`, `ease` (which sizes the KeyframeEase array using the
+  same code `set_temporal_ease` uses, not a copy), `shape` (which lands at
+  `[0,0]`), and `withoutUndoGroup`. The whole `OPS` table is callable too.
+
+### New tools, and one thing you no longer have to get right
+
+- **`duplicate_comp`** returns the new comp id, so you never look for the copy by
+  name. Shallow by default like AE's own Duplicate — the copy's precomp layers
+  point at the *same* nested comps — with `deep: true` for a real variant.
+- **`place_audio_cues`** scores a scene in one call: a cue list becomes one audio
+  layer each, imported once per file, named, trimmed, levelled in dB, in a single
+  undo step, all-or-nothing, with a `dryRun`.
+- **`set_temporal_ease` and `add_keyframe` size the ease array themselves.** Pass
+  one `{influence, speed}` pair per side; the count that worked comes back as
+  `easeDimensions`. The bare `parameter 2` failure is no longer yours to avoid.
+
+### Underneath
+
+- **Writes are serialized, one at a time, for the whole session** — so a long
+  `run_batch` can no longer have its undo step split in half by another call
+  landing between its chunks, and two writes issued together run in the order you
+  issued them. A call that waited says `queuedBehind` and `waitedMs`. Reads are
+  never queued. There is a new diagnosis to tell apart from a bridge timeout: a
+  call *dropped while waiting for the write queue* never reached After Effects,
+  so re-sending it is safe — which is the opposite of what a timeout means.
+- **The issue journal has two scopes.** `project` is this project's notes; `user`
+  travels with the person across every project, so log tool and After Effects
+  behaviour there. Ids are unique only within a journal, so open an entry with
+  the qualified form the listing shows (`user:…`).
 - **The guidance moved.** What the server sends every session is now a short
   pointer rather than a summary, because it was resident in every request the
-  user ever made. The narrative lives in `ae_guide({topic: "after-effects"})`,
-  and two topics sit behind it for when you need them: `extendscript-gotchas`
-  before writing raw `run_jsx`, and this one. In Claude Code and claude.ai the
-  same text is the `after-effects` skill and the files in its `references/`
-  folder — load one carrier, not both.
-- **Rigging is written down.** Opacity not propagating through parenting, and
-  parenting to a camera null while it is still at identity, are in the main
-  guide now. They were the two that cost the most review rounds.
-
-More is landing in this release than the two entries above; the topic is brought
-up to date at release. Where it is silent and a tool's schema is not, the schema
-is right.
+  user ever made. The narrative is `ae_guide({topic: "after-effects"})`, with
+  `extendscript-gotchas` behind it for raw `run_jsx` and this topic for changes.
+  In Claude Code and claude.ai the same text is the `after-effects` skill and the
+  files in its `references/` folder — load one carrier, not both.
+- **Rigging is written down**, in the main guide: opacity does not propagate
+  through parenting, and a camera null is parented to while it is still at
+  identity.
 
 ## 0.3.1
 

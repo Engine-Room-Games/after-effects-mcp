@@ -16,15 +16,20 @@ the wrong thing: a null returned here surfaces as `null is not an object` twenty
 lines later, and a reserved word means **nothing in the script runs at all**
 while the error points at one line in the middle.
 
-Two rules that make all of it cheaper:
+Three rules that make all of it cheaper:
 
 - **Nothing rolls back.** A script that fails halfway leaves everything before
-  the failure applied. Read the state back to find where it stopped; do not
-  re-run it and hope.
+  the failure applied. A failure names the line of your script and prints its
+  text, so start there — then read the state back, or pass `diff: true` and let
+  the call tell you what landed. Never re-run a mutating script to see whether
+  it fails again.
 - **Prefer the tool.** Most of what follows is a trap that only exists because
   you dropped to raw scripting. `add_shape_content`, `set_temporal_ease`,
-  `parent_layer` and the rest resolve names, sizes and orders for you and fail
-  loudly when they cannot.
+  `create_shape_layer`, `place_audio_cues`, `duplicate_comp` and `parent_layer`
+  resolve names, sizes and orders for you and fail loudly when they cannot. Each
+  item below names the tool that already handles it, where there is one.
+- **Do not paste what is already in scope.** See "What you already have" at the
+  end before you write a helper of your own.
 
 ## Property names that return null
 
@@ -33,6 +38,11 @@ that layer. It does not throw, so the failure lands later, somewhere else.
 
 - **2D rotation is `ADBE Rotate Z`.** `layer.property("ADBE Rotation")` is null.
   `layer.transform.rotation` is the safe form.
+- **Audio levels are `layer.audioLevels`.**
+  `layer.property("ADBE Audio Levels")` is null on an audio layer, which is the
+  trap a hand-written sound-placement loop hits on its first cue. *The tool
+  already does:* `place_audio_cues` places a whole cue list in one undo step,
+  all-or-nothing, with a `dryRun`.
 - **Time remap is an attribute, not a property lookup.**
   `layer.property("ADBE Time Remap")` is null on audio layers and on precomp
   layers, *even after* setting `timeRemapEnabled = true`. Use `layer.timeRemap`.
@@ -49,7 +59,10 @@ turns a misleading error twenty lines away into an accurate one here.
 - **`comp.layers.addShape()` spawns the layer at the comp centre** (960,540 at
   1080p, 1920,1080 at 4K) with its anchor at (0,0). If you then build contents in
   comp coordinates the whole drawing lands offset by half a frame. Zero the
-  position immediately, before you add anything to `Contents`.
+  position immediately, before you add anything to `Contents`. *The tool already
+  does:* `create_shape_layer` defaults to `[0,0]` (`position: "center"` restores
+  AE's spawn point), and the `shape(comp, {name, position})` helper does it
+  inside a script.
 - **Polystar type is `1 = Star`, `2 = Polygon`** on `ADBE Vector Star Type`.
   Type 2 *hides* Inner Radius, so setting inner radius after choosing polygon
   throws `property is hidden`. A gear is type 1.
@@ -90,8 +103,12 @@ turns a misleading error twenty lines away into an accurate one here.
   script does not reliably preserve where the layer sits two levels deep, so
   after scripted parenting audit scale and rotation as well as position.
   `parent_layer` does this correctly and takes `preserveTransform`.
-- **`app.executeCommand(id)` can silently no-op** through this bridge. Use API
-  methods — `CompItem.duplicate()`, `layer.duplicate()` — not menu command ids.
+- **`app.executeCommand(id)` can silently no-op** through this bridge. Menu
+  commands depend on host focus and the active selection, and this bridge has
+  neither. Use the API equivalents — `CompItem.duplicate()`, `layer.duplicate()`.
+  *The tool already does:* `duplicate_comp` returns the new comp id, and
+  `deep: true` duplicates the nested comps and re-points the copy at them, which
+  `CompItem.duplicate()` alone does not.
 
 ## Keyframes and expressions
 
@@ -101,9 +118,14 @@ turns a misleading error twenty lines away into an accurate one here.
   exactly 1 whether the layer is 2D or 3D, because the ease runs along the motion
   path rather than per axis. The wrong count throws about `parameter 2` or
   `Value array does not have 1 elements`. If you are scripting this by hand, try
-  1 then 2 then 3 in a try/catch. The `set_temporal_ease` tool knows the spatial
-  rule — see the array-size trap in the main guide — which is one more reason to
-  use it rather than reaching in.
+  1 then 2 then 3 in a try/catch — or, better, do not: the `ease(prop, keyIndex,
+  easeIn, easeOut)` helper is in scope and *is* the sizing code
+  `set_temporal_ease` uses, not a second copy of it, so a script and a tool call
+  can never disagree about what a property wanted. A bare number means
+  influence; omitting `easeOut` uses the same ease both sides; the return value
+  is the number of entries that worked. *The tool already does:*
+  `set_temporal_ease` and `add_keyframe` take one `{influence, speed}` pair per
+  side and report `easeDimensions`.
 - **The key lookup is `nearestKeyIndex(t)`**, not `nearestKeyAtTime`.
 - **Expression `time` is comp time, not layer time.** Shifting a layer's
   `startTime` moves its keyframes and leaves its expressions where they were, so
@@ -127,10 +149,41 @@ finishes in seconds; anything longer belongs in `run_batch`.
 
 ## When a script fails halfway
 
-The reported line number does not reliably map to your source, so do not spend
-long on it. Find the stop point by reading back what exists — `get_comp_tree`,
-`find_layers`, `get_layer_full` — and resume from there.
+**The error names the line of your script and prints its text.** Believe it —
+and when it says the number could not be mapped, believe that too: it is refusing
+to guess rather than pointing you at a plausible wrong line.
+
+Everything above that line already ran. To find out exactly what landed, pass
+`diff: true` and the call appends what changed to the error itself; otherwise
+read it back with `diff_comp`, `get_comp_tree` or `find_layers`. **Never re-run
+the script to see whether it fails again** — nothing rolled back, so the lines
+above the failure apply a second time.
 
 And remember what a *successful* script with no `return` looks like:
 `{ok: true, returned: null, undoGroup, note}`. That is completion, not failure.
 Re-running it applies every mutation a second time.
+
+## What you already have
+
+Before you write a helper, check it is not in scope. Every one of these wraps a
+trap on this page, and a version you write yourself re-derives the bug.
+
+- **`OPS`** — the whole tool table, callable from inside a script:
+  `OPS.set_transform({compId, layerId, position: [0, 0]})`. Anything a tool
+  already does well, do it this way rather than reaching into the DOM.
+- **`compById(id)` / `layerById(compOrId, layerId)`** — the pair every tool
+  returns, resolved. No index arithmetic.
+- **`walkProperty(layer, ["Transform", "Position"])`** — a property path,
+  resolved the same way the tools resolve it.
+- **`addKeys(prop, [[t, v], …])`** — returns the key index of each, in order, so
+  the next call can ease them without searching.
+- **`ease(prop, keyIndex, easeIn, easeOut)`** — sizes the KeyframeEase array.
+- **`shape(comp, {name, position})`** — a shape layer at `[0,0]`.
+- **`withoutUndoGroup(fn)`** — closes the undo group around one statement, which
+  is what `copyToComp` needs.
+
+And two arguments rather than more code: **`scriptPath`** runs an absolute `.jsx`
+path so a long script never enters the conversation at all, and **`libraries`**
+evaluates absolute `.jsx` paths at global scope first, once per After Effects
+session — re-passing an unchanged file is free, editing it re-evaluates it. Keep
+shared helpers in a library instead of pasting them into every script.
