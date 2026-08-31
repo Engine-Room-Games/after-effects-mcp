@@ -55,18 +55,26 @@ function __resolveDownsample(comp, requested) {
 // reduced frame directly instead of writing full size and resampling
 // afterwards. That is faster (a quarter of the pixels at factor 2) and needs no
 // external image tool, which is what makes it work off macOS.
+//
+// Factor 1 is *set*, not skipped. Skipping it rendered at whatever the user had
+// left the viewer on, so a comp parked at Quarter answered `downsample: 1` with
+// a quarter-size frame and `downsample: 2` came back **larger** than
+// `downsample: 1` (issue #72). Designers leave heavy comps at Quarter or Third
+// as a matter of course, so that was the common case rather than a corner. The
+// panel reads the real dimensions out of the PNG's IHDR, which means the
+// response stayed honest while the *picture* was not the one asked for — the
+// worse of the two failures, because an agent that can see a frame believes it.
+// Every factor reaching this function now names the resolution it renders at.
 function __saveFrameAt(comp, time, file, factor) {
-  if (factor <= 1) {
-    comp.saveFrameToPng(time, file);
-    return;
-  }
+  var f = (factor > 1) ? Math.round(factor) : 1;
   var previous = comp.resolutionFactor;
   try {
-    comp.resolutionFactor = [factor, factor];
+    comp.resolutionFactor = [f, f];
     comp.saveFrameToPng(time, file);
   } finally {
     // Restore unconditionally — a failed render must never leave the user
-    // looking at a half-resolution comp.
+    // looking at a half-resolution comp. This covers factor 1 too: the render
+    // happens at Full and the viewer goes back to Quarter afterwards.
     comp.resolutionFactor = previous;
   }
 }

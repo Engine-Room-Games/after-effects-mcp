@@ -573,9 +573,66 @@ OPS.parent_layer = function (args) {
   return out;
 };
 
+// Layers do not reorder with moveTo. `moveTo` is a PropertyBase method for
+// re-ranking a property inside an indexed group, and calling it on a Layer
+// throws "parent is not an INDEXED_GROUP" — which is every call this op has
+// ever served (issue #70). AE's layer-level primitives are moveBefore,
+// moveAfter, moveToBeginning and moveToEnd, and all four take a *layer*, never
+// an index. (The one legitimate moveTo in this codebase is the shape-property
+// one in shapes.jsx; it is on a PropertyBase and stays.)
+//
+// Two ways in, because reorder is the op that invalidates indexes:
+//
+//   * `beforeLayerId` / `afterLayerId` — place this layer relative to another
+//     one by id. Nothing about the answer depends on the stack not having moved
+//     since the caller last read it, which is why these are the preferred form.
+//   * `toIndex` — the index the layer ends up at, counting from the front.
+//     Stated as the *landing* index because "the index it displaces" and "the
+//     index it lands on" differ by one when moving down the stack and the
+//     caller cannot tell which one a tool meant.
+//
+// The two directions need different primitives, and swapping them is off by one
+// with no error. Moving up (toIndex < from), the layer currently at the target
+// is pushed down, so moveBefore lands exactly on it. Moving down, that layer
+// shifts up by one as this one leaves, so moveAfter is what lands on the target.
 OPS.reorder_layer = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
-  l.moveTo(args.toIndex);
-  return __layerSummary(l);
+  var from = l.index;
+  var n = c.numLayers;
+  var to;
+
+  if (args.beforeLayerId !== undefined && args.beforeLayerId !== null) {
+    var b = getLayerById(c, args.beforeLayerId);
+    if (b.id === l.id) throw new Error("reorder_layer: beforeLayerId is the layer being moved (" + l.id + ").");
+    l.moveBefore(b);
+  } else if (args.afterLayerId !== undefined && args.afterLayerId !== null) {
+    var a = getLayerById(c, args.afterLayerId);
+    if (a.id === l.id) throw new Error("reorder_layer: afterLayerId is the layer being moved (" + l.id + ").");
+    l.moveAfter(a);
+  } else if (args.toIndex !== undefined && args.toIndex !== null) {
+    to = Math.round(args.toIndex);
+    if (to < 1) to = 1;
+    if (to > n) to = n;
+    if (to === from) {
+      // Nothing to do. Saying so beats an AE call that is a no-op anyway.
+    } else if (to === 1) {
+      l.moveToBeginning();
+    } else if (to === n) {
+      l.moveToEnd();
+    } else if (to < from) {
+      l.moveBefore(c.layer(to));
+    } else {
+      l.moveAfter(c.layer(to));
+    }
+  } else {
+    throw new Error("reorder_layer: pass one of toIndex, beforeLayerId or afterLayerId.");
+  }
+
+  // Report both ends of the move. The landing index is read back off the layer
+  // rather than assumed, so a result can never claim a position AE did not
+  // give it — and `movedFrom === index` is how a caller sees a no-op.
+  var out = __layerSummary(l);
+  out.movedFrom = from;
+  return out;
 };
