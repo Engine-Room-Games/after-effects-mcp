@@ -161,6 +161,165 @@ ok("an empty journal is not an error", none.count === 0 && none.issues.length ==
 ok("nothing to open, nothing to point at", none.next === undefined);
 process.env.AE_MCP_HOME = home;
 
+// ============================================================= the two scopes
+//
+// Entries used to live only in `<project>/.ae-mcp`, so a new project started
+// ignorant of every tool behaviour the last one had worked out (issue #57).
+// There is now a second journal in the user's home, and three things have to
+// hold at once: the merge has to say which journal each entry came from, an id
+// has to be able to name one of two entries with the same slug, and the *home
+// fallback* — the project journal with no project to sit in — must not quietly
+// become the cross-project one.
+//
+// Everything here still runs inside the AE_MCP_HOME sandbox. A regression that
+// wrote to the real home directory would be a bug, so it is asserted rather
+// than assumed.
+
+const before = listIssues();
+const user = logIssue({
+  title: "Screenshots come back as a frame AE rendered earlier",
+  symptom:
+    "screenshot_frame returned pixel-identical PNGs for two unrelated comps at two unrelated times, " +
+    "with ok:true and a fresh temp path each time.",
+  workaround: "Vary the downsample factor to force a real render, and read the comp back rather than trusting the picture.",
+  cause: "AE re-serves a render buffer past some per-frame cost.",
+  tools: ["screenshot_frame"],
+  scope: "user",
+});
+ok("a user entry reports the user scope", user.scope === "user");
+ok("a user entry is a new entry, not an extension", user.previouslyLogged === false && user.occurrences === 1);
+// The whole point: it is not in the project folder.
+ok("the user journal is a different directory", !user.path.startsWith(path.join(home, "issues")));
+// And the whole *risk*: a single override has to sandbox it, or this test wrote
+// into whoever ran it.
+ok("the user journal stays inside the override", path.resolve(user.path).startsWith(path.resolve(home)));
+ok("the user journal ignores itself too", fs.readFileSync(path.join(home, "user", ".gitignore"), "utf8").trim() === "*");
+
+// -------------------------------------------------------------- the merge
+const merged = listIssues();
+ok("both journals are read", merged.count === before.count + 1);
+ok("every entry says where it came from", merged.issues.every((e) => e.scope === "project" || e.scope === "user"));
+ok("the user entry is tagged user", merged.issues.find((e) => e.id === user.id).scope === "user");
+ok("the project entries are still tagged project", merged.issues.some((e) => e.scope === "project"));
+// The envelope still names the project journal, because that is where log_issue
+// writes by default and the agent has to be able to say where its notes live.
+ok("the envelope still names the project journal", merged.scope === "project" && merged.dir === path.join(home, "issues"));
+ok("the envelope names every journal it read", merged.journals.length === 2);
+ok(
+  "each journal is counted",
+  merged.journals.find((j) => j.scope === "user").count === 1 &&
+    merged.journals.find((j) => j.scope === "project").count === before.count
+);
+// The index has to lead somewhere, and an id alone no longer identifies an
+// entry, so the pointer spells the qualified form out on a real one.
+ok("the pointer names a scope-qualified id", /list_known_issues\(\{ id: "(project|home|user):[a-z0-9-]+" \}\)/.test(merged.next));
+
+// -------------------------------------------------------------- the filter
+ok("scope:user reads only the user journal", listIssues({ scope: "user" }).issues.every((e) => e.scope === "user"));
+ok("scope:user finds the entry", listIssues({ scope: "user" }).count === 1);
+ok("scope:project excludes it", listIssues({ scope: "project" }).count === before.count);
+ok("filters compose with scope", listIssues({ scope: "user", tool: "screenshot_frame" }).count === 1);
+ok("the filtered envelope names one journal", listIssues({ scope: "user" }).journals.length === 1);
+
+// -------------------------------------------- the same title in both journals
+// Nothing stops a lesson being written down twice, so the merge has to be able
+// to hold both and the reader has to be able to say which one they want.
+const TITLE = "Shape property names are not the display names";
+const forked = logIssue({
+  title: TITLE,
+  symptom: "Same problem, written down as a tool behaviour rather than a fact about this project.",
+  workaround: "Read the real names out of get_layer_full first.",
+  scope: "user",
+});
+ok("the same title in the other scope is a new entry", forked.previouslyLogged === false && forked.occurrences === 1);
+ok("the fork names the journal that already had it", forked.alsoIn.includes("project"));
+ok("the project entry was not touched", listIssues({ id: `project:${third.id}` }).issues[0].occurrences === 1);
+// Reporting state is per entry per journal: the project one was marked reported
+// near the top of this file, and that says nothing about this new one.
+ok("reporting state does not cross journals", listIssues({ id: `user:${forked.id}` }).issues[0].reported === false);
+ok("the project one is still reported", listIssues({ id: `project:${third.id}` }).issues[0].reported === true);
+
+// Both are listed. Hiding one would lose whichever the reader needed.
+const bothListed = listIssues().issues.filter((e) => e.id === third.id);
+ok("both are listed", bothListed.length === 2);
+ok("and they are distinguishable", new Set(bothListed.map((e) => e.scope)).size === 2);
+
+// A bare id still works — no caller that predates the user journal breaks — and
+// resolves to the project entry, which is the more specific answer. The other
+// one is named rather than silently losing.
+const bare = listIssues({ id: third.id });
+ok("a bare id still resolves", bare.count === 1);
+ok("a bare id prefers the project entry", bare.issues[0].scope === "project");
+ok("the other scope is named, not hidden", /user:/.test(bare.next));
+ok("a qualified id reaches the user entry", listIssues({ id: `user:${third.id}` }).issues[0].scope === "user");
+ok("a qualified id reaches the project entry", listIssues({ id: `project:${third.id}` }).issues[0].scope === "project");
+// An id in no journal names the ones that exist, qualified, so the next call works.
+assert.throws(
+  () => listIssues({ id: "user:no-such-entry" }),
+  (e) => /Known ids: /.test(e.message) && /user:/.test(e.message)
+);
+passed++;
+
+// A title that happens to begin "user:" must stay reachable — the qualified
+// form is tried first and falls back to the whole string as a bare id.
+const awkward = logIssue({
+  title: "user: prefs got wiped by an unrelated plugin",
+  symptom: "The Character panel came back at tracking -20 on a fresh layer.",
+  workaround: "Set tracking explicitly on every text layer.",
+});
+ok("a title beginning 'user:' is still reachable", listIssues({ id: "user: prefs got wiped by an unrelated plugin" }).count === 1);
+ok("and it went to the project journal", awkward.scope === "project");
+
+// ------------------------------------------------------- marking either scope
+markReported(`user:${forked.id}`, "https://example.invalid/user");
+ok("a qualified id marks the user entry", listIssues({ id: `user:${forked.id}` }).issues[0].reported === true);
+ok("the project entry keeps its own URL", listIssues({ id: `project:${third.id}` }).issues[0].issueUrl === "https://example.invalid/3");
+ok("the user entry got the new URL", listIssues({ id: `user:${forked.id}` }).issues[0].issueUrl === "https://example.invalid/user");
+// A re-log of the user entry must not un-report it, exactly as in one journal.
+const relogged = logIssue({ title: TITLE, symptom: "again", workaround: "same", scope: "user" });
+ok("a new sighting does not un-report a user entry", relogged.reported === true && relogged.occurrences === 2);
+markReported(user.id, "https://example.invalid/bare");
+ok("a bare id still marks", listIssues({ id: `user:${user.id}` }).issues[0].reported === true);
+
+// ------------------------------------------------------------------ bounded
+// Two journals double the listing, so there is a cap — and a cap that did not
+// say it had bitten would be a short answer that looked complete.
+const capped = listIssues({ limit: 2 });
+const total = listIssues().count;
+ok("the cap holds the listing down", capped.issues.length === 2);
+ok("the count is still the truth", capped.count === total);
+ok("what was held back is counted", capped.omitted === total - 2);
+ok("and the pointer says so", /more matched/.test(capped.next));
+ok("an uncapped listing says nothing about omissions", listIssues().omitted === undefined);
+
+// ---------------------------------------------- the home fallback is not user
+// `home` is the project journal with no project. If it were merged into the
+// user journal, a Claude Desktop session's notes about one project's footage
+// would start arriving in every other project as cross-project knowledge.
+//
+// Nothing here writes: `listIssues` only reads, so the real journals stay
+// untouched and uncreated. The condition is reproduced the way Claude Desktop
+// produces it — a working directory of the filesystem root — rather than with
+// a chmod, which is a no-op on Windows and CI runs there.
+delete process.env.AE_MCP_HOME;
+const cwd = process.cwd();
+try {
+  process.chdir(path.parse(cwd).root);
+  const fallback = listIssues();
+  const home_ = fallback.journals.find((j) => j.scope === "home");
+  const user_ = fallback.journals.find((j) => j.scope === "user");
+  ok("an unusable working directory still resolves", fallback.scope === "home");
+  ok("the fallback is its own journal", home_ !== undefined && user_ !== undefined);
+  ok("the fallback is not the user journal", path.resolve(home_.dir) !== path.resolve(user_.dir));
+  ok("the fallback keeps its own folder name", /\.after-effects-mcp/.test(home_.dir));
+  ok("the user journal has the other name", /[/\\]\.ae-mcp[/\\]/.test(user_.dir + path.sep));
+  // scope:"project" reads the fallback, because that is what it is.
+  ok("scope:project covers the fallback", listIssues({ scope: "project" }).journals.some((j) => j.scope === "home"));
+} finally {
+  process.chdir(cwd);
+  process.env.AE_MCP_HOME = home;
+}
+
 fs.rmSync(home, { recursive: true, force: true });
 fs.rmSync(empty, { recursive: true, force: true });
 

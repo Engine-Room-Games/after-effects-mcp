@@ -557,7 +557,14 @@ export const ExportMogrt = z
   .strict();
 
 // ---------- house style (a markdown file beside the .aep, read over the bridge) ----------
-export const GetHouseStyle = z.object({}).strict();
+export const GetHouseStyle = z
+  .object({
+    detail: z.enum(["summary", "full"]).default("summary").optional()
+      .describe(
+        "'summary' (default) is a few hundred tokens: palette as named hexes, type, motion defaults, layout rules, and what it could not summarise. 'full' returns the whole document — use it before editing the guide with set_house_style, or when the summary is not enough."
+      ),
+  })
+  .strict();
 export const SetHouseStyle = z
   .object({
     content: z.string().min(1).describe("The complete style guide as markdown. Replaces the file, so send the whole document."),
@@ -612,6 +619,10 @@ export const LogIssue = z
     workaround: z.string().min(3).describe("What actually worked — concrete enough for the next session to apply without rediscovering it."),
     cause: z.string().optional().describe("Why it happens, if you worked it out."),
     tools: z.array(z.string()).optional().describe("Tool names involved, e.g. ['set_temporal_ease']."),
+    scope: z.enum(["project", "user"]).default("project").optional()
+      .describe(
+        "'project' (default) for this project's footage, comps or files. 'user' for how these tools or After Effects behave — that journal travels with the person, so every future project starts knowing it. Reported back as 'home' when there is no project folder to write into."
+      ),
   })
   .strict();
 export const ListKnownIssues = z
@@ -625,7 +636,7 @@ export const ListKnownIssues = z
     id: z
       .string()
       .optional()
-      .describe("Read one entry in full — cause and workaround included — by the id from a previous listing. Ignores the filters."),
+      .describe("Read one entry in full — cause and workaround included — by the id from a previous listing. Ignores the filters. Ids are unique only within a journal, so prefix with the entry's scope ('user:my-entry') when the listing shows one in each."),
     detail: z
       .enum(["index", "full"])
       .default("index")
@@ -633,11 +644,17 @@ export const ListKnownIssues = z
       .describe(
         "'index' (default) is one line per entry: id, title, tools, counts and a one-line summary — read the one you need with `id`. 'full' returns every matching entry's whole body and costs thousands of tokens."
       ),
+    scope: z.enum(["all", "project", "user"]).default("all").optional()
+      .describe(
+        "Which journal to read. 'all' (default) merges this project's with the user's cross-project one and tags every entry with the scope it came from."
+      ),
+    limit: z.number().int().positive().max(500).default(50).optional()
+      .describe("Most entries to return. Anything held back is counted in `omitted`."),
   })
   .strict();
 export const MarkIssueReported = z
   .object({
-    id: z.string().describe("The entry id returned by log_issue or list_known_issues."),
+    id: z.string().describe("The entry id returned by log_issue or list_known_issues. Prefix with its scope ('user:my-entry') when the same id exists in both journals."),
     url: z.string().optional().describe("Link to the issue that was opened."),
   })
   .strict();

@@ -60,7 +60,7 @@ The MCP server is stateless except for an in-memory `JobManager`. The panel is t
 | `packages/mcp-server/src/tools/descriptions.ts` | All tool descriptions in one file — including the verbatim screenshot guidance. |
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. |
 | `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool. |
-| `packages/mcp-server/src/issues/journal.ts` | The cross-session issue journal at `<project>/.ae-mcp/issues/`. Backs `log_issue` / `list_known_issues` / `mark_issue_reported`. The project folder is `process.cwd()`; a client that gives no usable one (Claude Desktop starts servers at `/`) falls back to `~/.after-effects-mcp`, reported as `scope: "home"` so the fallback is never silent. `AE_MCP_HOME` overrides the root (used by the CI check). |
+| `packages/mcp-server/src/issues/journal.ts` | The cross-session issue journal — two of them: `<project>/.ae-mcp/issues/` and the user-level `~/.ae-mcp/issues/`. Backs `log_issue` / `list_known_issues` / `mark_issue_reported`. The project folder is `process.cwd()`; a client that gives no usable one (Claude Desktop starts servers at `/`) falls back to `~/.after-effects-mcp`, reported as `scope: "home"` so the fallback is never silent. `AE_MCP_HOME` overrides both roots (used by the CI check). |
 | `packages/mcp-server/src/setup/{check,install,paths}.ts` | Backs `check_setup` / `setup_panel`. Never touches the bridge — it exists for the case where the panel isn't installed yet. |
 | `packages/mcp-server/src/setup/platform.ts` | **The only place macOS and Windows diverge** (PlayerDebugMode storage, AE process detection). Plus `cepExtensionsDir()` in `paths.ts`. Keep platform branching here — do not scatter `process.platform` through the codebase. |
 | `scripts/lib/setup.mjs` | Loads the compiled setup module so the dev scripts (`doctor`, `install-panel`, `enable-debug`) reuse the same platform logic the MCP tools use instead of keeping a second copy. |
@@ -70,6 +70,7 @@ The MCP server is stateless except for an in-memory `JobManager`. The panel is t
 | `packages/mcp-server/src/prompts/*.md` | Source of truth for user-invoked flows. Generated into MCP prompts and Claude Code commands. `$ARGUMENTS` is substituted at `prompts/get`. |
 | `packages/mcp-server/src/generated/content.ts` | Generated. Never hand-edit — `build-guides.mjs --check` fails the build if you do. |
 | `packages/jsx/style.jsx` | `get_house_style` / `set_house_style`. Reads `house-style.md` beside the .aep over the bridge, which is the only channel every client has. |
+| `packages/mcp-server/src/style/summary.ts` | The digest `get_house_style` returns by default. Parses a markdown document nobody controls; falls back to the document's own opening when it recognises nothing. Reading stays on the panel — only the summarising is here. |
 | `plugin/` | The Claude Code plugin: `.mcp.json` + generated `skills/` and `commands/`. Everything under those two is output, not source. |
 | `.claude-plugin/marketplace.json` | Marketplace catalog. Users add this repo, then install `after-effects@engine-room`. |
 | `scripts/bundle-jsx.mjs` | Concatenates `packages/jsx/*.jsx` in dependency order into `packages/ae-panel/jsx/bundle.jsx`. Run via `npm run build:jsx`. |
@@ -98,6 +99,7 @@ The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring 
 - **Long batch** (`run_batch` >100 ops): JSX returns `{jobId, async:true, total}`. Panel drives `_continue_job` in chunks of 25 in the background, broadcasting `progress` events on WS. Server forwards WS progress as `notifications/progress` keyed by the request's `progressToken`.
 - **Server-resident** (`await_job`, `get_job`, `cancel_job`, `check_setup`, `setup_panel`, `init_project`, `ae_guide`, `log_issue`, `list_known_issues`, `mark_issue_reported`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag). They're still listed in `OpSchemas` so `tools/list` picks them up — membership in `SERVER_OPS` is what stops the forwarding.
 - **Prose** (`ae_guide`): returns the markdown as a bare text content block rather than through `textResult()`. JSON-stringifying it would hand the model a wall of `\n`.
+- **Summarised** (`get_house_style`): the panel returns the whole document; `server.ts` runs it through `applyHouseStyleDetail` before packaging, and `detail: "summary"` — the default — replaces `content` with a digest. The one post-bridge transform in the codebase that changes what a *read* answers, so it is the one to remember when a house-style result looks unfamiliar. See "The house style".
 - **Downsampled screenshots**: handled entirely in `vision.jsx`. `saveFrameToPng` *does* respect `CompItem.resolutionFactor` (measured: a 3840×2160 comp yields 1920×1080 at factor 2, 960×540 at factor 4), so `__saveFrameAt` sets the factor, renders, and restores it in a `finally`. That restore is not optional — a throw mid-render would otherwise leave the user's comp at reduced resolution. The panel reads the true dimensions out of the PNG's IHDR chunk rather than computing them, so reported size can never disagree with the image sent. An earlier version shelled out to `sips`; it was replaced because rendering smaller is faster than resampling and needs no external tool, which is what makes downsampling work on Windows. The factor is *derived* from the comp when the caller omits one (`__autoDownsample`, aiming at a ~1280px long edge) — which is why `ScreenshotFrame`/`ScreenshotLayer` must not carry a zod `.default(1)`: a default there would reach the panel as an explicit 1 and the derivation would never run.
 
 ## Conventions
@@ -241,6 +243,53 @@ The costs, both reported rather than worked around:
   to replace an existing one. It is not a patch, and quietly half-rewriting
   someone's hand-written style guide is worse than refusing.
 
+### The summary, and why it is not on the panel
+
+`get_house_style` answers with a digest by default (`detail: "summary"`), and
+returns the document only when asked (`detail: "full"`). The reason is what
+people did without it: an established guide got heavy enough that projects put a
+rule in their own build notes telling sessions *not* to call the tool and to read
+a hand-maintained 40-line digest instead — so the digest and the source drifted,
+and "one cheap call" was neither (issue #59).
+
+**The reading is still over the bridge; only the summarising moved.** Every
+argument in the section above is about *where the file is opened*, and that has
+not changed — the panel opens it beside the .aep and hands back the whole text.
+Summarising is a separate question, and `style/summary.ts` answers it on the
+server for two reasons:
+
+- **The panel does not update itself.** A summariser in the .jsx bundle would be
+  dark until the user reinstalled the panel and relaunched AE, and until then an
+  old panel would return the whole document to a caller that believes it asked
+  for a digest. That is worse than not shipping the feature. Server-side, it is
+  live the moment the server updates, against whatever panel is already running.
+- **ExtendScript is ES3-ish.** This is regex-heavy parsing of a markdown file
+  nobody controls; doing it there would be miserable, and untestable without AE.
+  `tests/unit/house-style-summary.mjs` runs against synthetic documents with no
+  AE and no panel.
+
+Three rules keep the digest honest, and all three are about the same failure —
+a summary that looks complete and is not:
+
+- **Recognising nothing must not return nothing.** A guide written as prose with
+  no headings and no hexes comes back `structured: false` with the *document's
+  own opening* verbatim and a note saying it could not be interpreted. An empty
+  summary would read as "this project has no rules", and the agent would go on
+  to build something plausible in the wrong colours.
+- **Everything dropped is named.** Unrecognised headings come back in
+  `sectionsOmitted`, and the capped buckets are counted in the note. The one
+  section the walk deliberately folds in is `Rules`, because it is in the
+  template this project's own style-guide guide hands out.
+- **UTF-8 has one more place to break.** Recipe 10 exists because the encoding
+  fails *silently*; putting a processing step between the file and the caller
+  adds a place for it to fail. Curly quotes, guillemets, en dashes in a size
+  range and accented font names are asserted through the summariser, not just
+  through the round trip.
+
+`set_house_style` is unchanged: still the whole file, still `overwrite: true`.
+So `detail: "full"` is not optional before an edit — read the document, merge,
+send it back.
+
 ## Build + run
 
 ```bash
@@ -274,8 +323,8 @@ That sync is **opt-in on purpose**. The installed bundle is one half of the pane
 6. `run_batch` with 50 `create_solid_layer` ops, `transactional:true` → single undo step.
 7. `run_batch` with 600 ops → returns `{jobId}` (inline cutoff is 500). With `progressToken` set, `notifications/progress` fire ~20/sec. Without it, `await_job(jobId)` resolves with the final result.
 8. `run_jsx("return app.project.activeItem.name")` → comp name. Without the `return` → `{ok:true, returned:null, undoGroup:"AE MCP: run_jsx", note}`, never a bare `null`; same for an explicit `return null`, and `undoGroup:false` in the args flips the `undoGroup` field to `false`. `return 0` / `return false` still come back as `0` / `false` — the envelope is for nothing, not for falsy. With a deliberate error → structured `AeError` with line number.
-9. `log_issue` twice with the same title → one file, `occurrences: 2`, `previouslyLogged: true`. `mark_issue_reported` then `log_issue` again → still `reported: true` (a new sighting must not un-report an entry).
-10. `get_house_style` on an **unsaved** project → `{found:false, projectSaved:false}` with a readable reason, not a throw. Save the project, `set_house_style({content})` → file appears next to the .aep. Call it again without `overwrite` → refuses and names the path. With `overwrite:true` → replaces. Non-ASCII (curly quotes, accented font names) survives the round trip — that is the UTF-8 encoding, and it fails silently if dropped.
+9. `log_issue` twice with the same title → one file, `occurrences: 2`, `previouslyLogged: true`. `mark_issue_reported` then `log_issue` again → still `reported: true` (a new sighting must not un-report an entry). The same title once more with `scope:"user"` → a *second* file under `~/.ae-mcp/issues`, `occurrences: 1`, `previouslyLogged: false`, and `alsoIn: ["project"]`. `list_known_issues` → both listed, each tagged, `journals` naming two directories, and `next` quoting a `scope:id`. `list_known_issues({id: "user:<id>"})` → the new one, `reported: false`, while the project one stays reported. From Claude Desktop (cwd `/`) the same calls → the project entry reports `scope: "home"` and the user entry still reports `scope: "user"`; they are different folders and neither is `~/.ae-mcp` for both.
+10. `get_house_style` on an **unsaved** project → `{found:false, projectSaved:false}` with a readable reason, not a throw. Save the project, `set_house_style({content})` → file appears next to the .aep. Call it again without `overwrite` → refuses and names the path. With `overwrite:true` → replaces. Non-ASCII (curly quotes, accented font names) survives the round trip — that is the UTF-8 encoding, and it fails silently if dropped. Then the summary: `get_house_style` with no args → **no `content`**, a `summary` with the palette as named hexes, `characters`/`lines` sizing the source, and a `note` naming `detail:"full"`; the same call with `detail:"full"` → the document, byte-identical to what `set_house_style` wrote, non-ASCII included. Replace the guide with a page of prose containing no headings and no hexes → `structured:false`, `head` holding the document's own opening, and a note saying it could not be interpreted — never an empty summary.
 11. `init_project` with no `dir` from a client that advertises `roots` → writes into the client's folder, `resolvedFrom: "client-root"`. From Claude Desktop (cwd `/`) → refuses with a message telling the agent to ask.
 12. Version gate, with AE running an older panel: any forwarded op → the remediation message, not `Unknown op`. `setup_panel` then the same op → "still running the previous version", naming the restart as the only fix. Restart AE → works. (`tests/unit/panel-version.mjs` covers the decision table; this recipe covers the wiring.)
 13. Partial install: with AE **open**, overwrite a client file in the installed panel (`echo x >> …/client/main.js`). `check_setup` → `panelUpToDate` FAIL naming `client/main.js`, and the next steps lead with "quit After Effects" — never "restart and try again". Restore it → green.
@@ -290,14 +339,18 @@ That sync is **opt-in on purpose**. The installed bundle is one half of the pane
 
 ## The issue journal
 
-`log_issue` is how one session hands a hard-won workaround to the next, in the folder the work happened in. Four properties matter, and all four are things it would be easy to get wrong:
+`log_issue` is how one session hands a hard-won workaround to the next. Six properties matter, and all six are things it would be easy to get wrong:
 
-- **The folder ignores itself.** `ensureJournalDir` writes `.ae-mcp/.gitignore` containing `*` on first use. That is what keeps the journal untracked — not a rule in the project's `.gitignore`, which most of these folders do not have, and which the ones that do would have to remember to add.
+- **The folder ignores itself.** `ensureJournalDir` writes `.ae-mcp/.gitignore` containing `*` on first use, in *both* journals. That is what keeps them untracked — not a rule in the project's `.gitignore`, which most of these folders do not have, and which the ones that do would have to remember to add. The user journal gets one for the same money: `~/.ae-mcp` is usually outside any repository, but a home directory that *is* one (dotfiles) is exactly where committing a private journal of half-diagnosed failures would be an unpleasant surprise.
 
-- **The title is the identity.** It is slugified into the filename, so re-logging under the same title extends the entry rather than adding a near-duplicate. Agents are told to `list_known_issues` first for exactly this reason.
-- **Reporting state belongs to the entry, not the sighting.** Re-logging a known problem preserves `reported`, `issueUrl` and `firstSeen`, and a `cause` worked out once survives a later sighting logged without one. Otherwise the user gets asked to report the same thing repeatedly, which is the fastest way to make them stop reading the offer.
+- **There are two journals, and the folder is the only thing that decides which is which.** `<project>/.ae-mcp/` holds what is true about *this* project — its footage, its comps, its files. `~/.ae-mcp/` holds what is true about the tools and about After Effects, and is read alongside the project one so a new project folder does not start ignorant of everything the last one worked out (issue #57). `log_issue` defaults to `project` and takes `scope: "user"`; `list_known_issues` merges both and tags every entry. The scope is **not** written into the file's frontmatter: these files are meant to be hand-edited and moved, and a `scope:` key could be edited into disagreeing with where the entry actually lives.
+
+- **The home fallback is not the user journal, and keeping them apart is the whole design.** `home` — `~/.after-effects-mcp/`, used when there is no usable working directory — is the *project* journal with nowhere to sit. Merging it into `~/.ae-mcp/` would be one line and would mean every Claude Desktop session's notes about one project's footage arriving in every other project dressed as curated cross-project knowledge. They stay separate directories, `scope: "home"` keeps saying what it always said, and `scope: "project"` on a read covers the fallback because that is what the fallback is. `AE_MCP_HOME` has to sandbox *both* or a test writes into whoever ran it, so it puts the user journal in a child of the override.
+
+- **The title is the identity, and it is only unique within a journal.** It is slugified into the filename, so re-logging under the same title extends the entry rather than adding a near-duplicate. Agents are told to `list_known_issues` first for exactly this reason. Two journals can now hold the same slug, and both are listed — hiding one would lose whichever the reader needed. A bare id still resolves, project first, and names the other in `next`; `"user:<id>"` addresses one exactly, and falls back to the whole string as a bare id so a title that happens to begin "user:" stays reachable.
+- **Reporting state belongs to the entry, not the sighting — and to the entry *in its own journal*.** Re-logging a known problem preserves `reported`, `issueUrl` and `firstSeen`, and a `cause` worked out once survives a later sighting logged without one. Otherwise the user gets asked to report the same thing repeatedly, which is the fastest way to make them stop reading the offer. The same lesson written down in both journals is two records of two claims: sending one to the maintainers says nothing about the other, so `mark_issue_reported` moves exactly the one its id names.
 - **The files are meant to be hand-edited.** `parse()` is deliberately forgiving: missing keys, reflowed text and deleted headings degrade one entry instead of failing the whole journal. A file with no recognised headings keeps its text as the symptom rather than being read as empty.
-- **The listing is an index, not the corpus.** `listIssues` returns one line per entry by default — id, title, tools, counts and a clipped summary — and the body is fetched with `id`. That is worth roughly 5× on a journal of a dozen entries, and a tool result is re-sent on every request for the rest of the session. The failure mode to guard against is an index that leads nowhere: an agent reads this journal *because something already failed*, so the summary has to be enough to pick an entry and the `next` pointer has to name the call that opens it. `tests/unit/issue-journal.mjs` asserts both.
+- **The listing is an index, not the corpus.** `listIssues` returns one line per entry by default — id, scope, title, tools, counts and a clipped summary — and the body is fetched with `id`. That is worth roughly 5× on a journal of a dozen entries, and a tool result is re-sent on every request for the rest of the session. The failure mode to guard against is an index that leads nowhere: an agent reads this journal *because something already failed*, so the summary has to be enough to pick an entry and the `next` pointer has to name the call that opens it — which is why the pointer spells the qualified `scope:id` form out on a real entry rather than leaving the caller to infer the syntax. Merging two journals doubles the listing, so `limit` caps it at 50 and anything held back is counted in `omitted` and repeated in `next`. `tests/unit/issue-journal.mjs` asserts all of it.
 
 The user-facing half is the offer to report. It now lives in exactly two places: the `log_issue` **tool description** carries the minimum (finish the work first, phrase it for a non-programmer, don't say "GitHub issue"), and `src/prompts/report-ae-issue.md` carries the full flow. That second one is generated into both the MCP prompt (every client) and the Claude Code command, so there is nothing to keep in sync by hand. If you change the behaviour, change those two.
 
