@@ -4,7 +4,7 @@ This file is for future Claude Code sessions working in this repo. Humans readin
 
 ## What this project is
 
-An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, footage import, audio cue placement, Motion Graphics template export, one-off screenshots, bulk batches. 71 tools. macOS and Windows — the only two platforms AE runs on.
+An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, footage import, audio cue placement, comp snapshots and diffs, Motion Graphics template export, one-off screenshots and contact sheets, bulk batches. 74 tools. macOS and Windows — the only two platforms AE runs on.
 
 It ships five ways, and the ordering below is deliberate — it goes from least to most that the user has to already have installed:
 
@@ -199,8 +199,8 @@ would otherwise grow it without limit.
 ## Guidance and how it reaches an agent
 
 Tool descriptions cover one tool each. The knowledge that actually costs people
-time is cross-cutting — ids not indexes, read then write then verify, the
-spatial-ease array trap — and belongs to no single tool. The carriers for it, in
+time is cross-cutting — ids not indexes, read then write then verify, which of
+three bridge failures is safe to re-send — and belongs to no single tool. The carriers for it, in
 descending order of reach:
 
 | Carrier | Reaches | Cost |
@@ -239,9 +239,10 @@ Three rules that keep this honest:
   load-bearing: the generator refuses to build a reference whose parent does not
   name `references/<name>.md`, because a reference nothing points at is a file
   that is never read and never noticed. Two ship today, both under
-  `after-effects`: `extendscript-gotchas` (issue #48 — seven KB of `run_jsx`
-  traps that only matter to an agent about to script) and `whats-new` (issue #60
-  — the version deltas users were otherwise keeping in their own project notes).
+  `after-effects`: `extendscript-gotchas` (issue #48 — ten KB of `run_jsx` traps
+  and the helpers that already solve them, which only matter to an agent about to
+  script) and `whats-new` (issue #60 — the version deltas users were otherwise
+  keeping in their own project notes).
 
 Where a fact goes, in one line: an agent cannot infer it from the tool list *and*
 getting it wrong on the first call costs real work → `instructions`; it is part
@@ -491,6 +492,7 @@ That sync is **opt-in on purpose**. The installed bundle is one half of the pane
 13. Partial install: with AE **open**, overwrite a client file in the installed panel (`echo x >> …/client/main.js`). `check_setup` → `panelUpToDate` FAIL naming `client/main.js`, and the next steps lead with "quit After Effects" — never "restart and try again". Restore it → green.
 14. Missing dependency: `rm -rf …/games.engine-room.ae-mcp/node_modules/ws`, restart AE. The panel shows "cannot start — the ws module is missing" with the fix in its log, rather than "starting…". `check_setup` → `panelDependencies` FAIL naming the path, not just `bridgeReachable` FAIL.
 15. Scoped reads, on a comp with a keyframed shape layer: `list_layers({compId})` and `list_layers({compId, include: []})` → the second is id/index/name/sourceType only, same layers, same ids. `get_layer_full` with no `include` → byte-identical to before the scoping params existed, save for the shape-layer material groups that recipe 20 covers. With `include: ["transform","bounds"]` → those two sections plus the header, and an `included` echo. With `maxKeyframes: 4` on a property with more → four keyframes, `keyframesOmitted` and a `keyframesTruncated` note naming the count. With `shapeDepth: 1` → `childrenOmitted` on the groups the walk stopped at. `screenshot_frame({compId})` on a 3840×2160 comp → 1280×720 back with `downsample: 3`; the same call with `downsample: 1` → full resolution; the comp's own resolution is unchanged in the viewer afterwards.
+16. Compiled binary, the one no unit test reaches: run the built binary from an empty directory *and* from `/`, and confirm `setup_panel` installs a populated `node_modules/ws`. Under `bun --compile` the module resolver returns a bare specifier rather than throwing, so this path cannot be exercised under plain Node — see the `require.resolve` note in Known fragile areas.
 17. `import_footage` on an SVG with `viewBox="0 0 278050 333334"` and no width/height → refuses, names both aspect ratios, and the item is **gone** from `get_project_summary`. The same file with `force:true` → the item stays and `validation.ok` is false. A `0 0 512 512` SVG imports clean, and `create_footage_layer` + `screenshot_frame` shows it rendering. (The broken one, forced into a comp, produces no PNG at all — that is the bug, not a tooling failure.)
 18. `export_mogrt` on a comp with a text layer in a non-Adobe font → returns in a few seconds with no dialog in AE, and `fonts` names the font. With `suppressDialogs:false` → a modal dialog appears and the call blocks until it is clicked; that is the control, and it is worth running once because the whole tool rests on it. Called twice with the same `name` → refuses the second, then replaces with `overwrite:true`. On a project that has never been saved → refuses with a message naming the save, not a dialog.
 19. `.mogrt` thumbnail: give the comp an empty first frame (keyframe every layer's opacity 0 → 100 over the first second), export with no `posterTime` → `thumb.png` inside the zip is solid black. Export again with `posterTime` past the fade → `thumbnail.patched: true` and the frame is in there at AE's own thumbnail dimensions. Unzip and check the *other* entries are byte-identical; a corrupt `project.aegraphic` would not show up in the picture.
@@ -508,8 +510,6 @@ That sync is **opt-in on purpose**. The installed bundle is one half of the pane
 30. `duplicate_comp({compId})` on a comp with a precomp layer → new id, name `<name> 2`, and the copy's precomp layer resolves to the **same** nested comp as the original (that is the shallow contract; the result says so). The same call with `deep:true` → the copy points at its own nested comp, editing that one leaves the original alone, and a nested comp used by three layers is duplicated **once** with all three re-pointed at it. `folderId` pointing at a comp instead of a folder → refused, naming the id and what it actually is, with nothing created. `nameSuffix:" [v2]"` where `<name> [v2]` already exists → the copy gets `… [v2] 2`, and the existing item keeps its name.
 31. Frame integrity, on the comp that produced issue #45 — a heavy assembly, ~88 layers: a nested full-frame background precomp plus several shot precomps, at 4K. Build one if there isn't one: a 3840×2160 comp, a 1080p precomp scaled to fill with a blur and a glow on it, then six shot precomps each holding a dozen keyframed shape and text layers, all nested in. `screenshot_frame({compId})` → an image, or a message that says which of the two failures it was — never `truncated PNG` reaching the client, and never a picture that is a picture of something else. Repeat it four or five times at downsample 4, 6 and 8; if any call fails it must fail as **Corrupt frame** or **Render timed out**, with different advice under each, and a second failure at a different time must still say the same thing rather than turning into `Stale frame`. Watch the panel log: a corrupt read logs "re-rendering once", exactly once per call.
 32. Contact sheet: on a comp with something moving across the frame, `screenshot_frame({compId, times:[0, 1, 2]})` → **one** image, three cells left to right, `0s`/`1s`/`2s` burned into the top-left of each, `cols:3 rows:1`, and `tiles` naming each time and status. The sheet should be about the size a single `screenshot_frame` of that comp returns — compare `bytes` against one. `times` plus `time` in the same call → refused by the schema before it reaches AE. `times:[0,1,2], downsample:1` → full-resolution tiles, so an explicit factor still wins. On a comp with a **static** first second, `times:[0, 0.3, 0.6]` → three tiles, all `ok`, with `pixel-identical to the 0s tile` in the notes and no `Stale frame` error. On the heavy comp from recipe 31, expect a `FAILED` block sooner or later: the other tiles must still be there and `warning` must name the one that is not.
-
-16. Compiled binary, the one no unit test reaches: run the built binary from an empty directory *and* from `/`, and confirm `setup_panel` installs a populated `node_modules/ws`. Under `bun --compile` the module resolver returns a bare specifier rather than throwing, so this path cannot be exercised under plain Node — see the `require.resolve` note in Known fragile areas.
 
 ## The issue journal
 

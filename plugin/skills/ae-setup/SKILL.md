@@ -17,14 +17,37 @@ Assume the person you are helping is a motion designer, not a developer. They sh
 
 ## A timeout is not a disconnection
 
-Before you start any repair, check which failure you actually have. "The panel did not answer within N seconds" and "cannot reach the panel" are opposite diagnoses:
+Before you start any repair, work out which of **three** failures you have. They
+read alike and their remedies contradict each other:
 
-- **Did not answer** — something is listening; it is just too busy to reply. After Effects is single-threaded, so a long script or a modal dialog waiting for a click blocks it completely. Nothing is broken and nothing needs installing.
-- **Cannot reach** — nothing is listening. That is the case the repair path below is for.
+- **Did not answer in time** — something is listening; it is just too busy to
+  reply. After Effects is single-threaded, so a long script or a modal dialog
+  waiting for a click blocks it completely. Nothing is broken and nothing needs
+  installing. The call **did** reach After Effects and may still be running, so
+  do not re-send it.
+- **Cannot reach** — nothing is listening. That is the case the repair path
+  below is for.
+- **Waited behind another op for the write queue and was dropped** — the panel
+  is fine and this call never left the server, so nothing in the project was
+  changed. Writes are serialized because After Effects applies every change
+  through one undo stack, and something in front is taking a very long time,
+  usually a long `run_batch`. Re-sending **is** safe here, once the work in
+  front has finished; this is the one of the three where it is. Find out what is
+  in front with `get_job` or `await_job` — reads are never queued, so `list_`
+  and `get_` calls still answer.
+
+The message itself tells you which one you have; the queue error says in as many
+words that nothing was written. Never collapse them into "the bridge is playing
+up", because "re-send it" and "do not re-send it" are the two answers.
 
 On a timeout, `check_setup` says so itself: `bridgeReachable` reports that the port accepted the connection but did not answer in time, and `nextSteps` tells you to wait. Follow it. Re-running `setup_panel` or restarting After Effects here costs the user their work-in-progress for nothing, and both are the wrong move. Poll `check_setup` for about a minute; it usually clears on its own.
 
 Two things to ask about while waiting: whether a dialog is sitting behind another window in After Effects, and — on macOS — whether they have switched to another desktop. Calls have been reported to stall while the user is on a different Space and to complete as soon as they come back.
+
+A **full** write queue is a fourth message and a different instruction again:
+too many calls are already waiting, so stop issuing writes and let it drain. If
+you have that much independent work, send it as one `run_batch` — one
+ExtendScript pass, one undo step, one place in the queue.
 
 ## Install before they open After Effects, if you still can
 

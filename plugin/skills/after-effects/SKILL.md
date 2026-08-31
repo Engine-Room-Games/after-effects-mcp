@@ -27,6 +27,15 @@ sitting next to the `.aep` file. Call it once at the start of any build task and
 follow what it says. It costs one cheap call and it is the difference between
 work that matches everything else the user has made and work that does not.
 
+What comes back is a **digest**, not the document: the palette as named hexes,
+the type, the motion defaults, the layout rules, and a note naming anything it
+could not summarise. That is a few hundred tokens and it is what you build from.
+Pass `detail: "full"` when you need the guide's own wording — and always before
+`set_house_style`, which replaces the whole file, so you have to send the merged
+document rather than a patch. A guide written as unstructured prose comes back
+`structured: false` with its opening text, which is an honest "I could not read
+this as a spec", not an empty answer.
+
 If it reports `found: false`, build with sensible defaults and offer once, at the
 end, to capture a style guide from what you just made. Don't nag about it.
 
@@ -41,6 +50,14 @@ Never guess at project state. Cheap reads exist for exactly this:
 | What's in this comp? | `get_comp_tree` |
 | Everything about one layer | `get_layer_full` ⭐ |
 | Where is a layer, by name/type/effect? | `find_layers` |
+| What did my last change actually do? | `snapshot_comp` → `diff_comp` ⭐ |
+
+**Making a variant of something** is `duplicate_comp`, which returns the new id
+so you never go looking for it by name. Its default is a **shallow** copy, the
+same as AE's own Duplicate: the copy's precomp layers point at the *same* nested
+comps, so editing one edits both. That is right for "another version of this
+shot" and wrong for "a variant of this rig" — for that pass `deep: true`, which
+duplicates the nested comps too and re-points the copy at them.
 
 `get_layer_full` is the one to reach for. It returns transforms **with their keyframes and expressions**, effects with every parameter, masks, markers, and `sourceRect` (the layer's visible bounds) in a single call. Prefer one `get_layer_full` over four narrow queries — it is faster and it shows you context you did not know to ask for.
 
@@ -71,24 +88,61 @@ The same trap bites inside `run_jsx`: a `comp.layer(1)` wrapper is index-bound, 
 
 Property values are the ground truth. A screenshot tells you something *looks* wrong; `get_layer_full` tells you *why*.
 
+### Verify with a diff, not a second full read
+
+Re-reading a comp to see what changed makes you compare two large answers by eye,
+and you pay for both for the rest of the session. Fingerprint it instead:
+
+- `snapshot_comp({compId})` **before** the write returns a `snapshotId` and
+  almost nothing else. `diff_comp({since})` afterwards returns only what moved —
+  layers added, removed, renamed, retimed, re-parented, keyframe counts that
+  changed, expressions and effects gained or lost — and a count of the layers
+  that did not. Tens of tokens where the two reads were thousands.
+- `run_jsx` and `run_batch` take `diff: true`, which does the same thing *inside*
+  the call, so there is no window between the write and the fingerprint. On a
+  failure the diff rides on the error, which is the cheapest way to find where a
+  half-applied script stopped — nothing rolls back, so that is the question you
+  will actually have.
+
+Know what a fingerprint does **not** record: property values, expression text,
+effect parameters, masks and shape contents. So `changeCount: 0` means none of
+the recorded fields moved — not that the comp is unchanged. Retype a text layer
+or change a colour and the diff is empty and correct. For "is this value right",
+read the property.
+
 ## Screenshots are a diagnostic, not a feedback loop
 
 `screenshot_frame` and `screenshot_layer` are **one-off checks**. Do not screenshot every frame, do not scrub through time, do not screenshot after every edit.
 
-- Take at most 2–3 across an animation — typically start, middle, end.
-- **An image is the most expensive result this server returns**, and like every result it stays in your context for the rest of the session. Two or three frames is a budget for a whole build, not for one edit.
-- **The `downsample` is picked from the comp size** unless you pass one — 2 at 1080p, 3 at 4K, aiming at a long edge around 1280px. Pass `downsample: 1` only when you genuinely need full resolution: a full 4K frame is large enough to blow out your context in one call.
+**To judge motion, ask for a contact sheet — one call, not three.**
+`screenshot_frame({compId, times: [0, 1, 2]})` takes two to six times and returns
+a *single* tiled image with the time burned into each tile, held to roughly the
+pixel budget of one frame. It is cheaper than separate calls, it is one image
+resident in your context instead of three, and it gives After Effects one render
+request instead of three back-to-back ones — which is the pattern most likely to
+come back stale. `time` and `times` are mutually exclusive. There is no `times`
+on `screenshot_layer`.
+
+- **An image is the most expensive result this server returns**, and like every result it stays in your context for the rest of the session. One sheet is a budget for a whole build.
+- **The `downsample` is picked from the comp size** unless you pass one — 2 at 1080p, 3 at 4K, aiming at a long edge around 1280px, and per tile on a sheet. Pass `downsample: 1` only when you genuinely need full resolution: a full 4K frame is large enough to blow out your context in one call.
 - The result reports the dimensions actually returned and the factor actually applied — trust those numbers rather than assuming.
-- **Space them out.** Rapid back-to-back requests are far more likely to come back stale than requests a few seconds apart.
+- **Space single frames out.** Rapid back-to-back requests are far more likely to come back stale than requests a few seconds apart. A sheet does this for you.
 
-Two results are not images, and both are information rather than something to retry blindly:
+### The four results that are not a picture
 
-- **`Stale frame` (an error)** — After Effects returned the pixels it had already rendered for a *different* request, which the error names. Pause a few seconds and retry with a higher `downsample`; `6` has worked where `3`–`4` stayed stale. If it repeats, read the keyframes instead.
+They have different causes and opposite remedies, so read which one you got
+before you retry anything.
+
+- **`Stale frame`** — After Effects returned pixels it had already rendered for a *different* request, which the error names. Wait a few seconds and retry at a higher `downsample`; `6` has worked where `3`–`4` stayed stale. If two frames of a genuinely static comp really are identical, a different `downsample` renders a different number of pixels and proves it.
+- **`Corrupt frame`** — the render stopped writing and the file is not a whole PNG, so nothing was sent. **This is not a timeout.** It tracks how heavy the comp is: retry at `downsample` 6–8, or screenshot the shot precomps one at a time instead of the assembly.
+- **`Render timed out`** — After Effects was still working when the panel gave up. The render is probably still going, so wait a few seconds before doing anything else; a retry issued now queues behind it.
 - **`empty: true`** — every pixel at that time is fully transparent, so no image was sent. That is a fact about the composition: usually the wrong time, a layer outside its in/out points, disabled, or at zero opacity.
+
+On a contact sheet a single bad tile is drawn as a marked block and named in `warning` — the rest of the sheet is still good, so read it rather than re-requesting the whole thing.
 
 **Never disable layers to make a screenshot render.** A frame that will not render is a limit of the panel's render path, not project content that needs fixing — and it is very easy to leave someone's comp switched off afterwards.
 
-To check motion, read the keyframe values. That is exact; a picture is not.
+To check motion exactly, read the keyframe values. A picture tells you it looks wrong; `get_keyframes` tells you why.
 
 ## Bulk work goes through run_batch
 
@@ -96,6 +150,18 @@ Building 40 layers with 40 separate calls is slow and produces 40 undo steps. `r
 
 - `transactional: true` (the default) rolls back the whole batch on the first error.
 - Over 500 ops it returns a `jobId` and streams progress; call `await_job(jobId)` for the final result.
+- `diff: true` appends a structural diff of the comps it touched, so the batch reports what it did rather than you reading the comp back.
+
+**You do not have to issue writes one at a time.** The server holds a single
+write lock for the whole session, so independent writing calls sent together are
+run in the order you issued them, one after another, and a long `run_batch` keeps
+the lock until its last chunk lands — which is what stops another call splitting
+its undo step in half. A call that had to wait says so with `queuedBehind` and
+`waitedMs`; a call that did not is unchanged. Reads are never queued, so
+`list_layers`, `get_layer_full` and `await_job` still answer while a batch runs.
+
+Prefer `run_batch` anyway when the work is one user action: it is one
+ExtendScript pass rather than many, and one undo step rather than many.
 
 ## Keyframes and easing
 
@@ -105,7 +171,7 @@ Building 40 layers with 40 separate calls is slow and produces 40 undo steps. `r
 - `set_temporal_ease` — influence and speed, the "easy ease" controls.
 - `set_spatial_tangents` — the shape of a motion path through a position keyframe.
 
-**The array-size trap.** `set_temporal_ease` wants one ease entry *per dimension* for ordinary multi-dimensional properties (Scale, Color), but exactly **one** entry for spatial properties (Position, Anchor Point) regardless of whether the layer is 2D or 3D — because the ease applies along the motion path, not per axis. If you see `Value array does not have 1 elements`, you fed a spatial property one entry per axis.
+**Pass one `{influence, speed}` pair per side and nothing else.** `set_temporal_ease` and `add_keyframe` size the ease array themselves and report what the property wanted as `easeDimensions`. That number is worth glancing at, because it is not derivable from the value: a 2D layer's Scale takes 2, a shape's Ellipse Size takes 3, Opacity and sliders take 1, and a spatial property — Position, Anchor Point — takes exactly 1 whether the layer is 2D or 3D, since the ease runs along the motion path rather than per axis. Getting it wrong by hand throws a bare `parameter 2`, which is why you no longer do it by hand. If you are easing a property from `run_jsx` instead, use the `ease()` helper — it is the same sizing code, not a second copy of it.
 
 ## Rigging
 
@@ -160,6 +226,8 @@ Tracking is set to `0` unless you pass one, because AE's `addText()` otherwise i
 
 ## Shapes
 
+`create_shape_layer` puts the new layer's origin at `[0,0]` with its anchor at `[0,0]`, so **the layer's coordinate space is the comp's** and every vertex, rect position and path you add afterwards is in comp pixels. After Effects' own spawn point is the comp centre, which silently offsets a drawing authored in comp coordinates by half a frame; pass `position: "center"` if you want that back, or any `[x,y]` to place the origin yourself. The result echoes the position and anchor it ended up with.
+
 `add_shape_content` builds one node at a time under `Contents` — `rect`, `ellipse`, `star`, `path`, `fill`, `stroke`, `trim`, `repeater`, `merge`, `group`. Properties are set with friendly names in the same call (`size`, `position`, `roundness`, `color`, `width`, `lineCap`, …).
 
 This tool is **all-or-nothing**: if a key cannot be applied, the whole node is removed and you get an error naming the bad key. A success result therefore means everything landed. Don't add defensive re-reads for it, but do read the error carefully — it usually means the property is named differently on that node type, and `get_layer_full` will show you the real name.
@@ -170,11 +238,29 @@ For a custom path, use `{type: "path", vertices: [[x,y], …], closed: true}`. T
 
 **Node references go stale.** Adding a sibling to a group invalidates a reference you already hold to another node in it — add a Stroke and an earlier Fill reference starts throwing `Object is invalid`. Add every node first, then set values and expressions by addressing nodes by name.
 
+## Sound
+
+`place_audio_cues` scores a scene in one call: a list of cues — each a file (or an
+already-imported `footageId`), a comp `time` and a `levelDb` — becomes one
+audio layer each, imported once however many cues name the same file, named,
+trimmed, labelled, in a single undo step. Reach for it the moment you are placing
+more than two or three sounds.
+
+It is all-or-nothing: every cue is checked (the file exists, the item has an
+audio track, the time is inside the comp) before a single layer is made, and if a
+later one still fails, everything the call created is removed and the error names
+the cue by index. `dryRun: true` checks a list against the project without
+importing, creating, or even adding an undo step. `levelDb` is decibels, AE's own
+unit — `0` is the file as recorded, negative is quieter — and `inPoint`/`outPoint`
+trim in **comp** time, not file time.
+
 ## The escape hatch
 
-`run_jsx` executes arbitrary ExtendScript with `app`, `comp`, `OPS` and the helper functions in scope. Reach for it when a needed operation has no tool — duplicating a comp, driving the render queue, batch-renaming.
+`run_jsx` executes arbitrary ExtendScript. Reach for it when a needed operation has no tool — driving the render queue, batch-renaming, a bulk edit no single op expresses. Check the tool list first: duplicating a comp, easing a keyframe and placing a shape layer at a sane origin all have tools now, and each of them wraps a trap you would otherwise hit.
 
 **Read the gotchas before you write one** — `ae_guide({topic: "extendscript-gotchas"})`, or `references/extendscript-gotchas.md` beside this file. It is the list of things that fail while naming something else: a property lookup that returns null and surfaces twenty lines later, a `copyToComp` that does not insert where you think, a reserved word that stops the whole script before its first line. Every item on it has already cost somebody an aborted run.
+
+The reference also carries the two things that make a script cheap to write: `scriptPath` and `libraries`, which keep a long script and its shared helpers out of the conversation entirely, and the helpers already in scope — including the whole `OPS` table, so every tool on this server is callable from inside a script.
 
 ExtendScript is **single-threaded**, so a long synchronous loop freezes the user's AE UI. Keep the script short.
 
@@ -182,7 +268,7 @@ ExtendScript is **single-threaded**, so a long synchronous loop freezes the user
 
 **A bare expression is not a return.** `"ping";` as the last line yields nothing, and so does any script that just does its work. That case comes back as `{ok: true, returned: null, undoGroup, note}` — an envelope that says *the script ran to completion*. Do not re-run it. Nothing rolls back, so a second run of a script that duplicated a layer, reordered content or wrote keyframes applies all of it twice; read the state back instead, and add an explicit `return` if you want a value.
 
-The same holds after an error: a script that fails halfway leaves everything before the failure applied, and the reported line number does not reliably map to your source. Read the state back to find where it stopped.
+**On a failure, read the error before you touch anything.** It names the line of *your* script and prints that line's text; when the number cannot be mapped honestly it says so rather than guessing at one. Everything above that line already ran and nothing rolls back — so find out what landed, never re-run the script to see whether it fails again. `diff: true` is the fast way to find out: it fingerprints the comp around the script and appends only what changed, and on a throw that diff rides on the error message.
 
 ### Exporting a Motion Graphics template
 
@@ -227,6 +313,11 @@ index, so open the entry that looks like your failure with
 `list_known_issues({id})` — the cause and the workaround are in the entry, not in
 the index. `tool` and `query` narrow it further.
 
+There are two journals and every entry says which it came from. `project` is
+this project's own notes; `user` travels with the person across every project.
+Ids are only unique within a journal, so open an entry with the qualified form
+the listing's `next` pointer shows you — `list_known_issues({id: "user:…"})`.
+
 **`log_issue`** — write down what you worked out, the moment you work it out.
 
 Log something when all three are true: it cost real effort, it was the tool's
@@ -239,6 +330,12 @@ Write the entry for someone who has not seen the failure: the exact error text,
 the call that produced it, and a workaround concrete enough to apply directly.
 Reuse the existing title when you are extending an entry — that keeps one good
 record instead of five thin ones.
+
+**Pick the scope by what the entry is about, not by where you are.** Leave it at
+the default `project` for this project's footage, comps or files. Pass
+`scope: "user"` when it is about how these tools or After Effects behave — that
+is nearly everything worth logging, and it is the difference between the next
+project starting out knowing it and re-learning it.
 
 ### Then offer to pass it on
 
@@ -277,3 +374,12 @@ So when a call times out: do not re-send it (you would queue the same work twice
 - **They changed desktop.** On macOS, calls have been reported to stall while the user is on a different Space and to complete as soon as they return. If they have wandered off, ask them to switch back to the desktop After Effects is on before you diagnose anything else.
 
 If a specific operation of yours legitimately needs longer than the limit, the user can raise it by setting `AE_MCP_OP_TIMEOUT_MS` in the server's environment.
+
+**A dropped write is the opposite case, and it is safe to re-send.** If a call
+comes back saying it *waited behind* another op for the write queue and was
+dropped without running, the bridge is fine and nothing reached After Effects.
+Something in front is slow — usually a long `run_batch`, occasionally a modal
+dialog. Find out what with `get_job` or `await_job`; reads are never queued, so
+`list_*` and `get_*` still answer and will tell you the current state. Then
+re-send once the work in front has finished. That is exactly what you must *not*
+do after a bridge timeout, so read which of the two you got.
