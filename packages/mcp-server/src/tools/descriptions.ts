@@ -88,7 +88,12 @@ export const descriptions: Record<string, string> = {
   screenshot_layer: "ONE-OFF visual check of a single layer (solo'd) at a time. Same one-off rule and same downsample guidance as screenshot_frame. The same 'Stale frame', 'Corrupt frame', 'Render timed out' and `empty:true` non-image results apply. No `times` here — contact sheets are screenshot_frame only.",
 
   // ---------- batch ----------
-  run_batch: "Many ops in one ExtendScript pass, one undo step. >500 ops returns a jobId + streams progress; use await_job. transactional:true (default) rolls back on first error. `diff:true` appends a structural diff of the comps the batch touched — what it added, retimed, re-parented and keyframed — and on a failure that diff rides on the error, which is the cheapest way to find where a half-applied batch stopped.",
+  run_batch:
+    "Many ops in one ExtendScript pass — far faster than the same ops as separate calls, and far fewer undo steps. " +
+    "**Up to 500 ops it is exactly one undo step.** Over 500 it is chunked into a background job (returns a jobId, streams progress, finish with await_job) and lands as **one undo step per chunk of 25** — around 24 steps for 600 ops — because After Effects discards an undo group that spans two script calls. Every result reports the measured count in `undoSteps` with a `note`: read it before you tell anyone how to undo the work, and never say \"one Cmd-Z\" for a chunked batch. " +
+    "`singleUndo:true` forces one undo step at any size up to 2000 ops, by running the whole batch in one blocking call — After Effects' interface is frozen for the duration and no progress is reported, so use it only when a single Cmd-Z actually matters to the user. Over 2000 it is refused rather than freezing AE. " +
+    "transactional:true (default) stops at the first error; nothing rolls back either way — the ops before it stay applied, so read the state back rather than re-running. " +
+    "`diff:true` appends a structural diff of the comps the batch touched — what it added, retimed, re-parented and keyframed — and on a failure that diff rides on the error, which is the cheapest way to find where a half-applied batch stopped.",
 
   // ---------- explore ----------
   get_project_summary: "Project state: path, item count, active item, flat item list with type (comp | footage | solid | folder | unknown — same vocabulary as a layer's sourceType).",

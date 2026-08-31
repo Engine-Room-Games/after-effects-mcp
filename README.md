@@ -254,7 +254,7 @@ If you forget the second step, nothing breaks silently: the next thing you ask f
 A few behave differently from the rest:
 
 - **`get_layer_full`** returns a layer's transforms with their keyframes and expressions, every effect with every parameter, masks, markers and visible bounds — in one call.
-- **`run_batch`** runs many operations in a single pass and counts as one undo step. Long batches stream progress.
+- **`run_batch`** runs many operations in a single pass. Up to 500 of them that is one undo step; past that it runs in the background, streams progress, and lands as one undo step per chunk — After Effects will not keep a single undo group across a long job, so the result tells the assistant exactly how many steps the work took. Ask for a single undo step at any size with `singleUndo`, at the cost of freezing After Effects until it finishes.
 - **`screenshot_frame`** and **`screenshot_layer`** are for occasional checks, not for reviewing motion frame by frame. To judge movement, `screenshot_frame` takes several times at once and returns them as one labelled contact sheet — one image instead of several. On large comps it renders at reduced resolution unless you ask otherwise.
 - **`import_footage`** checks what After Effects actually produced. An SVG whose `viewBox` asks for one shape and imports at another is a known After Effects bug that renders as nothing at all, with no error — so the import is refused and explained rather than left to fail silently later.
 - **`export_mogrt`** writes a Motion Graphics template for Premiere. It suppresses the modal dialogs that would otherwise sit there waiting for a click, and can set the thumbnail from any frame you choose, rather than the first one — which is usually black if the comp fades up.

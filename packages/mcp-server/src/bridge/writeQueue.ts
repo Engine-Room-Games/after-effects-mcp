@@ -6,15 +6,21 @@ import { logger } from "../util/logger.js";
  *
  * The panel already serializes every individual `evalScript`, so two ordinary
  * writes cannot interleave *inside* one op. What it does not serialize is the
- * gap around a long `run_batch`: that handler opens `app.beginUndoGroup` and
- * returns the `{jobId, async}` envelope immediately, then the panel drives
- * `_continue_job` in chunks with the group still open. Every chunk is its own
- * turn on the panel's chain, so any other op issued meanwhile slots in between
- * two chunks — and because AE's undo groups do not nest, that op's own
- * `endUndoGroup()` closes the *batch's* group. The rest of the batch then
- * writes outside any group. That is the undo interleaving issue #55 reports,
- * and closing it is why a lease can be held past the call that took it
+ * gap around a long `run_batch`: that handler returns the `{jobId, async}`
+ * envelope immediately and the panel then drives `_continue_job` in chunks.
+ * Every chunk is its own turn on the panel's chain, so any other op issued
+ * meanwhile slots in *between* two chunks. That is the interleaving issue #55
+ * reports, and closing it is why a lease can be held past the call that took it
  * (`extendUntil`).
+ *
+ * Issue #55 described the damage as an undo group being closed early by the
+ * interloper's own `endUndoGroup()`. That reading was wrong in one detail: the
+ * batch's group was already gone, because After Effects discards a group opened
+ * in one `evalScript` and closed in another (issue #69). Each chunk now opens
+ * and closes its own group, so an interleaved write can no longer break one.
+ * The lease is still held for the whole job, for the reason that survives:
+ * a batch is one thing the caller asked for, and a write dropped into the
+ * middle of it runs out of the order the agent issued it in.
  *
  * Reads never come here. They are unaffected by an open undo group, and
  * screenshots are the slowest thing in the system — putting them behind this
@@ -34,9 +40,9 @@ export interface WriteLease {
   /**
    * Keep the lock past `release()` until `p` settles.
    *
-   * For `run_batch`: the panel answers with a jobId while the batch's undo
-   * group is still open, so the lock has to outlive the HTTP call that took it.
-   * Rejections are swallowed — a failed job still ends the undo group.
+   * For `run_batch`: the panel answers with a jobId while the batch is still
+   * running in chunks, so the lock has to outlive the HTTP call that took it.
+   * Rejections are swallowed — a failed job still frees the queue.
    */
   extendUntil(p: Promise<unknown>): void;
   /** Idempotent. A no-op after the first call. */

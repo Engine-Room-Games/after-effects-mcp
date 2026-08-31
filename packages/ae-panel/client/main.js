@@ -403,10 +403,17 @@
   }
 
   // ---------- Long job continuation loop ----------
-  function driveJob(jobId, progressToken) {
+  // Each turn of this loop is one evalScript, and each one now opens and closes
+  // its own undo group inside itself — a group cannot span two calls, because
+  // After Effects discards one that does (issue #69). So the chunk size is not
+  // only a pacing knob any more: it decides how many undo steps a long batch
+  // costs the user. It comes off the job envelope so the JSX side owns the
+  // number and the two cannot drift.
+  function driveJob(jobId, progressToken, chunkSize) {
     var totalGuess = null;
+    var size = chunkSize || 25;
     function step() {
-      return runOp("_continue_job", { jobId: jobId, chunkSize: 25 }).then(function (res) {
+      return runOp("_continue_job", { jobId: jobId, chunkSize: size }).then(function (res) {
         if (res.total) totalGuess = res.total;
         if (!res.done) {
           broadcast({ type: "progress", jobId: jobId, progress: res.progress, total: res.total, message: "running" });
@@ -414,11 +421,37 @@
           return new Promise(function (r) { setTimeout(r, 0); }).then(step);
         }
         if (res.failed) {
-          broadcast({ type: "error", jobId: jobId, error: res.error || "batch failed" });
-          return { done: true, failed: true, jobId: jobId, error: res.error, results: res.results, errors: res.errors, atIndex: res.atIndex };
+          // A failed job reaches the server as an error string and nothing else,
+          // so what the batch cost has to travel inside it or it is lost: the
+          // ops before the failure are applied and stay applied.
+          var failedMsg = (res.error || "batch failed") + (res.note ? " || " + res.note : "");
+          broadcast({ type: "error", jobId: jobId, error: failedMsg });
+          return { done: true, failed: true, jobId: jobId, error: res.error, results: res.results, errors: res.errors, atIndex: res.atIndex, undoSteps: res.undoSteps, note: res.note };
         }
-        broadcast({ type: "complete", jobId: jobId, result: { results: res.results, errors: res.errors, total: res.total || totalGuess, cancelled: !!res.cancelled } });
-        return { done: true, jobId: jobId, results: res.results, errors: res.errors, total: res.total || totalGuess, cancelled: !!res.cancelled };
+        // `undoSteps` is the measured number of undo groups the batch opened,
+        // and `diff` is the batch's own before/after — both are only ever seen
+        // by the agent if they are carried on this event.
+        broadcast({
+          type: "complete",
+          jobId: jobId,
+          result: {
+            results: res.results,
+            errors: res.errors,
+            total: res.total || totalGuess,
+            cancelled: !!res.cancelled,
+            undoSteps: res.undoSteps,
+            undoGroupName: res.undoGroupName,
+            note: res.note,
+            diff: res.diff,
+          },
+        });
+        return {
+          done: true, jobId: jobId,
+          results: res.results, errors: res.errors,
+          total: res.total || totalGuess, cancelled: !!res.cancelled,
+          undoSteps: res.undoSteps, undoGroupName: res.undoGroupName,
+          note: res.note, diff: res.diff,
+        };
       });
     }
     return step();
@@ -746,10 +779,21 @@
     if (op === "run_batch") {
       return runOp(op, args).then(function (res) {
         if (res && res.async && res.jobId) {
-          driveJob(res.jobId, progressToken).catch(function (e) {
+          driveJob(res.jobId, progressToken, res.chunkSize).catch(function (e) {
             broadcast({ type: "error", jobId: res.jobId, error: e.message });
           });
-          return { jobId: res.jobId, async: true, total: res.total };
+          // The undo fields ride out with the envelope so the agent is told the
+          // batch will be several steps *before* it goes and says otherwise —
+          // the final count arrives much later, on the completion event.
+          return {
+            jobId: res.jobId,
+            async: true,
+            total: res.total,
+            chunkSize: res.chunkSize,
+            undoStepsEstimate: res.undoStepsEstimate,
+            undoGroupName: res.undoGroupName,
+            note: res.note,
+          };
         }
         return res; // small batch: inline result already
       });

@@ -337,7 +337,11 @@ export function createServer() {
 
       // Async envelope handling for run_batch
       if (ASYNC_OPS.has(name) && isAsyncEnvelope(result)) {
-        const env = result as { jobId: string; async: true; total: number };
+        const env = result as {
+          jobId: string; async: true; total: number;
+          chunkSize?: number; undoStepsEstimate?: number;
+          undoGroupName?: string; note?: string;
+        };
         jobs.register(env.jobId, env.total);
         if (progressToken !== undefined) {
           jobs.bindProgressEmitter(env.jobId, (jid, progress, total, message) => {
@@ -348,12 +352,14 @@ export function createServer() {
           });
         }
         // This is the gap the panel's own mutex leaves, and the reason this
-        // queue exists at all. `run_batch` opened `app.beginUndoGroup` and
-        // handed back a jobId; the panel now drives `_continue_job` chunk by
-        // chunk with that group still OPEN. Each chunk is its own turn on the
-        // panel's evalScript chain, so releasing the lock here lets the next
-        // write land between two chunks — inside the batch's undo group, whose
-        // `endUndoGroup()` then closes it early. Hold the lock until the job
+        // queue exists at all. `run_batch` handed back a jobId and the panel now
+        // drives `_continue_job` chunk by chunk; each chunk is its own turn on
+        // the panel's evalScript chain, so releasing the lock here would let the
+        // next write land *between* two chunks. That is still wrong even now
+        // that each chunk carries its own undo group (issue #69 removed the
+        // group that used to span them): the batch is one thing the caller
+        // asked for, and another write interleaved into the middle of it runs
+        // out of the order it was issued in. Hold the lock until the job
         // reports done.
         //
         // `await_job` is server-resident and never takes this lock, so an agent
@@ -363,7 +369,21 @@ export function createServer() {
         // below it — a shorter one here would release the lock mid-batch while
         // a writer that queued at the same moment was still waiting.
         lease?.extendUntil(jobs.waitFor(env.jobId, writes.holdCeilingMs));
-        return textResult({ jobId: env.jobId, async: true, total: env.total }, wait);
+        // The undo fields travel with the envelope because this is the only
+        // message the agent sees before it starts describing the work to the
+        // user; the measured count arrives much later, with the job's result.
+        return textResult(
+          {
+            jobId: env.jobId,
+            async: true,
+            total: env.total,
+            chunkSize: env.chunkSize,
+            undoStepsEstimate: env.undoStepsEstimate,
+            undoGroupName: env.undoGroupName,
+            note: env.note,
+          },
+          wait
+        );
       }
 
       // An empty frame is reported, never shipped. The panel found every pixel
