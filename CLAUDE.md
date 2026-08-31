@@ -36,7 +36,7 @@ ExtendScript inside AE  (bundle.jsx = concat of packages/jsx/*.jsx)
 After Effects
 ```
 
-The MCP server is stateless except for an in-memory `JobManager`. The panel is the *only* thing that talks to AE; it holds a Promise-chain mutex around `evalScript` because ExtendScript is single-threaded and concurrent calls would interleave.
+The MCP server is stateless except for an in-memory `JobManager` and the write queue. The panel is the *only* thing that talks to AE; it holds a Promise-chain mutex around `evalScript` because ExtendScript is single-threaded and concurrent calls would interleave. That mutex is necessary and not sufficient — see "Serializing writes" below.
 
 ## Source layout
 
@@ -62,6 +62,7 @@ The MCP server is stateless except for an in-memory `JobManager`. The panel is t
 | `packages/mcp-server/src/tools/descriptions.ts` | All tool descriptions in one file — including the verbatim screenshot guidance. |
 | `packages/mcp-server/src/tools/runJsxSource.ts` | `run_jsx`'s `scriptPath` and `libraries`. The **server** reads those files, never the panel — same reasoning as `init_project`. `OPS.run_jsx` throws if a `scriptPath` still reaches it: that means the call came through `run_batch` (whose steps are never validated) or a direct `/op`, and running the empty script would report success for a file nobody read. |
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. |
+| `packages/mcp-server/src/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` — the lease that outlives its own call so a long `run_batch` keeps the lock while the panel drives it. Classification comes from `OpMutation` in `schemas.ts`. |
 | `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool. |
 | `packages/mcp-server/src/issues/journal.ts` | The cross-session issue journal at `<project>/.ae-mcp/issues/`. Backs `log_issue` / `list_known_issues` / `mark_issue_reported`. The project folder is `process.cwd()`; a client that gives no usable one (Claude Desktop starts servers at `/`) falls back to `~/.after-effects-mcp`, reported as `scope: "home"` so the fallback is never silent. `AE_MCP_HOME` overrides the root (used by the CI check). |
 | `packages/mcp-server/src/setup/{check,install,paths}.ts` | Backs `check_setup` / `setup_panel`. Never touches the bridge — it exists for the case where the panel isn't installed yet. |
@@ -85,13 +86,14 @@ The MCP server is stateless except for an in-memory `JobManager`. The panel is t
 
 ## The op pipeline (in detail)
 
-Adding a new op = touching five places. In order:
+Adding a new op = touching six places. In order:
 
 1. **Schema** — `packages/shared/src/schemas.ts`: add zod schema and an entry in `OpSchemas`.
-2. **ExtendScript handler** — add to the matching module in `packages/jsx/` as `OPS.your_op = function(args){ ... }`. Use `noUndo(fn)` for read-only ops (skips the undo group wrapper).
-3. **Description** — `packages/mcp-server/src/tools/descriptions.ts`: add an entry keyed by op name. Write it for an LLM agent reading the tool list cold.
-4. **Build** — `npm run build` rebuilds TS and concatenates the .jsx bundle.
-5. **Reload in AE** (optional, dev only) — `curl -X POST http://127.0.0.1:7777/reload-jsx` re-`$.evalFile`s the bundle without restarting AE.
+2. **Classification** — the `OpMutation` table at the bottom of the same file: `"write"`, `"read"` or `"server"`. `tests/unit/write-queue.mjs` fails the build if you skip it, on purpose — see "Serializing writes".
+3. **ExtendScript handler** — add to the matching module in `packages/jsx/` as `OPS.your_op = function(args){ ... }`. Use `noUndo(fn)` for read-only ops (skips the undo group wrapper).
+4. **Description** — `packages/mcp-server/src/tools/descriptions.ts`: add an entry keyed by op name. Write it for an LLM agent reading the tool list cold.
+5. **Build** — `npm run build` rebuilds TS and concatenates the .jsx bundle.
+6. **Reload in AE** (optional, dev only) — `curl -X POST http://127.0.0.1:7777/reload-jsx` re-`$.evalFile`s the bundle without restarting AE.
 
 The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring is needed unless the op needs special return packaging (vision = image content, run_batch = async envelope, jobs/* = server-resident) — or, in one case, special *input* packaging: `run_jsx` is rewritten between zod validation and the forward, so `scriptPath` becomes `code` and `libraries` become `{path, hash}` before the panel ever sees them (`tools/runJsxSource.ts`).
 
@@ -102,6 +104,79 @@ The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring 
 - **Server-resident** (`await_job`, `get_job`, `cancel_job`, `check_setup`, `setup_panel`, `init_project`, `ae_guide`, `log_issue`, `list_known_issues`, `mark_issue_reported`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag). They're still listed in `OpSchemas` so `tools/list` picks them up — membership in `SERVER_OPS` is what stops the forwarding.
 - **Prose** (`ae_guide`): returns the markdown as a bare text content block rather than through `textResult()`. JSON-stringifying it would hand the model a wall of `\n`.
 - **Downsampled screenshots**: handled entirely in `vision.jsx`. `saveFrameToPng` *does* respect `CompItem.resolutionFactor` (measured: a 3840×2160 comp yields 1920×1080 at factor 2, 960×540 at factor 4), so `__saveFrameAt` sets the factor, renders, and restores it in a `finally`. That restore is not optional — a throw mid-render would otherwise leave the user's comp at reduced resolution. The panel reads the true dimensions out of the PNG's IHDR chunk rather than computing them, so reported size can never disagree with the image sent. An earlier version shelled out to `sips`; it was replaced because rendering smaller is faster than resampling and needs no external tool, which is what makes downsampling work on Windows. The factor is *derived* from the comp when the caller omits one (`__autoDownsample`, aiming at a ~1280px long edge) — which is why `ScreenshotFrame`/`ScreenshotLayer` must not carry a zod `.default(1)`: a default there would reach the panel as an explicit 1 and the derivation would never run.
+
+## Serializing writes
+
+**The panel's `evalScript` mutex is necessary and not sufficient, and the gap it
+leaves is exactly where the damage was.** That chain serializes every individual
+`evalScript`, so two ordinary writes cannot interleave *within* one op — the
+undo group `dispatch()` opens is closed before the next call gets a turn. What
+it does not cover is the gap around a long `run_batch`. Over 500 ops, the
+handler calls `app.beginUndoGroup(name)`, returns `{jobId, async:true}`
+immediately, and the panel then drives `_continue_job` in chunks of 25 with that
+group **still open**. Every chunk is its own turn on the chain, so any op issued
+meanwhile slots in *between* two chunks — and AE's undo groups do not nest, so
+that op's own `endUndoGroup()` closes the batch's group. The rest of the batch
+writes outside any group, and the batch's final `endUndoGroup()` closes whatever
+happens to be open by then. One user action, an unknown number of undo steps,
+and no error anywhere. That is issue #55, and it is why the fix could not be
+"the panel already handles it".
+
+Ordering was the second half. Requests arrive at the server in the order the
+agent issued them, but the old code fired every one at `fetch` in parallel and
+took whatever order the sockets happened to deliver. Two writes where the second
+depends on the first were a coin toss.
+
+So: **one writer at a time, for the whole session.** `bridge/writeQueue.ts` is a
+FIFO mutex; `server.ts` takes a lease before forwarding any op classified
+`"write"`. Five things about it are load-bearing.
+
+- **The classification is a table, not a list of prefixes.** `OpMutation` lives
+  beside `OpSchemas` in `schemas.ts` and covers every op with `"write"`,
+  `"read"` or `"server"`. There is deliberately no default: an op nobody
+  classified would be classified by silence, and the silent answer — "read" — is
+  the one that reintroduces the bug. `tests/unit/write-queue.mjs` fails the
+  build when the two tables disagree in either direction, and `isWriteOp()`
+  falls back to `"write"` at runtime so even a shipped omission costs
+  serialization rather than correctness.
+- **Reads never queue, screenshots least of all.** They are unaffected by an
+  open undo group, and a screenshot is the slowest thing in the system — putting
+  one behind the write mutex would make every write wait on a render for
+  nothing. `await_job` and `cancel_job` are `"server"` for a harder reason: they
+  can be issued *while* the batch holding the lock is running, and queueing
+  either would deadlock against the thing they exist to wait on and release.
+- **The lease outlives its own call.** `extendUntil` is the whole fix. When
+  `run_batch` answers with a jobId, the lock is held until `JobManager` reports
+  the job finished — releasing it when the HTTP call returned would leave
+  precisely the gap described above. A leak guard at twice the wait ceiling
+  covers a job that never reports (a dropped WS); it is set *above* the wait
+  ceiling so that any writer queued behind the batch has hit its own deadline
+  and gone before the hold could expire and hand it the lock mid-batch.
+- **The op timeout starts at execution, never at enqueue.** `AbortSignal.timeout`
+  is created inside `runOp`, and `acquire()` is awaited before it — so a call
+  that waited ten minutes still gets its full budget when it runs. Get this
+  backwards and a queued call times out having never run, reporting a bridge
+  failure for a bridge that was answering fine. That is the one way this feature
+  could have made things worse, and the test that pins it runs the real
+  `HttpClient` against a stub on an ephemeral port.
+- **A cancelled request is dropped, not deferred.** If the MCP request is
+  cancelled while queued, `acquire` rejects and the caller never reaches the
+  bridge. Work that runs after the thing that asked for it gave up is the leak.
+
+A call that waited says so: `queuedBehind` and `waitedMs`, present only when it
+actually waited, so an uncontended result is byte-identical to what it always
+was. They fold into the result object where there is one, which is every writing
+op but `run_jsx` — that returns whatever the caller's script returned, arrays
+and bare numbers included, and rewrapping those would change what every existing
+caller reads (#43). Those get a second text content block instead. Vision
+results never carry a note at all, since screenshots are reads.
+
+Two limits worth knowing. The queue is per-server-process, so a second MCP
+client pointed at the same panel is not serialized against the first — the panel
+is a shared resource with no lock of its own. And the queue is bounded
+(`AE_MCP_WRITE_QUEUE_DEPTH`, default 64; `AE_MCP_WRITE_QUEUE_WAIT_MS`, default
+600s) rather than unbounded, because an agent looping writes at a stuck bridge
+would otherwise grow it without limit.
 
 ## Conventions
 
@@ -314,6 +389,7 @@ That sync is **opt-in on purpose**. The installed bundle is one half of the pane
 21. `run_jsx` error lines, which is the whole of issue #46 and cannot be seen offline. Submit a script whose *fourth* line throws (`comp.property("Nope").setValue(1)`), with three lines of real work above it → the error names line 4 and prints that line's text, and `list_layers` confirms the three lines above it landed. Run it again with the same throw moved to a different line → the reported line moves with it. Then submit a one-line script that throws → the line is 1, never 22. If a case ever comes back with "does not fall inside", that is the honest outcome, not a regression: read what `rawLine` said and work out what AE was counting from.
 22. `scriptPath` and `libraries`: write `/tmp/rig.jsx` containing `function rig(c){ return c.name; }` and `/tmp/scene.jsx` containing `return rig(app.project.activeItem);`. `run_jsx({scriptPath:"/tmp/scene.jsx", libraries:["/tmp/rig.jsx"]})` → the comp name, with neither file's text in the conversation. Call it again → same answer (the library is cached, not re-evaluated). Edit `rig.jsx` to return `c.name + "!"` and call again → the new answer, which is the content hash working. `run_jsx({scriptPath:"scene.jsx"})` → refused for being relative; a missing path → refused naming it; `code` and `scriptPath` together → refused. Break `rig.jsx` with a syntax error → the failure names the library file, not a line of the script.
 23. Helpers, against a real comp: `run_jsx({code:"var l = shape(app.project.activeItem, {name:'Card'}); return l.property('Transform').property('Position').value;"})` → `[0,0]`, not the comp centre. Then `addKeys` two keys on Opacity and `ease(prop, 2, 60)` → returns 1; the same on a shape's Ellipse **Size** → returns 3, having tried 2 first (issue #50's case, and the retry is the point). `get_layer_full` shows the ease on the keys.
+24. Write serialization, which needs a live AE because the failure it prevents is in AE's undo stack and nowhere else. Issue two writes in one turn — `create_solid_layer` and `create_text_layer` on the same comp — and check the second result carries `queuedBehind: "create_solid_layer"` and a `waitedMs`, while the first carries neither. Then the real one: `run_batch` with 600 ops (past the 500 inline cutoff) and, in the *same* turn, a `set_transform`. The batch returns its `{jobId}` immediately; the `set_transform` must not return until the job does, and AE's Edit menu afterwards must show the batch as **one** undo step with the transform as a separate one after it. Before this landed the transform went in mid-batch and the batch broke into an arbitrary number of steps. Reads are the control: `list_layers` issued alongside the running batch returns straight away, and `await_job` on the batch resolves rather than hanging (it would hang if it queued).
 
 16. Compiled binary, the one no unit test reaches: run the built binary from an empty directory *and* from `/`, and confirm `setup_panel` installs a populated `node_modules/ws`. Under `bun --compile` the module resolver returns a bare specifier rather than throwing, so this path cannot be exercised under plain Node — see the `require.resolve` note in Known fragile areas.
 
@@ -335,6 +411,7 @@ The user-facing half is the offer to report. It now lives in exactly two places:
 - `saveFrameToPng` is community-known, not officially documented. Alpha edge cases reported on some comps. If it fails, fallback would be the render queue with PNG Sequence template (slow; deferred to v1.1).
 - ExtendScript single-threading: `run_jsx` with a long synchronous loop will freeze AE's UI. Document for the agent in the tool description (already done).
 - **A busy AE is indistinguishable from a dead bridge at the HTTP layer.** ExtendScript is single-threaded, so while a script runs — or a modal dialog sits unclicked — the panel cannot service its socket at all. The connection is accepted and then nothing comes back. That is why `httpClient` separates `BridgeTimeoutError` from `BridgeUnreachableError` and why `check_setup`'s `bridgeReachable` reports a timeout differently from a refusal: the two have opposite remedies, and "restart After Effects" said to someone whose script is still running throws away work for nothing. Enumerating `app.effects` (~250 entries, tens of seconds in 26.3) is the reproducible case — issue #26 — which is also why `list_available_effects` caches for the session. Never collapse the two errors back into one sentence.
+- **There are now three of those, not two, and the third one's advice is the opposite of the second's.** `WriteQueueWaitError` means the call sat behind another write for the full `AE_MCP_WRITE_QUEUE_WAIT_MS` and was dropped **without ever leaving the server**. `BridgeTimeoutError` forbids re-sending, because that call did reach After Effects and may still be running; the queue error has to say the opposite, because nothing was written and re-sending once the queue drains is the correct move. `BridgeUnreachableError` sends the reader to `check_setup`, which the queue error must not, since the bridge is answering perfectly well. Three diagnoses, three remedies, no shared sentences — `tests/unit/write-queue.mjs` asserts they stay distinct, including that neither bridge error ever mentions the queue.
 - **The server's op timeout must sit above the panel's own waits, not on them.** `saveFrameToPng` is asynchronous and the panel polls for the PNG for up to 120s; with the server also at 120s it gave up at the exact moment the panel might still have succeeded. `SLOW_OPS` in `bridge/httpClient.ts` gives the screenshot, `run_jsx` and `run_batch` ops 300s. `AE_MCP_OP_TIMEOUT_MS` overrides every op, deliberately including the slow ones — one number a user can reason about beats a matrix they cannot see.
 - CEP manifest's `<AutoVisible>false</AutoVisible>` was unreliable in early CEP 12 builds. Current manifest uses `AutoVisible=true` with a small geometry — the panel still auto-loads invisibly enough; the user can dock the small status panel out of the way.
 - CEP panels installed without signing require `PlayerDebugMode=1`. The user does this once via `npm run enable:debug` and a reboot.

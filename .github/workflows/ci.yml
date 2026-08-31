@@ -156,6 +156,17 @@ jobs:
           node tests/unit/svg-import.mjs
           node tests/unit/bundle-determinism.mjs
 
+      # Concurrency is invisible when it breaks: a queue that lets two writes
+      # overlap looks identical to one that does not until an undo group is
+      # corrupted in someone's real project. The second file drives the real
+      # server over an in-memory transport against a stub bridge on an
+      # ephemeral port, and also fails the build when an op in OpSchemas has
+      # not been classified in OpMutation.
+      - name: Writes are serialized and every op is classified
+        run: |
+          node tests/unit/write-queue.mjs
+          node tests/unit/write-queue-server.mjs
+
       - name: check_setup resolves platform paths without throwing
         shell: bash
         run: |

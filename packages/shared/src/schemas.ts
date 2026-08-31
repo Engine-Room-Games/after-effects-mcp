@@ -750,3 +750,126 @@ export const OpSchemas = {
 } as const;
 
 export type OpName = keyof typeof OpSchemas;
+
+/**
+ * What each op does to the live After Effects session.
+ *
+ * ════════════════════════════════════════════════════════════════════════════
+ *  ADDING AN OP? ADD IT HERE TOO. `tests/unit/write-queue.mjs` fails the build
+ *  when an op is in `OpSchemas` and not in this table, or the other way round.
+ * ════════════════════════════════════════════════════════════════════════════
+ *
+ * There is deliberately no default. Guessing "read" for an op nobody
+ * classified would let a new writing tool run inside another write's undo group
+ * and corrupt it silently, which is the exact failure this table exists to
+ * prevent (issue #55) — so an unclassified op has to fail the build instead.
+ *
+ *   "write"  — changes the project or the application. The server serializes
+ *              these behind one mutex: After Effects applies every change
+ *              through a single undo stack, and two in flight interleave.
+ *   "read"   — reaches the bridge and changes nothing. Never queued. Screenshots
+ *              are here on purpose: they are slow *and* read-only, and putting
+ *              them behind the write mutex would make every write wait on a render.
+ *   "server" — never reaches the bridge at all (`SERVER_OPS` in server.ts).
+ *              Not queued, and that is load-bearing: `await_job` blocks for as
+ *              long as a batch runs and `cancel_job` is how a stuck one is
+ *              released, so queueing either would deadlock against the job
+ *              holding the lock.
+ */
+export const OpMutation = {
+  // comps
+  list_comps: "read",
+  get_comp: "read",
+  get_comp_tree: "read",
+  create_comp: "write",
+  set_comp: "write",
+  delete_comp: "write",
+  set_active_comp: "write",
+  // layers
+  list_layers: "read",
+  get_layer_full: "read",
+  create_text_layer: "write",
+  create_shape_layer: "write",
+  create_solid_layer: "write",
+  create_null_layer: "write",
+  create_adjustment_layer: "write",
+  create_precomp_layer: "write",
+  create_camera_layer: "write",
+  create_light_layer: "write",
+  duplicate_layer: "write",
+  delete_layer: "write",
+  set_layer: "write",
+  parent_layer: "write",
+  reorder_layer: "write",
+  // transforms
+  set_transform: "write",
+  // keyframes
+  add_keyframe: "write",
+  remove_keyframe: "write",
+  get_keyframes: "read",
+  set_interpolation: "write",
+  set_temporal_ease: "write",
+  set_spatial_tangents: "write",
+  // expressions
+  get_expression: "read",
+  set_expression: "write",
+  toggle_expression: "write",
+  clear_expression: "write",
+  // effects
+  list_effects: "read",
+  add_effect: "write",
+  remove_effect: "write",
+  set_effect_param: "write",
+  set_effect_enabled: "write",
+  list_available_effects: "read",
+  // text
+  set_text: "write",
+  add_text_animator: "write",
+  // shapes
+  set_shape_path: "write",
+  add_shape_content: "write",
+  set_shape_property: "write",
+  // masks
+  add_mask: "write",
+  set_mask: "write",
+  remove_mask: "write",
+  // markers
+  add_marker: "write",
+  remove_marker: "write",
+  // vision — read-only despite being the slowest thing here. `screenshot_*`
+  // borrows the comp's resolutionFactor and restores it in a `finally`;
+  // nothing in the project changes.
+  screenshot_frame: "read",
+  screenshot_layer: "read",
+  // batch
+  run_batch: "write",
+  // explore
+  get_project_summary: "read",
+  find_layers: "read",
+  // footage
+  import_footage: "write",
+  create_footage_layer: "write",
+  // motion graphics templates — saves the project before exporting.
+  export_mogrt: "write",
+  // raw — the script is the caller's and may do anything. Assume the worst.
+  run_jsx: "write",
+  // house style — written over the bridge into a file beside the .aep.
+  get_house_style: "read",
+  set_house_style: "write",
+  // jobs
+  await_job: "server",
+  get_job: "server",
+  cancel_job: "server",
+  // setup
+  check_setup: "server",
+  setup_panel: "server",
+  init_project: "server",
+  // guidance
+  ae_guide: "server",
+  // issue journal
+  log_issue: "server",
+  list_known_issues: "server",
+  mark_issue_reported: "server",
+} as const satisfies Record<OpName, "write" | "read" | "server">;
+
+export type OpEffect = (typeof OpMutation)[OpName];
