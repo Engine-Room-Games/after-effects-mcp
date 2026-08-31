@@ -18,6 +18,10 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const core = fs.readFileSync(path.join(root, "packages", "jsx", "core.jsx"), "utf8");
+// raw.jsx calls into snapshot.jsx for run_jsx's opt-in diff. In After Effects
+// both are halves of one concatenated bundle; here they have to be loaded
+// explicitly, or every run_jsx call fails on an undefined helper.
+const snapshot = fs.readFileSync(path.join(root, "packages", "jsx", "snapshot.jsx"), "utf8");
 const raw = fs.readFileSync(path.join(root, "packages", "jsx", "raw.jsx"), "utf8");
 
 function load() {
@@ -31,6 +35,7 @@ function load() {
   };
   vm.createContext(ctx);
   vm.runInContext(core, ctx, { filename: "core.jsx" });
+  vm.runInContext(snapshot, ctx, { filename: "snapshot.jsx" });
   vm.runInContext(raw, ctx, { filename: "raw.jsx" });
   const call = (op, args) =>
     vm.runInContext("dispatch", ctx)(JSON.stringify({ op, args }));

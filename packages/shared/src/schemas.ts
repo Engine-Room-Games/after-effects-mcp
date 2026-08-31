@@ -67,6 +67,39 @@ export const SetComp = z.object({
 });
 export const DeleteComp = z.object({ compId: z.number() });
 export const SetActiveComp = z.object({ compId: z.number() });
+export const DuplicateComp = z
+  .object({
+    compId: z.number(),
+    name: z.string().optional().describe("Name for the copy. Omit to take AE's own ('<name> 2')."),
+    folderId: z.number().optional()
+      .describe("Project folder to put the copy in. Must be a folder item id from get_project_summary."),
+    deep: z.boolean().default(false).optional()
+      .describe(
+        "Also duplicate the nested precomps and re-point the copy's layers at them. Off by default, which matches AE's own Duplicate: a shallow copy shares its nested comps with the original, so editing one edits both."
+      ),
+    nameSuffix: z.string().optional()
+      .describe("With deep:true, name each duplicated nested comp '<original><nameSuffix>'. Omit to let AE name them."),
+  })
+  .strict();
+
+// ---------- comp snapshots (half server-resident: the panel gathers, the server remembers) ----------
+export const SnapshotComp = z
+  .object({
+    compId: z.number(),
+    includeFingerprint: z.boolean().default(false).optional()
+      .describe(
+        "Return the fingerprint itself as well as its id. Off by default — returning it reintroduces exactly the context cost a snapshot exists to avoid."
+      ),
+  })
+  .strict();
+export const DiffComp = z
+  .object({
+    since: z.string().describe("A snapshotId from an earlier snapshot_comp or diff_comp."),
+    compId: z.number().optional().describe("Defaults to the comp the snapshot was taken of; pass it only to assert which comp you mean."),
+    includeFingerprint: z.boolean().default(false).optional()
+      .describe("Return the new fingerprint as well as the diff. Off by default."),
+  })
+  .strict();
 
 // ---------- layers ----------
 export const ListLayers = z.object({
@@ -493,11 +526,31 @@ export const ScreenshotLayer = z.object({
   downsample: downsampleParam,
 });
 
+/**
+ * The write ops' opt-in structural diff. The before-fingerprint has to be taken
+ * inside the same bridge call as the write — a separate snapshot_comp is a
+ * second round-trip during which anything can happen — so these two are read by
+ * the panel, not the server.
+ */
+const diffParam = z
+  .boolean()
+  .default(false)
+  .optional()
+  .describe(
+    "Fingerprint the comp before and after this call and append only what changed (layers added/removed/renamed/retimed/re-parented, keyframe counts, expression and effect counts). A few dozen tokens instead of reading the comp back. If the call fails, the diff of what landed before it stopped is appended to the error."
+  );
+const diffCompIdParam = z
+  .number()
+  .optional()
+  .describe("Which comp `diff` should fingerprint. Defaults to the comps this call names, else the comp open in the viewer.");
+
 // ---------- batch ----------
 export const RunBatch = z.object({
   ops: z.array(z.object({ op: z.string(), args: z.unknown() })),
   transactional: z.boolean().default(true).optional(),
   undoGroupName: z.string().default("AE MCP Batch").optional(),
+  diff: diffParam,
+  diffCompId: diffCompIdParam,
 });
 
 // ---------- explore ----------
@@ -519,6 +572,8 @@ export const RunJsx = z.object({
     .describe("Absolute paths to .jsx files evaluated at global scope before the script, once per After Effects session. Re-passing an unchanged file is free; editing it re-evaluates it. Put shared helpers here rather than pasting them into every script."),
   undoGroup: z.boolean().default(true).optional()
     .describe("Wrap the script in one undo step. Set false only for the operations AE refuses while an undo group is open — copyToComp on a layer with a parent or a linked expression. The script's changes then land as whatever undo steps AE records on its own."),
+  diff: diffParam,
+  diffCompId: diffCompIdParam,
 });
 
 // ---------- footage ----------
@@ -696,6 +751,9 @@ export const OpSchemas = {
   set_comp: SetComp,
   delete_comp: DeleteComp,
   set_active_comp: SetActiveComp,
+  duplicate_comp: DuplicateComp,
+  snapshot_comp: SnapshotComp,
+  diff_comp: DiffComp,
   // layers
   list_layers: ListLayers,
   get_layer_full: GetLayerFull,
@@ -819,6 +877,12 @@ export const OpMutation = {
   set_comp: "write",
   delete_comp: "write",
   set_active_comp: "write",
+  duplicate_comp: "write",
+  // Fingerprints: they forward a read to the panel and keep the answer in the
+  // server. Nothing is written to the project or the undo stack, so they must
+  // not queue — the point of a diff is checking on a write that is in flight.
+  snapshot_comp: "read",
+  diff_comp: "read",
   // layers
   list_layers: "read",
   get_layer_full: "read",

@@ -47,6 +47,7 @@ The MCP server is stateless except for an in-memory `JobManager` and the write q
 | `packages/jsx/*.jsx` | ExtendScript handlers. Each module attaches functions to the global `OPS` table. ES3-ish — no `let`/`const`/arrow/templates. |
 | `packages/jsx/core.jsx` | JSON polyfill, `dispatch(payloadJson)` router, `withUndo()` wrapper, `JOBS` table for chunked async. |
 | `packages/jsx/explore.jsx` | `get_layer_full` — the deep one-shot dump. The whole reason this MCP exists. Spend disproportionate care here. |
+| `packages/jsx/snapshot.jsx` | The comp fingerprint and the diff of two of them. Backs `snapshot_comp` / `diff_comp` and the `diff:true` flag on `run_jsx` / `run_batch`. The diff is pure — two objects in, one out — which is what lets it be tested with no AE. |
 | `packages/jsx/batch.jsx` | `run_batch` for ≤100 ops inline; otherwise registers a job and yields chunks via `_continue_job`. |
 | `packages/jsx/vision.jsx` | `saveFrameToPng` wrapper. Returns a temp path; the panel base64-encodes. |
 | `packages/jsx/footage.jsx` | `import_footage` / `create_footage_layer`. The SVG viewBox check lives here because import is the only place that has the file path and the resulting item together. Also holds `__importFile()` and `__itemPathMap()` — the one import in the codebase and the one project-by-path scan, both shared with `audio.jsx`. |
@@ -65,6 +66,7 @@ The MCP server is stateless except for an in-memory `JobManager` and the write q
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. |
 | `packages/mcp-server/src/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` — the lease that outlives its own call so a long `run_batch` keeps the lock while the panel drives it. Classification comes from `OpMutation` in `schemas.ts`. |
 | `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool. |
+| `packages/mcp-server/src/snapshots/store.ts` | In-memory comp fingerprints for `snapshot_comp` / `diff_comp`. Bounded ring; `missingMessage()` is the whole reason it is a class rather than a `Map`. |
 | `packages/mcp-server/src/issues/journal.ts` | The cross-session issue journal at `<project>/.ae-mcp/issues/`. Backs `log_issue` / `list_known_issues` / `mark_issue_reported`. The project folder is `process.cwd()`; a client that gives no usable one (Claude Desktop starts servers at `/`) falls back to `~/.after-effects-mcp`, reported as `scope: "home"` so the fallback is never silent. `AE_MCP_HOME` overrides the root (used by the CI check). |
 | `packages/mcp-server/src/setup/{check,install,paths}.ts` | Backs `check_setup` / `setup_panel`. Never touches the bridge — it exists for the case where the panel isn't installed yet. |
 | `packages/mcp-server/src/setup/platform.ts` | **The only place macOS and Windows diverge** (PlayerDebugMode storage, AE process detection). Plus `cepExtensionsDir()` in `paths.ts`. Keep platform branching here — do not scatter `process.platform` through the codebase. |
@@ -103,6 +105,7 @@ The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring 
 - **Vision** (`screenshot_frame`, `screenshot_layer`): JSX returns `{path, width, height, time, compId, layerId?}`. Panel reads the PNG, normalises it to 8-bit, base64-encodes, returns `{base64, bytes, ...}`. Server packages as MCP `image` content block. Two outcomes are deliberately *not* images: a fully transparent frame comes back as `{empty:true, reason}` and goes through `textResult`, and a frame whose pixels match a different earlier request is refused as a `STALE_FRAME` error. See "Known fragile areas".
 - **Long batch** (`run_batch` >100 ops): JSX returns `{jobId, async:true, total}`. Panel drives `_continue_job` in chunks of 25 in the background, broadcasting `progress` events on WS. Server forwards WS progress as `notifications/progress` keyed by the request's `progressToken`.
 - **Server-resident** (`await_job`, `get_job`, `cancel_job`, `check_setup`, `setup_panel`, `init_project`, `ae_guide`, `log_issue`, `list_known_issues`, `mark_issue_reported`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag). They're still listed in `OpSchemas` so `tools/list` picks them up — membership in `SERVER_OPS` is what stops the forwarding.
+- **Half server-resident** (`snapshot_comp`, `diff_comp`): the panel gathers, the server remembers. `SNAPSHOT_OPS` in `server.ts` routes them to `runSnapshotOp`, which forwards an internal read op (`_comp_fingerprint` / `_comp_diff`) and keeps the answer in `SnapshotStore`. Deliberately *not* in `SERVER_OPS` — unlike those, these do touch the bridge, and they are dispatched from inside the same `try` as `bridge.runOp` so the timeout, `AeError` and Unknown-op mappings all apply unchanged.
 - **Prose** (`ae_guide`): returns the markdown as a bare text content block rather than through `textResult()`. JSON-stringifying it would hand the model a wall of `\n`.
 - **Downsampled screenshots**: handled entirely in `vision.jsx`. `saveFrameToPng` *does* respect `CompItem.resolutionFactor` (measured: a 3840×2160 comp yields 1920×1080 at factor 2, 960×540 at factor 4), so `__saveFrameAt` sets the factor, renders, and restores it in a `finally`. That restore is not optional — a throw mid-render would otherwise leave the user's comp at reduced resolution. The panel reads the true dimensions out of the PNG's IHDR chunk rather than computing them, so reported size can never disagree with the image sent. An earlier version shelled out to `sips`; it was replaced because rendering smaller is faster than resampling and needs no external tool, which is what makes downsampling work on Windows. The factor is *derived* from the comp when the caller omits one (`__autoDownsample`, aiming at a ~1280px long edge) — which is why `ScreenshotFrame`/`ScreenshotLayer` must not carry a zod `.default(1)`: a default there would reach the panel as an explicit 1 and the derivation would never run.
 
@@ -342,6 +345,60 @@ The costs, both reported rather than worked around:
   to replace an existing one. It is not a patch, and quietly half-rewriting
   someone's hand-written style guide is worse than refusing.
 
+## Comp snapshots, and why they live in the server
+
+Verifying a write used to mean reading the comp back — `list_layers`, then
+`get_layer_full` — and comparing by eye. That answer is thousands of tokens,
+and a tool result is re-sent on every later request for the rest of the session,
+so a fourteen-scene build paid for it over and over (issue #52). A fingerprint
+plus a diff is a few dozen tokens for the same three questions: which layer is
+the new one after a `copyToComp` (copies do not land at index 1), where a
+partly-applied `run_jsx` stopped, and whether an assembly landed when
+`screenshot_frame` cannot render it.
+
+**The snapshot is kept in the MCP server, not in the After Effects project.**
+That split is the whole design. Only the panel can read AE, so the gathering
+has to happen there; but writing the fingerprint into the .aep would make a
+*read* tool modify the user's project — a project-panel item or a marker they
+never asked for, in their file and in their undo stack, for scaffolding nobody
+wants to keep. `SnapshotStore` is the other half: the one place in this server
+that remembers anything besides `JobManager`.
+
+The cost is a lifetime of one process, which for a stdio client is one session.
+That is acceptable — nothing needs yesterday's snapshot — but it must never be
+met as a cryptic failure, so `missingMessage()` says why the id is gone, lists
+the ids that *are* held, and names both ways forward (take a fresh one; or read
+the comp back, since a diff can only compare against a snapshot taken
+beforehand). That method is why the store is a class rather than a `Map`.
+
+Three further things hold this honest:
+
+- **`diff:true` on `run_jsx` / `run_batch` fingerprints inside the same call.**
+  A before-snapshot taken by a separate `snapshot_comp` is a second round-trip
+  during which anything can happen, and the agent has to remember to make it. So
+  the before, the write and the after are one bridge call, and the diff logic
+  lives in `snapshot.jsx` where `raw.jsx` and `batch.jsx` can both reach it —
+  each of them gains about six lines and no new contract.
+- **A failed write still gets its diff.** Nothing rolls back, so "where did it
+  stop" is the most valuable question after a throw. `__diffAnnotateError`
+  *mutates* the error's `message` and rethrows the same object, so `line` and
+  `stack` survive for `__mkError` — never build a new Error there.
+- **A diff is the extreme case of a scoped read, so it says what it left out.**
+  `covers` travels with every diff and `snapshot_comp` returns the long form:
+  the fingerprint records ids, names, indices, types, in/out/start, parent,
+  enabled, per-property keyframe counts, expression count and effect count, and
+  no property *values*, expression text, effect parameters, masks or shape
+  contents. Reading "no differences" as "identical" is the failure mode, and it
+  is the same class of lie as a swallowed error. The walk stops there on purpose
+  — a fingerprint that costs as much as the read it replaces is worth nothing —
+  and `tests/unit/comp-snapshot.mjs` puts probes on the effect and shape
+  accessors so a later edit cannot quietly start walking them.
+
+`index` is recorded but never diffed directly: inserting one layer shifts every
+index below it, which would report twenty changed layers for one addition.
+Relative order is compared separately, so a real reorder is reported and an
+insertion is not.
+
 ## Build + run
 
 ```bash
@@ -394,6 +451,9 @@ That sync is **opt-in on purpose**. The installed bundle is one half of the pane
 25. Ease sizing, the three properties that used to fail in a row: `add_keyframe` twice on **Opacity**, then `set_temporal_ease` on it → `easeDimensions: 1`. Same on a 2D layer's **Scale** → `2`. Same on a shape group's **Ellipse Size** → `3` (this is the one whose value reads `[w,h]`, so `2` would be the sensible wrong answer). Same on **Position**, 2D and then with the layer set 3D → `1` both times. `get_keyframes` echoes the influence and speed on each, and the easing is visibly non-linear in the graph editor. `set_temporal_ease` with neither `easeIn` nor `easeOut` → refuses rather than returning `ok`.
 26. Shape spawn point: `create_shape_layer({compId})` on a 3840×2160 comp → `position: [0,0]`, `anchorPoint: [0,0]` in the result. `add_shape_content` a rect of `size:[400,200]` with `position:[400,200]`, then `screenshot_frame` → the rect is near the top-left, centred on (400,200) in comp pixels, not half a frame away. The same sequence with `create_shape_layer({compId, position:"center"})` → `position: [1920,1080]` and the rect renders at comp centre + (400,200), which is AE's old behaviour. `position:"middle"` → refused, no layer created.
 27. `place_audio_cues`, on a comp with a few seconds of room: nine cues naming the same .wav at different times → nine layers, **one** new project item, one undo step (Cmd-Z removes all nine). Levels: pass `levelDb:-6` on one and read the Audio Levels property back — `-6, -6`, and the layer is audibly quieter on a RAM preview. Call it again on a project that already holds that .wav → `sources.reused` names it and nothing new is imported. `dryRun:true` on a list with one typo'd path → `ok:false`, the bad cue named by index, no layers, no imports, and **no new step in AE's undo history**. Point one cue at a still image already in the project → refused before anything is placed, naming "has no audio track". Then the rollback, which is the one worth doing deliberately: take a 90-cue list, make cue 60 impossible (an `outPoint` far past the end of a short file, say), run it → the call fails naming cue 60 and the timeline has **zero** new audio layers, not 59.
+28. `snapshot_comp({compId})` on a comp with a few layers → a `snapshotId` and a handful of fields, **no fingerprint** (add `includeFingerprint:true` to see it). Add a layer and keyframe its Opacity, then `diff_comp({since})` → the new layer's id and name, `layer N Opacity keys 0 → 4`, `unchangedLayers` counting the rest, and nothing at all about them. `diff_comp` again immediately → `changeCount: 0` and a summary that says the recorded fields did not move rather than "identical". Reorder two layers → `reordered` names those two; add a layer at the top instead → **no** `reordered` and no `changed`, even though every index below it shifted. `diff_comp({since:"snap_999"})` → the store's message, naming the ids it does hold. Restart the MCP server and reuse an old id → the same message, not a crash.
+29. `diff:true` on the write ops: `run_jsx({code:"…create three layers…", diff:true})` → `{ok, returned, diff}` with the three ids, in one call. The same script with a deliberate throw half-way → the error message carries `|| Changed before it stopped: 1 layer added…` **and** still reports its line number. `run_batch({ops:[…], diff:true})` across two comps → a `comps` array with one diff each. With no `compId` anywhere in the call and no comp open in the viewer → `diff.unavailable` naming `diffCompId`, and the call itself unaffected.
+30. `duplicate_comp({compId})` on a comp with a precomp layer → new id, name `<name> 2`, and the copy's precomp layer resolves to the **same** nested comp as the original (that is the shallow contract; the result says so). The same call with `deep:true` → the copy points at its own nested comp, editing that one leaves the original alone, and a nested comp used by three layers is duplicated **once** with all three re-pointed at it. `folderId` pointing at a comp instead of a folder → refused, naming the id and what it actually is, with nothing created. `nameSuffix:" [v2]"` where `<name> [v2]` already exists → the copy gets `… [v2] 2`, and the existing item keeps its name.
 
 16. Compiled binary, the one no unit test reaches: run the built binary from an empty directory *and* from `/`, and confirm `setup_panel` installs a populated `node_modules/ws`. Under `bun --compile` the module resolver returns a bare specifier rather than throwing, so this path cannot be exercised under plain Node — see the `require.resolve` note in Known fragile areas.
 
@@ -458,6 +518,20 @@ The user-facing half is the offer to report. It now lives in exactly two places:
 - **A batch op has to be all-or-nothing, because a partial one cannot be described.** `place_audio_cues` can be handed 90 cues; a run that dies on cue 30 leaves 29 sound effects in the timeline and an error naming none of them, and the natural next move — call it again — doubles the first 29. So it plans the whole list with no side effects (resolving every `footageId`, checking every path exists, checking each resolved item has audio, checking every time is inside the comp), reports *all* the offending cue indices at once, and creates nothing if any of them failed. What planning cannot foresee — an import that turns out to be silent, an AE refusal on some particular layer — is caught by a rollback that removes every layer and every import the call made, newest first, layers before items. **The layer joins the rollback list the instant `layers.add()` returns, not once it is configured**; registering it after the last `setValue` leaves exactly the failing layer behind, which the offline test caught before this ever ran in AE. `dryRun:true` is the same planner with the creation phase skipped, and it is not an undo step either — a plan appearing in the user's undo history would make "this changed nothing" false in the one place they can see it.
 - **AE fabricates dimensions for an SVG with a very large viewBox, and the numbers depend only on the viewBox.** A synthetic file with the reported `0 0 278050 333334` imports as **15906x5654** — byte for byte the dimensions in issue #33, from an entirely different SVG. It will not even rasterize: `saveFrameToPng` on a comp containing one produces no file at all, where a healthy SVG renders in seconds. That reproducibility is what makes the aspect-ratio check in `footage.jsx` a reliable detector rather than a heuristic.
 - **CEP anchors `__dirname` at the extension root, not at the folder holding the file.** So `require("ws")` resolves (node_modules is at the root) while `require("./pngcodec.js")` from `client/main.js` does not — it looks for `<ext>/pngcodec.js`, which is not where the file is. This is why the panel is the only part of the system whose bootstrap has to be tested rather than reasoned about: it shipped on `versions/0.3.0` refusing to start with "cannot start — pngcodec.js … is missing", and nothing caught it, because there is no AE on a runner, the unit tests require those modules by absolute path, and the one machine it had ever run on still had a pre-#36 panel installed. **Resolve panel-internal paths from `cs.getSystemPath(SystemPath.EXTENSION)`, never from `__dirname`** — that is authoritative, and `main.js` now builds `clientDir` from it before requiring anything. `tests/unit/panel-boot.mjs` runs the real `main.js` against a stub CEP host in a copy of the installed layout and asserts it reaches a listening `/health`.
+- **`CompItem.duplicate()` is shallow, and the copy looks finished.** The
+  duplicate's precomp layers point at the *same* nested comps as the original,
+  so "make a variant of this rig" and then editing the variant edits the
+  original too — silently, and usually noticed several scenes later.
+  `duplicate_comp` keeps that as the default because it is AE's own Duplicate
+  and changing it would surprise anyone who knows the app, but it says so in the
+  result rather than leaving it to be discovered, and `deep:true` duplicates the
+  nested comps and re-points the copy at them. Two things `deep` has to get
+  right and a hand-rolled `run_jsx` version usually does not: the same nested
+  comp appears on several layers, so it is duplicated once and reused (keyed by
+  the *original* id) rather than fanned out per reference; and the copy is
+  registered in that map *before* the walk descends into it, which is what makes
+  a cycle terminate. A nested duplication that fails part-way names every comp
+  it created in the error — the objects are real and nothing rolled them back.
 - **CEP returns a file URL, not a path.** `getSystemPath` gives `file:///C:/Users/…` on Windows, so stripping only the scheme leaves `/C:/…`; `path.join` then reads it as root-relative and produces `\C:\…\bundle.jsx`, and the panel reports the bundle missing while it sits at that exact location. `client/csinterface.js` strips the slash before a drive letter — do that there, not at call sites, since it is the one place a URL becomes a native path. `tests/unit/panel-paths.mjs` covers it; there is no AE on a runner, so nothing else does.
 
 ## Platform notes

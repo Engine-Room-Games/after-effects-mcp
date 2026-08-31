@@ -308,11 +308,20 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
   // name mirrors dispatch()'s default ("AE MCP: " + op); false means the caller
   // asked for no group and the changes landed as whatever steps AE recorded.
   var undoGroupName = (args.undoGroup === false) ? false : "AE MCP: run_jsx";
-  var result;
+  // diff:true fingerprints the comp before and after, inside this one call —
+  // see snapshot.jsx. Null unless asked for, so the ordinary path is untouched.
+  var __d = __diffStart(args, null);
+  var __value;
   try {
-    result = eval(wrapper);
+    __value = eval(wrapper);
   } catch (e) {
+    // Annotate before mapping the line: __rjThrowWithSource reads e.message,
+    // so the diff note has to be on it by then, and the source mapping is what
+    // makes the reported line the caller's own (#46).
+    __diffAnnotateError(e, __d);
     __rjThrowWithSource(e, code, args.scriptPath);
   }
-  return __rjResult(result, undoGroupName);
+  var __out = __rjResult(__value, undoGroupName);
+  if (__d) return __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
+  return __out;
 });

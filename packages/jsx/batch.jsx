@@ -5,6 +5,9 @@ OPS.run_batch = function (args) {
   var ops = args.ops || [];
   var transactional = args.transactional !== false;
   var name = args.undoGroupName || "AE MCP Batch";
+  // diff:true fingerprints the comps this batch names, before and after, inside
+  // this one call — see snapshot.jsx. Null unless asked for.
+  var diffState = __diffStart(args, ops);
   // Short batches: run inline synchronously. Inline stays sub-second for
   // typical create/keyframe ops up to a few hundred; the async-job overhead
   // (jobId envelope, polling, progress notifications) is only worth it for
@@ -19,10 +22,18 @@ OPS.run_batch = function (args) {
         results.push(handler(step.args || {}));
       } catch (e) {
         errors.push({ index: i, op: step.op, error: e.message });
-        if (transactional) throw new Error("Batch failed at op[" + i + "] " + step.op + ": " + e.message);
+        if (transactional) {
+          // Nothing rolls back, so the half-applied state is what the caller
+          // has to reason about. The diff says where it stopped.
+          var failure = new Error("Batch failed at op[" + i + "] " + step.op + ": " + e.message);
+          __diffAnnotateError(failure, diffState);
+          throw failure;
+        }
       }
     }
-    return { results: results, errors: errors, total: ops.length };
+    var out = { results: results, errors: errors, total: ops.length };
+    if (diffState) out.diff = __diffFinish(diffState);
+    return out;
   }
   // Long batches: register job, return jobId; panel polls _continue_job.
   var jobId = __newJobId();
@@ -35,6 +46,9 @@ OPS.run_batch = function (args) {
     cancelled: false,
     transactional: transactional,
     name: name,
+    // Carried across the chunked continuations: the before-fingerprint has to
+    // outlive the call that took it, or a long batch could never be diffed.
+    diffState: diffState,
   };
   // Wrap async run already inside an undoGroup chain. We open it now, the
   // continuations stay inside it until finalization.
@@ -68,13 +82,19 @@ OPS._continue_job = noUndo(function (args) {
         if (j.undoOpen) { app.endUndoGroup(); j.undoOpen = false; }
         // Attempt rollback via undo
         try { app.executeCommand(app.findMenuCommandId("Undo")); } catch (e2) {}
-        return { done: true, failed: true, jobId: jobId, error: e.message, atIndex: j.cursor, results: j.results, errors: j.errors };
+        var failed = { done: true, failed: true, jobId: jobId, error: e.message, atIndex: j.cursor, results: j.results, errors: j.errors };
+        // Taken after the undo attempt, so it reports the state that actually
+        // survived rather than the one before AE was asked to back it out.
+        if (j.diffState) failed.diff = __diffFinish(j.diffState);
+        return failed;
       }
     }
   }
   if (j.cursor >= j.total) {
     if (j.undoOpen) { app.endUndoGroup(); j.undoOpen = false; }
-    return { done: true, jobId: jobId, results: j.results, errors: j.errors, total: j.total };
+    var done = { done: true, jobId: jobId, results: j.results, errors: j.errors, total: j.total };
+    if (j.diffState) done.diff = __diffFinish(j.diffState);
+    return done;
   }
   return { done: false, jobId: jobId, progress: j.cursor, total: j.total };
 });

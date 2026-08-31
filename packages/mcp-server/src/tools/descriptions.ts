@@ -12,6 +12,12 @@ export const descriptions: Record<string, string> = {
   set_comp: "Modify a comp (name, dims, fps, duration, work area, bg). Undefined fields unchanged.",
   delete_comp: "Delete a comp. Reversible only via AE's Undo.",
   set_active_comp: "Focus a comp in the viewer/timeline.",
+  duplicate_comp:
+    "Copy a comp. Returns the new comp id, so you never have to find it by name. Use this instead of run_jsx + CompItem.duplicate(). By default the copy is SHALLOW, exactly like AE's own Duplicate: its precomp layers point at the same nested comps as the original, so editing one of those edits both. `deep:true` duplicates the nested comps too and re-points the copy at them — that is what 'a variant of this rig' means. A nested comp used by several layers is duplicated once and reused. `folderId` files the copy in a project folder; `nameSuffix` names the nested copies '<original><suffix>'.",
+  snapshot_comp:
+    "Take a cheap structural fingerprint of a comp and keep it in this server's memory. Returns a snapshotId and nothing else worth tokens — call it BEFORE a write, then diff_comp afterwards to learn what the write actually did, instead of reading the comp back and comparing by eye. It records per layer: id, name, index, type, in/out/start, parent, enabled, keyframe counts, expression count, effect count; per comp: size, duration, frame rate, work area, markers. It does NOT record property values, expression text, effect parameters, masks or shape contents. Nothing is written into the AE project, and snapshots are gone when the session ends.",
+  diff_comp:
+    "What changed in a comp since a snapshot: layers added, removed, renamed, retimed, re-parented, keyframe counts that moved, expressions and effects gained or lost — and nothing at all for unchanged layers, which are only counted. A few dozen tokens where list_layers + get_layer_full is thousands, and it answers the three questions worth asking after a write: which layer is the new one, where did a failed script stop, and did the assembly land. Only the recorded fields are compared, so 'no differences' means none of THOSE moved, not that the comp is identical. Returns a fresh snapshotId so you can keep diffing forward.",
 
   // ---------- layers ----------
   list_layers: "Layers in a comp, one-line each. Use get_layer_full for details. Pass `include` to trim it — `include: []` returns just id/index/name/type, the cheapest way to learn what is in a comp.",
@@ -81,7 +87,7 @@ export const descriptions: Record<string, string> = {
   screenshot_layer: "ONE-OFF visual check of a single layer (solo'd) at a time. Same one-off rule and same downsample guidance as screenshot_frame. The same 'Stale frame' and `empty:true` non-image results apply.",
 
   // ---------- batch ----------
-  run_batch: "Many ops in one ExtendScript pass, one undo step. >500 ops returns a jobId + streams progress; use await_job. transactional:true (default) rolls back on first error.",
+  run_batch: "Many ops in one ExtendScript pass, one undo step. >500 ops returns a jobId + streams progress; use await_job. transactional:true (default) rolls back on first error. `diff:true` appends a structural diff of the comps the batch touched — what it added, retimed, re-parented and keyframed — and on a failure that diff rides on the error, which is the cheapest way to find where a half-applied batch stopped.",
 
   // ---------- explore ----------
   get_project_summary: "Project state: path, item count, active item, flat item list with type (comp | footage | solid | folder | unknown — same vocabulary as a layer's sourceType).",
@@ -95,7 +101,8 @@ export const descriptions: Record<string, string> = {
     "`return X` sends a value back — arrays and nested objects come back whole. Anything that cannot be JSON is replaced in place by a marker string, never dropped: `\"[function]\"`, `\"[undefined]\"`, `\"[circular]\"`, `\"[max depth]\"`, `\"[NaN]\"`, and live AE objects as `\"[CompItem \\\"Main\\\" #12]\"` — a handle to pass to a real read tool, not a walk of the object. An empty result therefore means the script really returned nothing. " +
     "A script with no explicit `return` — including one ending in a bare expression, which does NOT return its value — comes back as `{ok:true, returned:null, undoGroup, note}`. That means it ran to completion; it did **not** fail, so do not re-run it. Nothing rolls back, so re-running a mutating script applies it twice. " +
     "A failure names the line of YOUR script and prints its text; when the number cannot be mapped it says so rather than guessing. Everything before that line already ran and nothing rolls back, so read the state back — never re-run the script to see if it fails again. " +
-    "AE refuses copyToComp for a layer with a parent or a linked expression while an undo group is open: call `withoutUndoGroup(function(){ … })` around just that part, or pass undoGroup:false for the whole script (its changes then land as whatever undo steps AE records on its own, not one). Keep loops short — ExtendScript is single-threaded and freezes the user's UI.",
+    "AE refuses copyToComp for a layer with a parent or a linked expression while an undo group is open: call `withoutUndoGroup(function(){ … })` around just that part, or pass undoGroup:false for the whole script (its changes then land as whatever undo steps AE records on its own, not one). Keep loops short — ExtendScript is single-threaded and freezes the user's UI. " +
+    "`diff:true` fingerprints the comp before and after the script and appends only what changed, so the script reports what it actually did instead of you reading the comp back; with it the answer is always `{ok, returned, diff}`. If the script throws, that diff is appended to the error — which is how you find where a half-applied script stopped, since nothing rolls back.",
 
   // ---------- footage ----------
   import_footage:

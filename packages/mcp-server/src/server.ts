@@ -13,6 +13,8 @@ import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
 import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge/writeQueue.js";
 import { JobManager } from "./jobs/manager.js";
+import { SnapshotStore } from "./snapshots/store.js";
+import type { CompFingerprint } from "./snapshots/store.js";
 import { descriptions } from "./tools/descriptions.js";
 import { AeError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText } from "./util/errors.js";
 import { resolveRunJsxSource, type RunJsxArgs } from "./tools/runJsxSource.js";
@@ -50,6 +52,11 @@ export const SERVER_OPS = new Set([
   "list_known_issues",
   "mark_issue_reported",
 ]);
+// Half server-resident: only the panel can read After Effects, only the server
+// can remember anything between calls. These forward an internal read op to
+// gather a fingerprint and keep the result in `SnapshotStore` — they are not in
+// SERVER_OPS, because unlike those they do touch the bridge.
+const SNAPSHOT_OPS = new Set(["snapshot_comp", "diff_comp"]);
 
 /**
  * True for an op that changes the After Effects session, from the one table
@@ -97,6 +104,7 @@ export function createServer() {
   // One writer at a time. See bridge/writeQueue.ts for why the panel's own
   // evalScript mutex is not enough.
   const writes = new WriteQueue();
+  const snapshots = new SnapshotStore();
   const ws = new WsClient(bridge.port, jobs);
   ws.start();
   const panelGate = createPanelGate(bridge);
@@ -312,6 +320,10 @@ export function createServer() {
 
     // Forward to panel.
     try {
+      // Inside this try so the panel's own error mapping — timeouts, AeError,
+      // the Unknown-op backstop — applies to the internal ops these forward.
+      if (SNAPSHOT_OPS.has(name)) return await runSnapshotOp(name, args, bridge, snapshots);
+
       const result = await bridge.runOp(name, args, progressToken);
 
       // Async envelope handling for run_batch
@@ -415,6 +427,75 @@ export function createServer() {
 
   return server;
 }
+
+/**
+ * `snapshot_comp` and `diff_comp`.
+ *
+ * The split is the point: the panel gathers a fingerprint because only it can
+ * read After Effects, and the server keeps it because a snapshot must not be
+ * written into the user's project (see snapshots/store.ts). Neither tool sends
+ * the fingerprint back unless asked — returning it by default would reintroduce
+ * exactly the context cost the snapshot exists to avoid, since a tool result is
+ * re-sent on every later request for the rest of the session.
+ */
+async function runSnapshotOp(
+  name: string,
+  args: unknown,
+  bridge: HttpClient,
+  snapshots: SnapshotStore
+) {
+  if (name === "snapshot_comp") {
+    const a = args as { compId: number; includeFingerprint?: boolean };
+    const fingerprint = (await bridge.runOp("_comp_fingerprint", { compId: a.compId })) as CompFingerprint;
+    const snap = snapshots.store(fingerprint);
+    return textResult({
+      snapshotId: snap.id,
+      compId: snap.compId,
+      compName: snap.compName,
+      layers: snap.layerCount,
+      takenAt: new Date(snap.takenAt).toISOString(),
+      next: `Do the work, then diff_comp({ since: "${snap.id}" }).`,
+      lifetime:
+        "Held in this MCP server's memory for the length of the session, not written into the After Effects project.",
+      covers: SNAPSHOT_COVERS,
+      fingerprint: a.includeFingerprint ? fingerprint : undefined,
+    });
+  }
+
+  const d = args as { since: string; compId?: number; includeFingerprint?: boolean };
+  const previous = snapshots.get(d.since);
+  if (!previous) return errorResult(snapshots.missingMessage(d.since));
+  if (d.compId !== undefined && d.compId !== previous.compId) {
+    return errorResult(
+      `Snapshot ${d.since} is of comp ${previous.compId} ("${previous.compName}"), not comp ${d.compId}. ` +
+        `A diff only means anything against a snapshot of the same comp — omit compId, or snapshot_comp(${d.compId}) first.`
+    );
+  }
+  const res = (await bridge.runOp("_comp_diff", {
+    compId: previous.compId,
+    since: previous.fingerprint,
+  })) as { diff: Record<string, unknown>; fingerprint: CompFingerprint };
+  // The fresh fingerprint becomes a snapshot of its own, so a verify-as-you-go
+  // loop can keep diffing forward without a second call per step.
+  const next = snapshots.store(res.fingerprint);
+  return textResult({
+    ...res.diff,
+    since: d.since,
+    snapshotId: next.id,
+    fingerprint: d.includeFingerprint ? res.fingerprint : undefined,
+  });
+}
+
+/**
+ * What a snapshot is and is not, quoted back on every one taken. A diff can
+ * only report a field it records, so "no differences" has to be readable as
+ * "none of these moved" and never as "identical" — the same rule that makes
+ * every other scoped read here name what it left out.
+ */
+const SNAPSHOT_COVERS =
+  "Records layer id/name/index/type, in/out/start, parent, enabled, keyframe counts, expression count and " +
+  "effect count, plus comp size/duration/frame rate/work area/markers. Property values, expression text, " +
+  "effect parameters and shape contents are not recorded.";
 
 /**
  * Caches the panel-version verdict so it costs one /health per session rather

@@ -28,6 +28,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const core = fs.readFileSync(path.join(root, "packages", "jsx", "core.jsx"), "utf8");
 const raw = fs.readFileSync(path.join(root, "packages", "jsx", "raw.jsx"), "utf8");
+// raw.jsx calls into snapshot.jsx for `diff:true`, and the bundle loads it first.
+const snapshot = fs.readFileSync(path.join(root, "packages", "jsx", "snapshot.jsx"), "utf8");
 const dist = (...p) =>
   pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 const { AeError, aeErrorText } = await import(dist("util", "errors.js"));
@@ -38,6 +40,7 @@ function load() {
   };
   vm.createContext(ctx);
   vm.runInContext(core, ctx, { filename: "core.jsx" });
+  vm.runInContext(snapshot, ctx, { filename: "snapshot.jsx" });
   vm.runInContext(raw, ctx, { filename: "raw.jsx" });
   return {
     ctx,
