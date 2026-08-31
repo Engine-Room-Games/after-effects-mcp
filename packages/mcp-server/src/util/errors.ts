@@ -248,3 +248,49 @@ export class WriteQueueCancelledError extends Error {
     this.name = "WriteQueueCancelledError";
   }
 }
+
+/**
+ * A rejected tool call, said in sentences.
+ *
+ * `ZodError.message` is `JSON.stringify(issues, null, 2)` — an array of objects
+ * with `code`, `expected`, `received` and a `path` array, wrapped around the one
+ * sentence worth reading. Every carefully written cross-field message in
+ * `schemas.ts` arrived buried in that, and the machine-readable parts say
+ * nothing an agent can act on that the prose does not.
+ *
+ * Same rule the rest of this file follows for After Effects' own errors: an
+ * agent can only correct a failure it is told about, so the message names the
+ * field and says what to pass. Anything that is not a `ZodError` passes through
+ * untouched — this must never swallow an error whose shape it does not know.
+ */
+export function invalidArgsText(op: string, e: unknown): string {
+  const issues = (e as { issues?: unknown } | null | undefined)?.issues;
+  if (!Array.isArray(issues) || issues.length === 0) {
+    return `Invalid arguments for ${op}: ${(e as Error).message}`;
+  }
+  const lines = issues.map((raw) => {
+    const issue = raw as {
+      path?: unknown[];
+      message?: string;
+      code?: string;
+      expected?: string;
+      received?: string;
+    };
+    const where = Array.isArray(issue.path) && issue.path.length ? issue.path.join(".") : null;
+    // A custom message is the whole reason for writing one, so it wins. The
+    // type-error forms are rebuilt because zod's own reads "Required" with the
+    // field name only in `path`, which is exactly the half that used to be lost.
+    let text = issue.message ?? "invalid";
+    if (issue.code === "invalid_type" && issue.received === "undefined") {
+      text = "required, and was not passed";
+    } else if (issue.code === "invalid_type" && issue.expected) {
+      text = `expected ${issue.expected}, got ${issue.received ?? "something else"}`;
+    }
+    return where ? `  - ${where}: ${text}` : `  - ${text}`;
+  });
+  const head =
+    issues.length === 1
+      ? `Invalid arguments for ${op}:`
+      : `Invalid arguments for ${op} (${issues.length} problems):`;
+  return [head, ...lines].join("\n");
+}
