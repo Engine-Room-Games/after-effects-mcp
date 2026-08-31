@@ -572,8 +572,12 @@ const diffCompIdParam = z
 // ---------- batch ----------
 export const RunBatch = z.object({
   ops: z.array(z.object({ op: z.string(), args: z.unknown() })),
-  transactional: z.boolean().default(true).optional(),
-  undoGroupName: z.string().default("AE MCP Batch").optional(),
+  transactional: z.boolean().default(true).optional()
+    .describe("Stop at the first failing op instead of running the rest. Nothing rolls back either way — the ops before the failure stay applied, and the error says where it stopped."),
+  undoGroupName: z.string().default("AE MCP Batch").optional()
+    .describe("What the user sees in After Effects' Edit > Undo menu. A chunked batch numbers its steps from this, e.g. \"AE MCP Batch (3)\"."),
+  singleUndo: z.boolean().default(false).optional()
+    .describe("Force the whole batch into ONE undo step, whatever its size, by running it in a single blocking ExtendScript call. Up to 2000 ops. The cost is real: After Effects' interface is frozen for the entire batch and no progress is reported, so the user sees nothing until it finishes. Without it a batch over 500 ops is chunked and lands as one undo step per chunk of 25 — the result reports the exact count. Reach for this only when the user has to be able to undo the work with a single Cmd-Z."),
   diff: diffParam,
   diffCompId: diffCompIdParam,
 });

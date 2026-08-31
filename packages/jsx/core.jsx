@@ -70,8 +70,26 @@ function __newJobId() {
 // undo state alone entirely when we never opened a group in the first place.
 var __UNDO_OPEN = false;
 
-function withUndo(name, fn) {
+// Every undo group this bundle opens is counted here, and __beginUndoGroup is
+// the only place allowed to call app.beginUndoGroup. run_batch reports the
+// number of undo steps it cost as the *delta* of this counter, so the number an
+// agent repeats to the user as "press Cmd-Z N times" is measured rather than
+// predicted — a chunk that threw still opened its group, and a batched op that
+// called withoutUndoGroup() really did split itself into two steps.
+var __UNDO_GROUPS = 0;
+
+function __beginUndoGroup(name) {
+  __UNDO_GROUPS += 1;
   app.beginUndoGroup(name || "AE MCP");
+}
+
+function __undoGroupsOpened() { return __UNDO_GROUPS; }
+
+// An undo group must open and close inside ONE evalScript call. After Effects
+// discards one that spans two — see the note in CLAUDE.md; measured, not
+// inferred. Everything that groups goes through here for that reason.
+function withUndo(name, fn) {
+  __beginUndoGroup(name || "AE MCP");
   __UNDO_OPEN = true;
   try { return fn(); }
   finally { __UNDO_OPEN = false; app.endUndoGroup(); }
@@ -87,7 +105,7 @@ function withoutUndoGroup(fn) {
   app.endUndoGroup();
   __UNDO_OPEN = false;
   try { return fn(); }
-  finally { app.beginUndoGroup("AE MCP: continue"); __UNDO_OPEN = true; }
+  finally { __beginUndoGroup("AE MCP: continue"); __UNDO_OPEN = true; }
 }
 
 // ---------- Error helper ----------

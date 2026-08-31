@@ -157,15 +157,28 @@ await check("an uncontended write is byte-identical to what it always was", asyn
 
 await check("a long batch holds the queue until the job finishes", async () => {
   // The gap the panel's own evalScript mutex leaves, and the whole reason for
-  // this queue: run_batch answers with a jobId while its undo group is still
-  // open, and the panel goes on driving _continue_job in the background. A
-  // write let through here would land inside that group.
+  // this queue: run_batch answers with a jobId and the panel goes on driving
+  // _continue_job in the background. A write let through here would land in the
+  // middle of the batch, out of the order the agent issued it in.
   seen.length = 0;
-  behaviour.set("run_batch", { ms: 5, result: { jobId: "j_test_1", async: true, total: 600 } });
+  behaviour.set("run_batch", {
+    ms: 5,
+    result: {
+      jobId: "j_test_1", async: true, total: 600,
+      chunkSize: 25, undoStepsEstimate: 24, undoGroupName: "AE MCP Batch",
+      note: "about 24 undo steps, NOT one",
+    },
+  });
   behaviour.set("set_layer", { ms: 5, result: { ok: true } });
 
   const batch = await call("run_batch", { ops: [{ op: "create_null_layer", args: { compId: 1 } }] });
-  assert.deepEqual(payload(batch), { jobId: "j_test_1", async: true, total: 600 });
+  // The undo fields have to survive the envelope: this is the only message the
+  // agent sees before it starts telling the user how to undo the work.
+  assert.deepEqual(payload(batch), {
+    jobId: "j_test_1", async: true, total: 600,
+    chunkSize: 25, undoStepsEstimate: 24, undoGroupName: "AE MCP Batch",
+    note: "about 24 undo steps, NOT one",
+  });
 
   let landed = false;
   const queued = call("set_layer", { compId: 1, layerId: 1, name: "n" }).then((r) => { landed = true; return r; });
@@ -195,6 +208,36 @@ await check("await_job does not deadlock against the batch holding the lock", as
 
   const state = payload(await awaited);
   assert.equal(state.status, "completed");
+});
+
+await check("a singleUndo batch releases the queue when its call returns", async () => {
+  // singleUndo runs the whole batch inside one evalScript, so it answers with a
+  // result and never with a jobId. The lease has to be released by the call's
+  // own `finally`; extending it here would park the queue on a job that will
+  // never complete, and every write for the rest of the session would wait out
+  // the hold ceiling. There is no async envelope to detect, so the guard is
+  // that the *next* write answers at all.
+  seen.length = 0;
+  behaviour.set("run_batch", {
+    ms: 20,
+    result: { results: [], errors: [], total: 600, undoSteps: 1, undoGroupName: "All at once" },
+  });
+  behaviour.set("set_layer", { ms: 5, result: { ok: true } });
+
+  const batch = await call("run_batch", {
+    ops: [{ op: "create_null_layer", args: { compId: 1 } }],
+    singleUndo: true,
+  });
+  assert.equal(payload(batch).undoSteps, 1);
+
+  const after = await Promise.race([
+    call("set_layer", { compId: 1, layerId: 1, name: "n" }),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("the write after a singleUndo batch never ran — the lease was not released")), 3000)
+    ),
+  ]);
+  assert.equal(payload(after).ok, true);
+  assert.equal(seen.map((s) => s.op).join(","), "run_batch,set_layer");
 });
 
 console.log(`write-queue-server: ${passed} checks passed`);
