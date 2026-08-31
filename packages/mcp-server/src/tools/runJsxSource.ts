@@ -30,11 +30,21 @@ export const MAX_SCRIPT_BYTES = 512 * 1024;
 /** A helper set, not a dependency tree. Past this something has gone wrong upstream. */
 export const MAX_LIBRARIES = 16;
 
+/**
+ * A validated `run_jsx` payload on its way to the panel.
+ *
+ * The index signature is the contract, not laziness. Everything here has
+ * already been through `OpSchemas.run_jsx`, which is the single source of truth
+ * for what a `run_jsx` call may contain and which strips everything else — so
+ * the only fields this type has to *name* are the three this module actually
+ * resolves. Naming the rest would make it a second copy of that schema, and a
+ * second copy is a thing that diverges. See `resolveRunJsxSource`.
+ */
 export interface RunJsxArgs {
+  [key: string]: unknown;
   code?: string;
   scriptPath?: string;
   libraries?: string[];
-  undoGroup?: boolean;
 }
 
 export interface RunJsxLibrary {
@@ -45,11 +55,14 @@ export interface RunJsxLibrary {
 }
 
 export interface ResolvedRunJsxArgs {
+  /** Every other `RunJsx` field, carried through untouched. */
+  [key: string]: unknown;
+  /** Always present and non-empty: inline `code`, or the text read from `scriptPath`. */
   code: string;
   /** Echoed to the panel so a failure can name the file rather than "your script". */
   scriptPath?: string;
+  /** `{path, hash, bytes}` — never the source text. */
   libraries?: RunJsxLibrary[];
-  undoGroup?: boolean;
 }
 
 function readScriptFile(p: string, what: string): { text: string; bytes: number } {
@@ -90,6 +103,19 @@ function readScriptFile(p: string, what: string): { text: string; bytes: number 
  *
  * Throws with a message written for the agent — every failure names the path,
  * because the one thing the caller can act on is which file was wrong.
+ *
+ * **Everything this function does not resolve passes through by construction.**
+ * It used to build a fresh object and copy the fields it knew about, which made
+ * it a whitelist of the `RunJsx` schema maintained by hand in a second place.
+ * The two diverged the first time the schema grew: `diff` and `diffCompId`
+ * landed on `RunJsx` and `RunBatch` together, `run_batch` forwards its args
+ * untouched and worked, and `run_jsx` dropped both here — so `diff: true` came
+ * back looking like an ordinary success with no diff, which is the swallowed
+ * error this codebase refuses everywhere else. Any field added to `RunJsx`
+ * would have failed the same silent way. The whitelist belongs to the zod
+ * schema, which has already run by the time we get here and has already
+ * stripped anything it does not declare; spreading is what makes this function
+ * about its own two jobs and nothing else.
  */
 export function resolveRunJsxSource(args: RunJsxArgs): ResolvedRunJsxArgs {
   const hasCode = typeof args.code === "string" && args.code.length > 0;
@@ -106,8 +132,17 @@ export function resolveRunJsxSource(args: RunJsxArgs): ResolvedRunJsxArgs {
     );
   }
 
-  const out: ResolvedRunJsxArgs = { code: "" };
-  if (args.undoGroup !== undefined) out.undoGroup = args.undoGroup;
+  // Start from the caller's own args. `undoGroup`, `diff`, `diffCompId` and
+  // whatever `RunJsx` grows next are carried by this line and need no code of
+  // their own. Absent stays absent — nothing here invents a default, because
+  // the panel reads several of these as `=== false` and a default here would be
+  // a second place that decides.
+  //
+  // `libraries` is lifted out of the spread rather than overwritten after it:
+  // the caller's `string[]` is not the `{path, hash, bytes}[]` the panel is
+  // promised, and lifting it makes that a type error rather than a convention.
+  const { libraries: requestedLibraries, ...passthrough } = args;
+  const out: ResolvedRunJsxArgs = { ...passthrough, code: "" };
 
   if (hasPath) {
     const p = args.scriptPath as string;
@@ -115,17 +150,21 @@ export function resolveRunJsxSource(args: RunJsxArgs): ResolvedRunJsxArgs {
     out.scriptPath = p;
   } else {
     out.code = args.code as string;
+    // An empty-string `scriptPath` passed alongside `code` is not a file. Left
+    // on the payload it would reach the panel's error reporting and blame a
+    // failure on a file nobody ever read.
+    delete out.scriptPath;
   }
 
-  if (args.libraries && args.libraries.length > 0) {
-    if (args.libraries.length > MAX_LIBRARIES) {
+  if (requestedLibraries && requestedLibraries.length > 0) {
+    if (requestedLibraries.length > MAX_LIBRARIES) {
       throw new Error(
-        `run_jsx takes at most ${MAX_LIBRARIES} libraries, got ${args.libraries.length}.`
+        `run_jsx takes at most ${MAX_LIBRARIES} libraries, got ${requestedLibraries.length}.`
       );
     }
     const libs: RunJsxLibrary[] = [];
     const seen = new Set<string>();
-    for (const raw of args.libraries) {
+    for (const raw of requestedLibraries) {
       // Duplicates within one call are the caller repeating itself, not a
       // second load — the panel's cache would collapse them anyway, and
       // collapsing them here keeps the payload honest about what is sent.
@@ -140,6 +179,8 @@ export function resolveRunJsxSource(args: RunJsxArgs): ResolvedRunJsxArgs {
     }
     out.libraries = libs;
   }
+  // `libraries: []` therefore leaves no key at all, which is what the panel has
+  // always been sent for "no libraries".
 
   return out;
 }

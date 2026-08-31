@@ -64,7 +64,7 @@ The MCP server is stateless except for an in-memory `JobManager` and the write q
 | `packages/ae-panel/client/mogrt.js` | Zip surgery + box-filter resample that replaces `thumb.png` inside an exported `.mogrt`. Node builtins only, requireable by a test. |
 | `packages/mcp-server/src/server.ts` | Tool registry, vision/async-envelope branching, error mapping. |
 | `packages/mcp-server/src/tools/descriptions.ts` | All tool descriptions in one file — including the verbatim screenshot guidance. |
-| `packages/mcp-server/src/tools/runJsxSource.ts` | `run_jsx`'s `scriptPath` and `libraries`. The **server** reads those files, never the panel — same reasoning as `init_project`. `OPS.run_jsx` throws if a `scriptPath` still reaches it: that means the call came through `run_batch` (whose steps are never validated) or a direct `/op`, and running the empty script would report success for a file nobody read. |
+| `packages/mcp-server/src/tools/runJsxSource.ts` | `run_jsx`'s `scriptPath` and `libraries`. The **server** reads those files, never the panel — same reasoning as `init_project`. `OPS.run_jsx` throws if a `scriptPath` still reaches it: that means the call came through `run_batch` (whose steps are never validated) or a direct `/op`, and running the empty script would report success for a file nobody read. It resolves those two fields and **spreads everything else through untouched** — see "The only op whose input is rewritten" below. |
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. |
 | `packages/mcp-server/src/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` — the lease that outlives its own call so a long `run_batch` keeps the lock while the panel drives it. Classification comes from `OpMutation` in `schemas.ts`. |
 | `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool. |
@@ -102,6 +102,38 @@ Adding a new op = touching six places. In order:
 6. **Reload in AE** (optional, dev only) — `curl -X POST http://127.0.0.1:7777/reload-jsx` re-`$.evalFile`s the bundle without restarting AE.
 
 The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring is needed unless the op needs special return packaging (vision = image content, run_batch = async envelope, jobs/* = server-resident) — or, in one case, special *input* packaging: `run_jsx` is rewritten between zod validation and the forward, so `scriptPath` becomes `code` and `libraries` become `{path, hash}` before the panel ever sees them (`tools/runJsxSource.ts`).
+
+### The only op whose input is rewritten
+
+Adding a field to `RunJsx` is therefore the one case where step 1 above is not
+enough on its own — so `resolveRunJsxSource` is built to make it enough anyway.
+
+It used to construct a fresh args object and copy across the fields it knew
+about, which made it a **second copy of the `RunJsx` schema, maintained by
+hand**. The two diverged the first time the schema grew: `diff` and `diffCompId`
+were added to `RunJsx` and `RunBatch` together, `run_batch` forwards its args
+untouched and worked, and `run_jsx` dropped both on the floor. Nothing failed.
+`diff:true` came back as an ordinary success with no diff on it — the swallowed
+error this repo refuses everywhere else, in the one tool where an agent that
+cannot see what a script changed re-runs the script.
+
+Two rules, and they are the whole of it:
+
+- **Spread the caller's args; override only what this function resolves.** The
+  whitelist belongs to the zod schema, which has already run by then and has
+  already stripped everything it does not declare. `libraries` is lifted out of
+  the spread by destructuring rather than overwritten after it, so the caller's
+  `string[]` reaching the panel in place of the resolved `{path, hash, bytes}[]`
+  is a type error and not a convention.
+- **`tests/unit/run-jsx-args.mjs` enumerates `RunJsx.shape` and fails if any
+  declared field is unreachable after resolution.** Same shape of guard as the
+  `OpMutation` classification test, and for the same reason: the omission is
+  invisible in the diff, invisible at runtime, and shows up as a plausible
+  success. It generates a sample value per field from the zod type and **throws
+  rather than skipping** on a type it cannot generate — a guard that quietly
+  passes over the field it does not understand is the failure it exists to catch.
+
+Verification recipe 29 is the live half.
 
 ## Special return shapes
 

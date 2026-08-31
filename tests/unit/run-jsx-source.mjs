@@ -57,6 +57,17 @@ try {
     assert.equal("undoGroup" in resolveRunJsxSource({ code: "x();" }), false);
   });
 
+  check("diff and diffCompId survive the resolution", () => {
+    // These were dropped for a release. This file passed the whole time, because
+    // every case in it is built from the same list of fields the implementation
+    // copied — so it could only ever confirm that the fields it already knew
+    // about survived. `tests/unit/run-jsx-args.mjs` is the guard that reads the
+    // list off the RunJsx schema instead; this case is the specific instance.
+    const out = resolveRunJsxSource({ code: "x();", diff: true, diffCompId: 11370 });
+    assert.equal(out.diff, true, "the panel's __diffStart reads args.diff — no key, no diff");
+    assert.equal(out.diffCompId, 11370);
+  });
+
   rejects(
     "neither code nor scriptPath is a clear refusal, not an empty run",
     {},
