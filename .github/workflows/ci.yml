@@ -129,6 +129,25 @@ jobs:
       - name: Panel tells a stale render from a repeated request
         run: node tests/unit/frame-cache.mjs
 
+      # saveFrameToPng returns before the bytes are on disk, and the panel used
+      # to call a frame finished once its size stopped changing for 30ms. On a
+      # heavy comp that is a pause, not an ending, so half-written PNGs went out
+      # as successful screenshots (#45). Completion is structural now, and this
+      # runs the real poll loop over files the test grows by hand.
+      - name: A half-written frame is never delivered
+        run: node tests/unit/frame-integrity.mjs
+
+      # Every requested time keeps its cell even when its render failed, and the
+      # time is burned into the picture rather than only reported beside it.
+      - name: Contact sheets tile and label what was asked for
+        run: node tests/unit/contact-sheet.mjs
+
+      # The wiring neither of those two can see: a failed read must never be
+      # delivered and never cached, while a genuinely re-served buffer must still
+      # be caught. Boots the real client/main.js against a stub CEP host.
+      - name: The screenshot pipeline holds end to end
+        run: node tests/unit/screenshot-pipeline.mjs
+
       # Archive surgery on a file the user is about to hand to an editor: a
       # thumbnail worth looking at is not worth a corrupt .mogrt, so every
       # entry the patch does not mean to touch is checked byte-for-byte.

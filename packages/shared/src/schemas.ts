@@ -514,11 +514,36 @@ const downsampleParam = z
   .describe(
     "Render at 1/N resolution. Omit and one is chosen from the comp size (long edge ~1280px: 2 at 1080p, 3 at 4K). Pass 1 for a full-resolution frame."
   );
-export const ScreenshotFrame = z.object({
-  compId: z.number(),
-  time: z.number().optional(),
-  downsample: downsampleParam,
-});
+export const ScreenshotFrame = z
+  .object({
+    compId: z.number(),
+    time: z.number().optional(),
+    /**
+     * Several times in one call, returned as one tiled sheet.
+     *
+     * Judging motion is a single visual question, and answering it used to cost
+     * one call per frame — three image blocks resident for the rest of the
+     * session, and three chances for After Effects to re-serve a stale buffer.
+     * Capped at six because past that each tile is too small to read at the
+     * pixel budget of one frame.
+     */
+    times: z
+      .array(z.number())
+      .min(2)
+      .max(6)
+      .optional()
+      .describe(
+        "2-6 times to render into one tiled contact sheet, in order, with the time burned into each tile. Cheaper than one call per frame and the whole point of it is judging motion. Mutually exclusive with `time`."
+      ),
+    downsample: downsampleParam,
+  })
+  // Enforced here rather than in the panel: two readings of "which frame did
+  // you want" reaching ExtendScript at all is a contract the schema should
+  // never have let through.
+  .refine((v) => !(v.time !== undefined && v.times !== undefined), {
+    message: "Pass either `time` (one frame) or `times` (a contact sheet), not both.",
+    path: ["times"],
+  });
 export const ScreenshotLayer = z.object({
   compId: z.number(),
   layerId: z.number(),
