@@ -16,7 +16,38 @@ refreshed at each release and a build in between can be ahead of it.
 ## 0.4.0
 
 The release where verifying a change stopped meaning reading the whole thing
-back. Two existing calls answer differently, so read those first.
+back — and where a live pass against After Effects 2026 found four things this
+server had been claiming that were never true. Those are first, because an agent
+that learned the old story will otherwise repeat it to a user.
+
+### Things that were never true, and are now fixed
+
+- **`run_batch` was never one undo step, and over 500 ops it still is not.** The
+  guarantee it shipped with did not exist on either path: After Effects discards
+  an undo group opened in one script call and closed in another, so a 600-op
+  batch landed as about six hundred separate steps while reporting one. Now: up
+  to 500 ops is genuinely one step; over 500 is **one step per chunk of 25**,
+  around 24 for 600 ops, with the measured count in `undoSteps` and a `note`
+  saying it in words. `singleUndo: true` forces one step up to 2000 ops by
+  running the batch in a single blocking call — which freezes AE's interface for
+  the duration and reports no progress. Read `undoSteps` before you tell anyone
+  how to undo the work.
+- **`transactional: true` never rolled anything back.** It fired one menu-command
+  Undo, and menu commands silently do nothing over this bridge — and one Undo is
+  one step, not a batch. It stops at the first failure, as it always really did,
+  and now says `rolledBack: false` and names the stop point. The ops before the
+  failure stay applied. Use `diff: true` to see what landed.
+- **`reorder_layer` had never worked at all.** Every call it ever served threw
+  `parent is not an INDEXED_GROUP`, because it used a shape-node method on a
+  layer. It now takes exactly one of `beforeLayerId`, `afterLayerId` or
+  `toIndex`, prefers the id forms because this is the op that invalidates
+  indexes, and `toIndex` means the index the layer **ends up at**.
+- **`downsample: 1` was not full resolution.** It skipped setting the comp's
+  resolution at all, so it inherited the viewer's Resolution dropdown — on a comp
+  a designer had left at Quarter, `downsample: 1` returned a quarter-size frame
+  and `downsample: 2` returned one four times larger. The response was honest
+  about the dimensions; the picture was not the one asked for. Factor 1 is now
+  set explicitly like any other and restored afterwards.
 
 ### Two calls changed under you
 
@@ -67,8 +98,15 @@ back. Two existing calls answer differently, so read those first.
 ### run_jsx
 
 - **A failure names the line of *your* script and prints its text**, and says so
-  honestly when the number cannot be mapped rather than guessing. The old advice
-  to ignore the line number is gone.
+  honestly when the number cannot be mapped rather than guessing. This one was
+  claimed once before it was true: until the live pass every error said line 1
+  and printed line 1's text, with the real number only in the parenthetical after
+  it, because AE reports `Error.start`/`Error.end` as `0` on every error rather
+  than as the character offsets its documentation describes.
+- **`diff: true` on `run_jsx` now reaches After Effects.** The server was
+  building a fresh argument object and dropping every field it did not enumerate,
+  so the flag was discarded before the call left. The same flag on `run_batch`
+  always worked, which is what hid it.
 - **`scriptPath` and `libraries`** keep a long script and its shared helpers out
   of the conversation entirely. Libraries are inlined ahead of the script in the
   same scope, so their functions are callable from it; they are re-evaluated on
@@ -89,13 +127,19 @@ back. Two existing calls answer differently, so read those first.
 - **`set_temporal_ease` and `add_keyframe` size the ease array themselves.** Pass
   one `{influence, speed}` pair per side; the count that worked comes back as
   `easeDimensions`. The bare `parameter 2` failure is no longer yours to avoid.
+- **`export_mogrt` refuses an empty Essential Graphics panel up front**, naming
+  the controller count. It used to attempt the export and then blame a modal
+  dialog, which under the default dialog suppression is the one cause ruled out
+  by construction. When an export does fail now, the message says what was
+  checked and — if dialogs were suppressed — that the cause is genuinely unknown,
+  because AE answers with a bare boolean and has no way to say why.
 
 ### Underneath
 
-- **Writes are serialized, one at a time, for the whole session** — so a long
-  `run_batch` can no longer have its undo step split in half by another call
-  landing between its chunks, and two writes issued together run in the order you
-  issued them. A call that waited says `queuedBehind` and `waitedMs`. Reads are
+- **Writes are serialized, one at a time, for the whole session**, so two writes
+  issued together run in the order you issued them and a long `run_batch` holds
+  the lock until its last chunk lands — nothing else drops into the middle of
+  work the user asked for as one thing. A call that waited says `queuedBehind` and `waitedMs`. Reads are
   never queued. There is a new diagnosis to tell apart from a bridge timeout: a
   call *dropped while waiting for the write queue* never reached After Effects,
   so re-sending it is safe — which is the opposite of what a timeout means.

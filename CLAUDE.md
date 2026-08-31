@@ -276,10 +276,11 @@ Three rules that keep this honest:
   load-bearing: the generator refuses to build a reference whose parent does not
   name `references/<name>.md`, because a reference nothing points at is a file
   that is never read and never noticed. Two ship today, both under
-  `after-effects`: `extendscript-gotchas` (issue #48 — ten KB of `run_jsx` traps
-  and the helpers that already solve them, which only matter to an agent about to
-  script) and `whats-new` (issue #60 — the version deltas users were otherwise
-  keeping in their own project notes).
+  `after-effects`: `extendscript-gotchas` (issue #48 — the `run_jsx` traps, the
+  helpers that already solve them, and the standing warning that Adobe's scripting
+  docs describe an ExtendScript AE 2026 does not implement; all of it dead weight
+  until an agent is about to script) and `whats-new` (issue #60 — the version
+  deltas users were otherwise keeping in their own project notes).
 
 Where a fact goes, in one line: an agent cannot infer it from the tool list *and*
 getting it wrong on the first call costs real work → `instructions`; it is part

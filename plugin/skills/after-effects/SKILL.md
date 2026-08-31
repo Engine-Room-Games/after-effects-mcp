@@ -80,6 +80,21 @@ Every comp and layer has a stable numeric `id`. Layer `index` is a 1-based posit
 
 The same trap bites inside `run_jsx`: a `comp.layer(1)` wrapper is index-bound, not a handle. Once a `copyToComp` or a `duplicate()` has shifted the destination's indices, a reference you took earlier silently resolves to a *different* layer — which is how a script ends up parenting a layer to itself. Re-resolve by id or name after anything that inserts a layer.
 
+### Reordering the layer stack
+
+`reorder_layer` takes **exactly one** destination. Prefer the id forms:
+`beforeLayerId` puts the layer directly in front of (above) that layer,
+`afterLayerId` directly behind it. `toIndex` is absolute — 1 is the front,
+`numLayers` the back — and it means the index the layer **ends up at**, not the
+slot it displaces; those two readings differ by one when moving down the stack.
+
+Reach for an index only when you genuinely mean "put it on top" or "send it to
+the back". This is the op that shifts every index below it, so an index you read
+before the move may already be stale by the time you use it — which is the same
+reason nothing else here is addressed by index. The result carries `movedFrom`
+alongside the landed `index`, read back off the layer; equal values mean it was
+already there.
+
 ## Read, then write, then verify
 
 1. Read the current state (`get_layer_full`).
@@ -124,7 +139,7 @@ come back stale. `time` and `times` are mutually exclusive. There is no `times`
 on `screenshot_layer`.
 
 - **An image is the most expensive result this server returns**, and like every result it stays in your context for the rest of the session. One sheet is a budget for a whole build.
-- **The `downsample` is picked from the comp size** unless you pass one — 2 at 1080p, 3 at 4K, aiming at a long edge around 1280px, and per tile on a sheet. Pass `downsample: 1` only when you genuinely need full resolution: a full 4K frame is large enough to blow out your context in one call.
+- **The `downsample` is picked from the comp size** unless you pass one — 2 at 1080p, 3 at 4K, aiming at a long edge around 1280px, and per tile on a sheet. Pass `downsample: 1` only when you genuinely need full resolution: a full 4K frame is large enough to blow out your context in one call. It does now mean full resolution — the render sets the comp's resolution explicitly and restores it afterwards, so a viewer the designer left on Quarter no longer silently changes the size of the frame you asked for.
 - The result reports the dimensions actually returned and the factor actually applied — trust those numbers rather than assuming.
 - **Space single frames out.** Rapid back-to-back requests are far more likely to come back stale than requests a few seconds apart. A sheet does this for you.
 
@@ -146,22 +161,47 @@ To check motion exactly, read the keyframe values. A picture tells you it looks 
 
 ## Bulk work goes through run_batch
 
-Building 40 layers with 40 separate calls is slow and produces 40 undo steps. `run_batch` runs many ops in one ExtendScript pass as a **single undo step**, which is also what the user expects when they ask to undo "that thing you just built".
+Building 40 layers with 40 separate calls is slow. `run_batch` runs many ops in
+one ExtendScript pass — far faster, and far fewer undo steps.
 
-- `transactional: true` (the default) rolls back the whole batch on the first error.
-- Over 500 ops it returns a `jobId` and streams progress; call `await_job(jobId)` for the final result.
-- `diff: true` appends a structural diff of the comps it touched, so the batch reports what it did rather than you reading the comp back.
+**How many undo steps depends on the size, and you have to read it rather than
+assume it.** After Effects discards an undo group opened in one script call and
+closed in another, which is not written down anywhere in Adobe's documentation
+and was measured on 26.3.
+
+- **Up to 500 ops: exactly one undo step.** The whole batch runs inside one
+  script call, so the group round it survives. One Cmd-Z takes the lot.
+- **Over 500 ops: one undo step per chunk of 25** — about 24 for 600 ops. It
+  returns a `jobId`, streams progress, and finishes with `await_job(jobId)`.
+- **`singleUndo: true` forces one step at any size up to 2000 ops**, by running
+  the whole thing in one blocking call. The cost is real and the user sees it:
+  After Effects' interface is frozen for the entire batch and no progress is
+  reported. Over 2000 it is refused rather than freezing AE for minutes.
+
+**Read `undoSteps` before you tell anyone how to undo the work.** Every result
+carries the *measured* count and a `note` in plain words, and the `{jobId}`
+envelope carries `undoStepsEstimate` — which is the only number you have at the
+moment you would otherwise be promising the user a single Cmd-Z. Never say "one
+undo" for a chunked batch.
+
+**Nothing rolls back, on either setting.** `transactional: true` (the default)
+*stops* at the first failing op; the ops before it stay applied, and the result
+says `rolledBack: false` and names where it stopped. `transactional: false` runs
+the rest and collects the errors. Either way, read the state back — `diff: true`
+appends a structural diff of the comps the batch touched, and on a failure that
+diff rides on the error, which is the cheapest way to find the stop point.
 
 **You do not have to issue writes one at a time.** The server holds a single
-write lock for the whole session, so independent writing calls sent together are
-run in the order you issued them, one after another, and a long `run_batch` keeps
-the lock until its last chunk lands — which is what stops another call splitting
-its undo step in half. A call that had to wait says so with `queuedBehind` and
-`waitedMs`; a call that did not is unchanged. Reads are never queued, so
-`list_layers`, `get_layer_full` and `await_job` still answer while a batch runs.
+write lock for the whole session, so independent writing calls sent together run
+in the order you issued them, one after another, and a long `run_batch` holds the
+lock until its last chunk lands — so another call cannot land in the middle of
+work the user asked for as one thing. A call that had to wait says so with
+`queuedBehind` and `waitedMs`; a call that did not is unchanged. Reads are never
+queued, so `list_layers`, `get_layer_full` and `await_job` still answer while a
+batch runs.
 
-Prefer `run_batch` anyway when the work is one user action: it is one
-ExtendScript pass rather than many, and one undo step rather than many.
+Prefer `run_batch` anyway when the work is one user action: one ExtendScript pass
+rather than many, and far fewer undo steps than the same ops sent separately.
 
 ## Keyframes and easing
 
@@ -234,7 +274,7 @@ This tool is **all-or-nothing**: if a key cannot be applied, the whole node is r
 
 For a custom path, use `{type: "path", vertices: [[x,y], …], closed: true}`. The key is `vertices`, not `points`.
 
-**Render order is the opposite of the layer stack.** Inside `Contents`, index 1 renders in *front*, and each `add_shape_content` call appends behind the previous one. So build **front-to-back**: details, text plates and traffic-light dots first, the big background rectangle last. Getting it backwards is silent — no error, just a solid slab where your artwork should be. `zOrder: "front"` will place a node at index 1 for you, but it needs an internal `moveTo`, which has been seen to disturb *nested* renders of the comp in AE 26.3; prefer ordering your calls. If an existing layer is already in the wrong order, rebuild it rather than reordering, and verify with a screenshot of a comp that **nests** it, not just the comp that owns it.
+**Render order is the opposite of the layer stack.** Inside `Contents`, index 1 renders in *front*, and each `add_shape_content` call appends behind the previous one. So build **front-to-back**: details, text plates and traffic-light dots first, the big background rectangle last. Getting it backwards is silent — no error, just a solid slab where your artwork should be. `zOrder: "front"` will place a node at index 1 for you, but it needs an internal `moveTo`, which has been seen to disturb *nested* renders of the comp in AE 26.3; prefer ordering your calls. If existing shape *content* is already in the wrong order, rebuild it rather than reordering, and verify with a screenshot of a comp that **nests** it, not just the comp that owns it. None of this applies to the layer stack: moving whole layers is `reorder_layer`, which is a different mechanism with none of these caveats.
 
 **Node references go stale.** Adding a sibling to a group invalidates a reference you already hold to another node in it — add a Stroke and an earlier Fill reference starts throwing `Object is invalid`. Add every node first, then set values and expressions by addressing nodes by name.
 
@@ -256,7 +296,7 @@ trim in **comp** time, not file time.
 
 ## The escape hatch
 
-`run_jsx` executes arbitrary ExtendScript. Reach for it when a needed operation has no tool — driving the render queue, batch-renaming, a bulk edit no single op expresses. Check the tool list first: duplicating a comp, easing a keyframe and placing a shape layer at a sane origin all have tools now, and each of them wraps a trap you would otherwise hit.
+`run_jsx` executes arbitrary ExtendScript. Reach for it when a needed operation has no tool — driving the render queue, batch-renaming, a bulk edit no single op expresses. Check the tool list first: duplicating a comp, easing a keyframe, reordering a layer and placing a shape layer at a sane origin all have tools now, and each of them wraps a trap you would otherwise hit. `reorder_layer` is worth singling out — it was broken for three releases, so an agent may have learned to route around it; the way round it in ExtendScript is `layer.moveTo()`, which does not exist and never worked.
 
 **Read the gotchas before you write one** — `ae_guide({topic: "extendscript-gotchas"})`, or `references/extendscript-gotchas.md` beside this file. It is the list of things that fail while naming something else: a property lookup that returns null and surfaces twenty lines later, a `copyToComp` that does not insert where you think, a reserved word that stops the whole script before its first line. Every item on it has already cost somebody an aborted run.
 
@@ -272,15 +312,18 @@ ExtendScript is **single-threaded**, so a long synchronous loop freezes the user
 
 ### Exporting a Motion Graphics template
 
-Use **`export_mogrt`**. Do not drive `comp.exportAsMotionGraphicsTemplate` from `run_jsx` — the tool exists because that call raises modal dialogs, and a modal dialog freezes this whole connection until someone clicks it in After Effects.
+Use **`export_mogrt`**. Do not drive `comp.exportAsMotionGraphicsTemplate` from `run_jsx`. That call raises modal dialogs, and a modal dialog freezes this whole connection until someone clicks it in After Effects — but suppressing them, which is what you have to do, costs you the only channel AE has for saying why an export failed. It answers with a bare boolean and nothing else. So the tool checks every precondition it can *before* exporting, which is the half of its job you cannot do from a script.
 
 `export_mogrt` handles all of it: it saves the project first (which is what removes AE's "the project needs to be saved" prompt, and it has to happen per export because exporting dirties the project again), it suppresses the font warning, and it runs outside the undo group so there is no "undo group mismatch" afterwards. Measured on 26.3: suppressed, an export of a comp using a non-Adobe font returns in about three seconds; unsuppressed, the same export sat past sixty and wrote nothing until the dialog was clicked.
 
-Three things worth knowing before you call it:
+Four things worth knowing before you call it. The first is the one that actually stops exports:
 
+- **The comp needs at least one property in its Essential Graphics panel.** After Effects will not build a template from an empty one, and it refuses silently — no file, no dialog, not a word. The tool checks the controller count first and refuses before touching anything. The fix is in AE and the user has to do it: Window > Essential Graphics, pick the comp, drag a layer property in.
 - **The project must have been saved once, by hand.** There is no folder to save into otherwise, and the tool refuses rather than raising a dialog the user was not expecting.
 - **`name` is the filename.** It defaults to the comp name, because AE's own default is the literal `Untitled` — leave it to AE and every template in the project overwrites the same file.
 - **`fonts` in the result lists what the template will require.** Tell the user about any non-Adobe ones: Premiere flags the template as needing fonts it cannot supply, and that is worth hearing from you rather than discovering later.
+
+**If an export fails anyway, read the message rather than guessing.** It lists what was checked and ruled out, and it only names a modal dialog when dialogs were left *unsuppressed*. Under the default suppression a dialog is impossible by construction, so the cause is genuinely unknown — say so, and tell the user the one place AE's own reason exists: exporting the same comp by hand from the Essential Graphics panel, where AE shows its error in the interface. Do not send them looking for a dialog that cannot be there.
 
 **The thumbnail.** AE writes the comp's *first frame* into the template, so anything that fades up from nothing gets a black one. Pass `posterTime` with a moment that actually shows the design and it is rendered and swapped in. If only the thumbnail fails the export still succeeds — check `thumbnail.patched` in the result.
 

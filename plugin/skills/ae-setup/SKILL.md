@@ -29,9 +29,10 @@ read alike and their remedies contradict each other:
   below is for.
 - **Waited behind another op for the write queue and was dropped** — the panel
   is fine and this call never left the server, so nothing in the project was
-  changed. Writes are serialized because After Effects applies every change
-  through one undo stack, and something in front is taking a very long time,
-  usually a long `run_batch`. Re-sending **is** safe here, once the work in
+  changed. Writes are serialized so that they land in the order the agent issued
+  them and nothing drops into the middle of work the user asked for as one
+  thing; something in front is taking a very long time, usually a long
+  `run_batch`. Re-sending **is** safe here, once the work in
   front has finished; this is the one of the three where it is. Find out what is
   in front with `get_job` or `await_job` — reads are never queued, so `list_`
   and `get_` calls still answer.
@@ -47,7 +48,7 @@ Two things to ask about while waiting: whether a dialog is sitting behind anothe
 A **full** write queue is a fourth message and a different instruction again:
 too many calls are already waiting, so stop issuing writes and let it drain. If
 you have that much independent work, send it as one `run_batch` — one
-ExtendScript pass, one undo step, one place in the queue.
+ExtendScript pass and one place in the queue, instead of dozens of each.
 
 ## Install before they open After Effects, if you still can
 

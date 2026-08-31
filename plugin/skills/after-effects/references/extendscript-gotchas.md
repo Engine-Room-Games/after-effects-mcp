@@ -11,6 +11,25 @@ each assembled by a fresh agent, roughly a thousand layers — lost at least one
 aborted script to every item below, and three to some of them. Measured on After
 Effects 2026 (26.3) through this server at 0.3.1.
 
+**Adobe's scripting documentation describes an ExtendScript that After Effects
+2026 does not implement.** This is not a general caution; it is the single
+largest source of shipped bugs in this project, and every instance was found by
+measuring rather than by reading. In one release: `$.evalFile` is documented as
+evaluating at global scope and in fact evaluates into the calling function's
+scope, so a helper library defined nothing anything could call. `Error.start`
+and `Error.end` are documented as character offsets into the source and are
+in fact `0` on every error, however far in the throw was — so code that trusted
+them reported line 1 for everything. An undo group opened in one script call and
+closed in another is silently discarded, so a 600-op batch that claimed to be one
+undo step was six hundred. `CompItem.posterTime` does not exist at all. And
+`exportAsMotionGraphicsTemplate` invalidates `app.project` itself, not just the
+comp you passed it.
+
+None of these raised. Each one returned exactly what success returns. So when
+this page and Adobe's reference disagree, this page was measured; and if you are
+about to rely on a documented behaviour that nothing here mentions, write the
+three-line probe that proves it before you build on it.
+
 Read it **before** you write the script. Most of these fail in a way that names
 the wrong thing: a null returned here surfaces as `null is not an object` twenty
 lines later, and a reserved word means **nothing in the script runs at all**
@@ -74,6 +93,16 @@ turns a misleading error twenty lines away into an accurate one here.
 - **Render order is the reverse of the layer stack.** Index 1 in `Contents`
   renders in front and `addProperty` appends to the end, so the first node you
   add is the one on top. Build front-to-back.
+- **`moveTo` is a shape-node method, not a layer method.** It re-ranks a
+  `PropertyBase` inside an indexed group, so `layer.moveTo(n)` throws
+  `parent is not an INDEXED_GROUP` — an error naming a concept the caller never
+  mentioned. Layers move with `moveBefore` / `moveAfter` / `moveToBeginning` /
+  `moveToEnd`, all four of which take a **layer**, never an index, and the two
+  directions need different primitives: moving up, `moveBefore` lands on the
+  target; moving down, the target shifts up as the layer leaves, so `moveAfter`
+  is the one that lands on it. Getting that backwards is off by one with no
+  error. *The tool already does:* `reorder_layer`, with `beforeLayerId` /
+  `afterLayerId` / `toIndex`.
 - **A node reference goes stale when a sibling is added.** Hold a Fill, add a
   Stroke to the same group, and the Fill reference starts throwing
   `Object is invalid`. Add every node first, then re-fetch by name before
@@ -103,12 +132,27 @@ turns a misleading error twenty lines away into an accurate one here.
   script does not reliably preserve where the layer sits two levels deep, so
   after scripted parenting audit scale and rotation as well as position.
   `parent_layer` does this correctly and takes `preserveTransform`.
-- **`app.executeCommand(id)` can silently no-op** through this bridge. Menu
-  commands depend on host focus and the active selection, and this bridge has
-  neither. Use the API equivalents — `CompItem.duplicate()`, `layer.duplicate()`.
+- **`app.executeCommand(id)` silently no-ops** through this bridge. Menu commands
+  depend on host focus and the active selection, and this bridge has neither. It
+  returns without complaint, which is how `run_batch`'s "transactional rollback"
+  spent three releases firing `findMenuCommandId("Undo")` and undoing nothing —
+  while reporting that it had. Use the API equivalents —
+  `CompItem.duplicate()`, `layer.duplicate()`.
   *The tool already does:* `duplicate_comp` returns the new comp id, and
   `deep: true` duplicates the nested comps and re-points the copy at them, which
   `CompItem.duplicate()` alone does not.
+
+## Undo groups
+
+- **An undo group does not survive a script boundary.** `beginUndoGroup` in one
+  `evalScript` call and `endUndoGroup` in another produces no group at all —
+  After Effects discards it, `endUndoGroup()` returns exactly as it does on
+  success, and the only place the truth is visible is AE's Edit menu. Anything
+  spanning calls has to open and close its own group per call and count them.
+  *The tool already does:* `run_batch` reports the measured `undoSteps`, and
+  `singleUndo: true` buys one step by staying inside a single call.
+- **`copyToComp` needs the group closed**, which is the opposite problem — see
+  Layers and comps above.
 
 ## Keyframes and expressions
 
