@@ -60,6 +60,43 @@ for (const [rel, re] of targets) {
   changed++;
 }
 
+// package-lock.json records the same versions again, and `npm version -w` only
+// touches the one workspace it was pointed at — so the root and the two other
+// workspaces drifted to 0.3.0 and stayed there through a whole release with
+// nothing to notice. It is not a regex target: the file has hundreds of
+// "version" keys and only these four are ours. A parse/stringify round trip is
+// byte-identical to what npm writes, so this rewrites the values and nothing
+// else.
+const lockFile = path.join(root, "package-lock.json");
+if (fs.existsSync(lockFile)) {
+  const before = fs.readFileSync(lockFile, "utf8");
+  const lock = JSON.parse(before);
+  const workspaces = ["packages/shared", "packages/ae-panel", "packages/mcp-server"];
+
+  const stale = [];
+  if (lock.version !== version) stale.push("version");
+  if (lock.packages?.[""] && lock.packages[""].version !== version) stale.push('packages[""]');
+  for (const ws of workspaces) {
+    if (lock.packages?.[ws] && lock.packages[ws].version !== version) stale.push(`packages["${ws}"]`);
+  }
+
+  if (stale.length > 0) {
+    if (check) {
+      console.error(`  package-lock.json: ${stale.join(", ")} (expected ${version})`);
+      drifted++;
+    } else {
+      lock.version = version;
+      if (lock.packages?.[""]) lock.packages[""].version = version;
+      for (const ws of workspaces) {
+        if (lock.packages?.[ws]) lock.packages[ws].version = version;
+      }
+      fs.writeFileSync(lockFile, JSON.stringify(lock, null, 2) + "\n", "utf8");
+      console.log(`  package-lock.json: ${stale.length} entr${stale.length === 1 ? "y" : "ies"} -> ${version}`);
+      changed++;
+    }
+  }
+}
+
 if (check) {
   if (drifted > 0) {
     console.error(`\n${drifted} file(s) out of sync with ${version}. Run: node scripts/sync-version.mjs`);
