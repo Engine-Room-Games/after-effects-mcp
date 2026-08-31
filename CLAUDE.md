@@ -260,7 +260,9 @@ make artifacts              # both of the above, unsigned
 
 Publishing: `npm publish -w @engine-room/after-effects-mcp` (the `prepack` hook builds `bin/` and `panel/` first). The workspace root and `@engineroom/shared` stay private — `shared` is inlined into the bundle, so it is never published on its own. Verify a release by installing the tarball into an empty directory and running the binary; the published layout puts the panel at `<pkg>/panel`, which is a different path from the checkout's `packages/ae-panel`.
 
-`build:jsx` writes both the source bundle and, if the panel is installed, the installed bundle at `~/Library/.../<bundleId>/jsx/bundle.jsx`. So `/reload-jsx` always sees fresh content — no manual `cp` step. (If you installed with `--symlink`, the installed path *is* the source path; the sync is a no-op.)
+`build:jsx` writes the source bundle. With `AE_MCP_SYNC_PANEL=1` it also writes the installed bundle at `~/Library/.../<bundleId>/jsx/bundle.jsx`, so `/reload-jsx` sees fresh content with no manual `cp` step. (If you installed with `--symlink`, the installed path *is* the source path; the sync is a no-op.)
+
+That sync is **opt-in on purpose**. The installed bundle is one half of the panel version gate, so a plain `npm run build` writing it changes what a *live* AE session compares itself against — another session on the same machine, mid-project, gets told to restart After Effects by a build it never ran. Default-off means a build only ever touches the repo.
 
 ## Verification recipes (run by hand against a live AE 2026)
 
