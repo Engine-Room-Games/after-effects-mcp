@@ -36,7 +36,8 @@ export const descriptions: Record<string, string> = {
   set_layer: "Update layer metadata (name/enabled/locked/shy/solo/3D/blend/label/in-out/stretch/trackMatte). Undefined fields unchanged.",
   parent_layer:
     "Set/clear a layer's parent (parentLayerId=null to unparent). The layer stays visually put: AE's own compensation double-counts when the parent was itself re-parented in the same call, so this recomputes the world transform and corrects position/scale/rotation, reporting any correction in `correction`. Read `correction.notes` — 3D layers, cameras and lights are not corrected, and with a keyframed ancestor the fix is only exact at the comp's current time. Pass preserveTransform:false to let the layer jump instead.",
-  reorder_layer: "Move layer to 1-based stack index.",
+  reorder_layer:
+    "Move a layer in the render stack. Pass exactly one destination: `beforeLayerId` puts it directly in front of (above) that layer, `afterLayerId` directly behind it, `toIndex` at an absolute 1-based position where 1 is the front and numLayers the back. `toIndex` is where the layer ENDS UP, not the slot it displaces — the two differ by one when moving down the stack. Prefer the id forms: this is the op that shifts every index below it, so an index you read earlier may already be stale. The result carries `movedFrom` and the landed `index`, read back off the layer; equal values mean it was already there.",
 
   // ---------- transforms ----------
   set_transform: "Set any of position/scale/rotation/anchorPoint/opacity (+3D orientation/per-axis on 3D). keyframe:true + time sets keyframes.",

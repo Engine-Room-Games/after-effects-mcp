@@ -216,7 +216,31 @@ export const ParentLayer = z.object({
   preserveTransform: z.boolean().default(true).optional()
     .describe("Keep the layer visually where it is (what AE's UI does). Leave on unless you want the layer to jump into the parent's coordinate space."),
 });
-export const ReorderLayer = z.object({ compId: z.number(), layerId: z.number(), toIndex: z.number().int().positive() });
+/**
+ * Reorder is the one op whose whole job is invalidating layer indexes, so an
+ * index is the worst possible way to address its destination — the caller read
+ * it before the move that is about to change it. The id-relative forms are
+ * therefore first-class here rather than sugar, and `toIndex` stays for the
+ * cases where the position is genuinely absolute ("put it on top").
+ */
+export const ReorderLayer = z
+  .object({
+    compId: z.number(),
+    layerId: z.number(),
+    toIndex: z.number().int().positive().optional()
+      .describe("Where the layer ENDS UP: its 1-based index after the move, counting from the front (1 renders in front of everything, numLayers is the back). Clamped to the stack. Prefer beforeLayerId/afterLayerId when you are placing this layer relative to another one — an index you read earlier may already be stale."),
+    beforeLayerId: z.number().optional()
+      .describe("Put this layer directly IN FRONT OF (above) the layer with this id."),
+    afterLayerId: z.number().optional()
+      .describe("Put this layer directly BEHIND (below) the layer with this id."),
+  })
+  // One destination, resolved before it can reach ExtendScript — two readings of
+  // "where does it go" are a contract the schema should never let through.
+  .refine(
+    (v) =>
+      [v.toIndex, v.beforeLayerId, v.afterLayerId].filter((x) => x !== undefined).length === 1,
+    { message: "Pass exactly one of `toIndex`, `beforeLayerId` or `afterLayerId`.", path: ["toIndex"] },
+  );
 
 // ---------- transforms ----------
 export const SetTransform = z.object({
@@ -512,7 +536,7 @@ const downsampleParam = z
   .max(8)
   .optional()
   .describe(
-    "Render at 1/N resolution. Omit and one is chosen from the comp size (long edge ~1280px: 2 at 1080p, 3 at 4K). Pass 1 for a full-resolution frame."
+    "Render at 1/N resolution. Omit and one is chosen from the comp size (long edge ~1280px: 2 at 1080p, 3 at 4K). Pass 1 for a full-resolution frame. The factor is always exactly what you asked for: the render sets the comp's resolution and puts it back, so a viewer left on Quarter or Third does not change the size of the frame you get."
   );
 export const ScreenshotFrame = z
   .object({
