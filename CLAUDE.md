@@ -934,6 +934,8 @@ CI (`.github/workflows/ci.yml`) builds and smoke-tests on macos-latest and windo
 
 Everything that can fail happens **before** the tag is pushed. A failed notarization costs a `git checkout -- .` and nothing else — that ordering is deliberate, so do not move the artifact build after the tag.
 
+**Release notes are short and to the point: a list of fixes, and nothing else.** `release.sh` writes the install block and the changelog link on its own; what goes above them is one line per fix or addition, each naming its issue number and saying what changed in the words a user would recognise the problem by. No narrative, no explanation of why, no upgrade advice, no "known and filed" paragraph. The reasoning behind a change lives in the issue and in `whats-new.md`, which is written for agents; a release page is read by a person deciding whether to update, and a short list is what answers that. (Migs's rule, 2026-09-07.)
+
 The Developer ID certificate stays on one machine and is never read by anything in this repo; `sign-and-notarize.sh` takes credentials from the environment only. A leaked certificate is revoked by Apple, and revocation stops *already-distributed* binaries from launching, which is why CI does not sign.
 
 ## Out of scope (v1)
