@@ -73,15 +73,33 @@ OPS.create_text_layer = function (args) {
   var align = args.anchorAlign === undefined ? "left" : args.anchorAlign;
   var wantJustify = align !== "none" && __JUSTIFICATION[align] !== undefined;
   var wantTracking = args.tracking !== undefined || align !== "none";
+  var verified = null;
   if (args.font || args.size || args.color || wantJustify || wantTracking) {
     var srcText = l.property("Source Text");
     var td = srcText.value;
+    // The same TextDocument round trip set_text does, so the same read-back
+    // (issue #93 / #94, see __verifyJustification in text.jsx): the requested
+    // justification if there is one, otherwise whatever addText() gave the
+    // layer — 'none' promised to leave it alone, and that is checked too.
+    var justificationWanted = wantJustify ? __JUSTIFICATION[align] : td.justification;
     if (args.font) td.font = args.font;
     if (args.size) td.fontSize = args.size;
     if (args.color) { td.applyFill = true; td.fillColor = [args.color[0], args.color[1], args.color[2]]; }
     if (wantTracking) td.tracking = (args.tracking !== undefined ? args.tracking : 0);
-    if (wantJustify) td.justification = __JUSTIFICATION[align];
+    if (wantJustify) td.justification = justificationWanted;
     srcText.setValue(td);
+    try {
+      verified = __verifyJustification(srcText, justificationWanted);
+    } catch (e) {
+      // A throw here would leave a layer the caller has no id for, and the
+      // natural next move — call again — makes two. Same rule as
+      // add_shape_content: take the node back, then say so. The message is
+      // amended on the same Error object so nothing about it is lost.
+      try { l.remove(); } catch (e2) {}
+      e.message = String(e.message) + " The new layer was removed, so nothing was created; " +
+        "create it with anchorAlign:\"none\" and set the alignment afterwards with set_text.";
+      throw e;
+    }
   }
   if (align !== "none") {
     l.property("Transform").property("Anchor Point").setValue([0, 0, 0]);
@@ -90,7 +108,12 @@ OPS.create_text_layer = function (args) {
     var p = args.position;
     l.property("Transform").property("Position").setValue(p.length === 3 ? p : [p[0], p[1]]);
   }
-  return __layerSummary(l);
+  var out = __layerSummary(l);
+  if (verified) {
+    out.justification = __justificationName(verified.justification);
+    out.justificationReasserted = verified.reasserted;
+  }
+  return out;
 };
 
 OPS.create_solid_layer = function (args) {
