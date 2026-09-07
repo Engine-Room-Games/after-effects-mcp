@@ -1010,7 +1010,7 @@ export const SetHouseStyle = z
 export const CheckSetup = z.object({}).strict();
 export const SetupPanel = z.object({
   enableDebugMode: z.boolean().default(true).optional()
-    .describe("Also enable Adobe's PlayerDebugMode preference, which AE requires to load this unsigned panel. Default true."),
+    .describe("Also set Adobe's PlayerDebugMode preference, which AE requires to load this unsigned panel, and CEP's LogLevel where it was never set, so CEP's own log records why a panel failed to load (issue #91). Default true."),
   force: z.boolean().default(false).optional()
     .describe("Replace an existing symlinked (development) install with a copy. Default false."),
 }).strict();

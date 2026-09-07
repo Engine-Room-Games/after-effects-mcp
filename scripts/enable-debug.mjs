@@ -6,11 +6,19 @@
 
 import { loadSetup } from "./lib/setup.mjs";
 
-const { enableDebugMode, isDebugModeOn, isSupportedPlatform } = await loadSetup();
+const { enableDebugMode, ensureCepLogging, isDebugModeOn, isSupportedPlatform, CEP_LOG_LEVEL } = await loadSetup();
 
 if (!isSupportedPlatform()) {
   console.error(`After Effects does not run on ${process.platform}; nothing to enable.`);
   process.exit(1);
+}
+
+// Same step setup_panel takes: CEP's own log is the only place a refusal to
+// load the panel is ever written (issue #91), and it is written only once
+// LogLevel is set. Left alone wherever a value — any value — is already there.
+const logging = await ensureCepLogging();
+if (logging.set.length > 0) {
+  console.log(`CEP LogLevel=${CEP_LOG_LEVEL} set for CSXS ${logging.set.join(", ")} so the CEP log records why a panel failed to load.`);
 }
 
 const before = await isDebugModeOn();

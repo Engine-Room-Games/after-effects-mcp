@@ -110,5 +110,19 @@ fs.cpSync(dir("dst-same"), dir("dst-samesize"), { recursive: true });
 write("dst-samesize/jsx/bundle.jsx", "OPS = [];");
 check("same size, different content", panelInstallDiff(dir("src"), dir("dst-samesize")), ["jsx/bundle.jsx"]);
 
+// A self-signed install (issue #91): ZXPSignCmd's zip, unpacked back over the
+// folder, adds META-INF/signatures.xml and a mimetype file beside the shipped
+// files. Those are extras in the installed copy, not differences from the
+// source, and a diff that counted them would call every signed install partial
+// — sending the user to reinstall, which strips the signature that made the
+// panel load. The walk is over the source tree only, and this is what pins it.
+fs.cpSync(dir("dst-same"), dir("dst-signed"), { recursive: true });
+write("dst-signed/META-INF/signatures.xml", "<signatures/>");
+write("dst-signed/mimetype", "application/vnd.adobe.air-ucf-package+zip");
+check("a self-signed install is complete and current", panelInstallDiff(dir("src"), dir("dst-signed")), []);
+// …while a real difference underneath the signature is still reported.
+write("dst-signed/jsx/bundle.jsx", "OPS = [];");
+check("a signed but stale install still reports the stale file", panelInstallDiff(dir("src"), dir("dst-signed")), ["jsx/bundle.jsx"]);
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`panel-install: ${passed} assertions passed`);

@@ -88,7 +88,16 @@ const AwaitJobSchema = schemas.AwaitJob;
 const GetJobSchema = schemas.GetJob;
 const CancelJobSchema = schemas.CancelJob;
 
-export function createServer() {
+export interface CreateServerOptions {
+  /**
+   * The bridge client to use instead of one discovered from the environment.
+   * A test hands in one pointed at a stale port with its own candidate list, so
+   * the drift path can be exercised without asking anything real on the machine.
+   */
+  bridge?: HttpClient;
+}
+
+export function createServer(opts: CreateServerOptions = {}) {
   const server = new Server(
     { name: "after-effects-mcp", version: "0.4.0" },
     {
@@ -100,20 +109,31 @@ export function createServer() {
     }
   );
 
-  const bridge = new HttpClient();
+  const bridge = opts.bridge ?? new HttpClient();
   const jobs = new JobManager();
   // One writer at a time. See bridge/writeQueue.ts for why the panel's own
   // evalScript mutex is not enough.
   const writes = new WriteQueue();
   const snapshots = new SnapshotStore();
-  const ws = new WsClient(bridge.port, jobs);
+  // Follows the bridge's port rather than copying it: see wsClient.ts.
+  const ws = new WsClient(bridge, jobs);
   ws.start();
   const panelGate = createPanelGate(bridge);
 
-  // Best-effort health probe; non-fatal.
+  // Best-effort health probe; non-fatal. A refusal here is the cheapest moment
+  // to notice the port file was stale (issue #92): the search costs a couple
+  // of seconds now, against a failed first op later.
   bridge.health().then(
     (h) => logger.info(`Bridge healthy on port ${h.port}`),
-    (e) => logger.warn(`Bridge not reachable yet: ${(e as Error).message}`)
+    async (e) => {
+      logger.warn(`Bridge not reachable yet: ${(e as Error).message}`);
+      if (!(e instanceof BridgeUnreachableError)) return;
+      const located = await bridge.rediscover().catch(() => null);
+      if (located?.found && located.found.port !== bridge.port) {
+        await bridge.switchPort(located.found.port);
+        logger.info(`Bridge healthy on port ${bridge.port}`);
+      }
+    }
   );
 
   // ---------- tools/list ----------
@@ -203,8 +223,12 @@ export function createServer() {
           jobs.cancel(a.jobId);
           return textResult({ ok: true });
         }
+        // check_setup is told which port ops are going to, so it can say when
+        // that disagrees with the port that answers — the state issue #92
+        // lived in for a week with every check green.
+        const setupOpts = () => ({ opPort: bridge.port, candidates: bridge.candidates() });
         if (name === "check_setup") {
-          return textResult(await checkSetup());
+          return textResult(await checkSetup(setupOpts()));
         }
         if (name === "setup_panel") {
           const a = schemas.SetupPanel.parse(rawArgs);
@@ -214,7 +238,7 @@ export function createServer() {
           panelGate.invalidate();
           // Re-run the diagnostic so the agent sees the resulting state rather
           // than having to guess whether the install was sufficient.
-          return textResult({ ...installed, setup: await checkSetup() });
+          return textResult({ ...installed, setup: await checkSetup(setupOpts()) });
         }
         if (name === "init_project") {
           const a = schemas.InitProject.parse(rawArgs);
@@ -561,6 +585,14 @@ function createPanelGate(bridge: HttpClient) {
   const RECHECK_MS = 60_000;
   let verdict: string | null = null;
   let checkedAt = 0;
+
+  // A verdict is about the panel on one port. When the bridge moves, whatever
+  // was decided about the old one — stale or healthy — says nothing about the
+  // panel now answering, so the next call has to ask again.
+  bridge.onPortChange(() => {
+    verdict = null;
+    checkedAt = 0;
+  });
 
   return {
     /** The message to return instead of forwarding, or null to proceed. */
