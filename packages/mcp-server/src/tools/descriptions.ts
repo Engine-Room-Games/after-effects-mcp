@@ -10,7 +10,8 @@ export const descriptions: Record<string, string> = {
   get_comp_tree: "Comp + nested layer tree, recursing pre-comps to `depth`.",
   create_comp: "Create a new comp. Returns id.",
   set_comp: "Modify a comp (name, dims, fps, duration, work area, bg). Undefined fields unchanged.",
-  delete_comp: "Delete a comp. Reversible only via AE's Undo.",
+  delete_comp:
+    "Delete a comp. Reversible only via AE's Undo. The solids its layers used are project items, not part of the comp, and After Effects leaves them behind in the Solids folder — the result counts them in `unusedSolidsLeft`. Pass `purgeUnusedSolids:true` to remove, in the same undo step, the ones nothing else uses; a solid another comp still uses is kept and reported in `keptSolids` with that comp's id. Only this comp's own solids are ever considered — for the whole project's orphans use purge_unused_footage.",
   set_active_comp: "Focus a comp in the viewer/timeline.",
   duplicate_comp:
     "Copy a comp. Returns the new comp id, so you never have to find it by name. Use this instead of run_jsx + CompItem.duplicate(). By default the copy is SHALLOW, exactly like AE's own Duplicate: its precomp layers point at the same nested comps as the original, so editing one of those edits both. `deep:true` duplicates the nested comps too and re-points the copy at them — that is what 'a variant of this rig' means. A nested comp used by several layers is duplicated once and reused. `folderId` files the copy in a project folder; `nameSuffix` names the nested copies '<original><suffix>'.",
@@ -115,6 +116,9 @@ export const descriptions: Record<string, string> = {
   import_footage:
     "Import a file (video, image, audio, SVG, PSD/AI) into the project. Returns the item id — pass it to create_footage_layer to place it. Validates what AE actually produced: an SVG whose viewBox asks for one aspect ratio and imports at another is a known AE bug that renders as nothing with no error, so the item is deleted and the call throws with the workaround. `force:true` keeps it and reports the problem in `validation` instead.",
   create_footage_layer: "Place an imported project item into a comp as a layer. Takes the itemId from import_footage or get_project_summary. For a comp use create_precomp_layer instead.",
+  purge_unused_footage:
+    "Remove footage items no comp uses. By default only solids — the items behind solid and adjustment layers, which delete_comp and delete_layer leave behind in the Solids folder, so a session that builds and discards comps can leave hundreds. `solidsOnly:false` removes every unused footage item, imported files and placeholders too, which is what AE's own Remove Unused Footage does. Comps and folders are never touched: a nested comp nothing uses is not footage. " +
+    "`dryRun:true` lists what would go (`wouldRemove`) without removing anything or adding an undo step — use it first on a project you did not build. `folderId` limits the sweep to one folder and its subfolders. Reports `scanned`, `inUse` and `removed` (id, name, kind); a real run is one undo step. If one removal fails, the error names it, what was already removed and what was not attempted, since nothing rolls back.",
 
   // ---------- audio ----------
   place_audio_cues:

@@ -299,7 +299,15 @@ export const SetComp = z.object({
   workAreaDuration: z.number().positive().optional(),
   bgColor: Color.optional(),
 });
-export const DeleteComp = z.object({ compId: z.number() });
+export const DeleteComp = z
+  .object({
+    compId: z.number(),
+    purgeUnusedSolids: z.boolean().default(false).optional()
+      .describe(
+        "Also remove the solid footage items this comp's own layers used, once nothing else uses them. Off by default because a solid can be shared: one another comp still uses is kept and reported with the comps using it."
+      ),
+  })
+  .strict();
 export const SetActiveComp = z.object({ compId: z.number() });
 export const DuplicateComp = z
   .object({
@@ -936,6 +944,18 @@ export const CreateFootageLayer = z.object({
   position: VecAny.optional(),
   startTime: z.number().optional(),
 });
+export const PurgeUnusedFootage = z
+  .object({
+    solidsOnly: z.boolean().default(true).optional()
+      .describe(
+        "Only remove solids — the items behind solid and adjustment layers. Pass false to remove every footage item no comp uses, imported files and placeholders included, which is what AE's own Remove Unused Footage does. Comps and folders are never removed either way."
+      ),
+    dryRun: z.boolean().default(false).optional()
+      .describe("List what would be removed without removing anything — not even an undo step."),
+    folderId: z.number().optional()
+      .describe("Restrict the sweep to one project folder and everything nested under it. A folder id from get_project_summary; omit for the whole project."),
+  })
+  .strict();
 
 // ---------- audio ----------
 export const AudioCue = z
@@ -1173,6 +1193,7 @@ export const OpSchemas = {
   // footage
   import_footage: ImportFootage,
   create_footage_layer: CreateFootageLayer,
+  purge_unused_footage: PurgeUnusedFootage,
   // audio
   place_audio_cues: PlaceAudioCues,
   // motion graphics templates
@@ -1304,6 +1325,10 @@ export const OpMutation = {
   // footage
   import_footage: "write",
   create_footage_layer: "write",
+  // Removes project items. A dryRun changes nothing, but the table is per op,
+  // not per call — a dry run waiting behind a batch costs a little time and a
+  // real one interleaving with it costs the batch's undo step.
+  purge_unused_footage: "write",
   // audio cues — imports footage and adds layers.
   place_audio_cues: "write",
   // motion graphics templates — saves the project before exporting.
