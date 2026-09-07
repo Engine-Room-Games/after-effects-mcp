@@ -23,8 +23,14 @@ const DEFAULT_OP_TIMEOUT_MS = 120_000;
  * `run_jsx` and `run_batch` are here because their duration is chosen by the
  * caller, not by us. `place_audio_cues` for the same reason — one call can
  * import dozens of files and build a layer for each, all synchronously.
+ * `purge_unused_footage` because its duration is chosen by the project: one
+ * `usedIn` per footage item, over a bin that reached 1,863 orphaned solids
+ * before the op existed (issue #83).
  */
-const SLOW_OPS = new Set(["run_batch", "run_jsx", "screenshot_frame", "screenshot_layer", "export_mogrt", "import_footage", "place_audio_cues"]);
+const SLOW_OPS = new Set([
+  "run_batch", "run_jsx", "screenshot_frame", "screenshot_layer", "export_mogrt",
+  "import_footage", "place_audio_cues", "purge_unused_footage",
+]);
 const SLOW_OP_TIMEOUT_MS = 300_000;
 
 /**

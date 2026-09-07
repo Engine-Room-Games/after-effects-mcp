@@ -222,7 +222,7 @@ If you forget the second step, nothing breaks silently: the next thing you ask f
 ---
 
 <details>
-<summary><b>🧰 All 74 tools</b></summary>
+<summary><b>🧰 All 75 tools</b></summary>
 
 <br>
 
@@ -240,7 +240,7 @@ If you forget the second step, nothing breaks silently: the next thing you ask f
 | Markers (2) | `add_marker`, `remove_marker` |
 | Vision (2) | `screenshot_frame`, `screenshot_layer` |
 | Batch (1) | `run_batch` |
-| Footage (2) | `import_footage`, `create_footage_layer` |
+| Footage (3) | `import_footage`, `create_footage_layer`, `purge_unused_footage` — remove the solids (or any footage) no comp uses, with a dry run |
 | Audio (1) | `place_audio_cues` — a whole cue list placed as one undo step |
 | Motion Graphics (1) | `export_mogrt` — export a comp as a `.mogrt` template for Premiere |
 | Explore (2) | `get_project_summary`, `find_layers` |

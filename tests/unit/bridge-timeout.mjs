@@ -116,7 +116,7 @@ check("no op named still gets the default", () => assert.equal(opTimeoutMs(), 12
 // The panel waits up to 120s for saveFrameToPng's file to land, so the server
 // must not give up at the same instant.
 check("expectedly slow ops get longer", () => {
-  for (const op of ["run_batch", "run_jsx", "screenshot_frame", "screenshot_layer"]) {
+  for (const op of ["run_batch", "run_jsx", "screenshot_frame", "screenshot_layer", "purge_unused_footage"]) {
     assert.equal(opTimeoutMs(op), 300_000, `${op} should get the slow-op budget`);
   }
 });

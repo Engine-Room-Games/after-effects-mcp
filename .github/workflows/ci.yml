@@ -43,7 +43,7 @@ jobs:
         run: node scripts/build-guides.mjs --check
 
       # A floor alone cannot catch the realistic regression, which is one tool
-      # silently dropped: at >=70 with 74 defined, four could vanish and this
+      # silently dropped: at >=70 with 75 defined, five could vanish and this
       # stayed green. So the count is checked against OpSchemas — the registry
       # tools/list is built from — which catches a schema that never reaches the
       # wire, and the floor is raised to the real number, which catches a tool
@@ -69,7 +69,7 @@ jobs:
               const missing=Object.keys(OpSchemas).filter(op=>!served.has(op));
               if(missing.length){console.error(`defined in OpSchemas but not served: ${missing.join(", ")}`);process.exit(1);}
               if(n!==defined){console.error(`tools/list served ${n} but OpSchemas defines ${defined}`);process.exit(1);}
-              if(n<74){console.error(`expected >=74 tools, got ${n} — a tool was removed from OpSchemas`);process.exit(1);}
+              if(n<75){console.error(`expected >=75 tools, got ${n} — a tool was removed from OpSchemas`);process.exit(1);}
               console.log(`${n} tools on ${process.platform}`);
               c.kill();process.exit(0);
             })();'
@@ -236,6 +236,13 @@ jobs:
           node tests/unit/batch-undo.mjs
           node tests/unit/mogrt-preconditions.mjs
 
+      # 0.5.0: delete_comp's purgeUnusedSolids and purge_unused_footage (#83).
+      # A solid's footage item outlives its layer, so both ops decide by
+      # `usedIn`, on footage only, and a dry run must not be an undo step.
+      - name: The ops added in 0.5.0 behave
+        run: |
+          node tests/unit/purge-footage.mjs
+
       # The guidance carriers, from the other side: that the guide sources
       # cross-reference files that exist, and that a house style is digested to
       # something small enough to be worth returning by default.
@@ -265,7 +272,7 @@ jobs:
       # Two failures at once, and the first one takes the whole server down with
       # it: the Anthropic API rejects a tool schema that is not valid draft
       # 2020-12, and a rejected schema breaks every tool in the session rather
-      # than the one it belongs to. So all 74 are validated against the real
+      # than the one it belongs to. So all 75 are validated against the real
       # metaschema here. The second is quieter and was the reason for the
       # change: zod-to-json-schema drops refinements, so a "pass exactly one of
       # these" rule can be enforced by the server and invisible to the model.
