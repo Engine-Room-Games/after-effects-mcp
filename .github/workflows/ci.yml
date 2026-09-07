@@ -244,13 +244,15 @@ jobs:
           node tests/unit/guide-references.mjs
           node tests/unit/house-style-summary.mjs
 
-      # 0.5.0 correctness fixes for reads and writes that used to look right
-      # and were not: find_layers' bounded default and its echo, and the
-      # justification read-back after a Source Text round trip.
+      # Three 0.5.0 correctness fixes, each a write or read that used to look
+      # right and was not: find_layers' bounded default and its echo, the
+      # justification read-back after a Source Text round trip, and
+      # expressionError surfacing a broken expression at the call that wrote it.
       - name: Reads are bounded and writes are verified
         run: |
           node tests/unit/find-layers.mjs
           node tests/unit/text-justification.mjs
+          node tests/unit/expression-error.mjs
 
       # Three distributions carry the panel and none of them is built on a pull
       # request, so what ships is asserted from the source tree and the build

@@ -54,9 +54,12 @@ export const descriptions: Record<string, string> = {
   set_spatial_tangents: "Set in/out spatial tangents for a position-style keyframe.",
 
   // ---------- expressions ----------
-  get_expression: "Expression text + enabled state on a property.",
-  set_expression: "Set + enable an expression on a property.",
-  toggle_expression: "Enable/disable an expression without clearing.",
+  get_expression:
+    "Expression text, enabled state and `expressionError` on a property. `expressionError` is After Effects' own message when the expression cannot be compiled or evaluated — the text of the warning banner in the AE UI — or an empty string when it runs clean. A non-empty one means the property is not being driven by that expression, whatever `enabled` says.",
+  set_expression:
+    "Set + enable an expression on a property, and verify it: after the write the property is evaluated and, if After Effects reports an error on it, the call THROWS with that message and the property path. So a success result means the expression compiles and runs; a failure means the text was written but AE cannot evaluate it — fix it and call set_expression again, or clear_expression to remove it. A broken expression never comes back as ok.",
+  toggle_expression:
+    "Enable/disable an expression without clearing. Enabling verifies the same way set_expression does: if AE reports an error on the expression once it is enabled, the call throws with the message rather than returning ok.",
   clear_expression: "Remove an expression.",
 
   // ---------- effects ----------
