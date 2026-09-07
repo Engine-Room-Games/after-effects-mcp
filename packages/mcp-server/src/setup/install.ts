@@ -6,9 +6,10 @@ import {
   isSupportedPlatform,
   isWsModuleDir,
   panelSourceDir,
+  signedInstallPresent,
   wsModuleDir,
 } from "./paths.js";
-import { debugModeLocation, enableDebugMode, isDebugModeOn } from "./platform.js";
+import { CEP_LOG_LEVEL, debugModeLocation, enableDebugMode, ensureCepLogging, isDebugModeOn } from "./platform.js";
 
 export interface InstallResult {
   ok: boolean;
@@ -17,7 +18,20 @@ export interface InstallResult {
   restartAfterEffects: boolean;
   rebootRecommended: boolean;
   notes: string[];
+  /**
+   * True when the install replaced a panel folder that had been self-signed
+   * (issue #91). The fresh copy is unsigned, so on a machine where CEP
+   * enforces signatures the signing has to be done again before AE loads it.
+   */
+  signedInstallOverwritten?: boolean;
 }
+
+/** Said whenever a signed install is replaced; the reader needs to know before the restart, not after. */
+export const SIGNED_INSTALL_OVERWRITTEN_NOTE =
+  "The previous install had been self-signed (META-INF/signatures.xml was present). This fresh copy is NOT signed. " +
+  "On a machine where CEP refuses unsigned panels despite PlayerDebugMode — the issue #91 case, seen on Windows — " +
+  "After Effects will not load it until it is signed again: repeat the ZXPSignCmd steps from check_setup's " +
+  "panelSignature nextSteps on the newly installed folder, then restart After Effects.";
 
 /**
  * Install (or refresh) the CEP panel inside After Effects and turn on the
@@ -78,9 +92,11 @@ export async function installPanel(opts: { enableDebugMode?: boolean; force?: bo
     };
   }
 
+  // Decided before anything is removed: the evidence is the folder itself.
+  const wasSigned = existing ? signedInstallPresent(target) : false;
   if (existing) {
     fs.rmSync(target, { recursive: true, force: true });
-    actions.push("Removed the previously installed panel.");
+    actions.push(wasSigned ? "Removed the previously installed (self-signed) panel." : "Removed the previously installed panel.");
   }
 
   fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -123,6 +139,20 @@ export async function installPanel(opts: { enableDebugMode?: boolean; force?: bo
     }
   }
 
+  // CEP's own log is the only place a refusal to load the panel is ever
+  // written (issue #91), and it is written only when LogLevel is set. Turning it
+  // on now, while everything works, is what lets check_setup diagnose the day
+  // it does not. Same opt-out as the debug flag: both are Adobe preferences.
+  if (opts.enableDebugMode !== false) {
+    const logging = await ensureCepLogging();
+    if (logging.set.length > 0) {
+      actions.push(
+        `Set CEP's LogLevel to ${CEP_LOG_LEVEL} for CSXS ${logging.set.join(", ")} so that, if After Effects ever refuses to load the panel, its CEP log says why.`
+      );
+    }
+  }
+
+  if (wasSigned) notes.push(SIGNED_INSTALL_OVERWRITTEN_NOTE);
   if (rebootRecommended) {
     notes.push("PlayerDebugMode was just turned on. Quit and reopen After Effects; if the panel still does not connect, restart the Mac once — on some macOS builds the preference only applies after a reboot.");
   }
@@ -134,5 +164,6 @@ export async function installPanel(opts: { enableDebugMode?: boolean; force?: bo
     restartAfterEffects: true,
     rebootRecommended,
     notes,
+    signedInstallOverwritten: wasSigned || undefined,
   };
 }

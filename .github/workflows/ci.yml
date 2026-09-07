@@ -145,6 +145,17 @@ jobs:
       # the only difference the user sees is which remedy we prescribe.
       - name: Bridge timeouts are diagnosed apart from disconnections
         run: node tests/unit/bridge-timeout.mjs
+
+      # Issue #92: the server follows the panel when its cached port is refused,
+      # and check_setup names a port disagreement instead of prescribing a restart.
+      - name: A stale bridge port is rediscovered, not restarted around
+        run: node tests/unit/port-drift.mjs
+
+      # Issue #91: CEP refusing the panel's signature is read out of CEP's own
+      # log, on both platforms' path shapes, and a signed install stays current.
+      - name: CEP signature refusals are diagnosed from the CEP log
+        run: node tests/unit/cep-signature.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.

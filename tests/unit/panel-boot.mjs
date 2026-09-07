@@ -19,6 +19,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
@@ -101,8 +102,14 @@ function makeDom() {
  * `dirnameAt` is the whole point of the harness: CEP sets __dirname to the
  * extension root, so that is the default, and the client-dir case is checked
  * too because a host build that does it the other way must still boot.
+ *
+ * `config` is written to the fake home as the panel's config.json before it
+ * boots. The default is `{ port: 0 }` — an ephemeral port — because the real
+ * default is 7777, and on the machine this is developed on a real panel holds
+ * 7777: with the #92 fix a test panel started there would recognise it as one
+ * of us and wait for it for ever.
  */
-function bootPanel(extDir, { dirnameAt = extDir } = {}) {
+function bootPanel(extDir, { dirnameAt = extDir, config = { port: 0 } } = {}) {
   const source = fs.readFileSync(path.join(extDir, "client", "main.js"), "utf8");
   const csSource = fs.readFileSync(path.join(extDir, "client", "csinterface.js"), "utf8");
   const host = makeHost(extDir);
@@ -116,6 +123,13 @@ function bootPanel(extDir, { dirnameAt = extDir } = {}) {
   const realOs = nodeRequire("node:os");
   const realHttp = nodeRequire("node:http");
   const servers = [];
+  const configDir = path.join(fakeHome, ".engineroom-ae-mcp");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "config.json"), typeof config === "string" ? config : JSON.stringify(config));
+
+  // The unload hook is how the panel gives its port back; a test fires it.
+  const listeners = {};
+  const fire = (type) => { for (const fn of listeners[type] ?? []) fn(); };
 
   const sandbox = {
     console,
@@ -124,7 +138,10 @@ function bootPanel(extDir, { dirnameAt = extDir } = {}) {
     __dirname: dirnameAt,
     __filename: path.join(dirnameAt, "main.js"),
     document: dom.document,
-    window: { __adobe_cep__: host },
+    window: {
+      __adobe_cep__: host,
+      addEventListener: (type, fn) => { (listeners[type] ??= []).push(fn); },
+    },
     require: (id) => {
       if (id === "os") return { ...realOs, homedir: () => fakeHome };
       if (id === "http") {
@@ -151,10 +168,10 @@ function bootPanel(extDir, { dirnameAt = extDir } = {}) {
   vm.runInContext(source, sandbox, { filename: "main.js" });
 
   const close = () => {
-    for (const s of servers) { try { s.close(); s.closeAllConnections?.(); } catch {} }
+    for (const s of servers) { try { s.closeAllConnections?.(); s.close(); } catch {} }
     fs.rmSync(fakeHome, { recursive: true, force: true });
   };
-  return { sandbox, dom, host, close, portFile: path.join(fakeHome, ".engineroom-ae-mcp", "port") };
+  return { sandbox, dom, host, close, fire, portFile: path.join(configDir, "port") };
 }
 
 function settled(dom, timeoutMs = 8000) {
@@ -164,6 +181,19 @@ function settled(dom, timeoutMs = 8000) {
       const status = dom.nodes.status.textContent;
       if (status === "ready" || status === "failed" || status.indexOf("cannot start") === 0) return resolve(status);
       if (Date.now() > deadline) return reject(new Error(`panel never settled; status stuck at "${status}"`));
+      setTimeout(poll, 25);
+    })();
+  });
+}
+
+/** Resolve once the status matches, or reject at the deadline with what it said instead. */
+function statusMatches(dom, re, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve, reject) => {
+    (function poll() {
+      const status = dom.nodes.status.textContent;
+      if (re.test(status)) return resolve(status);
+      if (Date.now() > deadline) return reject(new Error(`status never matched ${re}; stuck at "${status}"\n${logText(dom)}`));
       setTimeout(poll, 25);
     })();
   });
@@ -202,6 +232,8 @@ await check("serves /health on the port it announced", async () => {
   assert.equal(body.ok, true);
   assert.equal(body.bundleLoaded, true);
   assert.ok(body.bundleHash, "health did not report a bundle hash");
+  // Read off the socket, not the configured number: the config said 0.
+  assert.equal(body.port, port, "health must report the port actually bound");
 });
 
 await check("wrote the port file the MCP server discovers it by", () => {
@@ -232,6 +264,118 @@ await check("says which paths it tried when a sibling module really is missing",
     assert.match(log, /Quit After Effects/, "should name the fix");
   } finally { b.close(); }
   fs.rmSync(broken, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// Port drift (issue #92): who holds the port, and what to do about it.
+// ---------------------------------------------------------------------------
+
+await check("does not walk past another AE MCP panel: waits, names the holder, then takes the port over", async () => {
+  const held = Number(booted.dom.nodes.port.textContent);
+  const second = bootPanel(dir, { config: { port: held, bindRetryMs: 150 } });
+  try {
+    const status = await statusMatches(second.dom, /^waiting/);
+    assert.match(status, new RegExp(`port ${held} is held by another AE MCP panel`));
+    const log = logText(second.dom);
+    assert.match(log, /already held by another AE MCP panel/);
+    assert.match(log, /the same version as this one/, "the holder's bundle must be compared with this one's");
+    assert.match(log, /issue #92/);
+    assert.match(log, /allowPortWalk/, "the opt-in must be named for people who really run two instances");
+    assert.match(log, /CEPHtmlEngine/, "the zombie has to be named so the user can find it");
+
+    // Several retries later it is still waiting: no walk, no port announced,
+    // and no port file — the file may only ever name a port actually bound.
+    await new Promise((r) => setTimeout(r, 500));
+    assert.match(second.dom.nodes.status.textContent, /^waiting/);
+    assert.equal(second.dom.nodes.port.textContent, "");
+    assert.equal(fs.existsSync(second.portFile), false, "the port file was written for a port that was never bound");
+
+    // The holder exits. Nothing is restarted.
+    booted.close();
+    const after = await settled(second.dom);
+    assert.equal(after, "ready", `status: ${after}\n--- panel log ---\n${logText(second.dom)}`);
+    assert.equal(Number(second.dom.nodes.port.textContent), held, "should have taken over the same port, not walked");
+    assert.equal(fs.readFileSync(second.portFile, "utf8").trim(), String(held));
+    const res = await fetch(`http://127.0.0.1:${held}/health`);
+    assert.equal((await res.json()).ok, true);
+    booted = second;
+  } catch (e) {
+    second.close();
+    throw e;
+  }
+});
+
+await check("walks past a holder that is not an AE MCP panel, and says which port it chose and why", async () => {
+  const stranger = http.createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ hello: true }));
+  });
+  await new Promise((r) => stranger.listen(0, "127.0.0.1", r));
+  const q = stranger.address().port;
+  const p = bootPanel(dir, { config: { port: q } });
+  try {
+    const status = await settled(p.dom);
+    assert.equal(status, "ready", `status: ${status}\n${logText(p.dom)}`);
+    const got = Number(p.dom.nodes.port.textContent);
+    assert.notEqual(got, q);
+    const log = logText(p.dom);
+    assert.match(log, new RegExp(`port ${q} is held by something that is not an AE MCP panel`));
+    assert.match(log, new RegExp(`moving to port ${q + 1}`));
+    assert.match(log, /if tool calls fail on/, "the walk has to say what it will look like from the server side");
+    assert.match(log, new RegExp(`configured port ${q} was taken`));
+    assert.equal(fs.readFileSync(p.portFile, "utf8").trim(), String(got), "the port file names the port actually bound");
+  } finally {
+    p.close();
+    stranger.closeAllConnections?.();
+    stranger.close();
+  }
+});
+
+let walker = null;
+await check("allowPortWalk opts back into walking past our own panel", async () => {
+  const held = Number(booted.dom.nodes.port.textContent);
+  const p = bootPanel(dir, { config: { port: held, allowPortWalk: true } });
+  try {
+    const status = await settled(p.dom);
+    assert.equal(status, "ready", `status: ${status}\n${logText(p.dom)}`);
+    assert.notEqual(Number(p.dom.nodes.port.textContent), held);
+    assert.match(logText(p.dom), /allowPortWalk is on/);
+    assert.match(logText(p.dom), /another AE MCP panel/);
+    walker = p;
+  } catch (e) {
+    p.close();
+    throw e;
+  }
+});
+
+await check("unloading frees the port, and removes only this panel's own port-file entry", async () => {
+  const port = Number(walker.dom.nodes.port.textContent);
+  // Another panel has written the file since; that entry is not ours to erase.
+  fs.writeFileSync(walker.portFile, "1");
+  walker.fire("unload");
+  assert.equal(fs.readFileSync(walker.portFile, "utf8"), "1", "another panel's port-file entry was removed");
+  await assert.rejects(
+    fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) }),
+    "the port should have been given back"
+  );
+  walker.close();
+
+  // And the survivor: its own entry goes with it.
+  const own = Number(booted.dom.nodes.port.textContent);
+  assert.equal(fs.readFileSync(booted.portFile, "utf8").trim(), String(own));
+  booted.fire("unload");
+  assert.equal(fs.existsSync(booted.portFile), false, "the port file must go with the panel that wrote it");
+  await assert.rejects(fetch(`http://127.0.0.1:${own}/health`, { signal: AbortSignal.timeout(1000) }));
+});
+
+await check("a config with a bad key is tolerated: the bad key is named, the good one honoured", async () => {
+  const p = bootPanel(dir, { config: { port: 0, allowPortWalk: "yes" } });
+  try {
+    const status = await settled(p.dom);
+    assert.equal(status, "ready", `status: ${status}\n${logText(p.dom)}`);
+    assert.match(logText(p.dom), /ignoring "allowPortWalk"/);
+    assert.match(logText(p.dom), /read .*config\.json: port 0/);
+  } finally { p.close(); }
 });
 
 console.log(`panel-boot: ${passed} checks passed`);
