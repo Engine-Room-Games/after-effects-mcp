@@ -987,6 +987,14 @@ export const AudioCue = z
     outPoint: z.number().optional().describe("Trim the layer's out point to this COMP time. Omit to play to the end of the file."),
     label: z.union([z.number().int().min(0).max(16), z.string()]).optional()
       .describe("AE label colour, as an index 0-16 or a name (red, yellow, aqua, pink, lavender, peach, seafoam, blue, green, purple, orange, brown, fuchsia, cyan, sandstone, darkgreen)."),
+    loop: z.boolean().optional()
+      .describe("Loop the sound until `outPoint`, or until the end of the comp when no outPoint is given — for beds and ambiences. Enables time remapping with a wrap-around expression on Time Remap; the layer's in point still trims the front of the file the way it does on any layer. Default false: the file plays once."),
+    fadeIn: z.number().min(0).optional()
+      .describe("Seconds to fade in from `fadeFloorDb` up to `levelDb`, as keyframes on Audio Levels starting at the layer's in point. Default 0 (no fade). fadeIn + fadeOut must fit inside the cue's placed length or the cue is refused by index."),
+    fadeOut: z.number().min(0).optional()
+      .describe("Seconds to fade out from `levelDb` down to `fadeFloorDb`, ending at the layer's out point. Default 0 (no fade). fadeIn + fadeOut must fit inside the cue's placed length or the cue is refused by index."),
+    stretch: z.number().positive().optional()
+      .describe("Time stretch as a percentage: 100 is unchanged, 200 plays at half speed (lower pitch, twice as long), 50 at double speed. Must be greater than 0. The layer's start time and any trim are re-asserted after it, since After Effects moves them when stretch changes. Default 100."),
   })
   .strict();
 export const PlaceAudioCues = z
@@ -995,8 +1003,10 @@ export const PlaceAudioCues = z
     cues: z.array(AudioCue).min(1).max(200),
     namePrefix: z.string().default("SFX_").optional()
       .describe("Prefix for cues that do not name themselves. Pass \"\" for no prefix."),
+    fadeFloorDb: z.number().optional()
+      .describe("The level in decibels that every fadeIn starts from and every fadeOut ends at. Default -48, the bottom of After Effects' own Audio Levels slider and 1/256 of the recorded amplitude — near-silence. Must be below each faded cue's levelDb. One floor for the whole list."),
     dryRun: z.boolean().default(false).optional()
-      .describe("Resolve and check the whole list without importing, creating or changing anything — not even an undo step. Reports which paths do not exist and what would be placed."),
+      .describe("Resolve and check the whole list without importing, creating or changing anything — not even an undo step. Returns counts, the files it would import, the items it would reuse and the failing cues by index — never the whole resolved list."),
   })
   .strict();
 
