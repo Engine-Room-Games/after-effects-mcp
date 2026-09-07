@@ -1020,11 +1020,24 @@ export const SetupPanel = z.object({
  * names are part of the tool contract, so they are declared here and
  * `scripts/build-guides.mjs` fails the build if the two ever disagree.
  */
-export const GUIDE_TOPICS = ["ae-setup", "after-effects", "extendscript-gotchas", "style-guide", "whats-new"] as const;
+export const GUIDE_TOPICS = [
+  "ae-setup",
+  "after-effects",
+  "animation",
+  "assembly",
+  "extendscript-gotchas",
+  "issue-journal",
+  "mogrt-and-footage",
+  "shapes",
+  "sound",
+  "style-guide",
+  "text",
+  "whats-new",
+] as const;
 export const AeGuide = z
   .object({
     topic: z.enum(GUIDE_TOPICS).describe(
-      "after-effects: building, animating, easing, expressions, the traps — start here. extendscript-gotchas: read before writing raw ExtendScript for run_jsx. whats-new: what changed recently, when a call behaves differently from what you expected. style-guide: capturing the user's look. ae-setup: connecting to AE when a tool cannot reach it."
+      "after-effects: the core — orienting, bounded reads, verifying a write, screenshots, the bridge failures — start here; it points at one topic per subject. animation: keyframes, easing, rigging, expressions. shapes: shape layers and their Contents. text: text layers. assembly: shots placed into a master comp, markers, retiming. extendscript-gotchas: read before writing raw ExtendScript for run_jsx. sound: sound effects and levels. mogrt-and-footage: exporting a .mogrt, importing footage. issue-journal: when a tool fought back. whats-new: what changed recently, when a call behaves differently from what you expected. style-guide: capturing the user's look. ae-setup: connecting to AE when a tool cannot reach it."
     ),
   })
   .strict();
