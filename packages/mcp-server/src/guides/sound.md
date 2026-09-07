@@ -1,7 +1,7 @@
 ---
 name: sound
 reference: after-effects
-description: Sound effects and beds through the AE MCP tools — place_audio_cues for a whole cue list in one undo step, what levelDb actually means and why a level copied from another cue is meaningless, the dry run, and the audio facts a hand-written loop gets wrong. Load when a task places, levels or times sound.
+description: Sound effects and beds through the AE MCP tools — place_audio_cues for a whole cue list in one undo step, what levelDb actually means and why a level copied from another cue is meaningless, loops, fades and stretch per cue, the dry run, and the audio facts a hand-written loop gets wrong. Load when a task places, levels or times sound.
 ---
 
 # Sound
@@ -18,10 +18,10 @@ It is **all-or-nothing**: every cue is checked (the file exists, the item has
 an audio track, the time is inside the comp) before a single layer is made, and
 if a later one still fails, everything the call created is removed and the
 error names the cue by index. `dryRun: true` checks a list against the project
-without importing, creating, or even adding an undo step, and names the cues
-that would fail. Each cue names its sound with exactly one of `path` or
-`footageId`; `inPoint` and `outPoint` trim in **comp** time, not file time; the
-per-cue fields the tool accepts beyond those are in its schema.
+without importing, creating, or even adding an undo step, and answers with
+counts, `wouldImport`, `wouldReuse` and the failing cues by index — never the
+resolved list. Each cue names its sound with exactly one of `path` or
+`footageId`; `inPoint` and `outPoint` trim in **comp** time, not file time.
 
 ## Levels
 
@@ -36,11 +36,42 @@ things follow:
   stat`, or whatever the shell has; where there is no shell, ask the user what
   the file sounds like against the others), then choose a level that brings it
   to where you want it, not a number that looked right last time.
-- **Read the level back.** The result echoes the `levelDb` written for every
-  cue it placed; later, `run_jsx` with
-  `return layerById(compId, layerId).audioLevels.value` reads it off the layer.
-  Ask the user to preview if they can — a level is the one property in this
-  toolset that no screenshot can check.
+- **Read the level back off the layer.** The result carries one small entry
+  per cue — `layerId`, `name`, `time`, and what an option changed — and does
+  not echo the level; `run_jsx` with
+  `return layerById(compId, layerId).audioLevels.value` reads it. Ask the user
+  to preview if they can — a level is the one property in this toolset that no
+  screenshot can check.
+
+## Loops, fades and stretch
+
+Three per-cue options cover what a scoring pass otherwise redoes in `run_jsx`,
+and each moves something After Effects then quietly resets — which is the
+reason to take them from the tool rather than script them:
+
+- **`loop: true`** repeats the sound to the cue's `outPoint`, or to the end of
+  the comp when there is none — beds and ambiences. It enables time remapping
+  with a wrap-around expression on Time Remap, keeps the two keyframes AE
+  creates (removing them hides the property), and re-asserts the out point,
+  because enabling remapping resets it. `inPoint` still trims the front of the
+  file the way it does on any layer.
+- **`fadeIn` / `fadeOut`**, in seconds, keyframe Audio Levels at the in and
+  out point the layer actually has, between the call-level `fadeFloorDb`
+  (default `-48`, the bottom of AE's own slider) and the cue's `levelDb`. A
+  fade that does not fit the cue's placed length, or a floor at or above the
+  cue's level, is refused by cue index with nothing placed; for a file not yet
+  imported the fit is checked right after the import, before any layer exists.
+  The result carries `fadeFloorDb` when any cue faded.
+- **`stretch`** is a percentage: `100` unchanged, `200` half speed at a lower
+  pitch. The start time and any trims are re-asserted after it, because AE
+  moves them when stretch changes. A loop that is also stretched has the factor
+  baked into its expression, so changing the stretch by hand afterwards leaves
+  the loop wrapping at the old rate — set it here, or place the cue again.
+
+Every option is validated with the rest of the list before anything is
+created, and the result names what an option changed — `looped`, `stretch`,
+`fadeIn`, `fadeOut`, and the in and out point read back — only on the cues it
+applied to.
 
 ## Timing
 

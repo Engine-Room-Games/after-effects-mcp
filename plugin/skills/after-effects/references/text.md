@@ -28,15 +28,27 @@ is how per-character animation is built.
 **Verify alignment by the bounds, not by eye.** `get_layer_full({…, include:
 ["bounds"]})` returns `sourceRect`: a centred layer's `left` is about
 `-width / 2`, a left-justified layer's about `0`, a right-justified layer's
-about `-width`. That is the check to make after any call that could have
-touched justification.
+about `-width`. That is the check to make after a script has touched a
+`TextDocument`; the tools check their own writes, below.
 
 **To fit a background to text**, read `sourceRect` from the same call and size
 the shape from its width and height plus padding, positioned from its `left`
 and `top`. A `sourceRectAtTime()` expression on the background does the same
 thing live, and stays right when the text is retyped.
 
-**Scripting a `TextDocument` by hand** has one trap worth knowing before you
-try: justification written into the document from a script lands as the wrong
-value on 26.3, while the tool path lands correctly. It is in the
-`extendscript-gotchas` topic under Text, with the verification above.
+**The justification you got is the one in the result, not the one you asked
+for.** On 26.3 the Source Text round trip can hand back a different alignment
+from the one written — a left-aligned layer re-centred by a `set_text` that
+changed only `text`. So `set_text` and `create_text_layer` read the
+justification back after every write, write it once more on its own if it
+moved, and throw naming expected and actual if it still disagrees;
+`create_text_layer` removes the layer first, so a failure never leaves a layer
+you have no id for. Both results carry `justification` as a name and
+`justificationReasserted`, and an unknown justification name is refused rather
+than ignored. Trust `justification` in the result over your own argument.
+
+**From `run_jsx`, set justification through the tool** —
+`OPS.set_text({compId, layerId, justification: "center"})` inside the script —
+rather than by assigning `TextDocument.justification`, which on 26.3 stores the
+wrong value and gets no read-back. The `extendscript-gotchas` topic has the
+measurement under Text.
