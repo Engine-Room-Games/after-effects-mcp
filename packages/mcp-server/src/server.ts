@@ -22,7 +22,8 @@ import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
 import { assessPanel, installedBundleHash, unknownOpMessage } from "./setup/panelVersion.js";
-import { installedPanelDir, panelInstallDiff, panelSourceDir } from "./setup/paths.js";
+import { installedPanelDir, packageVersion, panelInstallDiff, panelSourceDir } from "./setup/paths.js";
+import { renderWhatsNew } from "./tools/whatsNew.js";
 import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./generated/content.js";
 import { listIssues, logIssue, markReported } from "./issues/journal.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
@@ -238,6 +239,21 @@ export function createServer() {
           if (!guide) return errorResult(`Unknown guide topic: ${a.topic}`);
           // Markdown, not JSON: this is prose to be read, and JSON-escaping it
           // would hand the model a wall of \n.
+          if (a.topic === "whats-new") {
+            // The one topic with a shape a machine can filter — see
+            // tools/whatsNew.ts. The version on the first line is the server's
+            // own, read from package.json, because the guide cannot know it.
+            const rendered = renderWhatsNew(guide.body, { since: a.since, serverVersion: packageVersion() });
+            return { content: [{ type: "text" as const, text: rendered.text }] };
+          }
+          if (a.since !== undefined) {
+            // Refused rather than ignored: a filter that silently did not apply
+            // is the swallowed error this server refuses everywhere else.
+            return errorResult(
+              `\`since\` filters the whats-new topic only; the ${a.topic} topic has no release sections to filter. ` +
+                `Call ae_guide({topic: "${a.topic}"}) without \`since\`, or ae_guide({topic: "whats-new", since: "${a.since}"}) for what changed.`
+            );
+          }
           return { content: [{ type: "text" as const, text: guide.body }] };
         }
         if (name === "log_issue") {

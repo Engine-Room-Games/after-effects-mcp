@@ -1024,8 +1024,15 @@ export const GUIDE_TOPICS = ["ae-setup", "after-effects", "extendscript-gotchas"
 export const AeGuide = z
   .object({
     topic: z.enum(GUIDE_TOPICS).describe(
-      "after-effects: building, animating, easing, expressions, the traps — start here. extendscript-gotchas: read before writing raw ExtendScript for run_jsx. whats-new: what changed recently, when a call behaves differently from what you expected. style-guide: capturing the user's look. ae-setup: connecting to AE when a tool cannot reach it."
+      "after-effects: building, animating, easing, expressions, the traps — start here. extendscript-gotchas: read before writing raw ExtendScript for run_jsx. whats-new: what changed, one section per release, when a call behaves differently from what you expected or a project is being brought up to date after an upgrade. style-guide: capturing the user's look. ae-setup: connecting to AE when a tool cannot reach it."
     ),
+    since: z
+      .string()
+      .regex(/^v?\d+\.\d+\.\d+$/, "must be a version like 0.4.0")
+      .optional()
+      .describe(
+        "whats-new only: return just the releases newer than this version — the version named is the one already absorbed and is excluded — behind the guide's preamble, or one line saying nothing is newer. Use the version a project's docs record as last absorbed. The answer opens with the server's own version. Rejected on any other topic, since there is nothing there to filter."
+      ),
   })
   .strict();
 

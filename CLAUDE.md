@@ -75,8 +75,9 @@ The MCP server is stateless except for an in-memory `JobManager`, the `SnapshotS
 | `scripts/lib/setup.mjs` | Loads the compiled setup module so the dev scripts (`doctor`, `install-panel`, `enable-debug`) reuse the same platform logic the MCP tools use instead of keeping a second copy. |
 | `packages/mcp-server/src/setup/scaffold.ts` | **The one definition of what a project folder is.** Client-aware layout, target resolution, never-overwrite. Used by both `init_project` and the CLI. |
 | `packages/mcp-server/src/cli/init.ts` | `npx … init <dir>` — the terminal front end to `scaffold()`. Holds no templates of its own. |
-| `packages/mcp-server/src/guides/*.md` | **Source of truth for agent guidance.** Frontmatter + markdown. Generated into resources, `ae_guide` topics and Claude Code skills. A `reference: <parent>` line makes one a reference file under the parent skill rather than a skill of its own — see "Guidance and how it reaches an agent". |
-| `packages/mcp-server/src/prompts/*.md` | Source of truth for user-invoked flows. Generated into MCP prompts and Claude Code commands. `$ARGUMENTS` is substituted at `prompts/get`. |
+| `packages/mcp-server/src/guides/*.md` | **Source of truth for agent guidance.** Frontmatter + markdown. Generated into resources, `ae_guide` topics and Claude Code skills. A `reference: <parent>` line makes one a reference file under the parent skill rather than a skill of its own — see "Guidance and how it reaches an agent". `whats-new.md` is the one guide with a shape a machine reads — the only home of release history, one `## <semver>` section per release with `supersedes:` lines; its contract is in a comment at the top of the file and asserted by `tests/unit/whats-new.mjs`. |
+| `packages/mcp-server/src/tools/whatsNew.ts` | The `since` filter on `ae_guide({topic: "whats-new"})`: semver compare (numeric — 0.10.0 is newer than 0.9.0), the release splitter, the `supersedes:` extractor and the answer's version header. Pure text functions, so the real guide is tested against its own contract with no server. |
+| `packages/mcp-server/src/prompts/*.md` | Source of truth for user-invoked flows. Generated into MCP prompts and Claude Code commands. `$ARGUMENTS` is substituted at `prompts/get`. `absorb-release.md` is the upgrade flow — see "Release history, and reading it once". |
 | `packages/mcp-server/src/generated/content.ts` | Generated. Never hand-edit — `build-guides.mjs --check` fails the build if you do. |
 | `packages/jsx/style.jsx` | `get_house_style` / `set_house_style`. Reads `house-style.md` beside the .aep over the bridge, which is the only channel every client has. |
 | `packages/mcp-server/src/style/summary.ts` | The digest `get_house_style` returns by default. Parses a markdown document nobody controls; falls back to the document's own opening when it recognises nothing. Reading stays on the panel — only the summarising is here. |
@@ -215,7 +216,7 @@ in the field descriptions, along with the fact that a wrong one changes nothing.
 - **Long batch** (`run_batch` >500 ops): JSX returns `{jobId, async:true, total, chunkSize, undoStepsEstimate, undoGroupName, note}`. Panel drives `_continue_job` in chunks of `chunkSize` in the background, broadcasting `progress` events on WS. Server forwards WS progress as `notifications/progress` keyed by the request's `progressToken`. The undo fields ride the envelope because it is the only message the agent sees before it starts describing the work — the *measured* `undoSteps` arrives much later, on the completion event. `singleUndo:true` takes the inline path instead, so no envelope and no progress at all.
 - **Server-resident** (`await_job`, `get_job`, `cancel_job`, `check_setup`, `setup_panel`, `init_project`, `ae_guide`, `log_issue`, `list_known_issues`, `mark_issue_reported`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag). They're still listed in `OpSchemas` so `tools/list` picks them up — membership in `SERVER_OPS` is what stops the forwarding.
 - **Half server-resident** (`snapshot_comp`, `diff_comp`): the panel gathers, the server remembers. `SNAPSHOT_OPS` in `server.ts` routes them to `runSnapshotOp`, which forwards an internal read op (`_comp_fingerprint` / `_comp_diff`) and keeps the answer in `SnapshotStore`. Deliberately *not* in `SERVER_OPS` — unlike those, these do touch the bridge, and they are dispatched from inside the same `try` as `bridge.runOp` so the timeout, `AeError` and Unknown-op mappings all apply unchanged.
-- **Prose** (`ae_guide`): returns the markdown as a bare text content block rather than through `textResult()`. JSON-stringifying it would hand the model a wall of `\n`.
+- **Prose** (`ae_guide`): returns the markdown as a bare text content block rather than through `textResult()`. JSON-stringifying it would hand the model a wall of `\n`. The `whats-new` topic is the one exception to "the body, verbatim": its answer opens with a line naming the server's own version (`packageVersion()`, read from package.json — the guide cannot know it, since a build between releases is ahead of its newest section), and with `since` it is the preamble plus only the sections newer than that version, or one explicit line saying nothing is newer. `since` on any other topic is refused, not ignored. The `ae://guide/whats-new` resource is untouched — still the raw body. See "Release history, and reading it once".
 - **Summarised** (`get_house_style`): the panel returns the whole document; `server.ts` runs it through `applyHouseStyleDetail` before packaging, and `detail: "summary"` — the default — replaces `content` with a digest. The one post-bridge transform in the codebase that changes what a *read* answers, so it is the one to remember when a house-style result looks unfamiliar. See "The house style".
 - **Downsampled screenshots**: handled entirely in `vision.jsx`. `saveFrameToPng` *does* respect `CompItem.resolutionFactor` (measured: a 3840×2160 comp yields 1920×1080 at factor 2, 960×540 at factor 4), so `__saveFrameAt` sets the factor, renders, and restores it in a `finally`. That restore is not optional — a throw mid-render would otherwise leave the user's comp at reduced resolution. **Every factor is set, factor 1 included**, and that is the fix for issue #72 rather than an implementation detail: `resolutionFactor` is also the Resolution dropdown in the viewer, so treating 1 as "nothing to do" rendered at whatever the designer had left the comp on. A comp parked at Quarter — routine on anything heavy — answered `downsample: 1` with a quarter-size frame and `downsample: 2` with one four times **larger**. The panel reads the true dimensions out of the PNG's IHDR chunk rather than computing them, so reported size can never disagree with the image sent; that is what kept this invisible, because the response stayed honest while the *picture* was not the one asked for, and an agent that can see a frame believes the frame. An earlier version shelled out to `sips`; it was replaced because rendering smaller is faster than resampling and needs no external tool, which is what makes downsampling work on Windows. The factor is *derived* from the comp when the caller omits one (`__autoDownsample`, aiming at a ~1280px long edge) — which is why `ScreenshotFrame`/`ScreenshotLayer` must not carry a zod `.default(1)`: a default there would reach the panel as an explicit 1 and the derivation would never run. `tests/unit/screenshot-resolution.mjs` holds all three — the explicit factor, the restore (on a throw as well, at 1 as well) and the derivation — against a mock comp whose viewer starts at Quarter.
 
@@ -360,6 +361,64 @@ getting it wrong on the first call costs real work → `instructions`; it is par
 of doing the job well → the relevant guide; it only matters once you have already
 decided to do something specific → a reference under that guide.
 
+### Release history, and reading it once
+
+History has a fourth place to go, and it is the one that kept leaking: **what a
+tool *used to* do belongs in `whats-new.md` and nowhere else.** Issue #99 found
+it in two other places. The main guide narrated past releases ("broken for three
+releases, so an agent may have learned to route around it"), which is resident
+in every session and — by naming the route-around — teaches it. And projects'
+own docs carried workarounds written by earlier sessions, with nothing to remove
+them when a release fixed the bug. The guides are the docs agent's problem
+(present tense, rule plus reason, at most a "measured on 26.3, contradicts
+Adobe's docs" tag); the project docs are what the machinery below is for.
+
+Three parts, and each is only useful because of the other two:
+
+- **`whats-new.md` has a shape a machine can filter.** One `## <semver>`
+  section per release, newest first; everything above the first is the
+  preamble; each entry is a bullet opening with the **rule as it now stands**,
+  and under it indented `supersedes:` lines quoting the *old* rule in the words a
+  project doc would have used — `run_batch is one undo step`, `reorder_layer is
+  broken, use run_jsx` — so it can be grepped for. The contract sits in a comment
+  at the top of the file. `tests/unit/whats-new.mjs` holds it: every `##` a
+  release, strictly newest first, a section for the version being built or
+  newer (so a release cannot ship without one), every entry bold-first, every
+  `supersedes:` line inside a bullet and free of markdown. Only rules that have
+  shipped get a `supersedes:` line; one for an unshipped change would send the
+  absorb flow deleting a rule that is still true.
+- **`ae_guide({topic: "whats-new", since})` returns the delta.** Sections
+  strictly newer than `since` — the version named is the one already absorbed —
+  behind the preamble, with the server's version on the first line so the agent
+  can record it. Nothing newer is one explicit sentence, never an empty string:
+  an agent cannot tell "up to date" from "broken" by an empty answer. The compare
+  is numeric (`0.10.0` > `0.9.0`); `since` is validated as a version by the
+  schema and refused on any other topic, since a filter that silently did not
+  apply is the swallowed error this repo refuses elsewhere. `tools/whatsNew.ts`.
+- **The absorb-release prompt applies it, once per release per project.**
+  `prompts/absorb-release.md`, generated into the MCP prompt and the Claude Code
+  command like the others. It finds `Tools version last absorbed: <version>` in
+  the project's docs (the scaffold writes it — see "The project scaffold"),
+  reads the delta, greps the project's CLAUDE.md / AGENTS.md / rules files /
+  `.ae-mcp/` notes for every `supersedes:` line and proposes a rewrite or
+  deletion of each hit (their docs — shown, approved once, never edited
+  silently; prefer deleting, since a note that mentions a workaround teaches
+  it), checks each *reported* journal entry's issue with `gh issue view` and
+  `archive_issue`s the ones closed as completed (never `NOT_PLANNED`, never a
+  `kind: "ae-quirk"` entry — those describe After Effects, which a release does
+  not change), then writes the server version back into the marker. After that
+  the history is not loaded again for that project. The detection is
+  client-side and stated in the prompt: at session start compare the recorded
+  version with `serverVersion` from `list_known_issues` (or the first line of
+  any whats-new answer). There are **two** versions that update separately —
+  the MCP server and, in Claude Code, the plugin carrying the skills — and the
+  flow records the server's, because the server is what answers calls.
+
+The generator needed nothing new for any of this: a prompt is a prompt. What
+had to be *added* was the version in the answer, because the guide cannot carry
+it — `packageVersion()` reads package.json at runtime, the same way the journal
+reports it, so it says what the user actually installed.
+
 ## Panel version gating
 
 The panel does not update itself, and it ships inside every distribution — so
@@ -438,6 +497,21 @@ Three things it has to get right:
   never a second copy.
 - **Never clobber.** It checks every path first and writes nothing if any
   exists. An agent calling this does not know what is already there.
+
+And one line it has to stamp: `AGENTS.md` carries
+`Tools version last absorbed: <version>` under a `## Tool updates` heading —
+the marker the absorb-release prompt reads after an upgrade to fetch only what
+changed since, and rewrites when it is done (see "Release history, and reading
+it once"). The version comes from `packageVersion()` **at call time**, never a
+literal: the marker has to say what the user actually installed, or the first
+absorb pass re-reads releases the project was scaffolded on. It is a plain,
+human-readable line on purpose — designers open AGENTS.md in a text editor, and
+a line they can read is one they will leave alone. The pointer files do not get
+a second copy, for the same reason they are pointers. `ABSORBED_MARKER_PREFIX`,
+`absorbedMarkerLine()` and `absorbedVersionIn()` in `scaffold.ts` are the one
+definition of the line; `tests/unit/scaffold-marker.mjs` asserts it through
+both entry points, and that never-clobber still holds — a re-run silently
+resetting the recorded version to the current one would skip a release.
 
 The house style is deliberately *not* part of the scaffold — see below.
 
@@ -622,6 +696,7 @@ That sync is **opt-in on purpose**. The installed bundle is one half of the pane
 31. Frame integrity, on the comp that produced issue #45 — a heavy assembly, ~88 layers: a nested full-frame background precomp plus several shot precomps, at 4K. Build one if there isn't one: a 3840×2160 comp, a 1080p precomp scaled to fill with a blur and a glow on it, then six shot precomps each holding a dozen keyframed shape and text layers, all nested in. `screenshot_frame({compId})` → an image, or a message that says which of the two failures it was — never `truncated PNG` reaching the client, and never a picture that is a picture of something else. Repeat it four or five times at downsample 4, 6 and 8; if any call fails it must fail as **Corrupt frame** or **Render timed out**, with different advice under each, and a second failure at a different time must still say the same thing rather than turning into `Stale frame`. Watch the panel log: a corrupt read logs "re-rendering once", exactly once per call.
 32. Contact sheet: on a comp with something moving across the frame, `screenshot_frame({compId, times:[0, 1, 2]})` → **one** image, three cells left to right, `0s`/`1s`/`2s` burned into the top-left of each, `cols:3 rows:1`, and `tiles` naming each time and status. The sheet should be about the size a single `screenshot_frame` of that comp returns — compare `bytes` against one. `times` plus `time` in the same call → refused by the schema before it reaches AE. `times:[0,1,2], downsample:1` on a comp whose viewer is at Quarter → full-resolution tiles, so an explicit factor still wins over the Resolution dropdown (#72; every tile goes through the same `__saveFrameAt`). On a comp with a **static** first second, `times:[0, 0.3, 0.6]` → three tiles, all `ok`, with `pixel-identical to the 0s tile` in the notes and no `Stale frame` error. On the heavy comp from recipe 31, expect a `FAILED` block sooner or later: the other tiles must still be there and `warning` must name the one that is not.
 33. `reorder_layer`, which had never once succeeded before 0.4.0 (#70). On a comp with four named layers, top to bottom A B C D: `reorder_layer({compId, layerId: D, toIndex: 2})` → the timeline reads A D B C and the result says `index: 2, movedFrom: 4`. `reorder_layer({compId, layerId: A, toIndex: 3})` → B C A D, `index: 3` — this is the direction that used to be off by one in every hand-rolled version, so check the panel and not just the response. `toIndex: 1` and `toIndex: 99` → front and back, no error on the out-of-range one. Then the id forms, which is what an agent should be reaching for: `beforeLayerId` puts the layer directly **above** the named one and `afterLayerId` directly below it, and naming the moved layer as its own destination is refused with nothing changed. `toIndex` together with `beforeLayerId` → refused by the schema before it reaches AE. Each successful call is **one** undo step. Nothing anywhere may report `parent is not an INDEXED_GROUP`.
+34. The absorb flow, end to end, which needs a live client because the edits it proposes land in a real project's docs. `init_project` into a fresh folder → `AGENTS.md` carries `Tools version last absorbed: <the server's version>`, and `ae_guide({topic: "whats-new", since: <that version>})` → one line, `Nothing newer than …`, no preamble. Now edit the marker down to `0.3.1` and add a line to `AGENTS.md` reading `run_batch is one undo step, so batch everything`. Run the `absorb-release` prompt (`/after-effects:absorb-release` in Claude Code) → it reads the 0.4.0 section and every section after it, and nothing older; it finds that line, shows it beside the 0.4.0 rule, and asks **before** touching it; it proposes deleting rather than rephrasing; after a yes the line is gone and the marker reads the server's version, not the newest section's (the two differ on a dev build, and it is the server's that must be written). With `gh` signed in and a *reported* journal entry whose issue is closed as completed → `archive_issue` is called with the URL as the reason; one closed as not planned is left alone and said so. Run the prompt again immediately → "up to date", no edits proposed, no journal calls beyond the listing. Then the two-version case: `ae_guide({topic: "after-effects", since: "0.4.0"})` → refused, naming the whats-new topic, and the `after-effects` topic without `since` → unchanged, no version header.
 
 ## The issue journal
 
