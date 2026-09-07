@@ -22,7 +22,7 @@ skill, the file beside this one:
 | shots placed into a master comp, markers, retiming a shot | `assembly` | `references/assembly.md` |
 | any raw ExtendScript for `run_jsx` — read it **before** writing the script | `extendscript-gotchas` | `references/extendscript-gotchas.md` |
 | sound effects and beds | `sound` | `references/sound.md` |
-| a `.mogrt` export, or importing footage | `mogrt-and-footage` | `references/mogrt-and-footage.md` |
+| a `.mogrt` export, importing footage, or the solids a deleted comp leaves behind | `mogrt-and-footage` | `references/mogrt-and-footage.md` |
 | a tool that fought back, and what to do with what you learned | `issue-journal` | `references/issue-journal.md` |
 | a call that behaves differently from what you remember | `whats-new` | `references/whats-new.md` |
 
@@ -54,7 +54,7 @@ bounded form is the one to reach for:
 | What is in this project? | `get_project_summary` |
 | What comps exist? | `list_comps({include: []})` — ids and names |
 | What is in this comp? | `list_layers({compId, include: []})` — id, index, name, type; `get_comp_tree` for the nesting |
-| Where is a layer, by name, type or effect? | `find_layers` — id, name and index by default; `include` widens it with the `list_layers` vocabulary |
+| Where is a layer, by name, type or effect? | `find_layers` — `{matches, count, compsSearched, included}`; a match is id, index, name, sourceType, compId and compName, and `include` (`flags`, `timing`, `parent` — the `list_layers` names) widens it. Unlike `list_layers`, omitting `include` here does **not** return everything |
 | One layer, in depth | `get_layer_full({compId, layerId, include: […]})` ⭐ |
 | What did my last change actually do? | `snapshot_comp` → `diff_comp` ⭐ |
 
@@ -189,14 +189,18 @@ and it is very easy to leave someone's comp switched off afterwards.
 
 `run_batch` runs many ops in one ExtendScript pass — far faster than the same
 ops as separate calls, and far fewer undo steps. **Up to 500 ops it is one undo
-step.** Over 500 it returns a `jobId` and lands as **one undo step per chunk of
-25** — about 24 for 600 ops — because After Effects discards an undo group that
-spans two script calls; `await_job(jobId)` waits for it and reports its
-progress. `singleUndo: true` forces one step at any size up to 2000 by running
-the whole batch in one blocking call, with AE's interface frozen for the
-duration. Every result carries the *measured* `undoSteps`: read it before you
-tell anyone how many Cmd-Z the work takes. `transactional: true` (the default)
-stops at the first failing op; `false` runs the rest and collects the errors.
+step.** Over 500 it returns a `jobId` at once, before the first chunk runs, and
+lands as **one undo step per chunk of 25** — about 24 for 600 ops — because
+After Effects discards an undo group that spans two script calls.
+`await_job(jobId)` finishes it, and is the call that carries progress: send it
+with a progress token and `notifications/progress` arrive while it waits. None
+can ride on `run_batch` itself, whose response is already back; `get_job` polls
+the same state without a token. `singleUndo: true` forces one step at any size
+up to 2000 by running the whole batch in one blocking call, with AE's interface
+frozen for the duration. Every result carries the *measured* `undoSteps`: read
+it before you tell anyone how many Cmd-Z the work takes. `transactional: true`
+(the default) stops at the first failing op; `false` runs the rest and collects
+the errors.
 Neither rolls anything back — `diff: true` shows what landed.
 
 **You do not have to issue writes one at a time.** The server runs one write at

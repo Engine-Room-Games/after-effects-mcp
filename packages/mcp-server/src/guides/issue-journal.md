@@ -12,13 +12,25 @@ rather than you going to it.
 
 ## A failure brings its own history
 
-**You do not read the journal before starting work.** When a call fails, the
-error names the journal entries that match it — same tool, same error text —
-so the moment you have a failure you also have what earlier sessions did about
-it. Open one with `list_known_issues({id})`; the cause and the workaround are in
-the entry, not in the index. `list_known_issues` with `tool` or `query` is for
-the case where the error named nothing and you still suspect this has happened
-before.
+**You do not have to read the journal before you start.** When a call fails,
+the error itself ends with `Known from earlier sessions: <scope:id> — <title>`
+for anything that matches its tool and its error text — up to three, most
+recently seen first, the overflow counted — and names the
+`list_known_issues({id})` call that opens the first. The cause and the
+workaround are in the entry, not in the index. A match is also a sighting: the
+entry's `lastSeen` and `lastVersion` move, so an entry that keeps biting stays
+live.
+
+Reach for the listing when you are planning something that has bitten before
+(`tool` or `query` narrows it) or when the user asks what is known. It is an
+index — id, scope, title, tools, `kind`, `lastSeen`, `lastVersion`, counts —
+with the entries naming the tool first and then the most recently seen first,
+and a `next` pointer spelling out the call that opens the top one. Archived
+entries — unseen for 30 days, a `tool-bug` last seen on an older server than
+the one running, or retired with `archive_issue` — are hidden and counted in
+`archivedCount`; `includeArchived: true` shows them, and a read by `id` always
+works, archived or not, because a failure's pointer can name one (marked
+archived, with the reason).
 
 There are two journals and every entry says which it came from. `project` is
 this project's own notes; `user` travels with the person across every project.
@@ -34,11 +46,19 @@ rejects, an error message that names the wrong thing, a property whose real
 name is nothing like its display name. Not your own typos. Not "I forgot the
 layer was 3D".
 
-Write the entry for someone who has not seen the failure: the exact error text
-(`errorText`, so a later failure can match it), the call that produced it, and a
-workaround concrete enough to apply directly. Logging under an existing title
-extends that entry rather than adding a near-duplicate — so if the failure
-brought you an entry, extend it.
+Write the entry for someone who has not seen the failure: the call that
+produced it, the exact error text, and a workaround concrete enough to apply
+directly. **Pass `tools` and the exact `errorText`.** That is what lets the
+next failure be answered with your entry, and it is what folds a re-log of the
+same error into the existing entry even if you gave it a different title — the
+result says `mergedBy: "errorText"` and keeps the existing title. Logging under
+an existing title extends that entry too, so if the failure brought you an
+entry, extend it rather than writing a twin. Use `kind: "ae-quirk"` for a
+permanent After Effects behaviour, so a new release does not archive it as
+fixed; the default `tool-bug` is presumed fixed once it was last seen on an
+older server than the one running. Every entry records the server version it
+was first and last seen on. If the result says `reopened: true`, a problem
+that was supposed to be gone is back — tell the user.
 
 **Pick the scope by what the entry is about, not by where you are.** Leave it
 at the default `project` for this project's footage, comps or files. Pass
@@ -48,12 +68,16 @@ project starting out knowing it and re-learning it.
 
 ## Retire what is no longer true
 
-An entry has to be able to leave. When a release fixes the bug an entry works
-around, when the workaround has been promoted into the `extendscript-gotchas`
-topic or the project's own docs, or when the entry describes a permanent After
-Effects fact that belongs in a guide rather than a bug list, `archive_issue`
-it: archived entries stay on disk, stop matching failures, and are listed only
-with `includeArchived: true`. A journal that only grows is one nobody reads.
+An entry has to be able to leave, and most leave on their own: one unseen for
+30 days, or a `tool-bug` last seen on an older server than the one running, is
+archived without anyone deciding — and comes back the moment a failure matches
+it or a `log_issue` lands on it. `archive_issue({id, reason})` is for a
+decision: a report already covers the problem (pass its URL as the reason), a
+release fixed it, or the lesson has been promoted into the
+`extendscript-gotchas` topic or the project's own docs. An archived entry stays
+on disk, leaves the index, and is still named by a matching failure — marked
+archived, with the reason — so the pointer leads somewhere; only a deliberate
+`log_issue` reopens it. A journal that only grows is one nobody reads.
 
 ## Then offer to pass it on
 
@@ -75,7 +99,9 @@ same time. Something like:
 Do not say "GitHub issue", "file a bug" or "open a ticket" unless they say it
 first. If they say yes, use the **report-ae-issue** prompt this server provides
 (`/report-ae-issue` where your client exposes prompts as commands) — it checks
-the tracker for an existing report before drafting one, and handles the rest.
+the tracker for a report that already covers the problem before drafting one,
+archiving the entry when that report is closed and marking it reported when it
+is open, and handles the rest.
 If they say no, drop it; the note stays and can be offered again another time.
 
 Never claim you have reported something you have not.

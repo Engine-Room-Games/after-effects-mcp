@@ -174,6 +174,10 @@ as a script, so they are in the `shapes` topic. The raw-scripting traps:
   script, or `set_text` / `create_text_layer`'s `anchorAlign` from outside —
   and verify with `get_layer_full({…, include: ["bounds"]})`: a centred layer's
   `sourceRect.left` is about `-width / 2`, a left-justified one's about `0`.
+  The tool path gets a check a script does not: `set_text` and
+  `create_text_layer` read the justification back after the write, re-assert it
+  once if it moved, and throw naming expected and actual if it still disagrees,
+  so the `justification` they return is what the layer shows.
 
 ## Keyframes and easing
 
@@ -202,8 +206,12 @@ as a script, so they are in the `shapes` topic. The raw-scripting traps:
   layer is left remap-enabled with no keys. Setting `timeRemapEnabled = true`
   already creates the two keys a loop needs — `[inPoint, 0]` and
   `[inPoint + source duration, source duration]` — so there is no reason to
-  clear them: edit those keys in place. If they are already gone, toggle
-  `timeRemapEnabled` off and on to get the defaults back.
+  clear them: edit those keys in place, or put an expression over them —
+  `(time - startTime) % thisLayer.source.duration` loops — which overrides
+  them without touching them. And re-assert `outPoint` after
+  `timeRemapEnabled = true`, because enabling it resets the layer's end. If
+  the keys are already gone, toggle `timeRemapEnabled` off and on to get the
+  defaults back. *The tool already does:* `place_audio_cues` with `loop: true`.
 
 ## Render queue and output modules
 

@@ -379,8 +379,8 @@ with contradicting remedies. Everything else is a reference, opened by subject:
 | `text` | justification as alignment, tracking, `set_text`, sizing a background from `sourceRect` |
 | `assembly` | shots built in local time and placed at offsets, comp markers, retiming without touching contents, the precomp that renders nothing before `startTime` (issue #101) |
 | `extendscript-gotchas` | **the `run_jsx` reference**: when to script, timeouts and the ~60-layer practical bound, `scriptPath`/`libraries` as the normal way to build, the helpers in scope, the raw-scripting traps by subject, the result and failure contract |
-| `sound` | `place_audio_cues`, what `levelDb` means and why a copied level is meaningless |
-| `mogrt-and-footage` | `export_mogrt` and its preconditions, the SVG viewBox trap |
+| `sound` | `place_audio_cues`, what `levelDb` means and why a copied level is meaningless, loops, fades and stretch per cue |
+| `mogrt-and-footage` | `export_mogrt` and its preconditions, the SVG viewBox trap, the solids `delete_comp` leaves behind and `purge_unused_footage` |
 | `issue-journal` | the journal flow: a failure brings matching entries, `log_issue`, retiring an entry, the offer to pass it on |
 | `whats-new` | version deltas (issue #60); the only place history lives |
 

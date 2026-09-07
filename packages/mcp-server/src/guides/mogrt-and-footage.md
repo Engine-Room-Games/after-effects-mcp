@@ -1,7 +1,7 @@
 ---
 name: mogrt-and-footage
 reference: after-effects
-description: Exporting a Motion Graphics template and importing footage through the AE MCP tools — export_mogrt and the preconditions it checks before touching the project, the thumbnail, the modal dialogs that freeze this connection, and the SVG whose viewBox makes After Effects fabricate dimensions and render nothing. Load when a task exports a .mogrt or imports a file.
+description: Exporting a Motion Graphics template, importing footage and keeping the project bin clean through the AE MCP tools — export_mogrt and the preconditions it checks before touching the project, the thumbnail, the modal dialogs that freeze this connection, the SVG whose viewBox makes After Effects fabricate dimensions and render nothing, and the solids a deleted comp leaves behind. Load when a task exports a .mogrt, imports a file, or deletes comps.
 ---
 
 # Motion Graphics templates and footage
@@ -95,10 +95,19 @@ If you hit that, the workarounds are:
 throwing. It is for when you know the dimensions are wrong and want it anyway —
 not a way past the error.
 
-Deleting a comp does not delete the footage its layers pointed at — a solid's
-footage item lives in the project's Solids folder, not in the comp — so a
-workflow that builds and discards comps grows the project bin without bound.
-`delete_comp({…, purgeUnusedSolids: true})` removes the solids nothing else
-uses once the comp is gone, and `purge_unused_footage` does the same for every
-unused item project-wide; both name what they removed and what they left, so
-read that rather than assuming the bin is clean.
+## Solids outlive their comps
+
+A solid or adjustment layer's source is a footage item in the project's Solids
+folder, and `delete_comp` and `delete_layer` remove the layer, not the item —
+so iterating on a rig by building and deleting comps silently fills the bin.
+`delete_comp` counts what it left in `unusedSolidsLeft`, with a note when that
+is not zero. Pass `purgeUnusedSolids: true` to take the comp's own now-unused
+solids with it in the same undo step, reported as `removedSolids` and
+`keptSolids` — a solid another comp still uses is kept, with that comp named
+under `usedIn`. Only the deleted comp's own solids are ever considered there;
+`purge_unused_footage` sweeps the whole project: solids only by default,
+`solidsOnly: false` for every unused footage item (what AE's own Remove Unused
+Footage does), `folderId` to scope it to one folder, and `dryRun: true` —
+first, on a project you did not build — which answers `wouldRemove` without
+removing anything or adding an undo step. Neither ever removes a solid another
+comp still uses, or a nested comp: a comp nothing uses is not footage.

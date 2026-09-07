@@ -67,12 +67,19 @@ topic builds shots in local time.
 `["Effects", "Gaussian Blur", "Blurriness"]`. Expressions are
 ExtendScript-flavoured JavaScript evaluated by AE per frame.
 
-**A `set_expression` result that carries an `expressionError` is a failed
-write.** After Effects compiles the expression when it is set; a syntax error or
-a reference it cannot resolve leaves the property showing a warning banner in
-the interface, which you cannot see. Read the field before you move on, and fix
-the expression rather than adding a second one. `get_expression` returns the
-same field, so an existing expression can be checked the same way.
+**`set_expression` throws when After Effects cannot evaluate what it wrote.**
+Assigning an expression succeeds whatever the text says; AE's only report is a
+warning banner on the property in the interface, which you cannot see. So the
+tool evaluates the property after the write and, if AE reports an error on it,
+fails with AE's own message and the property path — a success result means the
+expression compiles and runs. The expression is still on the property after
+such a failure: fix it and call `set_expression` again, or `clear_expression`
+to remove it. Do not add a second one on top. `toggle_expression({enabled:
+true})` verifies the same way, because enabling can surface an error that has
+sat on the property since it was disabled.
 
-`get_expression` reads one back, `toggle_expression` disables one without
+`get_expression` reads one back as `expression`, `enabled` and
+`expressionError` — AE's message, or an empty string when it runs clean. A
+non-empty `expressionError` means the property is not being driven by that
+expression, whatever `enabled` says. `toggle_expression` disables one without
 deleting it, and `clear_expression` removes it.

@@ -45,9 +45,165 @@ only quitting and reopening After Effects will.
 
 ## 0.5.0
 
-<!-- Coordinator: the 0.5.0 entries go here, in the format described at the top
-     of this file — bold rule first, then the reason, then `supersedes:` lines
-     quoting what a project's notes would have said before this release. -->
+The release where the guidance split into a core and references, the journal
+started coming to you instead of you going to it, and three more things After
+Effects does silently — a batch's progress no client ever saw, a broken
+expression reported as ok, a justification that did not land — became
+visible. Two results changed shape; those are first, because a caller reading
+the old shape gets nothing rather than an error.
+
+### Two results changed shape
+
+- **`find_layers` returns `{matches, count, compsSearched, included}`, and a
+  match is id, index, name, sourceType, compId and compName unless `include`
+  asks for more.** It used to answer a bare array of full layer summaries —
+  flags, timing, parent, on every match — with no way to bound it, so nine name
+  matches cost about two thousand tokens, re-sent on every later request.
+  `include` takes the `list_layers` section names (`flags`, `timing`,
+  `parent`); unlike `list_layers`, omitting it means the bounded record, not
+  everything, and the result echoes `included`. A caller that read the old
+  array reads `matches` now.
+  supersedes: find_layers cannot be bounded
+  supersedes: find_layers returns an array of layer summaries
+- **`place_audio_cues` results carry one small entry per cue — `layerId`,
+  `name`, `time`, plus what an option changed — and `dryRun` answers counts,
+  `wouldImport`, `wouldReuse` and the failing cues only.** The per-cue
+  `levelDb`, `label`, `index` and `itemId` were echoes of the request, and a
+  seven-cue dry run that found nothing wrong cost about 1,500 tokens of them.
+  Read a level off the layer, not out of the result.
+  supersedes: place_audio_cues echoes the levelDb written for every cue
+  supersedes: dryRun on place_audio_cues returns the resolved cue list
+
+### Three silences, now reported
+
+- **`run_batch` over 500 ops returns its `jobId` before the first chunk runs,
+  and progress is delivered on `await_job` — send that call with a progress
+  token and `notifications/progress` arrive while it waits.** Nothing can ride
+  on the `run_batch` call itself: its response is already back, and a
+  notification sent on a request's token after its response is one every
+  spec-compliant client has already stopped listening for — which is where
+  every progress message for a long batch went before 0.5.0, seen by no real
+  client. `get_job` polls the same state without a token.
+  supersedes: run_batch progress arrives on the run_batch call
+  supersedes: pass a progressToken on run_batch to see its progress
+- **`set_expression` throws when After Effects cannot evaluate the expression,
+  and `get_expression` returns `expressionError`.** Assigning an expression
+  succeeds whatever the text says, and AE's only report is a warning banner in
+  its interface; the tool now evaluates the property after the write and fails
+  with AE's message and the property path. The expression stays written — fix
+  it and call again, or `clear_expression`. `toggle_expression({enabled:
+  true})` verifies the same way. A non-empty `expressionError` means the
+  property is not being driven by that expression, whatever `enabled` says.
+  supersedes: set_expression reports success for a broken expression
+  supersedes: ask the user to check the property for an expression warning banner
+- **`set_text` and `create_text_layer` read the justification back after every
+  write, re-assert it once if it moved, and throw naming expected and actual
+  if it still disagrees.** On 26.3 a `set_text` that changed only `text` has
+  re-centred a left-aligned layer. Both results carry `justification` as a
+  name and `justificationReasserted`; a failing `create_text_layer` removes
+  the layer it made, so nothing is left without an id. An unknown
+  justification name is refused rather than ignored.
+  supersedes: set_text leaves justification alone when you do not pass it
+  supersedes: verify alignment by sourceRect after every set_text
+
+### Deleting a comp, and what it leaves behind
+
+- **`delete_comp` reports `unusedSolidsLeft`, and `purgeUnusedSolids: true`
+  removes the comp's own now-unused solids in the same undo step.** A solid's
+  source is a footage item in the Solids folder, and deleting the comp only
+  ever removed the layer, so a session that built and discarded comps left
+  hundreds behind. Only the deleted comp's own solids are considered; one
+  another comp still uses is kept and reported in `keptSolids` with that comp.
+  supersedes: delete_comp removes a comp and its solids
+  supersedes: sweep the Solids folder by hand after deleting comps
+- **`purge_unused_footage` sweeps the project: solids only by default,
+  `solidsOnly: false` for every unused footage item, `folderId` to scope it,
+  `dryRun: true` to list `wouldRemove` without an undo step.** Never a comp or
+  a folder — a nested comp nothing uses is not footage.
+  supersedes: remove unused footage with run_jsx
+
+### Sound
+
+- **`place_audio_cues` takes `loop`, `fadeIn`/`fadeOut` and `stretch` per cue,
+  and `fadeFloorDb` per call.** `loop: true` time-remaps with a wrap-around
+  expression, keeps AE's two default keys and re-asserts the out point; fades
+  keyframe Audio Levels at the layer's real in and out between the floor
+  (default `-48`) and the cue's level, and a fade that does not fit is refused
+  by cue index; `stretch` is a percentage with the start time and trims
+  re-asserted after it. A stretched loop bakes the factor into its expression,
+  so a later hand change to stretch leaves the loop at the old rate. All of it
+  is validated before anything is created and rolled back with the rest.
+  supersedes: loop a bed with run_jsx and timeRemap after place_audio_cues
+  supersedes: fade audio in run_jsx after placing the cues
+
+### The journal comes to you
+
+- **A failed call ends with `Known from earlier sessions: <scope:id> — <title>`
+  for up to three entries matching its tool and error text, and the
+  `list_known_issues({id})` call that opens the first.** Nobody reads the
+  journal ahead of time any more; the pointer arrives with the failure, and a
+  match moves the entry's `lastSeen`.
+  supersedes: read list_known_issues before nontrivial work
+  supersedes: check list_known_issues before guessing
+- **`log_issue` takes `errorText` and `kind`, and the same tool with the same
+  error text extends the existing entry even under a new title** — the result
+  says `mergedBy: "errorText"` and keeps the existing title. `kind:
+  "ae-quirk"` marks a permanent After Effects behaviour; the default
+  `tool-bug` is presumed fixed once last seen on an older server. Entries
+  record `firstVersion` and `lastVersion`.
+  supersedes: call list_known_issues first so you reuse the title when logging
+- **Entries archive themselves — unseen for 30 days, or a `tool-bug` last seen
+  on an older server — and `archive_issue({id, reason})` retires one by
+  hand.** Archived entries are hidden from the index and counted in
+  `archivedCount`; `includeArchived: true` lists them, a read by `id` always
+  works, and a fresh `log_issue` reopens one with `reopened: true`. Index
+  lines carry `kind`, `lastSeen` and `lastVersion` and no summary sentence,
+  sorted by tool match and then most recently seen.
+  supersedes: the journal only grows, entries are never removed
+- **The report flow checks the tracker before drafting.** An entry a closed
+  report already covers is archived with that URL; one an open report covers
+  is marked reported. Bodies go through a file, and "all of them" is one
+  approval.
+
+### Reading the history once
+
+- **`ae_guide({topic: "whats-new", since: "<version>"})` returns only the
+  releases after that version, opening with the server's own version**, and
+  this file has a shape a machine can filter: one section per release, every
+  entry leading with the rule as it now stands, `supersedes:` lines under it
+  quoting the old rule. The absorb-release prompt (`/absorb-release` where
+  prompts are commands) applies the delta to a project's notes once and
+  records the version in the `Tools version last absorbed:` line
+  `init_project` writes into AGENTS.md.
+  supersedes: read the whole whats-new guide after every update
+
+### The guidance
+
+- **The `after-effects` topic is a core of what silently produces wrong output
+  on any task, and each subject is its own topic** — `animation`, `shapes`,
+  `text`, `assembly`, `extendscript-gotchas`, `sound`, `mogrt-and-footage`,
+  `issue-journal`, `whats-new` — twelve `ae_guide` topics in all with
+  `style-guide` and `ae-setup`. In Claude Code and claude.ai the references
+  are the files in the `after-effects` skill's `references/` folder, opened
+  only when the core points at them. Keyframes, easing and rigging are in
+  `animation`; raw scripting, with the ease-arity table, in
+  `extendscript-gotchas` and nowhere else.
+  supersedes: the after-effects skill covers keyframes text and shapes in one file
+  supersedes: the ease arity table is in the main guide
+- **Four more After Effects facts, measured on 26.3, in `extendscript-gotchas`:**
+  removing the last Time Remap key hides the property, so edit AE's two
+  default keys in place or put an expression over them, and re-assert
+  `outPoint` after enabling remapping; `TextDocument.justification` written
+  from a script lands as RIGHT when handed CENTER, so set it through
+  `set_text`; `OutputModule.setSettings` rejects Format, Channels, Depth and
+  Color as read-only, so build an output template in the UI and apply it by
+  name; and the ease arity is not derivable from a value's dimension, so
+  never size a `KeyframeEase` array by hand.
+  supersedes: clear the Time Remap keys before adding your own
+  supersedes: set justification on the TextDocument from run_jsx
+  supersedes: set the output module codec with setSettings from run_jsx
+
+<!-- coordinator: #91/#92 bullets (port drift, CEP signature check) go here -->
 
 ## 0.4.0
 
@@ -221,7 +377,7 @@ that learned the old story will otherwise repeat it to a user.
   behind it for raw `run_jsx` and this topic for changes. In Claude Code and
   claude.ai the same text is the `after-effects` skill and the files in its
   `references/` folder — load one carrier, not both.
-- **Rigging is written down**, in the main guide: opacity does not propagate
+- **Rigging is written down**, in the `animation` topic: opacity does not propagate
   through parenting, and a camera null is parented to while it is still at
   identity.
 
