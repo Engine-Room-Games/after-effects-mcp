@@ -69,7 +69,7 @@ jobs:
               const missing=Object.keys(OpSchemas).filter(op=>!served.has(op));
               if(missing.length){console.error(`defined in OpSchemas but not served: ${missing.join(", ")}`);process.exit(1);}
               if(n!==defined){console.error(`tools/list served ${n} but OpSchemas defines ${defined}`);process.exit(1);}
-              if(n<75){console.error(`expected >=75 tools, got ${n} — a tool was removed from OpSchemas`);process.exit(1);}
+              if(n<76){console.error(`expected >=76 tools, got ${n} — a tool was removed from OpSchemas`);process.exit(1);}
               console.log(`${n} tools on ${process.platform}`);
               c.kill();process.exit(0);
             })();'

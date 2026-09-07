@@ -27,7 +27,8 @@ import { assessPanel, installedBundleHash, unknownOpMessage } from "./setup/pane
 import { installedPanelDir, packageVersion, panelInstallDiff, panelSourceDir } from "./setup/paths.js";
 import { renderWhatsNew } from "./tools/whatsNew.js";
 import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./generated/content.js";
-import { listIssues, logIssue, markReported } from "./issues/journal.js";
+import { archiveIssue, listIssues, logIssue, markReported } from "./issues/journal.js";
+import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
@@ -55,6 +56,7 @@ export const SERVER_OPS = new Set([
   "log_issue",
   "list_known_issues",
   "mark_issue_reported",
+  "archive_issue",
 ]);
 // Half server-resident: only the panel can read After Effects, only the server
 // can remember anything between calls. These forward an internal read op to
@@ -112,6 +114,15 @@ export function createServer() {
   const ws = new WsClient(bridge.port, jobs);
   ws.start();
   const panelGate = createPanelGate(bridge);
+
+  // The issue journal, pushed rather than pulled: every failed tool call is
+  // answered with the journal entries that match its tool and error text, so
+  // the pointer arrives at the moment it is needed and nothing else in the
+  // session pays for the journal's size (issue #102). `annotateFailure` never
+  // throws and never touches the message when nothing matches — see
+  // issues/failures.ts. The cache is per process, like `SnapshotStore`.
+  const journalCache = new JournalCache();
+  const fail = (tool: string, message: string) => errorResult(annotateFailure(journalCache, tool, message));
 
   // Best-effort health probe; non-fatal.
   bridge.health().then(
@@ -291,6 +302,9 @@ export function createServer() {
               // that a fresh project folder does not start ignorant.
               scope: a.scope ?? "all",
               limit: a.limit,
+              // Hidden unless asked: an archived entry is one that stopped
+              // biting, was superseded by a release, or was retired on purpose.
+              includeArchived: a.includeArchived ?? false,
             })
           );
         }
@@ -301,11 +315,24 @@ export function createServer() {
           // journal, and the caller has to be able to say which one moved.
           return textResult({ ok: true, id: entry.id, scope: entry.scope, reported: true, issueUrl: entry.issueUrl });
         }
+        if (name === "archive_issue") {
+          const a = schemas.ArchiveIssue.parse(rawArgs);
+          const entry = archiveIssue(a.id, a.reason);
+          return textResult({
+            ok: true,
+            id: entry.id,
+            scope: entry.scope,
+            archived: true,
+            reason: entry.archivedReason,
+            archivedAt: entry.archivedAt,
+            note: "The file is kept and can be reopened by a later log_issue with the same title or the same tool and error text.",
+          });
+        }
       } catch (e) {
         // A zod rejection here is the same class of thing as one below, and gets
         // the same prose treatment; `invalidArgsText` passes anything else
         // through unchanged.
-        return errorResult(invalidArgsText(name, e));
+        return fail(name, invalidArgsText(name, e));
       }
     }
 
@@ -314,7 +341,7 @@ export function createServer() {
     try {
       args = (OpSchemas[name as keyof typeof OpSchemas] as z.ZodTypeAny).parse(rawArgs);
     } catch (e) {
-      return errorResult(invalidArgsText(name, e));
+      return fail(name, invalidArgsText(name, e));
     }
 
     // run_jsx can take its script, and its helper libraries, from files rather
@@ -325,7 +352,7 @@ export function createServer() {
       try {
         args = resolveRunJsxSource(args as RunJsxArgs);
       } catch (e) {
-        return errorResult((e as Error).message);
+        return fail(name, (e as Error).message);
       }
     }
 
@@ -348,7 +375,7 @@ export function createServer() {
       } catch (e) {
         // Full, timed out in the queue, or cancelled — all three mean the call
         // never reached After Effects, and all three say so.
-        return errorResult((e as Error).message);
+        return fail(name, (e as Error).message);
       }
     }
     const wait: QueueWait | null = lease?.wait ?? null;
@@ -482,13 +509,16 @@ export function createServer() {
     } catch (e) {
       // Checked before BridgeUnreachableError because the remedies are
       // opposites: one says restart After Effects, the other says do not.
-      if (e instanceof BridgeTimeoutError) return errorResult(e.message);
-      if (e instanceof BridgeUnreachableError) return errorResult(e.message);
+      // Every branch below goes through `fail`, so a failure the journal already
+      // knows about arrives with its pointer attached — that is the push half of
+      // the journal, and the error path is the only place it can live.
+      if (e instanceof BridgeTimeoutError) return fail(name, e.message);
+      if (e instanceof BridgeUnreachableError) return fail(name, e.message);
       if (e instanceof AeError) {
         // A failure the panel diagnosed itself — a stale render buffer, so far.
         // Those messages are already a complete instruction to the agent, and
         // "AE:" in front of one would read as After Effects having raised it.
-        if (e.code) return errorResult(e.message);
+        if (e.code) return fail(name, e.message);
         // The gate above should have caught this, but it depends on /health
         // reporting a hash. On a panel too old to do that, this is the backstop
         // — and it is unambiguous, since unknown tool names never get this far.
@@ -499,9 +529,9 @@ export function createServer() {
         // The line number on its own counts from something the caller cannot
         // see, so this prints the failing line's text where the handler could
         // map it, and says so plainly where it could not (issue #46).
-        return errorResult(aeErrorText(e));
+        return fail(name, aeErrorText(e));
       }
-      return errorResult((e as Error).message);
+      return fail(name, (e as Error).message);
     } finally {
       // No-op unless a lease was taken, and deferred by `extendUntil` when a
       // long batch is still running behind the envelope we just returned.
