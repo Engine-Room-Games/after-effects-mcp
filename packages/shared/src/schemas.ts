@@ -1050,7 +1050,15 @@ export const LogIssue = z
     symptom: z.string().min(3).describe("What went wrong, including the exact error text and the call that produced it."),
     workaround: z.string().min(3).describe("What actually worked — concrete enough for the next session to apply without rediscovering it."),
     cause: z.string().optional().describe("Why it happens, if you worked it out."),
-    tools: z.array(z.string()).optional().describe("Tool names involved, e.g. ['set_temporal_ease']."),
+    tools: z.array(z.string()).optional().describe("Tool names involved, e.g. ['set_temporal_ease']. With errorText, this is what a later failure is matched on."),
+    errorText: z.string().optional()
+      .describe(
+        "The exact error text the failing call returned, verbatim. The next time a call to one of `tools` fails with matching text, its error names this entry — and a later log_issue with the same tool and error text extends this entry instead of creating a second one under a different title."
+      ),
+    kind: z.enum(["tool-bug", "ae-quirk"]).default("tool-bug").optional()
+      .describe(
+        "'tool-bug' (default): something these tools get wrong, which a later release may fix — so the entry is archived once it was last seen on an older server than the one running. 'ae-quirk': After Effects itself behaving unlike its documentation; no release changes that, so it is never archived by version."
+      ),
     scope: z.enum(["project", "user"]).default("project").optional()
       .describe(
         "'project' (default) for this project's footage, comps or files. 'user' for how these tools or After Effects behave — that journal travels with the person, so every future project starts knowing it. Reported back as 'home' when there is no project folder to write into."
@@ -1074,7 +1082,7 @@ export const ListKnownIssues = z
       .default("index")
       .optional()
       .describe(
-        "'index' (default) is one line per entry: id, title, tools, counts and a one-line summary — read the one you need with `id`. 'full' returns every matching entry's whole body and costs thousands of tokens."
+        "'index' (default) is one line per entry: id, title, tools, kind, when and on which version it was last seen, counts — read the one you need with `id`. 'full' returns every matching entry's whole body and costs thousands of tokens."
       ),
     scope: z.enum(["all", "project", "user"]).default("all").optional()
       .describe(
@@ -1082,12 +1090,22 @@ export const ListKnownIssues = z
       ),
     limit: z.number().int().positive().max(500).default(50).optional()
       .describe("Most entries to return. Anything held back is counted in `omitted`."),
+    includeArchived: z.boolean().default(false).optional()
+      .describe(
+        "Also list archived entries — not seen for 30 days, last seen on an older server than this one, or retired with archive_issue — each flagged with its reason. Default false: they are hidden and only counted in `archivedCount`. An `id` read always returns the entry, archived or not."
+      ),
   })
   .strict();
 export const MarkIssueReported = z
   .object({
     id: z.string().describe("The entry id returned by log_issue or list_known_issues. Prefix with its scope ('user:my-entry') when the same id exists in both journals."),
     url: z.string().optional().describe("Link to the issue that was opened."),
+  })
+  .strict();
+export const ArchiveIssue = z
+  .object({
+    id: z.string().describe("The entry id from log_issue or list_known_issues. Prefix with its scope ('user:my-entry') when the same id exists in both journals — only the one named moves."),
+    reason: z.string().min(3).describe("Why it is being retired, one line — the URL of the report that already covers it, the release that fixed it, or where the lesson was moved to."),
   })
   .strict();
 
@@ -1196,6 +1214,7 @@ export const OpSchemas = {
   log_issue: LogIssue,
   list_known_issues: ListKnownIssues,
   mark_issue_reported: MarkIssueReported,
+  archive_issue: ArchiveIssue,
 } as const;
 
 export type OpName = keyof typeof OpSchemas;
@@ -1327,6 +1346,7 @@ export const OpMutation = {
   log_issue: "server",
   list_known_issues: "server",
   mark_issue_reported: "server",
+  archive_issue: "server",
 } as const satisfies Record<OpName, "write" | "read" | "server">;
 
 export type OpEffect = (typeof OpMutation)[OpName];

@@ -222,7 +222,7 @@ If you forget the second step, nothing breaks silently: the next thing you ask f
 ---
 
 <details>
-<summary><b>🧰 All 74 tools</b></summary>
+<summary><b>🧰 All 75 tools</b></summary>
 
 <br>
 
@@ -249,7 +249,7 @@ If you forget the second step, nothing breaks silently: the next thing you ask f
 | Jobs (3) | `await_job`, `get_job`, `cancel_job` |
 | Setup (3) | `check_setup`, `setup_panel`, `init_project` |
 | Guidance (1) | `ae_guide` |
-| Issues (3) | `list_known_issues`, `log_issue`, `mark_issue_reported` |
+| Issues (4) | `list_known_issues`, `log_issue`, `mark_issue_reported`, `archive_issue` |
 
 A few behave differently from the rest:
 
@@ -297,7 +297,7 @@ Start here: **ask your assistant to check the After Effects setup.** It reports 
 }
 ```
 
-**The issue notebook.** These tools have rough edges. When your assistant hits one and works out a way around it, it writes the problem and the fix into `.ae-mcp/issues/` in your project folder — plain text files you can read or delete. The next session reads that notebook before guessing. The folder keeps itself out of version control.
+**The issue notebook.** These tools have rough edges. When your assistant hits one and works out a way around it, it writes the problem and the fix into `.ae-mcp/issues/` in your project folder — plain text files you can read, edit or delete. The next time the same thing fails, the error itself points at that note, so nothing has to be re-read up front. Notes that go quiet for a month, or that a newer version has fixed, drop out of the list on their own (they are kept, just hidden), and a note about something the maintainers already know can be retired outright. The folder keeps itself out of version control.
 
 **Reporting a bug.** If the problem looks like ours rather than yours, you'll be offered the chance to pass it on, or you can start it yourself with `/report-ae-issue`. It writes the report, shows it to you, and only sends it once you say yes. Nothing about your own work — comp names, file paths, clients — goes into it. Sending needs the [GitHub CLI](https://cli.github.com); without it you get a prefilled link to click.
 
