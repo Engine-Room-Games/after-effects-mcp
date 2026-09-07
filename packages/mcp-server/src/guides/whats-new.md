@@ -203,7 +203,38 @@ the old shape gets nothing rather than an error.
   supersedes: set justification on the TextDocument from run_jsx
   supersedes: set the output module codec with setSettings from run_jsx
 
-<!-- coordinator: #91/#92 bullets (port drift, CEP signature check) go here -->
+### Connecting, and staying connected
+
+- **The server follows the panel's port.** A call refused on the port the
+  server remembered makes it look again — 7777 first, then the port file —
+  switch to whichever answers as the panel, and re-send the call once. Only a
+  refused connection triggers this; a timed-out call reached After Effects and
+  is never re-sent (issue #92). `AE_MCP_PORT` is a hard pin: with it set, no
+  other port is ever tried.
+  supersedes: reconnect the MCP server when ops fail on a port check_setup does not report
+- **`check_setup` reports the port that actually answers**, flags a stale
+  port file, and carries a new `portAgreement` check. When calls go to one
+  port and the panel answers on another, its advice is to retry or reconnect
+  the MCP server. It never tells you to restart After Effects for that.
+  supersedes: cannot reach the panel means nothing is listening so restart After Effects
+- **The panel waits instead of moving when an older copy of itself holds
+  7777.** It says so in its own window, names the holder, and takes the port
+  over the moment that copy exits, with no restart. Two After Effects
+  instances on one machine opt back into walking with `"allowPortWalk": true`
+  in `~/.engineroom-ae-mcp/config.json`; the same file's `"port"` moves the
+  panel. The port file only ever names a port that was really bound and is
+  removed when the panel unloads.
+  supersedes: the panel walks up to the next free port when 7777 is taken
+- **A panel that never loads on Windows gets a diagnosis, not a restart
+  loop.** `check_setup` reads CEP's own log and, when CEP refused the panel's
+  signature — an Adobe CEP 12 bug that ignores PlayerDebugMode — reports
+  `panelSignature` with the steps to self-sign the installed panel with
+  Adobe's ZXPSignCmd (issue #91). With no log yet, it gives the one command
+  that turns CEP logging on. `setup_panel` now turns that logging on itself
+  where it was never set, warns when it is about to replace a self-signed
+  panel (`signedInstallOverwritten`, since the fresh copy needs signing
+  again), and reports a signed panel as up to date rather than partial.
+  supersedes: check_setup all green but the panel never loads means restart After Effects again
 
 ## 0.4.0
 

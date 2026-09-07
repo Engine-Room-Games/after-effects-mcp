@@ -219,9 +219,15 @@ so with `queuedBehind` and `waitedMs`. Reads are never queued: `list_*`,
   minute, and ask the user whether a dialog is hiding behind another window. A
   call that legitimately needs longer gets it from `AE_MCP_OP_TIMEOUT_MS` in the
   server's environment.
-- **Cannot reach After Effects.** Nothing is listening. Call `check_setup` and
-  relay its `nextSteps` to the user in plain language; the repair path is the
-  `ae-setup` topic. Do not diagnose CEP by hand.
+- **Cannot reach After Effects.** The connection was refused, so nothing
+  reached After Effects and nothing changed. The server looks again on its own
+  first — 7777, then the port file — and follows a panel that has moved, so a
+  refusal that reaches you is one that search did not resolve. Call
+  `check_setup` and relay its `nextSteps` to the user in plain language; the
+  repair path is the `ae-setup` topic. If it reports the panel answering on a
+  port other than the one the call named, retry the call or reconnect the MCP
+  server and never restart After Effects for it: something *is* listening, and
+  a restart costs the user their work in progress. Do not diagnose CEP by hand.
 - **Waited behind another op for the write queue and was dropped.** Nothing
   reached After Effects and nothing changed. Something in front is slow — usually
   a long `run_batch`; find it with `get_job` or `await_job` — then re-send once
