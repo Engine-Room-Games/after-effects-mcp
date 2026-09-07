@@ -262,6 +262,13 @@ jobs:
           node tests/unit/write-queue.mjs
           node tests/unit/write-queue-server.mjs
 
+      # Where a long batch's progress goes. A notification sent after its
+      # request's response is on the wire and seen by no client — that is how
+      # #82 shipped, verified by reading the stream. This drives the real SDK
+      # client with onprogress and asserts order, not presence.
+      - name: Progress reaches the request that is still open
+        run: node tests/unit/job-progress.mjs
+
       # Two failures at once, and the first one takes the whole server down with
       # it: the Anthropic API rejects a tool schema that is not valid draft
       # 2020-12, and a rejected schema breaks every tool in the session rather

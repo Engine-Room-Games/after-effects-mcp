@@ -91,7 +91,7 @@ export const descriptions: Record<string, string> = {
   // ---------- batch ----------
   run_batch:
     "Many ops in one ExtendScript pass — far faster than the same ops as separate calls, and far fewer undo steps. " +
-    "**Up to 500 ops it is exactly one undo step.** Over 500 it is chunked into a background job (returns a jobId, streams progress, finish with await_job) and lands as **one undo step per chunk of 25** — around 24 steps for 600 ops — because After Effects discards an undo group that spans two script calls. Every result reports the measured count in `undoSteps` with a `note`: read it before you tell anyone how to undo the work, and never say \"one Cmd-Z\" for a chunked batch. " +
+    "**Up to 500 ops it is exactly one undo step.** Over 500 it is chunked into a background job — this call returns a jobId at once, before the first chunk runs; finish with await_job, which blocks for the job and is where its progress is delivered (pass a progressToken on THAT call, not on this one; get_job polls without one) — and lands as **one undo step per chunk of 25** — around 24 steps for 600 ops — because After Effects discards an undo group that spans two script calls. Every result reports the measured count in `undoSteps` with a `note`: read it before you tell anyone how to undo the work, and never say \"one Cmd-Z\" for a chunked batch. " +
     "`singleUndo:true` forces one undo step at any size up to 2000 ops, by running the whole batch in one blocking call — After Effects' interface is frozen for the duration and no progress is reported, so use it only when a single Cmd-Z actually matters to the user. Over 2000 it is refused rather than freezing AE. " +
     "transactional:true (default) stops at the first error; nothing rolls back either way — the ops before it stay applied, so read the state back rather than re-running. " +
     "`diff:true` appends a structural diff of the comps the batch touched — what it added, retimed, re-parented and keyframed — and on a failure that diff rides on the error, which is the cheapest way to find where a half-applied batch stopped.",
@@ -140,8 +140,11 @@ export const descriptions: Record<string, string> = {
     "The full working guidance for these tools, by topic. Read `after-effects` before a first substantial build in a session, `style-guide` when capturing or editing the user's look, `ae-setup` when a tool cannot reach After Effects. Covers the traps that silently produce wrong output and are not visible from any single tool's schema.",
 
   // ---------- jobs ----------
-  await_job: "Block until job is done. Default 10min timeout. Returns the same payload the tool would have.",
-  get_job: "Non-blocking job status: progress/total/state/error.",
+  await_job:
+    "Block until a chunked run_batch job is done. Default 10min timeout. Returns the same payload the tool would have, `undoSteps` included. " +
+    "**This is the call that carries progress**: send it with a progressToken and notifications/progress arrive while it waits, every one before its response. run_batch's own response is back before the first chunk runs, so no progress can ride on that call — a token there is ignored.",
+  get_job:
+    "Non-blocking job status: progress/total/state/error. Poll this when you cannot keep an await_job open. It never sends notifications/progress — that is await_job's job.",
   cancel_job: "Set cancel flag; chunked loop stops at next boundary.",
 
   // ---------- setup ----------
