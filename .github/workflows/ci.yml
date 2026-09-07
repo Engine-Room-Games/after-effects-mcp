@@ -260,6 +260,16 @@ jobs:
           node tests/unit/find-layers.mjs
           node tests/unit/text-justification.mjs
           node tests/unit/expression-error.mjs
+      # Release history is read once per release per project and then never
+      # again, which only works if whats-new.md keeps the shape a machine can
+      # filter: every ## a release, newest first, a section for the version
+      # being built, and `supersedes:` lines plain enough to grep a project's
+      # notes with. The second file proves the scaffold stamps the version the
+      # absorb flow later compares against, through both entry points.
+      - name: Release history filters by version and the scaffold records one
+        run: |
+          node tests/unit/whats-new.mjs
+          node tests/unit/scaffold-marker.mjs
 
       # Three distributions carry the panel and none of them is built on a pull
       # request, so what ships is asserted from the source tree and the build
@@ -320,6 +330,9 @@ jobs:
           test -f ci-project/CLAUDE.md
           test -f ci-project/.mcp.json
           test -f ci-project/renders/.gitkeep
+          # The version the absorb-release flow compares against, stamped from
+          # package.json at run time — never a literal.
+          grep -q "^Tools version last absorbed: $(node -p 'require("./packages/mcp-server/package.json").version')$" ci-project/AGENTS.md
           node packages/mcp-server/dist/index.js init ci-cursor --client cursor --with-mcp
           test -f ci-cursor/.cursor/rules/after-effects.mdc
           test -f ci-cursor/.cursor/mcp.json
