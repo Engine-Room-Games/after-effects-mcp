@@ -85,10 +85,43 @@ first, then write the guide.
 The file is plain markdown. Tell them where it is and that they can edit it in
 any text editor without going through you.
 
+## The digest contract
+
+`get_house_style` answers with a digest by default, and the digest is built by
+a parser that recognises a fixed vocabulary. **The template's headings are the
+contract.** A guide written under them comes back `structured: true` with every
+section read; a guide written under other headings comes back with those
+sections named in `sectionsOmitted`, or — when nothing at all is recognised —
+`structured: false` with the document's opening text and no palette, which the
+next session will read as "this project has no rules". So write the guide in
+the shape below, and when the user's own guide uses different headings, tell
+them which ones were skipped rather than letting them believe it was read.
+
+What the parser recognises:
+
+- **Headings** — markdown `#` headings of any level, and the underlined
+  (`===` / `---`) forms. A heading is classified by the words in it:
+  *palette, colour, color, swatch* → palette; *type, typography, font,
+  lettering, typeface* → type; *motion, animation, timing, easing, ease,
+  transition* → motion; *layout, grid, spacing, composition, margin, safe area,
+  framing, rule, constraint* → layout. "Rules" is read as layout on purpose.
+  A subsection under a classified heading is folded into it (`### Display`
+  under `## Type`); a top-level title such as `# House style` with no prose of
+  its own is fine.
+- **Colours** — every hex (`#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`) anywhere in
+  the document, not only under Palette. It is named by the text before it on
+  the line, or by the first non-hex cell of its table row, so `Accent: #3DC46E`
+  and a table row whose first cell is *Accent* both come back as *Accent*. A
+  colour written as `rgb(…)` or by name is not a palette entry.
+- **Size** — up to 24 colours, 3 type lines, 8 layout lines and about 240
+  characters of motion. Put the lines that matter most first under each
+  heading; what is dropped is counted in the digest's `note`.
+
 ## Starting point
 
-When writing a guide from scratch, this is the shape to fill in. Drop headings
-you have nothing real to put under.
+When writing a guide from scratch, this is the shape to fill in — its headings
+are the ones the digest reads. Drop headings you have nothing real to put
+under.
 
 ```markdown
 # House style

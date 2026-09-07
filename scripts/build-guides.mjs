@@ -54,10 +54,11 @@ const check = process.argv.includes("--check");
 const INSTRUCTIONS = `You are driving a live After Effects session through this server. The user sees
 every change as it happens and every call is a real undo step in their project.
 
-Read the guidance before you build. \`ae_guide({topic: "after-effects"})\` covers
-orienting in a project, keyframes and easing, expressions, effects, text, shapes,
-and the traps that silently produce wrong output. In Claude Code and claude.ai
-the \`after-effects\` skill is the same text — load one carrier, not both.
+Read the guidance before you build. \`ae_guide({topic: "after-effects"})\` is the
+core — orienting, bounded reads, verifying a write, screenshots, the bridge
+failures — and points at one topic per subject (shapes, text, animation, raw
+scripting, sound, …). In Claude Code and claude.ai the \`after-effects\` skill is
+the same text — load one carrier, not both.
 Topics: __TOPICS__.
 
 Three habits that matter before that call returns:
