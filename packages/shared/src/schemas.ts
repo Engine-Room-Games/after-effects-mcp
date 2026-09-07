@@ -344,9 +344,14 @@ export const DiffComp = z
   .strict();
 
 // ---------- layers ----------
+// The sections __layerSummary (layers.jsx) can add to its id/index/name/type
+// core. One list for list_layers and find_layers, because both read through
+// that one function — a section named here and not there is a field the
+// schema advertises and the panel never fills, which no test can see.
+export const LAYER_SUMMARY_SECTIONS: ["flags", "timing", "parent"] = ["flags", "timing", "parent"];
 export const ListLayers = z.object({
   compId: z.number(),
-  include: includeParam(["flags", "timing", "parent"], "the id/index/name/type map alone"),
+  include: includeParam(LAYER_SUMMARY_SECTIONS, "the id/index/name/type map alone"),
 });
 export const GetLayerFull = z.object({
   compId: z.number(),
@@ -896,6 +901,16 @@ export const FindLayers = z.object({
   namePattern: z.string().optional(),
   type: z.string().optional(),
   hasEffectMatchName: z.string().optional(),
+  // Same section names as list_layers, opposite default: a search is for
+  // learning which layers exist and what to address them by, so omitting this
+  // means the core alone rather than everything (issue #87). `includeParam`
+  // is not reused because its sentence says "omit for all of them".
+  include: z
+    .array(z.enum(LAYER_SUMMARY_SECTIONS))
+    .optional()
+    .describe(
+      `Sections to add to each match: ${LAYER_SUMMARY_SECTIONS.join(", ")} — the same names as list_layers. Omit it (or pass []) for id/index/name/sourceType plus compId/compName only; unlike list_layers, omitting it here does NOT return every section. The result echoes what was included.`
+    ),
 });
 
 // ---------- raw ----------

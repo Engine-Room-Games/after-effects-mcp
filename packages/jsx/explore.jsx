@@ -494,7 +494,16 @@ OPS.get_project_summary = noUndo(function (args) {
   };
 });
 
+// A search, so the default is the opposite of list_layers: absent `include`
+// means the core alone — id/index/name/sourceType plus the comp — because the
+// reason to call this is to learn which layers exist and what to address them
+// by, not to read them (issue #87: nine matches cost ~2k tokens, re-sent on
+// every later request). `include: []` and omitting it are therefore the same
+// here, and the section names are list_layers' own, read through the same
+// __layerSummary. What was included is echoed, so a bounded answer is never
+// read as a full one.
 OPS.find_layers = noUndo(function (args) {
+  var sections = (args && args.include) ? args.include : [];
   var out = [];
   var comps = [];
   if (args.compId) comps.push(getCompById(args.compId));
@@ -521,11 +530,11 @@ OPS.find_layers = noUndo(function (args) {
         }
         if (!hit) continue;
       }
-      var s = __layerSummary(l);
+      var s = __layerSummary(l, sections);
       s.compId = c.id;
       s.compName = c.name;
       out.push(s);
     }
   }
-  return out;
+  return { matches: out, count: out.length, compsSearched: comps.length, included: sections };
 });
