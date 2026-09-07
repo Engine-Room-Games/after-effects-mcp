@@ -244,6 +244,12 @@ jobs:
           node tests/unit/guide-references.mjs
           node tests/unit/house-style-summary.mjs
 
+      # 0.5.0 correctness fixes for reads and writes that used to look right
+      # and were not: find_layers' bounded default and its echo.
+      - name: Reads are bounded and writes are verified
+        run: |
+          node tests/unit/find-layers.mjs
+
       # Three distributions carry the panel and none of them is built on a pull
       # request, so what ships is asserted from the source tree and the build
       # scripts instead. This also holds ci.yml's own test list against the one

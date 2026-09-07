@@ -98,7 +98,8 @@ export const descriptions: Record<string, string> = {
 
   // ---------- explore ----------
   get_project_summary: "Project state: path, item count, active item, flat item list with type (comp | footage | solid | folder | unknown — same vocabulary as a layer's sourceType).",
-  find_layers: "Search across one or all comps for layers matching name/type/effect filters.",
+  find_layers:
+    "Search one comp (`compId`) or every comp for layers matching name (regex, case-insensitive), type and/or effect matchName filters. Returns `{matches, count, compsSearched, included}`; each match is id/index/name/sourceType plus compId/compName — enough to address the layer with any other tool. That is the whole record by default: pass `include` (flags, timing, parent — the same names as list_layers) to add sections to every match, and note that unlike list_layers an omitted `include` here means the bounded form, not everything. For one layer's details use get_layer_full on the id it gives you.",
 
   // ---------- raw ----------
   run_jsx:
