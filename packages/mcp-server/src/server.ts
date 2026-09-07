@@ -7,6 +7,8 @@ import {
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { schemas } from "@engineroom/shared";
 import { HttpClient } from "./bridge/httpClient.js";
@@ -189,8 +191,20 @@ export function createServer() {
       try {
         if (name === "await_job") {
           const a = AwaitJobSchema.parse(rawArgs);
-          const st = await jobs.waitFor(a.jobId, a.timeoutMs ?? 600_000);
-          return textResult(st);
+          // This is the one call that blocks for the job, so it is the one
+          // call whose progress a client is still correlating while the job
+          // runs — see forwardJobProgress for why run_batch cannot be.
+          const forward = progressToken !== undefined ? forwardJobProgress(jobs, a.jobId, progressToken, extra) : null;
+          try {
+            const st = await jobs.waitFor(a.jobId, a.timeoutMs ?? 600_000);
+            return textResult(st);
+          } finally {
+            // Unbind, then wait for every notification already started to
+            // reach the transport. The response is written after this handler
+            // returns, so nothing on this token can land behind it — on the
+            // timeout path as much as on the success path.
+            await forward?.settle();
+          }
         }
         if (name === "get_job") {
           const a = GetJobSchema.parse(rawArgs);
@@ -329,7 +343,11 @@ export function createServer() {
       // the Unknown-op backstop — applies to the internal ops these forward.
       if (SNAPSHOT_OPS.has(name)) return await runSnapshotOp(name, args, bridge, snapshots);
 
-      const result = await bridge.runOp(name, args, progressToken);
+      // The request's progressToken is deliberately not forwarded. The panel
+      // does nothing with it — its WS `progress` events carry a jobId and no
+      // token — and progress is delivered on `await_job`, never here; see
+      // forwardJobProgress.
+      const result = await bridge.runOp(name, args);
 
       // Async envelope handling for run_batch
       if (ASYNC_OPS.has(name) && isAsyncEnvelope(result)) {
@@ -339,14 +357,14 @@ export function createServer() {
           undoGroupName?: string; note?: string;
         };
         jobs.register(env.jobId, env.total);
-        if (progressToken !== undefined) {
-          jobs.bindProgressEmitter(env.jobId, (jid, progress, total, message) => {
-            void server.notification({
-              method: "notifications/progress",
-              params: { progressToken, progress, total, message },
-            });
-          });
-        }
+        // No progress emitter is bound to this request, and that absence is
+        // the fix for issue #82. This handler returns the envelope a few lines
+        // down, and a `notifications/progress` sent on this request's token
+        // after that response is one a spec-compliant client has already
+        // stopped correlating — every message was on the wire and every real
+        // client saw nothing. The call that can carry progress is the one
+        // that blocks for the job, `await_job`; the note says so.
+        //
         // This is the gap the panel's own mutex leaves, and the reason this
         // queue exists at all. `run_batch` handed back a jobId and the panel now
         // drives `_continue_job` chunk by chunk; each chunk is its own turn on
@@ -376,7 +394,7 @@ export function createServer() {
             chunkSize: env.chunkSize,
             undoStepsEstimate: env.undoStepsEstimate,
             undoGroupName: env.undoGroupName,
-            note: env.note,
+            note: withProgressNote(env.note, env.jobId),
           },
           wait
         );
@@ -476,6 +494,68 @@ export function createServer() {
   });
 
   return server;
+}
+
+/**
+ * Forward a job's progress to the request that is waiting on it, as
+ * `notifications/progress` on that request's own token.
+ *
+ * Bound by `await_job` and by nothing else. `run_batch` has answered with its
+ * `{jobId}` envelope before the first chunk runs, and a notification sent on a
+ * request's token after that request's response is one a spec-compliant client
+ * has already stopped listening for — the SDK client drops its progress
+ * handler the moment the response arrives. Until 0.5.0 every progress message
+ * for a long batch went out that way: plainly visible on the raw wire, and
+ * seen by no real client at all (issue #82).
+ *
+ * `extra.sendNotification` is the SDK's request-scoped sender, and it is used
+ * on purpose over `server.notification`: it tags each message with the request
+ * id, so a Streamable HTTP transport delivers it on that request's own stream,
+ * and it silently drops anything sent after the request has been cancelled.
+ *
+ * `settle()` unbinds first and then waits for every send already started. The
+ * SDK writes the response after the handler returns, so awaiting this before
+ * returning is what puts every notification ahead of the response on the wire
+ * — on the timeout path, where the emitter would otherwise outlive the call,
+ * as much as on the success path.
+ */
+function forwardJobProgress(
+  jobs: JobManager,
+  jobId: string,
+  progressToken: string | number,
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+) {
+  const inFlight = new Set<Promise<void>>();
+  const unbind = jobs.bindProgressEmitter(jobId, (_jid, progress, total, message) => {
+    const p = extra
+      .sendNotification({ method: "notifications/progress", params: { progressToken, progress, total, message } })
+      .catch((e) => logger.warn(`progress notification for job ${jobId} was not sent: ${(e as Error).message}`));
+    inFlight.add(p);
+    void p.finally(() => inFlight.delete(p));
+  });
+  return {
+    async settle(): Promise<void> {
+      unbind();
+      await Promise.all(inFlight);
+    },
+  };
+}
+
+/**
+ * The sentence on a long batch's envelope that says where its progress goes.
+ *
+ * Appended here rather than written in `batch.jsx`, because it describes this
+ * server and not After Effects: the panel does not update itself, and a note
+ * authored there would go on describing whatever the server did when that
+ * panel was installed.
+ */
+function withProgressNote(note: string | undefined, jobId: string): string {
+  const progress =
+    `Follow it with await_job({jobId: "${jobId}"}), which blocks until the batch finishes and returns its result. ` +
+    `Progress is delivered on THAT call: send it with a progressToken and notifications/progress arrive while it ` +
+    `waits, every one before its response. None can ride on this run_batch call — its response is already back ` +
+    `before the first chunk runs. get_job({jobId: "${jobId}"}) reads the same state without a token.`;
+  return note ? `${note} ${progress}` : progress;
 }
 
 /**
