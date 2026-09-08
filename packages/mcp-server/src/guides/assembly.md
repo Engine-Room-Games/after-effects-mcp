@@ -1,7 +1,7 @@
 ---
 name: assembly
 reference: after-effects
-description: Assembling shots into a master comp — each shot built in its own comp in local time and placed at its offset, comp markers at the beats, retiming or trimming a shot without touching its contents, and the precomp that renders nothing before its startTime. Load when a task has more than one scene, a narration to cut to, or a shot to move in time.
+description: Assembling shots into a master comp — each shot built in its own comp in local time and placed at its offset, comp markers at the beats, retiming, reversing or trimming a shot without touching its contents, the precomp that renders nothing before its startTime or past its source, what a nesting shares (controls, a resize, collapse transformations, motion blur), replacing a nested comp without losing the layers that nest it, and how an assembly, a small detail, a doubtful tile and a cut are verified. Load when a task has more than one scene, a narration to cut to, or a shot to move in time.
 ---
 
 # Assembling shots into a master
@@ -33,6 +33,15 @@ speed. All four leave the shot comp untouched, which is what "retime a shot"
 should mean: move the layer, never the contents. To make a shot longer or
 shorter, change its content in the shot comp and then re-trim the layer.
 
+**A precomp layer cannot run past its source.** `outPoint` clamps to the shot
+comp's duration without a word, and a layer trimmed past it — in a rig as much
+as in the master — simply ends there. Extend the shot comp's `duration` with
+`set_comp` first, then the layer's `outPoint`, and read the out point back
+from the result. To play a shot backwards, time-remap the layer from the
+shot's end to its start — `run_jsx`: `timeRemapEnabled = true`, then swap the
+values of the two default keys with `setValueAtKey` — and nothing inside the
+shot is touched.
+
 **A precomp layer renders nothing before its `startTime`.** So you cannot hold
 a rigged shot at its pre-animation state by pushing `startTime` later than the
 moment it appears — you get an empty frame until the layer starts. Freeze the
@@ -47,6 +56,46 @@ extending the shot comp.
 Trim `outPoint` at the cut, or the next shot renders on top of a tail that is
 still animating.
 
+## What a nesting shares, and what it clips
+
+**A control inside a shot comp is shared by every layer that nests it.** Key a
+slider in the shot and every instance of the shot changes with it. A shot that
+must differ per placement is its own comp — `duplicate_comp`, with `deep:
+true` when the shot nests comps of its own — keyed on its own control.
+
+**Changing a shot comp's size moves everything that nests it by half the
+change.** A precomp layer's anchor sits at its source's centre, and after
+`set_comp` changes the width or height the anchor and the position of each
+nesting layer no longer agree, so the nested world jumps by half the
+difference. Read every nesting layer's anchor point and position back and
+re-place it.
+
+**A precomp is clipped at its own bounds unless collapse transformations is
+on.** A blur or a glow at a shot's edge is cut off at the frame, and a camera
+below 100 % shows the cut edge; a shot flown through at scale goes soft at 4×.
+The layer's collapse switch fixes both — vector contents render at the final
+resolution and past the bounds — and every instance of the shot needs it, not
+just one. It costs two things: an adjustment layer inside a collapsed shot acts
+on the frame *behind* the shot rather than on the shot alone, and the shot
+layer's own blending mode is ignored. Where either matters, leave collapse off
+and oversize the shot comp instead. No tool sets the switch; from `run_jsx`,
+`layerById(compId, layerId).collapseTransformation = true`.
+
+**Motion blur is a per-comp switch and a per-layer switch, and the layer
+switch inside the shot is the one a build forgets.** The master's comp switch,
+the precomp layer's switch and each moving layer's switch inside the shot all
+have to be on before anything in the shot blurs; switch the shot comp's own on
+too, so the shot previews the same way opened alone. From `run_jsx`:
+`comp.motionBlur = true` on a comp, `layer.motionBlur = true` on a layer.
+
+**`delete_comp` on a shot takes every layer that nests it with it**, in the
+master and anywhere else, silently. To replace a shot with a rebuilt one, build
+the new comp under a working name, point each nesting layer at it — `run_jsx`:
+`layer.replaceSource(newComp, false)`, then `startTime`, `inPoint` and
+`outPoint` written again, because the swap keeps the old timing — and delete
+the old comp only once nothing nests it (`return compById(oldId).usedIn.length`
+reads `0`); then rename.
+
 ## Markers at the beats
 
 `add_marker({compId, time, comment})` with no `layerId` puts a **comp marker**
@@ -58,9 +107,37 @@ turns a marker into a span, which suits a shot's whole run.
 
 ## Checking an assembly
 
-`get_comp_tree({compId: master})` shows the nesting, and `snapshot_comp` →
-`diff_comp` on the master confirms a placement moved only the layer you meant.
-A master is the heaviest thing you can screenshot: when a frame of it comes back
-`Corrupt frame`, screenshot the shot comps one at a time instead and trust the
-master's layer timing from the read. A camera move across the master is a null
-parented while at identity — the `animation` topic has the arithmetic.
+**Verify the master by reading it back; screenshot the shots.**
+`get_comp_tree({compId: master})` shows the nesting, `list_layers({compId,
+include: ["timing"]})` shows where each shot starts and ends, and
+`snapshot_comp` → `diff_comp` confirms a placement moved only the layer you
+meant. A master is the heaviest thing you can render and the first to come back
+`Corrupt frame`; a shot comp screenshots cheaply and shows the same picture. A
+camera move across the master is a null parented while at identity — the
+`animation` topic has the arithmetic.
+
+Four rules for the screenshots you do take:
+
+- **A shot comp with no background renders its empty areas transparent, and
+  what a transparent area looks like is the viewer, not the set** — white,
+  often, or a sheet's dark gutter. Judge sky, ground and anything that reads
+  against the background on the assembled comp over its real background, or
+  put a temporary solid behind the shot.
+- **Detail under about 40 px is judged at `downsample: 1`, never from a
+  downsampled frame** — a stroke, a label, a small icon blur or vanish at the
+  default factor. `screenshot_layer` isolates the layer but is still a whole
+  frame; for a detail in a heavy comp, a small temporary comp of a few hundred
+  pixels that nests the shot scaled up around the detail is what makes full
+  resolution affordable.
+- **A contact-sheet tile that contradicts a property read-back is re-rendered
+  as a single frame before anything is changed.** A tile can be stale — the
+  sheet names it when it can tell — and a read-back cannot, so the
+  disagreement is a question about the picture, not about the property.
+- **A cut is verified with a Difference render.** In a temporary comp, the
+  outgoing shot at its last frame under the incoming shot at its first
+  (`create_precomp_layer` twice, `set_layer` with `startTime` so those two
+  frames fall on the same comp time), the top layer at
+  `set_layer({blendingMode: "DIFFERENCE"})`, both over one solid so both sides
+  are opaque, collapse off on both — a collapsed layer ignores its blending
+  mode. `screenshot_frame` at that time: anything not black is where the two
+  frames disagree.

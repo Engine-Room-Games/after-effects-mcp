@@ -1,7 +1,7 @@
 ---
 name: sound
 reference: after-effects
-description: Sound effects and beds through the AE MCP tools — place_audio_cues for a whole cue list in one undo step, what levelDb actually means and why a level copied from another cue is meaningless, loops, fades and stretch per cue, the dry run, and the audio facts a hand-written loop gets wrong. Load when a task places, levels or times sound.
+description: Sound effects and beds through the AE MCP tools — place_audio_cues for a whole cue list in one undo step, what levelDb actually means and why a level copied from another cue is meaningless, peak for a one-shot and RMS for a bed with the onset on the beat, loops, fades and stretch per cue, a trim clamped at the file's end, a bed that follows a move, the dry run, a file that will not place, and the audio facts a hand-written loop gets wrong. Load when a task places, levels or times sound.
 ---
 
 # Sound
@@ -21,7 +21,10 @@ error names the cue by index. `dryRun: true` checks a list against the project
 without importing, creating, or even adding an undo step, and answers with
 counts, `wouldImport`, `wouldReuse` and the failing cues by index — never the
 resolved list. Each cue names its sound with exactly one of `path` or
-`footageId`; `inPoint` and `outPoint` trim in **comp** time, not file time.
+`footageId`; `inPoint` and `outPoint` trim in **comp** time, not file time. An
+`outPoint` past the file's placed length — its duration times `stretch` — is
+clamped to it without a word, so read the out point back from the result; a
+sound that must run longer is `loop: true`, not a longer trim.
 
 ## Levels
 
@@ -42,6 +45,12 @@ things follow:
   `return layerById(compId, layerId).audioLevels.value` reads it. Ask the user
   to preview if they can — a level is the one property in this toolset that no
   screenshot can check.
+- **Match a one-shot by peak and a bed by RMS.** A hit is heard at its peak
+  and a bed at its average, so a bed levelled by peak sits too low and a hit
+  levelled by RMS jumps out. And put the file's *onset* on the beat, not its
+  start: a one-shot with silence before the hit goes at `time: beat − onset`
+  with `inPoint: beat` to trim the silence, which is also how a hit is
+  shortened under a visual shorter than the file.
 
 ## Loops, fades and stretch
 
@@ -80,6 +89,20 @@ local time, so a cue list for a master and a cue list for a shot are different
 lists — put a sound where the thing that makes it lives. Comp markers at the
 beats (the `assembly` topic) are the right skeleton for a cue list, and a cue's
 `name` is worth setting to the beat it belongs to.
+
+A sound that belongs to a move follows the move. Under an eased camera, a bed
+run at a constant rate and level comes apart from the picture at every ease;
+drive the bed's Time Remap from the distance the camera has travelled and its
+level from the camera's `speed` (expressions on the audio layer reading the
+null's position), so it slows, stops and rises with the move.
+
+## A file that will not place
+
+A file that imports with no audio track, or refuses to import at all, is worth
+checking for its sample format before anything else: a 32-bit float WAV
+(format tag 3) is the usual case. Convert it to 16-bit PCM — `afconvert -f
+WAVE -d LEI16 in.wav out.wav` on macOS, `ffmpeg -i in.wav -c:a pcm_s16le
+out.wav` anywhere — and keep a sound bank at 16-bit PCM so it never comes up.
 
 ## Scripting sound by hand
 

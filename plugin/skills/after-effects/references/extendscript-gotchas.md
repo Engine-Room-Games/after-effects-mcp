@@ -1,7 +1,7 @@
 ---
 name: extendscript-gotchas
 reference: after-effects
-description: The run_jsx reference — when to script instead of calling a tool, how much one call can do before the timeout, scriptPath and libraries as the normal way to build, the helpers already in scope, and the ExtendScript facts that abort a script while naming something else (property lookups that return null, ease arrays sized per property, a TextDocument that stores the wrong justification, output-module settings that are read-only, the reserved words that stop a script before its first line). Read it before writing raw ExtendScript, not after it fails.
+description: The run_jsx reference — when to script instead of calling a tool, how much one call can do before the timeout, scriptPath and libraries as the normal way to build, the helpers already in scope, and the ExtendScript facts that abort a script while naming something else (property lookups that return null, a `.value` read at the playhead rather than at a time, effects addressed by a name that is not unique, a track matte that switches its matte's video off, ease arrays sized per property, a TextDocument that stores the wrong justification, output-module settings that are read-only, the reserved words that stop a script before its first line). Read it before writing raw ExtendScript, not after it fails.
 ---
 
 # Scripting After Effects with run_jsx
@@ -102,7 +102,23 @@ that does it.
   null on audio layers and on precomp layers, even after
   `timeRemapEnabled = true`.
 - **`instanceof` is unreliable on host objects.** Probe instead: a shape layer
-  is one where `property("ADBE Root Vectors Group")` is non-null.
+  is one where `property("ADBE Root Vectors Group")` is non-null, and a
+  project item's kind is `item.typeName` — `"Composition"`, `"Footage"`,
+  `"Folder"` — a string compare that needs no class.
+
+## Reading and writing values
+
+- **`.value` is the value at the comp's current time** — wherever the user
+  left the playhead, not time zero — so on a keyed or expression-driven
+  property it is one sample from a moment you did not choose. Read at the
+  time you mean with `valueAtTime(t, false)`, the post-expression value
+  (`true` is pre-expression). To bake a driven property, sample every time
+  you need first, then remove the expression, then the keys: each of those
+  changes what the next read returns.
+- **`setValue` on a comp that is not open in a viewer can throw with the
+  value already applied.** Open the comp first — `comp.openInViewer()`, or
+  `set_active_comp` from outside — and on such a throw read the property back
+  before retrying: the write may already be there.
 
 ## Layers and comps
 
@@ -141,6 +157,37 @@ that does it.
   directions need different primitives: moving up, `moveBefore` lands on the
   target; moving down the target shifts up as the layer leaves, so `moveAfter`
   is the one that lands on it. *The tool already does:* `reorder_layer`.
+- **Assigning a track matte switches the matte layer's video off.** That is
+  After Effects' own default, and `setTrackMatte` and `trackMatteType` both
+  do it. A layer that is both a matte and visible art gets `enabled = true`
+  again after every call that points a matte at it; read the switch back
+  rather than assuming.
+- **`replaceSource` keeps the layer's old timing.** `startTime`, `inPoint`
+  and `outPoint` stay where the previous source put them, so a longer or
+  shorter file arrives trimmed to the old one. After the swap write
+  `startTime`, then `inPoint`, then `outPoint`, and read them back; on a
+  time-remapped layer turn `timeRemapEnabled` off before the swap and on
+  again after it, so the default keys are rebuilt for the new duration.
+- **Removing a comp removes every layer that nests it**, in every comp,
+  without a word. The `assembly` topic has the replacement flow.
+- The layer stack builds back-to-front — every `layers.add*()` lands at
+  index 1, on top — which the `shapes` topic states beside the `Contents`
+  order it is the opposite of.
+
+## Effects
+
+- **Effects are addressed by display name, and the name is not unique.**
+  `effects.property("Slider Control")` returns the *first* effect with that
+  name, so a second slider added under the default name is unreachable by
+  name and a write meant for it silently drives the first. Name each control
+  as you add it (`fx.name = "Zoom"`), or remove a same-named one first; from
+  outside, `list_effects` reports every effect's name and index and
+  `set_effect_param` takes the index.
+- **Adding an effect invalidates every effect reference held on that layer**,
+  a second Slider Control included: the group re-indexes and an earlier
+  handle throws `Object is invalid`, the way a shape node reference goes
+  stale when a sibling is added. Add every effect first, then resolve each by
+  name and set its parameters.
 
 ## Shapes
 
@@ -208,10 +255,15 @@ as a script, so they are in the `shapes` topic. The raw-scripting traps:
   `[inPoint + source duration, source duration]` — so there is no reason to
   clear them: edit those keys in place, or put an expression over them —
   `(time - startTime) % thisLayer.source.duration` loops — which overrides
-  them without touching them. And re-assert `outPoint` after
-  `timeRemapEnabled = true`, because enabling it resets the layer's end. If
-  the keys are already gone, toggle `timeRemapEnabled` off and on to get the
-  defaults back. *The tool already does:* `place_audio_cues` with `loop: true`.
+  them without touching them. If your keys must sit at other times, add them
+  **before** removing the two defaults: only a property with no keys at all
+  hides. And re-assert `outPoint` after `timeRemapEnabled = true`, because
+  enabling it resets the layer's end — on a remapped layer set `outPoint`
+  before `inPoint` and read both back, since an in point past the source's
+  natural end moves the layer instead of trimming it until the out point has
+  let it extend. If the keys are already gone, toggle `timeRemapEnabled` off
+  and on to get the defaults back. *The tool already does:* `place_audio_cues`
+  with `loop: true`.
 
 ## Render queue and output modules
 

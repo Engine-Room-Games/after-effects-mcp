@@ -110,4 +110,6 @@ under `usedIn`. Only the deleted comp's own solids are ever considered there;
 Footage does), `folderId` to scope it to one folder, and `dryRun: true` —
 first, on a project you did not build — which answers `wouldRemove` without
 removing anything or adding an undo step. Neither ever removes a solid another
-comp still uses, or a nested comp: a comp nothing uses is not footage.
+comp still uses, or a nested comp: a comp nothing uses is not footage. A comp
+another comp *does* nest is the opposite case — deleting it takes the nesting
+layers with it — and the `assembly` topic has the replacement flow.

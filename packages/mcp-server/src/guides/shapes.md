@@ -1,7 +1,7 @@
 ---
 name: shapes
 reference: after-effects
-description: Shape layers through the AE MCP tools — the origin a new shape layer spawns at and why it is the comp's coordinate space, add_shape_content and its all-or-nothing contract, the render order inside Contents that runs opposite to the layer stack, node references that go stale, and reading a shape layer cheaply. Load when a task builds or edits a shape layer.
+description: Shape layers through the AE MCP tools — the origin a new shape layer spawns at and why it is the comp's coordinate space, add_shape_content and its all-or-nothing contract, one fill per group, the render order inside Contents that runs opposite to the layer stack (which builds back-to-front), node references that go stale, a group's pivot, seams between shapes, centring a repeated run, and reading a shape layer cheaply. Load when a task builds or edits a shape layer.
 ---
 
 # Shape layers
@@ -34,6 +34,12 @@ landed. Do not add defensive re-reads for it — but do read the error, since it
 usually means the property is named differently on that node type, and a
 `get_layer_full({…, include: ["shape"]})` shows the real name.
 
+**A fill or stroke applies to every path above it in its group.** One Fill
+under two paths fills both, so an open stroked path beside a filled shape in
+the same group renders as a filled polygon. One group per path-and-paint
+pairing: `{type: "group"}` first, then the path and its fill or stroke inside
+it through `parentGroupPath`.
+
 **Render order is the opposite of the layer stack.** Inside `Contents`, index 1
 renders in *front*, and each `add_shape_content` call appends behind the
 previous one. So build **front-to-back**: details, text plates and
@@ -45,13 +51,43 @@ ordering the calls. If existing content is in the wrong order, rebuild it rather
 than reordering, and verify with a screenshot of a comp that **nests** it, not
 only the comp that owns it. None of this applies to the layer stack: moving
 whole layers is `reorder_layer`, a different mechanism with none of these
-caveats.
+caveats. The stack runs the other way: every new layer — `create_*`,
+`duplicate_layer`, a `layers.add*()` in a script — lands at index 1, on top,
+so a stack is built **back-to-front**, the plate first and the label after,
+and a script re-run from the middle re-stacks whatever it recreates over what
+was already there.
 
 **Node references go stale.** Adding a sibling to a group invalidates a
 reference you already hold to another node in it — add a Stroke and an earlier
 Fill reference starts throwing `Object is invalid`. Add every node first, then
 set values and expressions by addressing nodes by name. The tool re-fetches
 after every insert for the same reason.
+
+## Animating a group
+
+A group drawn in comp coordinates pivots at the comp origin: its Transform's
+anchor point is `[0,0]`, which with the layer's origin at `[0,0]` is the comp's
+top-left corner, so a scale or rotation keyed on the group swings the artwork
+around that corner. Before keying a group, set its anchor point to the pivot
+you mean *and* its position to the same value — `set_shape_property` with
+`contentPath: ["Contents", "<group>", "Transform"]` and `property: "Anchor
+Point"`, then `"Position"` — which leaves the artwork where it is and turns it
+about the pivot.
+
+## Seams and runs
+
+**Two shapes that meet on a shared edge show the seam when they move.**
+Anti-aliasing leaves both edges partly transparent, so a hairline of whatever
+is behind flickers along the join under a camera move, worst over a dark
+ground. Overlap the back shape 10–20 px under the front one rather than
+butting them.
+
+**Centring a repeated run** — a Repeater tape, a dashed band — of copies `s`
+wide at pitch `p` across a width `W` starting at `left`:
+`copies = floor((W − s) / p) + 1`, and the first copy's centre is
+`left + (W − s − (copies − 1)·p) / 2 + s/2`. With that `copies` on the
+Repeater and that centre as the first element's position the run is
+symmetrical whatever `W` is; dashes with equal gaps are `p = 2s`.
 
 ## Reading a shape layer
 

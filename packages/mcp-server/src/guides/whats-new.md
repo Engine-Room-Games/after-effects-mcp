@@ -202,6 +202,25 @@ the old shape gets nothing rather than an error.
   supersedes: clear the Time Remap keys before adding your own
   supersedes: set justification on the TextDocument from run_jsx
   supersedes: set the output module codec with setSettings from run_jsx
+- **The references carry the craft rules a project would otherwise keep in
+  its own notes** (issue #103). `extendscript-gotchas`: a `.value` read at
+  the playhead, a `setValue` that throws with the value applied on a comp not
+  in a viewer, effects addressed by a name that is not unique and references
+  that go stale when one is added, a track matte that switches its matte's
+  video off, `replaceSource` keeping the old timing, `item.typeName`, Time
+  Remap keys added before the defaults are removed. `animation`: a held pose
+  as a hold key, a waypoint that must not stop, parenting at rest and before
+  the pop with the parent-space arithmetic, a mirrored parent mirroring its
+  text, expression text built from numbers, a shake as an expression over
+  keys. `assembly`: a precomp clamped at its source, reversing with time
+  remap, controls shared across every instance, a resized comp shifting what
+  nests it, collapse transformations and motion blur across a nesting,
+  replacing a nested comp, and verifying an assembly, a small detail, a
+  doubtful tile and a cut. `sound`: peak for a one-shot and RMS for a bed
+  with the onset on the beat, a trim clamped at the file's end, a bed that
+  follows a move, a float WAV that will not place. `shapes`: one fill per
+  group, the layer stack built back-to-front, a group's pivot, seams between
+  shapes, centring a repeated run.
 
 ### Connecting, and staying connected
 
