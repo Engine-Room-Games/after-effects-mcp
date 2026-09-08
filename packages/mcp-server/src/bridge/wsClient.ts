@@ -38,7 +38,16 @@ export class WsClient {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     const old = this.ws;
     this.ws = undefined;
-    try { old?.removeAllListeners(); old?.close(); } catch {}
+    try {
+      old?.removeAllListeners();
+      // A socket still connecting emits `error` on the next tick when it is
+      // closed ("WebSocket was closed before the connection was established"),
+      // and with every listener gone that is an uncaught exception — the whole
+      // server process, for a socket nobody wanted. It must never be able to
+      // throw again; nothing it says matters now.
+      old?.on("error", () => {});
+      old?.close();
+    } catch {}
     return this.connect();
   }
 

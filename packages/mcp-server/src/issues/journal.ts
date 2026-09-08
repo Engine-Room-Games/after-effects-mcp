@@ -297,9 +297,16 @@ function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * The one-line form an entry stores. The server's own decorations are cut
+ * *before* the text is flattened: every cut is anchored on the whitespace in
+ * front of it, and flattening first left the mapped line, the "nothing rolls
+ * back" reminder and a pasted pointer block in the stored text — where a bare
+ * recurrence of the error matched none of it.
+ */
 function clipErrorText(text: string | undefined): string | undefined {
   if (!text) return undefined;
-  const line = oneLine(text);
+  const line = oneLine(stripDecorations(text));
   if (line.length === 0) return undefined;
   return line.length > ERROR_TEXT_CHARS ? line.slice(0, ERROR_TEXT_CHARS) : line;
 }
@@ -549,14 +556,20 @@ function uniqueTools(...lists: Array<string[] | undefined>): string[] {
  * "nothing rolls back" reminder (`aeErrorText`), a `diff:true` annotation, and —
  * since an agent will paste a tool error straight into `errorText` — the
  * pointer block this very module appends. Each is a cut: the text ends where
- * the decoration begins.
+ * the decoration begins. Anchored on any whitespace — or the start — rather
+ * than a newline, because the text may already have been flattened to one line
+ * (`clipErrorText` stores it that way), and a cut that only fired across a
+ * newline left every decoration in the stored text. The phrases are the
+ * server's own; the one After Effects could plausibly say itself is "at line
+ * N", and that cut requires the "of" the mapped line carries and AE's own
+ * messages ("at line 4." / "at line 1 in property") do not.
  */
 const DECORATION_CUTS = [
-  /\n\s*at line \d+ of /,
-  /\n\s*After Effects reported line/,
-  /\n\s*Everything before the failure already ran/,
+  /(?:^|\s)at line \d+ of /,
+  /(?:^|\s)After Effects reported line/,
+  /(?:^|\s)Everything before the failure already ran/,
   /\s\|\|\s*Changed before it stopped/,
-  /\n\s*Known from earlier sessions:/,
+  /(?:^|\s)Known from earlier sessions:/,
 ];
 
 export function stripDecorations(text: string): string {
@@ -666,6 +679,7 @@ export function logIssue(input: LogIssueInput): LogIssueResult {
   }
 
   const reopened = existing?.archived === true;
+  const incomingError = clipErrorText(input.errorText);
   const entry: IssueEntry = {
     id,
     // On an error-text merge the existing title stays: it is the id, and the
@@ -674,7 +688,14 @@ export function logIssue(input: LogIssueInput): LogIssueResult {
     scope: journal.scope,
     tools: uniqueTools(existing?.tools, tools),
     kind: input.kind ?? existing?.kind ?? "tool-bug",
-    errorText: clipErrorText(input.errorText) ?? existing?.errorText,
+    // The recorded text is the one that has been matching, so a re-log of the
+    // same error — a different number, a different name, pasted with its
+    // decorations — leaves it alone. Only a genuinely different error under
+    // this title replaces it: that is the caller's statement, not a paste.
+    errorText:
+      incomingError && existing?.errorText && errorTextsMatch(existing.errorText, incomingError)
+        ? existing.errorText
+        : incomingError ?? existing?.errorText,
     firstSeen: existing?.firstSeen || today(),
     lastSeen: today(),
     firstVersion: existing?.firstVersion || version,
@@ -887,6 +908,10 @@ const SCOPE_PREFIX = /^(project|home|user)\s*:\s*(.+)$/i;
  * The qualified form is tried first and *falls back* to the whole string as a
  * bare id, because `list_known_issues({id})` also accepts a title, and a title
  * beginning "user: …" would otherwise be unreachable.
+ *
+ * `"project:<slug>"` also reaches the home fallback — that is the project
+ * journal relocated, and a read under scope "project" already includes it —
+ * while `"home:<slug>"` stays exact.
  */
 function resolveEntry(
   raw: string,
@@ -896,7 +921,8 @@ function resolveEntry(
   if (qualified) {
     const scope = qualified[1]!.toLowerCase() as JournalScope;
     const slug = slugify(qualified[2]!);
-    const hit = entries.find((e) => e.scope === scope && e.id === slug);
+    const inScope = (e: IssueEntry) => e.scope === scope || (scope === "project" && e.scope === "home");
+    const hit = entries.find((e) => inScope(e) && e.id === slug);
     if (hit) return { found: hit, alsoIn: [] };
   }
 

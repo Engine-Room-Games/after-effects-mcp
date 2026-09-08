@@ -248,6 +248,40 @@ await check("the retry gets a full timeout budget of its own", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// WsClient: a socket abandoned mid-connect must never throw
+// ---------------------------------------------------------------------------
+
+await check("reconnect while the previous connect is still in flight cannot crash the process", async () => {
+  // `reconnect` drops every listener from the old socket and closes it. On a
+  // socket that is still CONNECTING, ws 8.x aborts the handshake and emits
+  // `error` on the next tick — "WebSocket was closed before the connection was
+  // established" — and an `error` with no listener is an uncaught exception:
+  // the whole server process, for a socket nobody wanted. `switchPort` calls
+  // `reconnect` after a refused op, and the connect still in flight at that
+  // moment is exactly the one that was aimed at the port nothing answered on.
+  const { WsClient } = await import(dist("bridge", "wsClient.js"));
+  const { JobManager } = await import(dist("jobs", "manager.js"));
+  const uncaught = [];
+  const onUncaught = (e) => uncaught.push(e);
+  process.on("uncaughtException", onUncaught);
+  try {
+    const bridge = new HttpClient(stale, { candidates: () => [stale] });
+    const ws = new WsClient(bridge, new JobManager());
+    ws.start(); // a connect to a closed port — still CONNECTING this tick
+    ws.reconnect(); // abandons it before anything has happened on the wire
+    const second = ws.reconnect(); // and again, so two abandoned sockets are in flight
+    // The abandoned sockets' own promises never settle (their listeners are
+    // gone); the live one resolves on its refused close. Bounded either way.
+    await Promise.race([second, sleep(1000)]);
+    await sleep(150);
+    ws.stop();
+    assert.deepEqual(uncaught.map((e) => e.message), [], "an abandoned socket threw with nobody listening");
+  } finally {
+    process.off("uncaughtException", onUncaught);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // check_setup's view of it
 // ---------------------------------------------------------------------------
 

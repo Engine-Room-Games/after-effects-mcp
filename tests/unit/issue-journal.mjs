@@ -345,12 +345,18 @@ ok("an uncapped listing says nothing about omissions", listIssues().omitted === 
 // user journal, a Claude Desktop session's notes about one project's footage
 // would start arriving in every other project as cross-project knowledge.
 //
-// Nothing here writes: `listIssues` only reads, so the real journals stay
-// untouched and uncreated. The condition is reproduced the way Claude Desktop
-// produces it — a working directory of the filesystem root — rather than with
-// a chmod, which is a no-op on Windows and CI runs there.
+// The condition is reproduced the way Claude Desktop produces it — a working
+// directory of the filesystem root — rather than with a chmod, which is a no-op
+// on Windows and CI runs there. The fallback lands in the home directory, which
+// this test must never write into, so for the duration the home is a temporary
+// folder: os.homedir() reads HOME (USERPROFILE on Windows), and the sandbox is
+// asserted before anything is written.
 delete process.env.AE_MCP_HOME;
 const cwd = process.cwd();
+const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "ae-mcp-journal-home-"));
+const realHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+process.env.HOME = fakeHome;
+process.env.USERPROFILE = fakeHome;
 try {
   process.chdir(path.parse(cwd).root);
   const fallback = listIssues();
@@ -363,9 +369,23 @@ try {
   ok("the user journal has the other name", /[/\\]\.ae-mcp[/\\]/.test(user_.dir + path.sep));
   // scope:"project" reads the fallback, because that is what it is.
   ok("scope:project covers the fallback", listIssues({ scope: "project" }).journals.some((j) => j.scope === "home"));
+  // And so does the `project:` handle. An agent under Claude Desktop sees
+  // `scope: "home"` on every result, but the qualified id it reaches for is the
+  // project one, and either has to open the entry — `archive_issue` included.
+  assert.ok(path.resolve(home_.dir).startsWith(path.resolve(fakeHome)), `the fallback must resolve into the sandbox, not ${home_.dir}`);
+  const desk = logIssue({ title: "Footage lives on the NAS", symptom: "Relinks fail while it is asleep.", workaround: "Wake it first." });
+  ok("a default-scope log lands in the fallback", desk.scope === "home" && path.resolve(desk.path).startsWith(path.resolve(fakeHome)));
+  ok("project:<id> reaches the fallback entry", listIssues({ id: `project:${desk.id}` }).issues[0].scope === "home");
+  ok("home:<id> still reaches it", listIssues({ id: `home:${desk.id}` }).issues[0].scope === "home");
+  ok("archive_issue takes the project: form too", archiveIssue(`project:${desk.id}`, "noted in the project docs").scope === "home");
 } finally {
   process.chdir(cwd);
+  for (const [k, v] of Object.entries(realHome)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
   process.env.AE_MCP_HOME = home;
+  fs.rmSync(fakeHome, { recursive: true, force: true });
 }
 
 // =========================================================== version stamps
@@ -451,6 +471,12 @@ ok(
   ) === "objectisinvalid"
 );
 ok("normalisation drops a trailing line number", normalizeErrorText("Object is invalid (line 12)") === "objectisinvalid");
+// The cuts are anchored on whitespace, not a newline, so a line number that is
+// part of After Effects' own sentence must not be mistaken for the mapped one.
+ok(
+  "a line number inside the message itself is not a decoration",
+  normalizeErrorText("Unable to execute script at line 4. Object is invalid") === "unabletoexecutescriptatlineobjectisinvalid"
+);
 ok(
   "normalisation drops a pointer block pasted from an earlier failure",
   normalizeErrorText("Object is invalid\n\nKnown from earlier sessions: user:x — X\nlist_known_issues({ id: \"user:x\" }) has the cause and the workaround.") ===
@@ -503,7 +529,8 @@ ok("the existing title stayed", twin.title === "Spatial ease wants exactly one e
 ok("the merge counts as a sighting", twin.occurrences === 2 && twin.previouslyLogged === true);
 ok("the merge says what it did", typeof twin.note === "string" && twin.note.includes(spatial.id) && twin.note.includes("not used"));
 ok("no second file was written", fs.readdirSync(projectIssues).length === filesBefore);
-ok("the merge recorded the error text on the entry", fileOf(projectIssues, spatial.id).includes("errorText: AE: Value array does not have 1 elements (line 41)"));
+// Stored bare: the `AE:` prefix and the line number are the server's, not the error's.
+ok("the merge recorded the error text on the entry", /^errorText: Value array does not have 1 elements$/m.test(fileOf(projectIssues, spatial.id)));
 ok("the entry now matches by errorText rather than symptom", entryMatchesFailure(listIssues({ id: `project:${spatial.id}` }).issues[0], "set_temporal_ease", "Value array does not have 1 elements"));
 const other = logIssue({
   title: "Another tool, same words",
@@ -696,6 +723,52 @@ ok("a retired entry is still named, marked archived", /Known from earlier sessio
 ok("and stays retired", fileOf(userIssues, retiredAgain.id).includes("archived: true"));
 ok("no match leaves the message byte-identical", annotateFailure(cache, "set_text", "AE: Nothing anyone has ever seen before") === "AE: Nothing anyone has ever seen before");
 ok("a match on the wrong tool is no match", annotateFailure(cache, "create_comp", staleMessage) === staleMessage);
+
+// An agent pastes the *whole* tool error into errorText — the tool description
+// tells it to — and that text carries the server's own decorations: the mapped
+// line, the "nothing rolls back" reminder, and the pointer block from an
+// earlier failure. None of it may reach the stored text, and the bare error
+// recurring must find the entry. It did not: the text was flattened to one line
+// *before* the decorations were cut, and four of the five cuts were anchored on
+// the newline that had just been removed — so the stored text was the whole
+// paste, and the recurrence, fifteen letters long, matched none of it.
+const PASTED_ERROR =
+  "AE: nope is undefined\n" +
+  "  at line 2 of the script you submitted, 3 lines:\n" +
+  "    nope.boom();\n" +
+  "  Everything before the failure already ran and nothing rolls back: read the state back rather than re-running the script.\n" +
+  "\n" +
+  "Known from earlier sessions: project:some-other-entry — Some other entry\n" +
+  'list_known_issues({ id: "project:some-other-entry" }) has the cause and the workaround.';
+const pasted = logIssue({
+  title: "run_jsx cannot see the helpers",
+  symptom: "A script calling a helper by the wrong name threw.",
+  workaround: "Check the name against the list in the run_jsx description.",
+  tools: ["run_jsx"],
+  errorText: PASTED_ERROR,
+});
+const pastedFile = fileOf(projectIssues, pasted.id);
+ok("the stored errorText is the bare error", /^errorText: nope is undefined$/m.test(pastedFile));
+ok("the pointer block pasted with it is not stored", !pastedFile.includes("Known from earlier sessions"));
+ok("nor the mapped line or the reminder", !pastedFile.includes("at line 2 of") && !pastedFile.includes("Everything before the failure"));
+const recurrence = annotateFailure(cache, "run_jsx", "AE: nope is undefined (line 7)");
+ok(
+  "the bare error recurring finds the entry",
+  /Known from earlier sessions: project:run-jsx-cannot-see-the-helpers — run_jsx cannot see the helpers/.test(recurrence)
+);
+// A re-log of the same error keeps the text that has been matching, however
+// the new sighting was pasted; a genuinely different error under the same title
+// is the caller's statement, and replaces it.
+const relogSame = logIssue({
+  title: "run_jsx cannot see the helpers",
+  symptom: "Again.",
+  workaround: "Same.",
+  tools: ["run_jsx"],
+  errorText: "AE: Nope is undefined (line 9)\n\nKnown from earlier sessions: project:run-jsx-cannot-see-the-helpers — run_jsx cannot see the helpers",
+});
+ok("a re-log of the same error keeps the recorded text", relogSame.occurrences === 2 && /^errorText: nope is undefined$/m.test(fileOf(projectIssues, pasted.id)));
+logIssue({ title: "run_jsx cannot see the helpers", symptom: "Different.", workaround: "Same.", tools: ["run_jsx"], errorText: "AE: Object is invalid (line 3)" });
+ok("a different error under the same title replaces it", /^errorText: Object is invalid$/m.test(fileOf(projectIssues, pasted.id)));
 // Never a second failure on the failure path: point the journal at something
 // that is not a directory and the error comes back untouched.
 const broken = fs.mkdtempSync(path.join(os.tmpdir(), "ae-mcp-journal-broken-"));
