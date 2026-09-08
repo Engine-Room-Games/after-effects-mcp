@@ -805,7 +805,7 @@ const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
 // Report the hash this server ships so the panel-version gate is a no-op
 // rather than a variable of whatever is installed on the test machine.
 const bundleHash = sourceBundleHash();
-new WebSocketServer({ server: stubBridge, path: "/events" });
+const stubWss = new WebSocketServer({ server: stubBridge, path: "/events" });
 await new Promise((r) => stubBridge.listen(0, "127.0.0.1", r));
 const port = stubBridge.address().port;
 assert.notEqual(port, 7777, "must not bind the panel's port");
@@ -877,6 +877,19 @@ console.log(
   `issue-journal: ${passed} assertions passed ` +
     `(index ${indexBytes} bytes vs full ${fullBytes} bytes for 3 entries)`
 );
-// The bridge stub's WS client reconnects on a timer the server owns, so there
-// is nothing to await here — same reason write-queue-server.mjs ends this way.
+// Shut down in order — the MCP pair, then the stub the server's sockets point
+// at — and settle before exiting. `process.exit()` straight after a `fetch`
+// crashes Node 24 on Windows with a libuv assertion at exit, after every line
+// above has passed (nodejs/node#56645: fixed in Node 26, never backported, and
+// this file hit it twice in a row on the 0.5.0 PR while its siblings passed).
+// The settle is the workaround every affected project uses. Exiting is still
+// explicit because the server's WS client reconnects on a timer it owns, so
+// the process would never drain on its own.
+await client.close();
+await server.close();
+for (const c of stubWss.clients) c.terminate();
+stubWss.close();
+stubBridge.closeAllConnections?.();
+stubBridge.close();
+await new Promise((r) => setTimeout(r, 200));
 process.exit(0);

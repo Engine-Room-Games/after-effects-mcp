@@ -449,6 +449,9 @@ await check("the MCP server switches ports on a refused call, and its job socket
 
 console.log(`port-drift: ${passed} checks passed`);
 live.close(); other.close(); silent.close();
-// The bridge's WS client reconnects on a timer the server owns, so there is
-// nothing to await here — same reason write-queue-server.mjs ends this way.
+// Settle before exiting: `process.exit()` straight after a `fetch` crashes
+// Node 24 on Windows with a libuv assertion (nodejs/node#56645; the note in
+// issue-journal.mjs). The server's WS client reconnects on a timer it owns, so
+// the process cannot simply be left to drain.
+await new Promise((r) => setTimeout(r, 200));
 process.exit(0);

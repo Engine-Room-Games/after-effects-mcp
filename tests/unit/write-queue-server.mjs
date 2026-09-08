@@ -244,6 +244,9 @@ await check("a singleUndo batch releases the queue when its call returns", async
 });
 
 console.log(`write-queue-server: ${passed} checks passed`);
-// The bridge stub's WS client reconnects on a timer the server owns, so there
-// is nothing to await here — same reason panel-boot.mjs ends this way.
+// Settle before exiting: `process.exit()` straight after a `fetch` crashes
+// Node 24 on Windows with a libuv assertion (nodejs/node#56645; the note in
+// issue-journal.mjs). The server's WS client reconnects on a timer it owns, so
+// the process cannot simply be left to drain.
+await new Promise((r) => setTimeout(r, 200));
 process.exit(0);
