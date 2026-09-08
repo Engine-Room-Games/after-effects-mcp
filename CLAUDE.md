@@ -2,6 +2,35 @@
 
 This file is for future Claude Code sessions working in this repo. Humans reading it: see `README.md` for the user-facing intro.
 
+**This file is the core, and it is loaded on every task.** It holds what is
+needed to orient and what silently produces wrong output if you do not know it.
+Everything else — the measured traps, the subsystem reasoning, the live-AE
+recipes — sits behind it in `docs/`, opened when a task reaches that subject.
+The same split the guides use, for the same reason: prose resident in every
+session is a tax on every request the user ever makes.
+
+| Read | When |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | The annotated source tree, and the op path in detail: the one op whose input is rewritten, cross-field rules, the special return shapes, write serialization. |
+| [`docs/subsystems.md`](docs/subsystems.md) | Panel version gating, the project scaffold, the house style, comp snapshots, the issue journal. |
+| [`docs/guidance-system.md`](docs/guidance-system.md) | How agent guidance is written once and generated into every carrier. Read before touching anything under `src/guides/` or `src/prompts/`. |
+| [`docs/fragile-areas-ae.md`](docs/fragile-areas-ae.md) | Measured After Effects and ExtendScript behaviour: undo, shapes, text, audio, mogrt, expressions, `run_jsx`. |
+| [`docs/fragile-areas-bridge.md`](docs/fragile-areas-bridge.md) | The bridge, ports, CEP, the panel, and the screenshot pipeline. |
+| [`docs/fragile-areas-server.md`](docs/fragile-areas-server.md) | Tool schemas and the MCP protocol, the journal's caches, packaging and binaries. |
+| [`docs/verification-recipes.md`](docs/verification-recipes.md) | The 46 recipes run by hand against a live AE 2026. |
+
+**Nothing in `docs/` is generated** — hand-written, like this file. The generated
+prose is elsewhere and is called out below.
+
+**Driving After Effects is not this file's subject.** `.mcp.json` connects this
+server to any session opened in the repo, so that guidance is already available
+on demand: call `ae_guide({topic})`, or read the sources under
+`packages/mcp-server/src/guides/`. The division is that **the guides own how
+After Effects behaves; `docs/` owns why this code is shaped the way it is.**
+Where a fact belongs to both, the guide keeps the behaviour and the repo doc
+keeps the reasoning and points at the topic — a second copy of the ease-arity
+table is how that one went stale once already.
+
 ## What this project is
 
 An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, footage import, audio cue placement, comp snapshots and diffs, Motion Graphics template export, one-off screenshots and contact sheets, bulk batches. 76 tools. macOS and Windows — the only two platforms AE runs on.
@@ -16,7 +45,7 @@ It ships five ways, and the ordering below is deliberate — it goes from least 
 | Claude Code plugin | Claude Code | this repo added as a marketplace |
 | git checkout | development | the lot |
 
-**Nothing here is Claude-only by design.** Skills and slash commands exist only in Claude's clients, so anything written only there reaches maybe half the users. The cross-cutting knowledge is carried by the MCP `instructions` field, MCP prompts, MCP resources and the `ae_guide` tool — all four are generated from the same source, and the Claude Code skills are one more generated output rather than the original. See "Guidance and how it reaches an agent" below.
+**Nothing here is Claude-only by design.** Skills and slash commands exist only in Claude's clients, so anything written only there reaches maybe half the users. The cross-cutting knowledge is carried by the MCP `instructions` field, MCP prompts, MCP resources and the `ae_guide` tool — all four are generated from the same source, and the Claude Code skills are one more generated output rather than the original. See [`docs/guidance-system.md`](docs/guidance-system.md).
 
 ## How the pieces talk
 
@@ -36,69 +65,71 @@ ExtendScript inside AE  (bundle.jsx = concat of packages/jsx/*.jsx)
 After Effects
 ```
 
-The MCP server is stateless except for an in-memory `JobManager`, the `SnapshotStore` and the write queue. The panel is the *only* thing that talks to AE; it holds a Promise-chain mutex around `evalScript` because ExtendScript is single-threaded and concurrent calls would interleave. That mutex is necessary and not sufficient — see "Serializing writes" below.
+The MCP server is stateless except for an in-memory `JobManager`, the `SnapshotStore` and the write queue. The panel is the *only* thing that talks to AE; it holds a Promise-chain mutex around `evalScript` because ExtendScript is single-threaded and concurrent calls would interleave. That mutex is necessary and not sufficient — see [`docs/architecture.md`](docs/architecture.md).
 
 ## Source layout
 
+One line each. The annotated version — why each file is the way it is — is in
+[`docs/architecture.md`](docs/architecture.md).
+
 | Path | Purpose |
 |---|---|
-| `packages/shared/src/schemas.ts` | **Source of truth for op contracts.** Adding an op = adding a zod schema here. Also holds `OpMutation` (write/read/server) and the `crossField()` vocabulary for rules `zod-to-json-schema` cannot express — see "Cross-field rules". |
+| `packages/shared/src/schemas.ts` | **Source of truth for op contracts.** zod schemas, `OpSchemas`, the `OpMutation` classification table, `crossField()`. |
 | `packages/shared/src/ipc.ts` | HTTP envelope + WS event types. |
-| `packages/jsx/*.jsx` | ExtendScript handlers. Each module attaches functions to the global `OPS` table. ES3-ish — no `let`/`const`/arrow/templates. |
-| `packages/jsx/core.jsx` | JSON polyfill, `dispatch(payloadJson)` router, `withUndo()` wrapper, `JOBS` table for chunked async. |
-| `packages/jsx/explore.jsx` | `get_layer_full` — the deep one-shot dump. The whole reason this MCP exists. Spend disproportionate care here. |
-| `packages/jsx/snapshot.jsx` | The comp fingerprint and the diff of two of them. Backs `snapshot_comp` / `diff_comp` and the `diff:true` flag on `run_jsx` / `run_batch`. The diff is pure — two objects in, one out — which is what lets it be tested with no AE. |
-| `packages/jsx/batch.jsx` | `run_batch` for ≤500 ops inline in one undo group; otherwise registers a job and yields chunks via `_continue_job`, one undo group per chunk. `singleUndo:true` forces the inline path at any size up to 2000. |
-| `packages/jsx/vision.jsx` | `saveFrameToPng` wrapper. Returns a temp path; the panel base64-encodes. |
-| `packages/jsx/footage.jsx` | `import_footage` / `create_footage_layer` / `purge_unused_footage`. The SVG viewBox check lives here because import is the only place that has the file path and the resulting item together. Also holds `__importFile()` and `__itemPathMap()` — the one import in the codebase and the one project-by-path scan, both shared with `audio.jsx` — and the solid/`usedIn`/remove helpers that `delete_comp`'s `purgeUnusedSolids` (in `comps.jsx`) shares with the sweep. |
-| `packages/jsx/audio.jsx` | `place_audio_cues`. Plans the whole cue list with no side effects, then imports each distinct file once and builds a layer per cue, rolling back everything it made if any of it fails. The per-cue `loop`, `fadeIn`/`fadeOut` and `stretch` options (#85) live in `__placeAudioCue`, whose statement order is load-bearing — stretch before `startTime`, remap before the extent, fade keys last — because each one moves something AE then resets; see "Known fragile areas". `loop` keeps the two Time Remap keys AE creates (removing them hides the property, #86). `__fadeFitProblem` is pure and runs twice: at plan time on what is known, and again after the imports on the durations it could not know, still before any layer exists. The dryRun report is counts plus `wouldImport`/`wouldReuse` plus the failing cues, never the resolved list (#88). |
-| `packages/jsx/mogrt.jsx` | `export_mogrt`. Checks every precondition it can before touching anything, saves, suppresses dialogs, exports outside the undo group, and re-fetches everything afterwards. `__exportFailureMessage` is where a failure AE will not explain is reported as unknown rather than as a dialog. |
-| `packages/jsx/raw.jsx` | `run_jsx` — the result serializer, and the wrapper that inlines any `libraries` ahead of the caller's script and maps a failure back onto whichever of those files it landed in. |
-| `packages/jsx/helpers.jsx` | The helper scope a `run_jsx` script runs in: `compById`, `layerById`, `ease`, `addKeys`, `shape`. Global functions on purpose. Every one is listed by signature in the `run_jsx` description — change both together, since that is the only place a caller sees them. |
-| `packages/ae-panel/CSXS/manifest.xml` | CEP manifest. Auto-start on AE activate. Node enabled. |
-| `packages/ae-panel/client/main.js` | HTTP+WS server, `evalScript` mutex, JSON envelope, job driver, PNG reader. Also `startServers`: on `EADDRINUSE` it asks `/health` who holds the port and **waits** for one of our own panels rather than walking past it (issue #92) — see "Known fragile areas". Reads `~/.engineroom-ae-mcp/config.json` (`port`, `allowPortWalk`) because a CEP panel has no environment variables of the user's; writes the port file only for a port actually bound, and removes its own entry on unload. |
-| `packages/ae-panel/client/pngcodec.js` | 16-bit→8-bit PNG conversion, empty-frame detection, decoded pixels for the stale check, and `inspectPngStructure` — the chunk walk that says whether a file is a whole PNG yet. Node builtins only, requireable by a test. |
-| `packages/ae-panel/client/framereader.js` | The poll loop that decides when After Effects has *finished* writing a frame, and the two error messages that come out of it. Issue #45 lives here. |
-| `packages/ae-panel/client/contactsheet.js` | Tiles several frames into one labelled sheet, bitmap font included. Everything `times[]` needs that ExtendScript cannot do. |
-| `packages/ae-panel/client/framecache.js` | The window of recently delivered frames that makes a re-served render buffer visible. |
-| `packages/ae-panel/client/mogrt.js` | Zip surgery + box-filter resample that replaces `thumb.png` inside an exported `.mogrt`. Node builtins and `pngcodec.js` only — no third-party dependencies, so a test can require it. |
-| `packages/mcp-server/src/server.ts` | Tool registry, vision/async-envelope branching, error mapping. `toolInputSchema()` is the whole of what a client sees as a tool's contract: zod → draft-07 → `toDraft2020()` → the cross-field constraints put back. Exported so a test can validate the exact document that ships. |
-| `packages/mcp-server/src/tools/descriptions.ts` | All tool descriptions in one file — including the verbatim screenshot guidance. |
-| `packages/mcp-server/src/tools/runJsxSource.ts` | `run_jsx`'s `scriptPath` and `libraries`. The **server** reads those files, never the panel — same reasoning as `init_project`. `OPS.run_jsx` throws if a `scriptPath` still reaches it, and likewise for a library with a path and no `text`: that means the call came through `run_batch` (whose steps are never validated) or a direct `/op`, and running the empty script — or skipping the library — would report success for a file nobody read. `MAX_TOTAL_BYTES` caps the script and its libraries together, because since they are inlined every byte travels on every call. It resolves those two fields and **spreads everything else through untouched** — see "The only op whose input is rewritten" below. |
-| `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. `discovery.ts` holds the candidate ports (`AE_MCP_PORT` alone if pinned; otherwise 7777 *then* the port file) and `isPanelHealth`, the test that decides whether something on a port is the panel — mirrored by `isOurHealth` in the panel's `main.js`; keep the two in step. `httpClient.ts` re-runs discovery when a call is **refused** (never on a timeout) and re-sends once if a different port answers as the panel; `wsClient.ts` follows the client's port through `onPortChange` instead of keeping a copy. |
-| `packages/mcp-server/src/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` — the lease that outlives its own call so a long `run_batch` keeps the lock while the panel drives it. Classification comes from `OpMutation` in `schemas.ts`. |
-| `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool, and the progress emitters `await_job` binds for exactly the span of its own call — `bindProgressEmitter` hands back the unbind, and the caller must use it. See "Long batch" under "Special return shapes" and the #82 entry in "Known fragile areas". |
-| `packages/mcp-server/src/snapshots/store.ts` | In-memory comp fingerprints for `snapshot_comp` / `diff_comp`. Bounded ring; `missingMessage()` is the whole reason it is a class rather than a `Map`. |
-| `packages/mcp-server/src/issues/journal.ts` | The cross-session issue journal — two of them: `<project>/.ae-mcp/issues/` and the user-level `~/.ae-mcp/issues/`. Backs `log_issue` / `list_known_issues` / `mark_issue_reported` / `archive_issue`. The project folder is `process.cwd()`; a client that gives no usable one (Claude Desktop starts servers at `/`) falls back to `~/.after-effects-mcp`, reported as `scope: "home"` so the fallback is never silent. `AE_MCP_HOME` overrides both roots (used by the CI check). Also holds the error-text normaliser and matcher (`normalizeErrorText`, `errorTextsMatch`, `entryMatchesFailure`), the version stamps, and `archiveReason` — the one place that decides whether an entry is hidden. See "The issue journal". |
-| `packages/mcp-server/src/issues/failures.ts` | The push half of the journal: `annotateFailure` appends `Known from earlier sessions: <scope:id> — <title>` lines to a failed tool call's error text, from a per-file mtime+size cache (`JournalCache`). Never throws, never masks the error, never clears an `archive_issue` retirement — it only moves `lastSeen`/`lastVersion` on a match. Every failure-path `errorResult` in `server.ts` goes through it via `fail()`. |
-| `packages/mcp-server/src/setup/{check,install,paths}.ts` | Backs `check_setup` / `setup_panel`. Never touches the bridge client — it exists for the case where the panel isn't installed yet — but `check.ts` probes every candidate port itself and reports the one that *answers* (`bridgeReachable`), whether that is the port ops go to (`portAgreement`; the server passes `opPort`), and what CEP's own log says about the panel's signature (`panelSignature`, issue #91; `findSignatureFailure` reads the last 256KB only). `install.ts` warns when it overwrites a self-signed install and turns CEP's LogLevel on where it was never set. `panelInstallDiff` in `paths.ts` walks the *source* tree only, which is what lets a signed install's `META-INF/` and `mimetype` pass as current. |
-| `packages/mcp-server/src/setup/platform.ts` | **The only place macOS and Windows diverge** (PlayerDebugMode storage and CEP's `LogLevel` beside it, AE process detection, and where CEP writes its own log — `cepLogDir()` is `%TEMP%` vs `~/Library/Logs/CSXS/`, `cepLogPaths()` matches both the documented `csxs<n>-AEFT.log` and the measured `CEP<n>-AEFT.log`). Plus `cepExtensionsDir()` in `paths.ts`. Keep platform branching here — do not scatter `process.platform` through the codebase. |
-| `scripts/lib/setup.mjs` | Loads the compiled setup module so the dev scripts (`doctor`, `install-panel`, `enable-debug`) reuse the same platform logic the MCP tools use instead of keeping a second copy. |
-| `packages/mcp-server/src/setup/scaffold.ts` | **The one definition of what a project folder is.** Client-aware layout, target resolution, never-overwrite. Used by both `init_project` and the CLI. |
-| `packages/mcp-server/src/cli/init.ts` | `npx … init <dir>` — the terminal front end to `scaffold()`. Holds no templates of its own. |
-| `packages/mcp-server/src/guides/*.md` | **Source of truth for agent guidance.** Frontmatter + markdown. Generated into resources, `ae_guide` topics and Claude Code skills. `after-effects.md` is the **core** — it loads on every AE task, so it holds only what silently produces wrong output on *any* task — and every subject sits behind it as a `reference: after-effects` guide, opened when a task reaches that subject. The table at the top of the core is the pointer the generator requires. See "Guidance and how it reaches an agent". |
-| `packages/mcp-server/src/prompts/*.md` | Source of truth for user-invoked flows. Generated into MCP prompts and Claude Code commands. `$ARGUMENTS` is substituted at `prompts/get`. `absorb-release.md` is the upgrade flow — see "Release history, and reading it once". |
-| `packages/mcp-server/src/guides/*.md` | **Source of truth for agent guidance.** Frontmatter + markdown. Generated into resources, `ae_guide` topics and Claude Code skills. A `reference: <parent>` line makes one a reference file under the parent skill rather than a skill of its own — see "Guidance and how it reaches an agent". `whats-new.md` is the one guide with a shape a machine reads — the only home of release history, one `## <semver>` section per release with `supersedes:` lines; its contract is in a comment at the top of the file and asserted by `tests/unit/whats-new.mjs`. |
-| `packages/mcp-server/src/tools/whatsNew.ts` | The `since` filter on `ae_guide({topic: "whats-new"})`: semver compare (numeric — 0.10.0 is newer than 0.9.0), the release splitter, the `supersedes:` extractor and the answer's version header. Pure text functions, so the real guide is tested against its own contract with no server. |
-| `packages/mcp-server/src/generated/content.ts` | Generated. Never hand-edit — `build-guides.mjs --check` fails the build if you do. |
-| `packages/jsx/style.jsx` | `get_house_style` / `set_house_style`. Reads `house-style.md` beside the .aep over the bridge, which is the only channel every client has. |
-| `packages/mcp-server/src/style/summary.ts` | The digest `get_house_style` returns by default. Parses a markdown document nobody controls; falls back to the document's own opening when it recognises nothing. Reading stays on the panel — only the summarising is here. |
-| `plugin/` | The Claude Code plugin: `.mcp.json` + generated `skills/` and `commands/`. Everything under those two is output, not source. |
-| `.claude-plugin/marketplace.json` | Marketplace catalog. Users add this repo, then install `after-effects@engine-room`. |
-| `scripts/bundle-jsx.mjs` | Concatenates `packages/jsx/*.jsx` in dependency order into `packages/ae-panel/jsx/bundle.jsx`. Run via `npm run build:jsx`. |
-| `scripts/prepare-package.mjs` | `prepack` hook. esbuild-bundles the server to `bin/server.js` (inlining `@engineroom/shared`, which is never published separately) and vendors the panel to `panel/`. |
-| `scripts/install-panel.mjs` | Dev equivalent of `setup_panel`. Copies (or symlinks with `--symlink`) the panel into `~/Library/Application Support/Adobe/CEP/extensions/`. |
-| `scripts/build-guides.mjs` | Generates every copy of the guidance prose from `src/{guides,prompts}/*.md`. Holds the hand-written `instructions` text. `--check` mode runs in CI. Also asserts `GUIDE_TOPICS` in `schemas.ts` matches the guides on disk, and that every `reference:` guide has a parent that points at it. |
-| `scripts/build-mcpb.mjs` | The Claude Desktop bundle. Reproduces the runtime layout `setup/paths.ts` expects: `package.json`, `server/index.js`, real `node_modules/ws`, vendored `panel/`. |
-| `scripts/build-binaries.mjs` | `bun build --compile` for mac arm64/x64 and win x64. Each target is a *folder* — the binary alone cannot find the panel. |
-| `scripts/sign-and-notarize.sh` | codesign (hardened runtime + `scripts/entitlements.plist`) then `notarytool submit --wait`. Local-only; reads credentials from the environment and never from the repo. |
+| `packages/jsx/*.jsx` | ExtendScript handlers, attached to the global `OPS` table. ES3-ish. |
+| `packages/jsx/core.jsx` | JSON polyfill, `dispatch()` router, `withUndo()`, the `JOBS` table. |
+| `packages/jsx/explore.jsx` | `get_layer_full` — the deep one-shot dump. The whole reason this MCP exists; spend disproportionate care here. |
+| `packages/jsx/snapshot.jsx` | The comp fingerprint and the diff of two of them. Pure, so testable with no AE. |
+| `packages/jsx/batch.jsx` | `run_batch` — inline under 500 ops, otherwise a chunked job. |
+| `packages/jsx/vision.jsx` | `saveFrameToPng` wrapper, the resolution factor, contact-sheet tiles. |
+| `packages/jsx/footage.jsx` | Import, footage layers, the SVG viewBox check, the shared solid/`usedIn` helpers. |
+| `packages/jsx/audio.jsx` | `place_audio_cues` — plan, import, build, roll back. Statement order is load-bearing. |
+| `packages/jsx/mogrt.jsx` | `export_mogrt` — preconditions first, dialogs suppressed, everything re-fetched afterwards. |
+| `packages/jsx/raw.jsx` | `run_jsx` — the result serializer, library inlining, failure attribution. |
+| `packages/jsx/helpers.jsx` | The helper scope a `run_jsx` script runs in. Listed by signature in the tool description — change both together. |
+| `packages/jsx/style.jsx` | `get_house_style` / `set_house_style`, read beside the .aep over the bridge. |
+| `packages/ae-panel/CSXS/manifest.xml` | CEP manifest. Auto-start on AE activate, Node enabled. |
+| `packages/ae-panel/client/main.js` | HTTP+WS server, the `evalScript` mutex, the job driver, port binding and the port file. |
+| `packages/ae-panel/client/pngcodec.js` | 16→8-bit conversion, empty-frame detection, `inspectPngStructure`. |
+| `packages/ae-panel/client/framereader.js` | Decides when After Effects has *finished* writing a frame. |
+| `packages/ae-panel/client/contactsheet.js` | Tiles several frames into one labelled sheet. |
+| `packages/ae-panel/client/framecache.js` | The window of delivered frames that makes a re-served render buffer visible. |
+| `packages/ae-panel/client/mogrt.js` | Zip surgery + resample that replaces `thumb.png` in an exported `.mogrt`. |
+| `packages/mcp-server/src/server.ts` | Tool registry, return-shape branching, error mapping, `toolInputSchema()`. |
+| `…/tools/descriptions.ts` | All tool descriptions, written for an LLM reading the tool list cold. |
+| `…/tools/runJsxSource.ts` | `scriptPath` and `libraries`. The **server** reads those files, never the panel. |
+| `…/tools/whatsNew.ts` | The `since` filter on the whats-new topic: semver compare, splitter, version header. |
+| `…/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing, port candidates, the panel-health test. |
+| `…/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` for a lease that outlives its call. |
+| `…/jobs/manager.ts` | In-memory job table, `waitFor(jobId)`, the progress emitters `await_job` binds. |
+| `…/snapshots/store.ts` | In-memory comp fingerprints; `missingMessage()` is why it is a class and not a `Map`. |
+| `…/issues/journal.ts` | The two issue journals, the error-text matcher, version stamps, `archiveReason`. |
+| `…/issues/failures.ts` | `annotateFailure` — the push half. Never throws, never masks the error. |
+| `…/setup/{check,install,paths}.ts` | `check_setup` / `setup_panel`. Never touches the bridge client. |
+| `…/setup/platform.ts` | **The only place macOS and Windows diverge.** |
+| `…/setup/scaffold.ts` | **The one definition of what a project folder is.** Used by `init_project` and the CLI. |
+| `…/cli/init.ts` | `npx … init <dir>`. Holds no templates of its own. |
+| `…/style/summary.ts` | The house-style digest. Parses a markdown document nobody controls. |
+| `…/guides/*.md` | **Source of truth for agent guidance.** Frontmatter + markdown; `after-effects.md` is the core. |
+| `…/prompts/*.md` | Source of truth for user-invoked flows. |
+| `…/generated/content.ts` | Generated. Never hand-edit — `build-guides.mjs --check` fails the build if you do. |
+| `plugin/` | The Claude Code plugin: `.mcp.json` plus generated `skills/` and `commands/`. |
+| `.claude-plugin/marketplace.json` | Marketplace catalog. |
+| `scripts/bundle-jsx.mjs` | Concatenates `packages/jsx/*.jsx` into the panel bundle. Must stay a pure function of its sources. |
+| `scripts/build-guides.mjs` | Generates every copy of the guidance prose. `--check` runs in CI. |
+| `scripts/prepare-package.mjs` | `prepack` — esbuild the server to `bin/`, vendor the panel to `panel/`. |
+| `scripts/install-panel.mjs` | Dev equivalent of `setup_panel`. |
+| `scripts/build-mcpb.mjs` | The Claude Desktop bundle. |
+| `scripts/build-binaries.mjs` | `bun build --compile`; every target is a *folder*, not a bare binary. |
+| `scripts/sign-and-notarize.sh` | codesign then notarytool. Local-only; credentials from the environment. |
+| `scripts/lib/setup.mjs` | Lets the dev scripts reuse the compiled setup module instead of a second copy. |
 
-## The op pipeline (in detail)
+## Adding an op
 
 Adding a new op = touching six places. In order:
 
-1. **Schema** — `packages/shared/src/schemas.ts`: add zod schema and an entry in `OpSchemas`. If two fields are alternatives ("exactly one of these"), declare it with `crossField()` rather than `.refine()` — a bare refinement is dropped by the converter and `tests/unit/schema-constraints.mjs` fails the build. See "Cross-field rules".
-2. **Classification** — the `OpMutation` table at the bottom of the same file: `"write"`, `"read"` or `"server"`. `tests/unit/write-queue.mjs` fails the build if you skip it, on purpose — see "Serializing writes".
+1. **Schema** — `packages/shared/src/schemas.ts`: add zod schema and an entry in `OpSchemas`. If two fields are alternatives ("exactly one of these"), declare it with `crossField()` rather than `.refine()` — a bare refinement is dropped by the converter and `tests/unit/schema-constraints.mjs` fails the build. See "Cross-field rules" in [`docs/architecture.md`](docs/architecture.md).
+2. **Classification** — the `OpMutation` table at the bottom of the same file: `"write"`, `"read"` or `"server"`. `tests/unit/write-queue.mjs` fails the build if you skip it, on purpose — see "Serializing writes" in [`docs/architecture.md`](docs/architecture.md).
 3. **ExtendScript handler** — add to the matching module in `packages/jsx/` as `OPS.your_op = function(args){ ... }`. Use `noUndo(fn)` for read-only ops (skips the undo group wrapper).
 4. **Description** — `packages/mcp-server/src/tools/descriptions.ts`: add an entry keyed by op name. Write it for an LLM agent reading the tool list cold.
 5. **Build** — `npm run build` rebuilds TS and concatenates the .jsx bundle.
@@ -106,607 +137,38 @@ Adding a new op = touching six places. In order:
 
 The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring is needed unless the op needs special return packaging (vision = image content, run_batch = async envelope, jobs/* = server-resident) — or, in one case, special *input* packaging: `run_jsx` is rewritten between zod validation and the forward, so `scriptPath` becomes `code` and `libraries` become `{path, text}` before the panel ever sees them (`tools/runJsxSource.ts`).
 
-### The only op whose input is rewritten
-
-Adding a field to `RunJsx` is therefore the one case where step 1 above is not
-enough on its own — so `resolveRunJsxSource` is built to make it enough anyway.
-
-It used to construct a fresh args object and copy across the fields it knew
-about, which made it a **second copy of the `RunJsx` schema, maintained by
-hand**. The two diverged the first time the schema grew: `diff` and `diffCompId`
-were added to `RunJsx` and `RunBatch` together, `run_batch` forwards its args
-untouched and worked, and `run_jsx` dropped both on the floor. Nothing failed.
-`diff:true` came back as an ordinary success with no diff on it — the swallowed
-error this repo refuses everywhere else, in the one tool where an agent that
-cannot see what a script changed re-runs the script.
-
-Two rules, and they are the whole of it:
-
-- **Spread the caller's args; override only what this function resolves.** The
-  whitelist belongs to the zod schema, which has already run by then and has
-  already stripped everything it does not declare. `libraries` is lifted out of
-  the spread by destructuring rather than overwritten after it, so the caller's
-  `string[]` reaching the panel in place of the resolved `{path, text, bytes}[]`
-  is a type error and not a convention.
-- **`tests/unit/run-jsx-args.mjs` enumerates `RunJsx.shape` and fails if any
-  declared field is unreachable after resolution.** Same shape of guard as the
-  `OpMutation` classification test, and for the same reason: the omission is
-  invisible in the diff, invisible at runtime, and shows up as a plausible
-  success. It generates a sample value per field from the zod type and **throws
-  rather than skipping** on a type it cannot generate — a guard that quietly
-  passes over the field it does not understand is the failure it exists to catch.
-
-Verification recipe 29 is the live half.
-
-### Cross-field rules ("pass exactly one of these")
-
-**A `.refine()` is invisible to the model.** `zod-to-json-schema` drops
-refinements without a word, so a rule written that way is enforced on the
-server and absent from the schema the agent is shown — and the only way it
-learns the rule is by making the call and having it rejected. That is a wasted
-turn in every session that hits it, and three 0.4.0 features landed on the same
-edge independently: `reorder_layer`'s three destinations, `screenshot_frame`'s
-`time`/`times`, `run_jsx`'s `code`/`scriptPath`. Two more rules were being
-enforced further down still — `set_temporal_ease` from inside After Effects
-(a round trip and a write lease spent on a call that was never going to change
-anything) and `set_effect_param` as a bare `Effect param not found`, which
-reads as though the *name* was wrong rather than absent.
-
-So a rule is **declared once**, with `crossField()` in `schemas.ts`, and three
-things are generated from that one declaration:
-
-| Generated | By | Reaches |
-|---|---|---|
-| the zod check | `crossField` | the server, on every call |
-| `oneOf` / `anyOf` / `not` in the emitted schema | `crossFieldJsonSchema`, applied by `toolInputSchema()` | every client, before the call |
-| the sentence in the rejection | `crossFieldMessage` | the agent, when it breaks anyway |
-
-Three kinds cover everything so far: `exactlyOne`, `atMostOne`, `atLeastOne`.
-Five ops use them — `reorder_layer`, `screenshot_frame`, `run_jsx`,
-`set_temporal_ease`, `set_effect_param`.
-
-Four things hold it together, and each is a way it could rot quietly:
-
-- **The declaration is the only copy.** A rule enforced in zod and described in
-  prose somewhere else is two statements that drift, and the drift is invisible
-  because the schema keeps working while only the *advice* goes stale.
-- **An unclassified refinement fails the build.** `tests/unit/schema-constraints.mjs`
-  enumerates every `ZodEffects` in every op schema and refuses any that is not a
-  declared rule — same shape of guard as the `OpMutation` classification test
-  and `run-jsx-args.mjs`, and for the same reason: what it cannot classify, it
-  must not pass over. At *runtime* `toolInputSchema()` logs and carries on
-  instead of throwing, for the reason `isWriteOp()` falls back to `"write"`:
-  `tools/list` is the call every session begins with, so raising there would
-  turn one under-specified tool into no tools at all. Fail the build loudly;
-  fail the session towards what shipped before.
-- **The two enforcers are proved to agree.** For a rule over N fields there are
-  2^N ways to pass them, and the test probes every one against both the compiled
-  JSON Schema and `safeParse`. A schema *stricter* than the server would
-  advertise working calls as illegal; one *looser* is the invisible constraint
-  this exists to end.
-- **The description says it too.** Belt and braces on purpose — the keyword is
-  machine-readable, the sentence is what a model actually reads, and a converter
-  or a client can drop the first but never the second. The test requires both
-  the field names and a phrase matching the rule kind.
-
-`crossField` returns a `ZodEffects`, which has no `.shape`. Use `objectShapeOf()`
-rather than reaching into `_def` — a schema loses `.shape` the day a rule is
-added to it, and the caller that breaks is never the one that added the rule.
-
-The runtime half is `invalidArgsText()` in `util/errors.ts`. `ZodError.message`
-is `JSON.stringify(issues)`, so every carefully written message used to arrive
-buried in an array of `code`/`expected`/`received` objects; it is now one line
-per problem, naming the field. Passing *none* of a rule's fields and passing
-*two* must read differently — an agent that cannot tell which mistake it made
-re-sends the same call.
-
-**Two constraints deliberately left as prose.** `place_audio_cues` requires
-exactly one of `footageId`/`path` *per cue*, and `audio.jsx` reports every
-offending cue index at once so `dryRun` can answer for the whole list; a zod
-rule would reject the call through a different, less structured channel and
-change what `dryRun` is for. And `blendingMode`, `trackMatte.type` and a mask's
-`mode` are keys into After Effects' own enumerations, looked up by name — an
-unrecognised one is **ignored** and the call still reports success. That is a
-swallowed error rather than a hidden constraint, and fixing it means changing
-what the .jsx does with no AE to test against; for now the accepted names are
-in the field descriptions, along with the fact that a wrong one changes nothing.
-
-## Special return shapes
-
-- **Vision** (`screenshot_frame`, `screenshot_layer`): JSX returns `{path, width, height, time, compId, layerId?}`. Panel waits for the file to be a *complete* PNG (`framereader.js`), normalises it to 8-bit, base64-encodes, returns `{base64, bytes, ...}`. Server packages as MCP `image` content block. Four outcomes are deliberately *not* images: a fully transparent frame comes back as `{empty:true, reason}` and goes through `textResult`; a frame whose pixels match a different earlier request is refused as `STALE_FRAME`; a file After Effects wrote and abandoned is refused as `FRAME_INCOMPLETE`; and a render that never finished is refused as `RENDER_TIMEOUT`. Those last two must never share a sentence — see "Known fragile areas".
-- **Contact sheet** (`screenshot_frame` with `times`): 2-6 times in one call, exclusive with `time` — a declared `atMostOne` cross-field rule, so two readings of "which frame" can never reach ExtendScript *and* the exclusion is in the emitted JSON Schema rather than only in the rejection. JSX renders one temp PNG per time at a shared per-tile factor and returns `{contactSheet:true, tiles:[{path,time}|{error}], downsample, ...}`; the panel reads each, composites them into one labelled image (`contactsheet.js`) and returns the same `base64` shape plus `tiles`, `cols`, `rows`, `cellWidth`/`cellHeight`. Three properties hold it together: **every requested time keeps its cell**, so a failed tile is a marked block rather than a gap that renumbers the rest; **the time is burned into the picture**, because metadata beside an image is not what a model compares; and **a bad tile never invalidates the sheet** — it is named and counted in `warning`, and only a sheet where *nothing* rendered is refused outright. Inside one sheet, two tiles with identical pixels are a static comp, not the #29 stale buffer, so they are flagged in `note` rather than refused; a match against a frame from *outside* the sheet is still a stale tile and is drawn as a block.
-- **Long batch** (`run_batch` >500 ops): JSX returns `{jobId, async:true, total, chunkSize, undoStepsEstimate, undoGroupName, note}`. Panel drives `_continue_job` in chunks of `chunkSize` in the background, broadcasting `progress` events on WS. **Those reach the client as `notifications/progress` on `await_job`, and never on `run_batch`** — `run_batch` has answered before the first chunk runs, and a notification sent on a request's token after that request's response is one every spec-compliant client has already stopped correlating (issue #82; the "Known fragile areas" entry). So `server.ts` appends a sentence to the envelope's `note` saying where progress goes, and `await_job` binds an emitter to *its own* request's `progressToken` for exactly the span of that call, sending through the SDK's request-scoped `extra.sendNotification` and draining every send before it returns (`forwardJobProgress`). `get_job` reads the same state and never notifies. The undo fields ride the envelope because it is the only message the agent sees before it starts describing the work — the *measured* `undoSteps` arrives much later, on the completion event. `singleUndo:true` takes the inline path instead, so no envelope and no progress at all.
-- **Server-resident** (`await_job`, `get_job`, `cancel_job`, `check_setup`, `setup_panel`, `init_project`, `ae_guide`, `log_issue`, `list_known_issues`, `mark_issue_reported`, `archive_issue`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag). They're still listed in `OpSchemas` so `tools/list` picks them up — membership in `SERVER_OPS` is what stops the forwarding.
-- **Half server-resident** (`snapshot_comp`, `diff_comp`): the panel gathers, the server remembers. `SNAPSHOT_OPS` in `server.ts` routes them to `runSnapshotOp`, which forwards an internal read op (`_comp_fingerprint` / `_comp_diff`) and keeps the answer in `SnapshotStore`. Deliberately *not* in `SERVER_OPS` — unlike those, these do touch the bridge, and they are dispatched from inside the same `try` as `bridge.runOp` so the timeout, `AeError` and Unknown-op mappings all apply unchanged.
-- **Prose** (`ae_guide`): returns the markdown as a bare text content block rather than through `textResult()`. JSON-stringifying it would hand the model a wall of `\n`. The `whats-new` topic is the one exception to "the body, verbatim": its answer opens with a line naming the server's own version (`packageVersion()`, read from package.json — the guide cannot know it, since a build between releases is ahead of its newest section), and with `since` it is the preamble plus only the sections newer than that version, or one explicit line saying nothing is newer. `since` on any other topic is refused, not ignored. The `ae://guide/whats-new` resource is untouched — still the raw body. See "Release history, and reading it once".
-- **Summarised** (`get_house_style`): the panel returns the whole document; `server.ts` runs it through `applyHouseStyleDetail` before packaging, and `detail: "summary"` — the default — replaces `content` with a digest. The one post-bridge transform in the codebase that changes what a *read* answers, so it is the one to remember when a house-style result looks unfamiliar. See "The house style".
-- **Downsampled screenshots**: handled entirely in `vision.jsx`. `saveFrameToPng` *does* respect `CompItem.resolutionFactor` (measured: a 3840×2160 comp yields 1920×1080 at factor 2, 960×540 at factor 4), so `__saveFrameAt` sets the factor, renders, and restores it in a `finally`. That restore is not optional — a throw mid-render would otherwise leave the user's comp at reduced resolution. **Every factor is set, factor 1 included**, and that is the fix for issue #72 rather than an implementation detail: `resolutionFactor` is also the Resolution dropdown in the viewer, so treating 1 as "nothing to do" rendered at whatever the designer had left the comp on. A comp parked at Quarter — routine on anything heavy — answered `downsample: 1` with a quarter-size frame and `downsample: 2` with one four times **larger**. The panel reads the true dimensions out of the PNG's IHDR chunk rather than computing them, so reported size can never disagree with the image sent; that is what kept this invisible, because the response stayed honest while the *picture* was not the one asked for, and an agent that can see a frame believes the frame. An earlier version shelled out to `sips`; it was replaced because rendering smaller is faster than resampling and needs no external tool, which is what makes downsampling work on Windows. The factor is *derived* from the comp when the caller omits one (`__autoDownsample`, aiming at a ~1280px long edge) — which is why `ScreenshotFrame`/`ScreenshotLayer` must not carry a zod `.default(1)`: a default there would reach the panel as an explicit 1 and the derivation would never run. `tests/unit/screenshot-resolution.mjs` holds all three — the explicit factor, the restore (on a throw as well, at 1 as well) and the derivation — against a mock comp whose viewer starts at Quarter.
-
-## Serializing writes
-
-**The panel's `evalScript` mutex is necessary and not sufficient, and the gap it
-leaves is exactly where the damage was.** That chain serializes every individual
-`evalScript`, so two ordinary writes cannot interleave *within* one op — the
-undo group `dispatch()` opens is closed before the next call gets a turn. What
-it does not cover is the gap around a long `run_batch`. Over 500 ops, the
-handler returns `{jobId, async:true}` immediately and the panel then drives
-`_continue_job` in chunks of 25. Every chunk is its own turn on the chain, so
-any op issued meanwhile slots in *between* two chunks. That is issue #55, and it
-is why the fix could not be "the panel already handles it".
-
-Issue #55 described the damage as an interloper's own `endUndoGroup()` closing
-the batch's group, since AE's groups do not nest. That reading was wrong in one
-detail, found while verifying 0.4.0: the batch's group was **already gone**,
-because After Effects discards a group opened in one `evalScript` and closed in
-another (issue #69, and the "Known fragile areas" entry below). Each chunk now
-opens and closes its own group, so nothing an interloper does can break one. The
-lock is still held for the whole job, for the reason that survives the
-correction: a batch is one thing the caller asked for, and a write dropped into
-the middle of it runs out of the order the agent issued it in.
-
-Ordering was the second half. Requests arrive at the server in the order the
-agent issued them, but the old code fired every one at `fetch` in parallel and
-took whatever order the sockets happened to deliver. Two writes where the second
-depends on the first were a coin toss.
-
-So: **one writer at a time, for the whole session.** `bridge/writeQueue.ts` is a
-FIFO mutex; `server.ts` takes a lease before forwarding any op classified
-`"write"`. Five things about it are load-bearing.
-
-- **The classification is a table, not a list of prefixes.** `OpMutation` lives
-  beside `OpSchemas` in `schemas.ts` and covers every op with `"write"`,
-  `"read"` or `"server"`. There is deliberately no default: an op nobody
-  classified would be classified by silence, and the silent answer — "read" — is
-  the one that reintroduces the bug. `tests/unit/write-queue.mjs` fails the
-  build when the two tables disagree in either direction, and `isWriteOp()`
-  falls back to `"write"` at runtime so even a shipped omission costs
-  serialization rather than correctness.
-- **Reads never queue, screenshots least of all.** They are unaffected by an
-  open undo group, and a screenshot is the slowest thing in the system — putting
-  one behind the write mutex would make every write wait on a render for
-  nothing. `await_job` and `cancel_job` are `"server"` for a harder reason: they
-  can be issued *while* the batch holding the lock is running, and queueing
-  either would deadlock against the thing they exist to wait on and release.
-  `await_job` is also the call that carries the batch's progress (#82), which
-  is a second reason it can never sit in this queue: a waiter that is itself
-  waiting reports nothing about the batch it exists to watch.
-- **The lease outlives its own call.** `extendUntil` is the whole fix. When
-  `run_batch` answers with a jobId, the lock is held until `JobManager` reports
-  the job finished — releasing it when the HTTP call returned would leave
-  precisely the gap described above. A leak guard at twice the wait ceiling
-  covers a job that never reports (a dropped WS); it is set *above* the wait
-  ceiling so that any writer queued behind the batch has hit its own deadline
-  and gone before the hold could expire and hand it the lock mid-batch.
-- **The op timeout starts at execution, never at enqueue.** `AbortSignal.timeout`
-  is created inside `runOp`, and `acquire()` is awaited before it — so a call
-  that waited ten minutes still gets its full budget when it runs. Get this
-  backwards and a queued call times out having never run, reporting a bridge
-  failure for a bridge that was answering fine. That is the one way this feature
-  could have made things worse, and the test that pins it runs the real
-  `HttpClient` against a stub on an ephemeral port.
-- **A cancelled request is dropped, not deferred.** If the MCP request is
-  cancelled while queued, `acquire` rejects and the caller never reaches the
-  bridge. Work that runs after the thing that asked for it gave up is the leak.
-
-A call that waited says so: `queuedBehind` and `waitedMs`, present only when it
-actually waited, so an uncontended result is byte-identical to what it always
-was. They fold into the result object where there is one, which is every writing
-op but `run_jsx` — that returns whatever the caller's script returned, arrays
-and bare numbers included, and rewrapping those would change what every existing
-caller reads (#43). Those get a second text content block instead. Vision
-results never carry a note at all, since screenshots are reads.
-
-Two limits worth knowing. The queue is per-server-process, so a second MCP
-client pointed at the same panel is not serialized against the first — the panel
-is a shared resource with no lock of its own. And the queue is bounded
-(`AE_MCP_WRITE_QUEUE_DEPTH`, default 64; `AE_MCP_WRITE_QUEUE_WAIT_MS`, default
-600s) rather than unbounded, because an agent looping writes at a stuck bridge
-would otherwise grow it without limit.
+Two things step 1 does not cover on its own, both in
+[`docs/architecture.md`](docs/architecture.md): `run_jsx` is the one op whose
+input is rewritten between validation and the forward, and a rule spanning two
+fields (`"pass exactly one of these"`) is declared with `crossField()` rather
+than `.refine()` — a bare refinement is dropped by the schema converter, so the
+rule reaches the server and never the model.
 
 ## Conventions
 
 - **ExtendScript is ES3-ish.** No `let`/`const`/arrow functions/template literals/`Object.keys`/destructuring in `packages/jsx/*.jsx`. AE 2026 has native JSON but `core.jsx` polyfills defensively.
 - **Stable IDs.** `getCompById(id)` uses `app.project.itemByID`; `getLayerById(comp, layerId)` walks `comp.layers` matching `layer.id`. Never use `.index` as a long-lived identifier — it shifts when layers are reordered.
-- **One undo step per request, and never one that spans two requests.** `dispatch()` wraps the handler in `withUndo()`, and `__beginUndoGroup` is the only thing allowed to call `app.beginUndoGroup` — everything groups through it, so `__UNDO_GROUPS` can count what was actually opened. `run_batch` manages its own undo (`__meta.noUndo = true`): one group for an inline batch, one per chunk for a long one. A group that opens in one `evalScript` and closes in another is not merely fragile — AE throws it away. See "Known fragile areas".
+- **One undo step per request, and never one that spans two requests.** `dispatch()` wraps the handler in `withUndo()`, and `__beginUndoGroup` is the only thing allowed to call `app.beginUndoGroup` — everything groups through it, so `__UNDO_GROUPS` can count what was actually opened. `run_batch` manages its own undo (`__meta.noUndo = true`): one group for an inline batch, one per chunk for a long one. A group that opens in one `evalScript` and closes in another is not merely fragile — AE throws it away. See [`docs/fragile-areas-ae.md`](docs/fragile-areas-ae.md).
 - **MCP server stdout is sacred.** All logs go to stderr via `util/logger.ts`. Touching `console.log` anywhere in mcp-server will corrupt the JSON-RPC stream.
 - **Tool descriptions are written for LLMs.** Tell the agent (a) what the tool does, (b) when to reach for it, (c) what to avoid. Screenshot descriptions especially must say "one-off, do NOT screenshot every frame."
 - **Never report success for work that didn't happen.** An agent can only correct a failure it's told about, so a swallowed error is worse than a thrown one. `add_shape_content` is the reference case: it resolves every key first, and if any is unresolvable it removes the node it created and throws with the offending keys named, rather than leaving a half-built shape behind an `{ok:true}`. Schemas that accept free-form objects must be `.strict()` for the same reason — zod's default is to strip unknown keys silently.
 
-## Guidance and how it reaches an agent
+## Rules that are easy to break silently
 
-Tool descriptions cover one tool each. The knowledge that actually costs people
-time is cross-cutting — ids not indexes, read then write then verify, which of
-three bridge failures is safe to re-send — and belongs to no single tool. The carriers for it, in
-descending order of reach:
+The full reasoning for each is one click away. What they have in common is that
+breaking one produces a plausible success rather than an error.
 
-| Carrier | Reaches | Cost |
-|---|---|---|
-| Tool descriptions | every client, always | always resident |
-| `instructions` (initialize result) | every client that honours it | always resident — keep it short |
-| `ae_guide` tool | every client | on demand |
-| MCP resources (`ae://guide/…`) | clients with resource support | on demand |
-| Claude Code skills | Claude Code, claude.ai | on demand, whole skill at once |
-| Claude Code skill references | Claude Code, claude.ai | on demand, one file at a time |
-
-All of them except the tool descriptions come from
-`packages/mcp-server/src/guides/*.md` via `scripts/build-guides.mjs`. **Edit the
-markdown, never the outputs.** The same script generates
-`packages/mcp-server/src/prompts/*.md` into MCP prompts and Claude Code commands.
-
-Three rules that keep this honest:
-
-- **`instructions` is always resident in every session, so it stays short.** It
-  says three things: that the session is live, where the real guidance is, and
-  the two or three habits that decide whether the *first* calls do damage before
-  an agent has read any of it. Everything else is a tax on every request the user
-  ever makes — put it in a guide. It was six numbered items and 1,395 characters
-  until 0.4.0, restating what `after-effects.md` already said in full; issue #60
-  is what that cost. `tests/unit/guide-references.mjs` and the CI smoke test both
-  fail it past 1,500 characters, which is a ceiling and not a target. The topic
-  list is substituted into `__TOPICS__` at build time, so every guide added
-  lengthens it — about 1,170 characters with twelve topics.
-- **`ae_guide` exists because the better carriers are not universal.** Some
-  clients drop `instructions`; fewer support resources. Tools are the floor
-  every client reaches, so the guidance has to be available as one.
-- **Only the skill has a per-session cost, so only the skill splits.** A guide
-  with `reference: <parent>` in its frontmatter is still a full `ae_guide` topic
-  and a full `ae://guide/…` resource — narrowing that half would be a reach
-  regression for every non-Claude client — but on the skill side it generates
-  into `plugin/skills/<parent>/references/<name>.md` instead of a skill of its
-  own, so Claude Code opens it only when the parent points at it. That pointer is
-  load-bearing: the generator refuses to build a reference whose parent does not
-  name `references/<name>.md`, because a reference nothing points at is a file
-  that is never read and never noticed. Nine ship, all under `after-effects`,
-  and `tests/unit/guide-references.mjs` lists every one by name so a reference
-  cannot go missing from a carrier unnoticed.
-
-### The core and its references
-
-`after-effects.md` was 36 KB and loaded on every AE task, most of which never
-touched half of it (issue #98). It is now the **core** — about 13 KB — and it
-holds only what silently produces wrong output on *any* task: ids not indexes,
-bounded reads (the bounded form leads; "one `get_layer_full` over several
-narrow calls" and "bound every read" are reconciled as *the bound is the
-`include` list, not the number of calls*), read/write/verify with a diff,
-screenshots as a one-off diagnostic with their cost in tokens, write ordering
-and the `run_batch` undo rule in eight lines, and the three bridge failures
-with contradicting remedies. Everything else is a reference, opened by subject:
-
-| Reference | Holds |
-|---|---|
-| `animation` | keyframes and easing through the tools, rigging, expressions (comp time vs layer time lives here) |
-| `shapes` | spawn origin, `add_shape_content`, render order, stale node references, compact reads |
-| `text` | justification as alignment, tracking, `set_text`, sizing a background from `sourceRect` |
-| `assembly` | shots built in local time and placed at offsets, comp markers, retiming without touching contents, the precomp that renders nothing before `startTime` (issue #101) |
-| `extendscript-gotchas` | **the `run_jsx` reference**: when to script, timeouts and the ~60-layer practical bound, `scriptPath`/`libraries` as the normal way to build, the helpers in scope, the raw-scripting traps by subject, the result and failure contract |
-| `sound` | `place_audio_cues`, what `levelDb` means and why a copied level is meaningless, loops, fades and stretch per cue |
-| `mogrt-and-footage` | `export_mogrt` and its preconditions, the SVG viewBox trap, the solids `delete_comp` leaves behind and `purge_unused_footage` |
-| `issue-journal` | the journal flow: a failure brings matching entries, `log_issue`, retiring an entry, the offer to pass it on |
-| `whats-new` | version deltas (issue #60); the only place history lives |
-
-Three rules hold the split honest:
-
-- **Every fact has one home.** A fact that applies whether you use the tools or
-  script raw goes in the subject reference (render order is in `shapes`,
-  comp-time-vs-layer-time in `animation`); a fact that only bites when writing
-  raw ExtendScript goes in `extendscript-gotchas`, with the subject reference
-  carrying a one-line pointer at most. Issue #98 counted seven facts stated in
-  both the core and the gotchas, and issue #96 found the always-loaded copy of
-  the ease arity stale while the reference was right — which is what a second
-  copy does. The ease-arity table is in `extendscript-gotchas.md` and nowhere
-  else; `animation.md` points at it.
-- **Present tense only, outside `whats-new`.** A rule plus its reason clause,
-  and at most a "measured on 26.3" tag where the fear is training data rather
-  than project notes. No "was never true", no "broken for three releases", no
-  "it does now mean" — an agent that reads the route-around learns the route
-  (issue #99). What a tool *used to* do goes in `whats-new` and only there.
-- **A reference may point at a sibling by topic name**, never at
-  `references/<name>.md` — that path form is the parent's pointer, and the
-  generator only checks the parent. `extendscript-gotchas` must stay reachable
-  under that name: the `instructions` name it, and users' project notes do.
-
-Where a fact goes, in one line: an agent cannot infer it from the tool list *and*
-getting it wrong on the first call costs real work → `instructions`; it silently
-produces wrong output on any task → the core; it only matters once a task has
-reached a subject → that subject's reference.
-
-### Release history, and reading it once
-
-History has a fourth place to go, and it is the one that kept leaking: **what a
-tool *used to* do belongs in `whats-new.md` and nowhere else.** Issue #99 found
-it in two other places. The main guide narrated past releases ("broken for three
-releases, so an agent may have learned to route around it"), which is resident
-in every session and — by naming the route-around — teaches it. And projects'
-own docs carried workarounds written by earlier sessions, with nothing to remove
-them when a release fixed the bug. The guides are the docs agent's problem
-(present tense, rule plus reason, at most a "measured on 26.3, contradicts
-Adobe's docs" tag); the project docs are what the machinery below is for.
-
-Three parts, and each is only useful because of the other two:
-
-- **`whats-new.md` has a shape a machine can filter.** One `## <semver>`
-  section per release, newest first; everything above the first is the
-  preamble; each entry is a bullet opening with the **rule as it now stands**,
-  and under it indented `supersedes:` lines quoting the *old* rule in the words a
-  project doc would have used — `run_batch is one undo step`, `reorder_layer is
-  broken, use run_jsx` — so it can be grepped for. The contract sits in a comment
-  at the top of the file. `tests/unit/whats-new.mjs` holds it: every `##` a
-  release, strictly newest first, a section for the version being built or
-  newer (so a release cannot ship without one), every entry bold-first, every
-  `supersedes:` line inside a bullet and free of markdown. Only rules that have
-  shipped get a `supersedes:` line; one for an unshipped change would send the
-  absorb flow deleting a rule that is still true.
-- **`ae_guide({topic: "whats-new", since})` returns the delta.** Sections
-  strictly newer than `since` — the version named is the one already absorbed —
-  behind the preamble, with the server's version on the first line so the agent
-  can record it. Nothing newer is one explicit sentence, never an empty string:
-  an agent cannot tell "up to date" from "broken" by an empty answer. The compare
-  is numeric (`0.10.0` > `0.9.0`); `since` is validated as a version by the
-  schema and refused on any other topic, since a filter that silently did not
-  apply is the swallowed error this repo refuses elsewhere. `tools/whatsNew.ts`.
-- **The absorb-release prompt applies it, once per release per project.**
-  `prompts/absorb-release.md`, generated into the MCP prompt and the Claude Code
-  command like the others. It finds `Tools version last absorbed: <version>` in
-  the project's docs (the scaffold writes it — see "The project scaffold"),
-  reads the delta, greps the project's CLAUDE.md / AGENTS.md / rules files /
-  `.ae-mcp/` notes for every `supersedes:` line and proposes a rewrite or
-  deletion of each hit (their docs — shown, approved once, never edited
-  silently; prefer deleting, since a note that mentions a workaround teaches
-  it), checks each *reported* journal entry's issue with `gh issue view` and
-  `archive_issue`s the ones closed as completed (never `NOT_PLANNED`, never a
-  `kind: "ae-quirk"` entry — those describe After Effects, which a release does
-  not change), then writes the server version back into the marker. After that
-  the history is not loaded again for that project. The detection is
-  client-side and stated in the prompt: at session start compare the recorded
-  version with `serverVersion` from `list_known_issues` (or the first line of
-  any whats-new answer). There are **two** versions that update separately —
-  the MCP server and, in Claude Code, the plugin carrying the skills — and the
-  flow records the server's, because the server is what answers calls.
-
-The generator needed nothing new for any of this: a prompt is a prompt. What
-had to be *added* was the version in the answer, because the guide cannot carry
-it — `packageVersion()` reads package.json at runtime, the same way the journal
-reports it, so it says what the user actually installed.
-
-## Panel version gating
-
-The panel does not update itself, and it ships inside every distribution — so
-"tools newer than panel" is the normal state after any upgrade, not an edge
-case. Before this existed it surfaced as `Unknown op: get_house_style`, which
-tells an agent nothing and usually got retried.
-
-**Two hashes, and they are not interchangeable:**
-
-| | What it is | Where from |
-|---|---|---|
-| installed | the bundle in the CEP extension folder — what AE loads *next* launch | `sha256` on disk |
-| running | the bundle the panel actually `$.evalFile`d — what answers *now* | `bundleHash` on `/health` |
-
-They diverge for the entire window between `setup_panel` and restarting AE,
-which is exactly when calls break. **Only the running hash is worth gating on.**
-`setup/panelVersion.ts` maps the pair onto five states, and the distinction that
-matters most to a user is `restart-needed` — telling someone to run
-`setup_panel` again there wastes their time, so the message says so explicitly.
-
-**Both hashes must identify the code, not the build.** `bundle-jsx.mjs` used to
-stamp `// Generated <ISO timestamp>` into the header, which put a moving value
-inside the thing being compared: two builds of an unchanged tree disagreed, and
-an upgrade touching no ExtendScript still told the user to quit AE and relaunch.
-Nothing in `packages/jsx/` may reach the bundle unless a source changed, so keep
-the concatenation a pure function of the sources — no timestamps, no ids, and no
-unsorted directory reads. `tests/unit/bundle-determinism.mjs` builds twice and
-compares the bytes, and also checks the hash still moves when a source does.
-
-The fifth state, `partial-install`, is checked *before* any of the others,
-because all of them reason from `bundle.jsx` alone and a current bundle says
-nothing about the client files beside it. Callers pass `installComplete` from
-`panelInstallDiff()`; it defaults to `true` so a caller that has not looked
-keeps the old behaviour rather than quietly asserting the install is sound.
-
-Three enforcement points, in order of preference:
-
-1. **The gate in `server.ts`** — one `/health` per session, cached; refuses to
-   forward and returns the remediation. `panelGate.invalidate()` after
-   `setup_panel`, because the disk half of the comparison just changed.
-2. **The `Unknown op:` backstop** — for panels too old to report a hash at all.
-   This is never a false positive: `server.ts` validates tool names against
-   `OpSchemas` before forwarding, so any op the panel rejects is one this server
-   defines.
-3. **`check_setup`'s `panelRunningCurrent`** — the truthful version of
-   `panelUpToDate`, which compares files and therefore goes green the instant
-   `setup_panel` runs, while AE carries on running the old code.
-
-`tests/unit/panel-version.mjs` covers the decision table; CI runs it. Old panels
-predate `bundleHash` entirely, so `undefined` must always mean "too old to say",
-never "matches".
-
-**Install before AE is open.** The panel loads at launch and only at launch, so
-installing while AE is closed costs no restart. `check_setup` reports
-`afterEffectsRunning`, and the guides, the `init-after-effects` prompt and
-`setup_panel`'s description all branch on it. When changing that advice, change
-all four.
-
-**The verdict is about the panel on one port.** Since 0.5.0 the bridge client
-can move (issue #92 — see "The port file is not the authority" under Known
-fragile areas), and a verdict cached about the panel on 7780 says nothing about
-the one now answering on 7777. `createPanelGate` subscribes to
-`bridge.onPortChange` and drops both the verdict and the recheck clock when the
-port changes; `WsClient` follows the same event and reconnects. Anything else
-that ever caches the port, or anything derived from `/health`, must subscribe
-too — the port is the one input to this gate that used to be a constant.
-
-**A self-signed install is a current install.** The #91 workaround leaves
-`META-INF/signatures.xml` and `mimetype` in the extension folder.
-`panelInstallDiff` walks the source tree only, so those are invisible to it and
-`installComplete` stays true; a diff that counted extras would report every
-signed install as `partial-install` and send the user to reinstall, which
-strips the signature that made the panel load. `tests/unit/panel-install.mjs`
-pins it.
-
-## The project scaffold
-
-`init_project` and `npx … init` both call `scaffold()` in `setup/scaffold.ts`.
-The tool exists because **the server writing the files is the only design that
-works everywhere** — Claude Desktop gives its agent no filesystem tools, so
-"tell the agent to write these files" fails there entirely.
-
-Three things it has to get right:
-
-- **Where.** Explicit `dir` → the client's `roots` → `process.cwd()`. It refuses
-  the filesystem root and the home directory outright — **however they were
-  arrived at**, an explicit `dir` included — because Claude Desktop starts
-  servers at `/` and scaffolding there is never what anyone meant. The error
-  tells the agent to ask the user, which is the correct next move. Until
-  2026-09-08 only the cwd fallback was guarded, and the live pass found
-  `init_project({dir: "/Users/x"})` writing `AGENTS.md` and `renders/` into a
-  home directory; `refuseUnscoped()` in `scaffold.ts` now sits behind all three
-  sources, and `tests/unit/scaffold-marker.mjs` pins it.
-- **Which layout.** `server.getClientVersion()` carries the client's name
-  through the MCP handshake, so `detectClient()` picks `CLAUDE.md` vs
-  `AGENTS.md` vs `.cursor/rules/` without asking the user what they are running.
-  `AGENTS.md` is always written; the client-specific file is a pointer to it,
-  never a second copy.
-- **Never clobber.** It checks every path first and writes nothing if any
-  exists. An agent calling this does not know what is already there.
-
-And one line it has to stamp: `AGENTS.md` carries
-`Tools version last absorbed: <version>` under a `## Tool updates` heading —
-the marker the absorb-release prompt reads after an upgrade to fetch only what
-changed since, and rewrites when it is done (see "Release history, and reading
-it once"). The version comes from `packageVersion()` **at call time**, never a
-literal: the marker has to say what the user actually installed, or the first
-absorb pass re-reads releases the project was scaffolded on. It is a plain,
-human-readable line on purpose — designers open AGENTS.md in a text editor, and
-a line they can read is one they will leave alone. The pointer files do not get
-a second copy, for the same reason they are pointers. `ABSORBED_MARKER_PREFIX`,
-`absorbedMarkerLine()` and `absorbedVersionIn()` in `scaffold.ts` are the one
-definition of the line; `tests/unit/scaffold-marker.mjs` asserts it through
-both entry points, and that never-clobber still holds — a re-run silently
-resetting the recorded version to the current one would skip a release.
-
-The house style is deliberately *not* part of the scaffold — see below.
-
-## The house style
-
-`house-style.md` lives next to the `.aep`, and is read and written over the
-bridge by `packages/jsx/style.jsx`, not by the MCP server.
-
-That looks like the wrong layer until you count clients. The bridge is the one
-channel every client has, because the whole product already depends on it.
-Reading the style over it needs no working directory, no `roots`, and no
-filesystem tools on the client — so it works identically in Claude Desktop and
-in a git checkout. A server-side file would need a project folder, and the
-clients that need help most are exactly the ones that do not have one.
-
-The costs, both reported rather than worked around:
-
-- **The project must have been saved once.** `app.project.file` is null until
-  then and there is no folder to write into. `get_house_style` returns
-  `projectSaved: false` with an explanation; `set_house_style` throws it.
-- **`set_house_style` replaces the whole file** and requires `overwrite: true`
-  to replace an existing one. It is not a patch, and quietly half-rewriting
-  someone's hand-written style guide is worse than refusing.
-
-### The summary, and why it is not on the panel
-
-`get_house_style` answers with a digest by default (`detail: "summary"`), and
-returns the document only when asked (`detail: "full"`). The reason is what
-people did without it: an established guide got heavy enough that projects put a
-rule in their own build notes telling sessions *not* to call the tool and to read
-a hand-maintained 40-line digest instead — so the digest and the source drifted,
-and "one cheap call" was neither (issue #59).
-
-**The reading is still over the bridge; only the summarising moved.** Every
-argument in the section above is about *where the file is opened*, and that has
-not changed — the panel opens it beside the .aep and hands back the whole text.
-Summarising is a separate question, and `style/summary.ts` answers it on the
-server for two reasons:
-
-- **The panel does not update itself.** A summariser in the .jsx bundle would be
-  dark until the user reinstalled the panel and relaunched AE, and until then an
-  old panel would return the whole document to a caller that believes it asked
-  for a digest. That is worse than not shipping the feature. Server-side, it is
-  live the moment the server updates, against whatever panel is already running.
-- **ExtendScript is ES3-ish.** This is regex-heavy parsing of a markdown file
-  nobody controls; doing it there would be miserable, and untestable without AE.
-  `tests/unit/house-style-summary.mjs` runs against synthetic documents with no
-  AE and no panel.
-
-Three rules keep the digest honest, and all three are about the same failure —
-a summary that looks complete and is not:
-
-- **Recognising nothing must not return nothing.** A guide written as prose with
-  no headings and no hexes comes back `structured: false` with the *document's
-  own opening* verbatim and a note saying it could not be interpreted. An empty
-  summary would read as "this project has no rules", and the agent would go on
-  to build something plausible in the wrong colours.
-- **Everything dropped is named.** Unrecognised headings come back in
-  `sectionsOmitted`, and the capped buckets are counted in the note. The one
-  section the walk deliberately folds in is `Rules`, because it is in the
-  template this project's own style-guide guide hands out.
-- **UTF-8 has one more place to break.** Recipe 10 exists because the encoding
-  fails *silently*; putting a processing step between the file and the caller
-  adds a place for it to fail. Curly quotes, guillemets, en dashes in a size
-  range and accented font names are asserted through the summariser, not just
-  through the round trip.
-
-`set_house_style` is unchanged: still the whole file, still `overwrite: true`.
-So `detail: "full"` is not optional before an edit — read the document, merge,
-send it back.
-
-## Comp snapshots, and why they live in the server
-
-Verifying a write used to mean reading the comp back — `list_layers`, then
-`get_layer_full` — and comparing by eye. That answer is thousands of tokens,
-and a tool result is re-sent on every later request for the rest of the session,
-so a fourteen-scene build paid for it over and over (issue #52). A fingerprint
-plus a diff is a few dozen tokens for the same three questions: which layer is
-the new one after a `copyToComp` (copies do not land at index 1), where a
-partly-applied `run_jsx` stopped, and whether an assembly landed when
-`screenshot_frame` cannot render it.
-
-**The snapshot is kept in the MCP server, not in the After Effects project.**
-That split is the whole design. Only the panel can read AE, so the gathering
-has to happen there; but writing the fingerprint into the .aep would make a
-*read* tool modify the user's project — a project-panel item or a marker they
-never asked for, in their file and in their undo stack, for scaffolding nobody
-wants to keep. `SnapshotStore` is the other half: besides `JobManager` and the
-write queue's in-flight leases, it is the only thing this server remembers.
-
-The cost is a lifetime of one process, which for a stdio client is one session.
-That is acceptable — nothing needs yesterday's snapshot — but it must never be
-met as a cryptic failure, so `missingMessage()` says why the id is gone, lists
-the ids that *are* held, and names both ways forward (take a fresh one; or read
-the comp back, since a diff can only compare against a snapshot taken
-beforehand). That method is why the store is a class rather than a `Map`.
-
-Three further things hold this honest:
-
-- **`diff:true` on `run_jsx` / `run_batch` fingerprints inside the same call.**
-  A before-snapshot taken by a separate `snapshot_comp` is a second round-trip
-  during which anything can happen, and the agent has to remember to make it. So
-  the before, the write and the after are one bridge call, and the diff logic
-  lives in `snapshot.jsx` where `raw.jsx` and `batch.jsx` can both reach it —
-  each of them gains about six lines and no new contract.
-- **A failed write still gets its diff.** Nothing rolls back, so "where did it
-  stop" is the most valuable question after a throw. `__diffAnnotateError`
-  *mutates* the error's `message` and rethrows the same object, so `line` and
-  `stack` survive for `__mkError` — never build a new Error there.
-- **A diff is the extreme case of a scoped read, so it says what it left out.**
-  `covers` travels with every diff and `snapshot_comp` returns the long form:
-  the fingerprint records ids, names, indices, types, in/out/start, parent,
-  enabled, per-property keyframe counts, expression count and effect count, and
-  no property *values*, expression text, effect parameters, masks or shape
-  contents. Reading "no differences" as "identical" is the failure mode, and it
-  is the same class of lie as a swallowed error. The walk stops there on purpose
-  — a fingerprint that costs as much as the read it replaces is worth nothing —
-  and `tests/unit/comp-snapshot.mjs` puts probes on the effect and shape
-  accessors so a later edit cannot quietly start walking them.
-
-`index` is recorded but never diffed directly: inserting one layer shifts every
-index below it, which would report twenty changed layers for one addition.
-Relative order is compared separately, so a real reorder is reported and an
-insertion is not.
+- **Every op must be classified `write` / `read` / `server`** in `OpMutation`. There is no default — silence would classify it as a read, which is the bug the write queue exists to fix. The build fails if the tables disagree. → [architecture](docs/architecture.md)
+- **A cross-field rule is declared once, with `crossField()`.** `.refine()` is dropped by the converter without a word. → [architecture](docs/architecture.md)
+- **Every emitted tool schema must be valid draft 2020-12.** One invalid schema takes down *every* tool in the session, not just its own, so nothing goes into that emission pass unvalidated. → [server](docs/fragile-areas-server.md)
+- **An undo group must open and close inside one `evalScript` call.** After Effects discards one that spans two, and nothing raises. → [AE](docs/fragile-areas-ae.md)
+- **The panel does not update itself.** Gate on the *running* bundle hash, never the installed one; they diverge for the whole window between `setup_panel` and the next AE launch. → [subsystems](docs/subsystems.md)
+- **Edit `src/guides/*.md` and `src/prompts/*.md`, never the generated outputs.** `plugin/skills/**`, `plugin/commands/**` and `src/generated/content.ts` are owned wholesale and overwritten by the next build. → [guidance](docs/guidance-system.md)
+- **A bounded read must name what it left out.** Absent `include` means everything — except `find_layers`, where the bounded form is the promise. → [server](docs/fragile-areas-server.md)
+- **Three bridge failures, three contradicting remedies.** Timeout, unreachable and write-queue-wait must never share a sentence: one forbids re-sending, one asks for it, one sends the reader to `check_setup`. → [bridge](docs/fragile-areas-bridge.md)
+- **Measure After Effects; do not trust Adobe's documentation.** Undo groups across calls, `CompItem.posterTime`, `$.evalFile`'s scope and `Error.start`/`end` were all documented one way and behave another. → [recipes](docs/verification-recipes.md)
+- **The .jsx bundle must stay a pure function of its sources** — no timestamps, no unsorted directory reads. Its hash is half the version gate. → [subsystems](docs/subsystems.md)
+- **`ws` is always a real directory on disk**, in every packaging path. It can never be inlined. → [server](docs/fragile-areas-server.md)
 
 ## Build + run
 
@@ -730,203 +192,6 @@ Publishing: `npm publish -w @engine-room/after-effects-mcp` (the `prepack` hook 
 `build:jsx` writes the source bundle. With `AE_MCP_SYNC_PANEL=1` it also writes the installed bundle at `~/Library/.../<bundleId>/jsx/bundle.jsx`, so `/reload-jsx` sees fresh content with no manual `cp` step. (If you installed with `--symlink`, the installed path *is* the source path; the sync is a no-op.)
 
 That sync is **opt-in on purpose**. The installed bundle is one half of the panel version gate, so a plain `npm run build` writing it changes what a *live* AE session compares itself against — another session on the same machine, mid-project, gets told to restart After Effects by a build it never ran. Default-off means a build only ever touches the repo.
-
-## Verification recipes (run by hand against a live AE 2026)
-
-1. `list_comps` → JSON array, empty `[]` on fresh project.
-2. `create_comp({name:"t", width:1920, height:1080, frameRate:30, duration:5})` → returns id.
-3. `create_text_layer({compId, text:"hi"})`, then `add_keyframe` at t=0 left and t=2 right, then `screenshot_frame` at t=0/1/2 to confirm motion visually.
-4. `add_effect({compId, layerId, matchName:"ADBE Gaussian Blur 2"})`, `set_effect_param({...paramName:"Blurriness", value:25})`.
-5. `set_expression({propertyPath:["Effects","Gaussian Blur","Blurriness"], expression:"time*10"})`, then `get_layer_full` echoes the expression.
-6. `run_batch` with 50 `create_solid_layer` ops, `transactional:true` → `undoSteps: 1`, and — this is the half only AE can answer — **AE's Edit menu reads `Undo AE MCP Batch`, and one Cmd-Z removes all 50 layers**. Reading the JSON alone is what let this be wrong for three releases: the old code opened no group at all on this path and the result said nothing either way.
-7. `run_batch` with 600 ops → returns `{jobId, chunkSize: 25, undoStepsEstimate: 24}` (inline cutoff is 500) and a `note` saying plainly that it will not be one step **and** naming `await_job` as the call that carries progress. Then the progress, which is a question about *order* and not about presence — the messages were always on the wire, and reading them there without checking what they followed is how issue #82 shipped. Run the client with its stdio logged (or any SDK client passing `onprogress`): `await_job(jobId)` sent with a `progressToken` → `notifications/progress` at ~20/sec, **every one between that request and its response**, the client showing each as it arrives; the response carries the final result with `undoSteps: 24`, after the last of them. The same `await_job` with no token → the same result and no notifications. Then the control: a `progressToken` on the `run_batch` call itself → the envelope and nothing after it on that token; a `notifications/progress` anywhere after that call's response is the bug back. `tests/unit/job-progress.mjs` holds all three against the real SDK client, so a live run is confirming the panel's events arrive in the order the stub sent them, nothing more. In AE: the Edit menu reads `Undo AE MCP Batch (24)`, one Cmd-Z removes 25 layers — not one, and not all 600 — and 24 presses clear the lot. Then the same 600 ops with `singleUndo:true` → no jobId, no progress, AE's interface frozen for the duration, `undoSteps: 1`, and **one** Cmd-Z removes all 600. 2001 ops with `singleUndo:true` → refused, naming the 2000 limit, with nothing created and no new undo step.
-8. `run_jsx("return app.project.activeItem.name")` → comp name. Without the `return` → `{ok:true, returned:null, undoGroup:"AE MCP: run_jsx", note}`, never a bare `null`; same for an explicit `return null`, and `undoGroup:false` in the args flips the `undoGroup` field to `false`. `return 0` / `return false` still come back as `0` / `false` — the envelope is for nothing, not for falsy. With a deliberate error → structured `AeError` with line number.
-9. `log_issue` twice with the same title → one file, `occurrences: 2`, `previouslyLogged: true`. `mark_issue_reported` then `log_issue` again → still `reported: true` (a new sighting must not un-report an entry). The same title once more with `scope:"user"` → a *second* file under `~/.ae-mcp/issues`, `occurrences: 1`, `previouslyLogged: false`, and `alsoIn: ["project"]`. `list_known_issues` → both listed, each tagged, `journals` naming two directories, and `next` quoting a `scope:id`. `list_known_issues({id: "user:<id>"})` → the new one, `reported: false`, while the project one stays reported. From Claude Desktop (cwd `/`) the same calls → the project entry reports `scope: "home"` and the user entry still reports `scope: "user"`; they are different folders and neither is `~/.ae-mcp` for both. Then the 0.5.0 half: open the project file → it carries `kind: tool-bug`, `errorText:` and `firstVersion`/`lastVersion` both equal to the running server version. `log_issue` a **different** title with the same `tools` and an `errorText` that matches the first entry's (numbers and quoted names may differ) → `mergedBy: "errorText"`, the *original* id and title, `occurrences: 3`, a `note` saying the title passed was not used, and **no new file** in `.ae-mcp/issues/`. The same call with a different tool → a new entry; with no `tools` at all → a new entry. `list_known_issues` → every index line has `kind`, `lastSeen`, `lastVersion` and **no `summary`**, and `archivedCount: 0`.
-10. `get_house_style` on an **unsaved** project → `{found:false, projectSaved:false}` with a readable reason, not a throw. Save the project, `set_house_style({content})` → file appears next to the .aep. Call it again without `overwrite` → refuses and names the path. With `overwrite:true` → replaces. Non-ASCII (curly quotes, accented font names) survives the round trip — that is the UTF-8 encoding, and it fails silently if dropped. Open the file on disk: LF line endings, no bare CR (ExtendScript's macOS default is CR, and the round trip hides it — see Known fragile areas). Then the summary: `get_house_style` with no args → **no `content`**, a `summary` with the palette as named hexes, `characters`/`lines` sizing the source, and a `note` naming `detail:"full"`; the same call with `detail:"full"` → the document, byte-identical to what `set_house_style` wrote, non-ASCII included. Replace the guide with a page of prose containing no headings and no hexes → `structured:false`, `head` holding the document's own opening, and a note saying it could not be interpreted — never an empty summary.
-11. `init_project` with no `dir` from a client that advertises `roots` → writes into the client's folder, `resolvedFrom: "client-root"`. From Claude Desktop (cwd `/`) → refuses with a message telling the agent to ask.
-12. Version gate, with AE running an older panel: any forwarded op → the remediation message, not `Unknown op`. `setup_panel` then the same op → "still running the previous version", naming the restart as the only fix. Restart AE → works. (`tests/unit/panel-version.mjs` covers the decision table; this recipe covers the wiring.)
-13. Partial install: with AE **open**, overwrite a client file in the installed panel (`echo x >> …/client/main.js`). `check_setup` → `panelUpToDate` FAIL naming `client/main.js`, and the next steps lead with "quit After Effects" — never "restart and try again". Restore it → green.
-14. Missing dependency: `rm -rf …/games.engine-room.ae-mcp/node_modules/ws`, restart AE. The panel shows "cannot start — the ws module is missing" with the fix in its log, rather than "starting…". `check_setup` → `panelDependencies` FAIL naming the path, not just `bridgeReachable` FAIL.
-15. Scoped reads, on a comp with a keyframed shape layer: `list_layers({compId})` and `list_layers({compId, include: []})` → the second is id/index/name/sourceType only, same layers, same ids. `get_layer_full` with no `include` → byte-identical to before the scoping params existed, save for the shape-layer material groups that recipe 20 covers. With `include: ["transform","bounds"]` → those two sections plus the header, and an `included` echo. With `maxKeyframes: 4` on a property with more → four keyframes, `keyframesOmitted` and a `keyframesTruncated` note naming the count. With `shapeDepth: 1` → `childrenOmitted` on the groups the walk stopped at. `screenshot_frame({compId})` on a 3840×2160 comp → 1280×720 back with `downsample: 3`; the same call with `downsample: 1` → full resolution; the comp's own resolution is unchanged in the viewer afterwards. **Set the viewer to Quarter before running the downsample half of this** — that is issue #72's condition and the whole point: at Full it passes either way. At Quarter, `downsample: 1` must still return 3840×2160 and `downsample: 2` must return the *smaller* of the two, and the Resolution dropdown must read Quarter again when the call is done.
-16. Compiled binary, the one no unit test reaches: run the built binary from an empty directory *and* from `/`, and confirm `setup_panel` installs a populated `node_modules/ws`. Under `bun --compile` the module resolver returns a bare specifier rather than throwing, so this path cannot be exercised under plain Node — see the `require.resolve` note in Known fragile areas.
-17. `import_footage` on an SVG with `viewBox="0 0 278050 333334"` and no width/height → refuses, names both aspect ratios, and the item is **gone** from `get_project_summary`. The same file with `force:true` → the item stays and `validation.ok` is false. A `0 0 512 512` SVG imports clean, and `create_footage_layer` + `screenshot_frame` shows it rendering. (The broken one, forced into a comp, produces no PNG at all — that is the bug, not a tooling failure.)
-18. `export_mogrt` on a comp with a text layer in a non-Adobe font → returns in a few seconds with no dialog in AE, and `fonts` names the font. With `suppressDialogs:false` → a modal dialog appears and the call blocks until it is clicked; that is the control, and it is worth running once because the whole tool rests on it. Called twice with the same `name` → refuses the second, then replaces with `overwrite:true`. On a project that has never been saved → refuses with a message naming the save, not a dialog. Then the empty-panel case, which is a distinct outcome and the one that produced issue #71: on a comp whose Essential Graphics panel is empty → refused in well under a second, `0 Essential Graphics controllers` named, the word "dialog" nowhere in the message, and **nothing** changed in AE — the project is not saved, the comp's template name is untouched and no file appears in the destination. Drag one property into the panel (Window > Essential Graphics, pick the comp, drag a text layer's Source Text in) and the identical call exports. Worth doing back-to-back with the `suppressDialogs:false` control above, because the two failures are the ones that used to share a message.
-19. `.mogrt` thumbnail: give the comp an empty first frame (keyframe every layer's opacity 0 → 100 over the first second), export with no `posterTime` → `thumb.png` inside the zip is solid black. Export again with `posterTime` past the fade → `thumbnail.patched: true` and the frame is in there at AE's own thumbnail dimensions. Unzip and check the *other* entries are byte-identical; a corrupt `project.aegraphic` would not show up in the picture.
-20. Shape reads, on a shape layer with several groups: `get_layer_full({compId, layerId, include:["shape"]})` → no `ADBE Vector Materials Group` anywhere, `materialsOmitted` counting the groups it was dropped from, and every group whose Transform nobody has touched carrying `atDefaults: true` instead of its seven properties. With `shapeMaterials:true` → the 48 properties are back and `materialsOmitted` is gone. A group that is scaled, keyframed or expression-driven must *never* say `atDefaults`. With `shapeDetail:"compact"` → one indented line per group, `[n keys]`/`[expr]` on the animated properties, and a path as `path(7 verts, closed)`. Measured on the layer in issue #42: 13,369 → 3,052 → 643 characters of shape JSON.
-
-21. `run_jsx` error lines, which is the whole of issue #46 and cannot be seen offline. Submit a script whose *fourth* line throws (`comp.property("Nope").setValue(1)`), with three lines of real work above it → the error names line 4 and prints that line's text, and `list_layers` confirms the three lines above it landed. Run it again with the same throw moved to a different line → the reported line moves with it. Then submit a one-line script that throws → the line is 1, never 22. **The specific wrong answer to watch for is line 1 with line 1's text and the true number in the parenthetical afterwards** — that is `e.start`/`e.end` being read as offsets when AE 2026 reports them as 0 on every error, and it is how #46 shipped "fixed" and was not. If a case comes back with "does not fall inside", that is the honest outcome, not a regression: read what `rawLine` said and work out what AE was counting from.
-22. `scriptPath` and `libraries`: write `/tmp/rig.jsx` containing `function rig(c){ return c.name; }` and `/tmp/scene.jsx` containing `return rig(app.project.activeItem);`. `run_jsx({scriptPath:"/tmp/scene.jsx", libraries:["/tmp/rig.jsx"]})` → the comp name, with neither file's text in the conversation. This is the whole point of the recipe: the first implementation of `libraries` — written for this same release and corrected before it shipped — answered `Function rig is undefined` every time, because `$.evalFile` scopes a library to the loader that called it. Edit `rig.jsx` to return `c.name + "!"` and call again → the new answer (there is no cache to invalidate — a library is re-read and re-evaluated on every call). Now the line numbers, which is where this meets #46: put a throw on line 2 of a **three**-line `scene.jsx` with a two-line `rig.jsx` loaded → the error says line 2 of `scene.jsx`, with AE's own number (4) shown beside it. `run_jsx({scriptPath:"scene.jsx"})` → refused for being relative; a missing path → refused naming it; `code` and `scriptPath` together → refused. Break `rig.jsx` with a missing brace → "failed to parse", naming `rig.jsx` and a line of *it*, and the script must not have run at all.
-23. Helpers, against a real comp: `run_jsx({code:"var l = shape(app.project.activeItem, {name:'Card'}); return l.property('Transform').property('Position').value;"})` → `[0,0]`, not the comp centre. Then `addKeys` two keys on Opacity and `ease(prop, 2, 60)` → returns 1, and `get_layer_full` shows the ease on the keys. Do the same on a shape's Ellipse **Size** and **record what comes back** rather than asserting it: #50 measured 3, the 2026-09-08 pass measured **2** through `ease()` and `set_temporal_ease` alike on 26.3x87, and the returned number is the only evidence there is for a given property. What a live run cannot see is which sizes were *tried* — `ease` returns the one that worked and nothing else — so the ladder is asserted in `tests/unit/run-jsx-helpers.mjs` and nowhere else. If this call returns something other than 3, that is a real measurement about that property and belongs here and in recipe 25, not a bug in `ease`.
-24. Write serialization, which needs a live AE because the failure it prevents is in AE's undo stack and nowhere else. Issue two writes in one turn — `create_solid_layer` and `create_text_layer` on the same comp — and check the second result carries `queuedBehind: "create_solid_layer"` and a `waitedMs`, while the first carries neither. Then the real one: `run_batch` with 600 ops (past the 500 inline cutoff) and, in the *same* turn, a `set_transform`. The batch returns its `{jobId}` immediately; the `set_transform` must not return until the job does, and AE's Edit menu afterwards must show the batch's **24** steps — `AE MCP Batch (1)` … `(24)` — contiguous, with the transform as a single separate step *after* the last of them and none of them interleaved. (Before #69 this recipe asked for one step and got ~600; the steps were never one, and the interleaving it is really testing is the ordering, not the grouping.) Reads are the control: `list_layers` issued alongside the running batch returns straight away, and `await_job` on the batch resolves rather than hanging (it would hang if it queued). Repeat once with `singleUndo:true` on the batch: the transform must still land after it, and the batch must now be a single step.
-25. Ease sizing, the three properties that used to fail in a row: `add_keyframe` twice on **Opacity**, then `set_temporal_ease` on it → `easeDimensions: 1`. Same on a 2D layer's **Scale** → `3`. Same on a shape group's **Ellipse Size** → `2` (measured — and note it is the *Scale* that wants three while its value reads `[x,y]`, and the Ellipse Size that wants two while its value reads `[w,h]`; both are the opposite of the sensible guess, which is the whole reason the ladder exists). Same on **Position**, 2D and then with the layer set 3D → `1` both times. `get_keyframes` echoes the influence and speed on each, and the easing is visibly non-linear in the graph editor. `set_temporal_ease` with neither `easeIn` nor `easeOut` → refuses rather than returning `ok`.
-26. Shape spawn point: `create_shape_layer({compId})` on a 3840×2160 comp → `position: [0,0]`, `anchorPoint: [0,0]` in the result. `add_shape_content` a rect of `size:[400,200]` with `position:[400,200]`, then `screenshot_frame` → the rect is near the top-left, centred on (400,200) in comp pixels, not half a frame away. The same sequence with `create_shape_layer({compId, position:"center"})` → `position: [1920,1080]` and the rect renders at comp centre + (400,200), which is AE's old behaviour. `position:"middle"` → refused, no layer created.
-27. `place_audio_cues`, on a comp with a few seconds of room: nine cues naming the same .wav at different times → nine layers, **one** new project item, one undo step (Cmd-Z removes all nine). Levels: pass `levelDb:-6` on one and read the Audio Levels property back — `-6, -6`, and the layer is audibly quieter on a RAM preview. Call it again on a project that already holds that .wav → `sources.reused` names it and nothing new is imported. `dryRun:true` on a list with one typo'd path → `ok:false`, the bad cue named by index in `problems` and nothing else echoed — counts, `wouldImport`, `wouldReuse` and **no `cues` list** (#88) — no layers, no imports, and **no new step in AE's undo history**. Point one cue at a still image already in the project → refused before anything is placed, naming "has no audio track". Then the rollback, which is the one worth doing deliberately: take a 90-cue list, make cue 60 impossible (an `outPoint` far past the end of a short file, say), run it → the call fails naming cue 60 and the timeline has **zero** new audio layers, not 59.
-28. `snapshot_comp({compId})` on a comp with a few layers → a `snapshotId` and a handful of fields, **no fingerprint** (add `includeFingerprint:true` to see it). Add a layer and keyframe its Opacity, then `diff_comp({since})` → the new layer's id and name, `layer N Opacity keys 0 → 4`, `unchangedLayers` counting the rest, and nothing at all about them. `diff_comp` again immediately → `changeCount: 0` and a summary that says the recorded fields did not move rather than "identical". Reorder two layers → `reordered` names those two; add a layer at the top instead → **no** `reordered` and no `changed`, even though every index below it shifted. `diff_comp({since:"snap_999"})` → the store's message, naming the ids it does hold. Restart the MCP server and reuse an old id → the same message, not a crash.
-29. `diff:true` on the write ops: `run_jsx({code:"…create three layers…", diff:true})` → `{ok, returned, diff}` with the three ids, in one call. The same script with a deliberate throw half-way → the error message carries `|| Changed before it stopped: 1 layer added…` **and** still reports its line number. `run_batch({ops:[…], diff:true})` across two comps → a `comps` array with one diff each. With no `compId` anywhere in the call and no comp open in the viewer → `diff.unavailable` naming `diffCompId`, and the call itself unaffected.
-30. `duplicate_comp({compId})` on a comp with a precomp layer → new id, name `<name> 2`, and the copy's precomp layer resolves to the **same** nested comp as the original (that is the shallow contract; the result says so). The same call with `deep:true` → the copy points at its own nested comp, editing that one leaves the original alone, and a nested comp used by three layers is duplicated **once** with all three re-pointed at it. `folderId` pointing at a comp instead of a folder → refused, naming the id and what it actually is, with nothing created. `nameSuffix:" [v2]"` where `<name> [v2]` already exists → the copy gets `… [v2] 2`, and the existing item keeps its name.
-31. Frame integrity, on the comp that produced issue #45 — a heavy assembly, ~88 layers: a nested full-frame background precomp plus several shot precomps, at 4K. Build one if there isn't one: a 3840×2160 comp, a 1080p precomp scaled to fill with a blur and a glow on it, then six shot precomps each holding a dozen keyframed shape and text layers, all nested in. `screenshot_frame({compId})` → an image, or a message that says which of the two failures it was — never `truncated PNG` reaching the client, and never a picture that is a picture of something else. Repeat it four or five times at downsample 4, 6 and 8; if any call fails it must fail as **Corrupt frame** or **Render timed out**, with different advice under each, and a second failure at a different time must still say the same thing rather than turning into `Stale frame`. Watch the panel log: a corrupt read logs "re-rendering once", exactly once per call.
-32. Contact sheet: on a comp with something moving across the frame, `screenshot_frame({compId, times:[0, 1, 2]})` → **one** image, three cells left to right, `0s`/`1s`/`2s` burned into the top-left of each, `cols:3 rows:1`, and `tiles` naming each time and status. The sheet should be about the size a single `screenshot_frame` of that comp returns — compare `bytes` against one. `times` plus `time` in the same call → refused by the schema before it reaches AE. `times:[0,1,2], downsample:1` on a comp whose viewer is at Quarter → full-resolution tiles, so an explicit factor still wins over the Resolution dropdown (#72; every tile goes through the same `__saveFrameAt`). On a comp with a **static** first second, `times:[0, 0.3, 0.6]` → three tiles, all `ok`, with `pixel-identical to the 0s tile` in the notes and no `Stale frame` error. On the heavy comp from recipe 31, expect a `FAILED` block sooner or later: the other tiles must still be there and `warning` must name the one that is not.
-33. `reorder_layer`, which had never once succeeded before 0.4.0 (#70). On a comp with four named layers, top to bottom A B C D: `reorder_layer({compId, layerId: D, toIndex: 2})` → the timeline reads A D B C and the result says `index: 2, movedFrom: 4`. `reorder_layer({compId, layerId: A, toIndex: 3})` → B C A D, `index: 3` — this is the direction that used to be off by one in every hand-rolled version, so check the panel and not just the response. `toIndex: 1` and `toIndex: 99` → front and back, no error on the out-of-range one. Then the id forms, which is what an agent should be reaching for: `beforeLayerId` puts the layer directly **above** the named one and `afterLayerId` directly below it, and naming the moved layer as its own destination is refused with nothing changed. `toIndex` together with `beforeLayerId` → refused by the schema before it reaches AE. Each successful call is **one** undo step. Nothing anywhere may report `parent is not an INDEXED_GROUP`.
-34. Progress on a batch that is genuinely still running, which the stub bridge in `tests/unit/job-progress.mjs` cannot produce — it emits its events on command and the job is over the moment the test says so. `run_batch` with 1000 `create_solid_layer` ops (40 chunks, long enough to watch), then `await_job({jobId, timeoutMs: 1500})` with a `progressToken` → progress arrives while it waits, the call fails at 1.5s naming the timeout, and **the batch carries on in AE** — layers keep appearing — while the logged stdio stream shows no further `notifications/progress` on that call's token after its error response. Then `await_job({jobId})` again, a fresh token → progress resumes from wherever the batch has got to, every notification before the response, and the response carries `undoSteps: 40`. `get_job({jobId})` in between → the current `progress`, no notifications. Finally the same 1000 ops with `singleUndo:true` and a token on `await_job` — there is no job, so `await_job` has nothing to wait for; the point is that `run_batch` itself returns the result with no `jobId`, no envelope note and no progress at all, and AE's interface is frozen until it does.
-35. `delete_comp` and the solids it leaves (#83). Build comp A with three solid layers, two of them on the **same** solid (`duplicate_layer` one of them), plus one solid that a second comp B also uses (`create_solid_layer` in A, then a `run_jsx` `copyToComp` of that layer into B, and confirm with `get_project_summary` that both comps' layers point at one item). `delete_comp({compId: A})` → `unusedSolidsLeft: 1` with a note naming `purgeUnusedSolids:true`, and the Project panel's Solids folder still shows every item. Cmd-Z, then `delete_comp({compId: A, purgeUnusedSolids: true})` → `removedSolids` names A's own solid **once**, not twice; `keptSolids` names the shared one with B's id in `usedIn`; the Solids folder is down to the shared item; and **one** Cmd-Z brings back the comp and the removed solid together. This is the half only AE can answer: whether `usedIn` already reads empty in the same call as `comp.remove()`. If `removedSolids` comes back empty and `keptSolids` names the *deleted* comp, `usedIn` is stale within the call and the purge needs a different signal — that is the finding, not a tooling failure. Measured 2026-09-08 on 26.3: `usedIn` is current within the call — `removedSolids` named A's own solid once, `keptSolids` named the shared one with B, and one Cmd-Z restored both.
-36. `purge_unused_footage`, on a project with a few orphaned solids, an imported file no comp uses, and a nested comp nothing uses: `dryRun:true` → `wouldRemove` lists the solids with `kind: "solid"`, `scanned`/`inUse` add up to the solid count, nothing in the Project panel changes and **no new step appears in AE's undo history**. Without `dryRun` → `removed` is the same list in the same order, the Solids folder is down to the used ones, and one Cmd-Z restores the lot. Then the boundaries: the unused file survives the default and goes with `solidsOnly:false`; the unused nested comp survives both (it is not footage — AE's own Remove Unused Footage leaves it too); an offline file is listed with `footageMissing: true`; `folderId` of the Solids folder scopes the sweep and a comp id passed as `folderId` is refused naming what it is. On something the size of the 1,863-item project from the issue, note the wall-clock time — one `usedIn` per item — against the 300s slow-op budget, because that is the number `SLOW_OPS` membership rests on.
-37. `find_layers` bounding (#87), on a project with two or more comps and a few layers sharing a name fragment: `find_layers({namePattern:"hero"})` → `{matches, count, compsSearched, included: []}`, every match carrying **only** `id`, `index`, `name`, `sourceType`, `compId`, `compName` — no `inPoint`, no `enabled`, no `parent`. `include: ["timing"]` → the four timing fields added to every match and `included: ["timing"]`; `include: ["flags","timing","parent"]` → field-for-field what `list_layers` returns for the same layers with the same `include`, plus the two comp fields. `include: ["transform"]` → refused by the schema before it reaches AE (that is a `get_layer_full` section). `type:"shape"` and `hasEffectMatchName` still filter on the bounded output. Compare the token cost of the default against `list_layers({include: []})` on the same comp — the search should now cost about the same per layer, which is the whole point.
-38. Justification read-back (#93/#94), which needs AE 26.3 because the misbehaviour has only been seen there. `create_text_layer({compId, text:"Left", anchorAlign:"left", position:[110, 500]})` → result carries `justification: "left"` and `justificationReasserted: false`. Then `set_text({compId, layerId, text:"Retyped"})` — text only — and **read the result before the screenshot**: on the build that produced #93 expect `justificationReasserted: true` with `justification: "left"`, and the layer must still start at x=110 in `screenshot_frame`, not span the frame centre. `get_layer_full include:["text"]` → `justification: "7413"`. Now the other report: `create_text_layer({anchorAlign:"center", font:"<any non-default font>", size:64})` → either `justification: "center"` (with `justificationReasserted` saying whether the second write was needed — **record which**, it is the only measurement of #94's mechanism there is) or a throw naming `expected center (7415)` and what the layer reads, with **no new layer** in the comp afterwards. Run `set_text({justification:"center"})` on an existing layer as the control; #94 says that one lands first time. `set_text({justification:"middle"})` → refused. A `run_batch` step with the same bad name → refused by the handler, `Nothing was changed`, no undo step. Every successful `set_text` is still one undo step — the reassert, when it fires, is inside the same group.
-39. `expressionError` (#97). `set_expression({propertyPath:["Transform","Position"], expression:"wiggle("})` → **throws**, the message naming `Transform > Position`, carrying AE's own error text (the same sentence the yellow banner shows in the timeline), and ending with the two ways forward; the expression is still on the property afterwards — `get_expression` → `expression: "wiggle("`, `expressionError` non-empty, and `enabled` reporting whatever AE did with it. `clear_expression` → `expressionError: ""`. `set_expression` with `wiggle(2, 30)` → `{ok:true}` and `expressionError: ""`. Then the measurement the offline test cannot make: from `run_jsx`, assign a broken expression to a property, set `expressionEnabled = true`, and read `expressionError` **without** touching `.value` — if it is already populated, the nudge in `__expressionError` is belt-and-braces; if it is empty until `.value` is read, the nudge is load-bearing and the fragile-areas bullet should say "measured" rather than "implied". Measured 2026-09-08 on 26.3x87: already populated before `.value` is read, so the nudge is belt-and-braces. A reference to a layer that does not exist (`thisComp.layer("Nope").transform.position`) is the second case worth running: it evaluates rather than parses, so it is the one a parse-time-only report would miss. `toggle_expression({enabled:true})` on a property carrying a broken expression → throws worded "was enabled"; `enabled:false` → ok, silently, as before.
-40. `place_audio_cues` options (#85), which are the three things no offline test can hear. On a 30s comp with a 2s ambience file: one cue `{path, time: 1, loop: true, fadeIn: 2, fadeOut: 3}` → one layer whose bar runs 1s to 30s, Time Remap enabled with **exactly the two keys AE made** still on it and the expression `(time - startTime) % thisLayer.source.duration` showing no error badge in the timeline; a RAM preview plays the bed continuously to the end of the comp, rising over the first 2s and falling over the last 3s. `get_keyframes` on Audio Levels → four keys at 1, 3, 27 and 30 reading -48 / 0 / 0 / -48 dB, and the result carries `looped: true, outPoint: 30, fadeIn: 2, fadeOut: 3` and `fadeFloorDb: -48` at the top. Then `{time: 5, stretch: 200}` on a short hit → `stretch: 200` and an `outPoint` twice the file's length past 5s, the layer bar **starting at 5s in the timeline** — that is the `startTime` re-assertion; #85 reports that AE moves it and which point it holds was never measured, so **write down what you see** in the fragile-areas bullet — and the hit audibly lower and longer on preview. `{time: 8, loop: true, stretch: 200, outPoint: 14}` → the expression carries `* 100 / 200` and the bed plays at half speed to 14s, no faster. `levelDb: -6` with `fadeIn: 1` → the ramp ends at -6, not 0. `fadeIn: 5` on the 2s file with no loop and no `outPoint` → refused **after** the import: `0 layer(s) and 1 import(s) … removed`, and the project panel is back to what it was; the same call with `dryRun: true` → `ok: true` and `unverified` naming the fade, because the length is not knowable until AE has the file. Last, the control from #86, in `run_jsx`: enable time remap on any audio layer, remove both keys, then `setValueAtTime` on it → throws. That is why the tool leaves them.
-41. The absorb flow, end to end, which needs a live client because the edits it proposes land in a real project's docs. `init_project` into a fresh folder → `AGENTS.md` carries `Tools version last absorbed: <the server's version>`, and `ae_guide({topic: "whats-new", since: <that version>})` → one line, `Nothing newer than …`, no preamble. Now edit the marker down to `0.3.1` and add a line to `AGENTS.md` reading `run_batch is one undo step, so batch everything`. Run the `absorb-release` prompt (`/after-effects:absorb-release` in Claude Code) → it reads the 0.4.0 section and every section after it, and nothing older; it finds that line, shows it beside the 0.4.0 rule, and asks **before** touching it; it proposes deleting rather than rephrasing; after a yes the line is gone and the marker reads the server's version, not the newest section's (the two differ on a dev build, and it is the server's that must be written). With `gh` signed in and a *reported* journal entry whose issue is closed as completed → `archive_issue` is called with the URL as the reason; one closed as not planned is left alone and said so. Run the prompt again immediately → "up to date", no edits proposed, no journal calls beyond the listing. Then the two-version case: `ae_guide({topic: "after-effects", since: "0.4.0"})` → refused, naming the whats-new topic, and the `after-effects` topic without `since` → unchanged, no version header.
-42. Push on failure and the exits (#102), which need a live AE only for the failure itself. `log_issue({title:"run_jsx cannot see the helpers", tools:["run_jsx"], errorText:"nope is undefined", symptom:…, workaround:…})`, then `run_jsx({code:"nope.boom();"})` → the error still begins `AE: nope is undefined` with its line, and **ends** with `Known from earlier sessions: project:run-jsx-cannot-see-the-helpers — run_jsx cannot see the helpers` and a `list_known_issues({ id: "project:…" })` line; a *successful* `run_jsx` right after carries no such block, and neither does a `run_jsx` that throws something else. The entry's file now shows today's `lastSeen`. Then the exits, by hand-editing the file (that is supported): set `lastSeen` 31 days back → `list_known_issues` hides it, `archivedCount: 1`, `next` names `includeArchived`; `list_known_issues({id})` still opens it with `archived: true` and `archivedReason: "not seen for N days"`; `includeArchived: true` lists it flagged; throw again → the pointer still names it **with `(archived: not seen for N days)`**, and afterwards the entry is back in the index with today's `lastSeen` — nothing un-archived it, the verdict is computed. Set `lastVersion: 0.0.1` → hidden, the reason naming both versions; add `kind: ae-quirk` → visible again with the same `lastVersion`; delete the `lastVersion` line entirely → visible (unknown is not older). `archive_issue({id, reason:"already closed upstream: https://…"})` → hidden, the file gains `archived: true` + `archivedReason` + `archivedAt`, the next throw's pointer says `(archived: already closed upstream: …)`, `mark_issue_reported` on it leaves it archived, and `log_issue` with the same title → `reopened: true`, `previousArchiveReason`, listed again with `reported` and `issueUrl` intact. From Claude Desktop (cwd `/`) the pointer names `home:<id>`. Finally the sort: with two entries about `set_text`, one naming it in `tools` and one only in its title with `occurrences: 99`, `list_known_issues({tool:"set_text"})` puts the `tools` one first.
-43. Port drift, the server half (#92). With AE open and the panel ready on 7777, write `7780` into `~/.engineroom-ae-mcp/port` and start a fresh MCP session → stderr says `Bridge not reachable yet … 7780` and then `Bridge port changed: 7780 -> 7777`, and the first `list_comps` works with no retry visible to the agent. `check_setup` from that session → `bridgeReachable` responding on 7777 with the detail naming the stale file, `portAgreement` OK naming 7777. Then the pinned case: start a second server with `AE_MCP_PORT=7780` → every op fails `Cannot reach … 7780` and the message names the pin as the reason no other port was tried; `check_setup` from it → `bridgeReachable` OK on 7777, `portAgreement` FAIL naming both 7780 and 7777 as *pinned*, and `nextSteps` opens with "Do not restart After Effects" and says retrying will not help — change or unset the pin and reconnect. Then a long batch across the switch: with the file stale again and a fresh server, `run_batch` with 600 ops as the very first call → returns its `{jobId}`, `await_job` resolves — that is the WS client having followed the port — and a `set_transform` issued alongside lands after the batch. Restore the file afterwards, or let the panel overwrite it on the next launch.
-44. The zombie, the panel half (#92). Before launching AE, run a stub that answers `/health` on 7777 in the panel's own shape (`node -e 'require("http").createServer((q,r)=>r.end(JSON.stringify({ok:true,port:7777,bundleLoaded:true,bundleHash:"stub"}))).listen(7777)'`), then open AE → the panel's own window (Window > Extensions > AE MCP Bridge) reads `waiting — port 7777 is held by another AE MCP panel`, the log names bundle `stub` as a DIFFERENT version, names CEPHtmlEngine and `allowPortWalk`, and the port file is **untouched**. Kill the stub → within a few seconds the panel reads `ready` on 7777 with no restart, and the file reads 7777. Repeat with `python3 -m http.server 7777` in its place → the panel walks to 7778, the log says `held by something that is not an AE MCP panel … moving to port 7778`, the file reads 7778, and a fresh server finds it through the file (`check_setup` → responding on 7778, `portAgreement` OK). Then the port file: with the panel on 7777, quit AE normally → the file is gone (measured 2026-09-08, on 7777 and after a walk to 7778 alike — CEP does fire `unload`). Finally the opt-in: with the panel ready, write `{"allowPortWalk": true}` to `~/.engineroom-ae-mcp/config.json`, keep a stub in the panel's shape on 7777, relaunch AE → ready on 7778 with `allowPortWalk is on` in the log. Delete the config afterwards.
-45. Windows, CEP's signature check (#91) — nobody on this project has run this; a user has. On a Windows 11 machine with AE 2026 where the panel does not load (AE open, no `CEPHtmlEngine.exe` in Task Manager, nothing on Window > Extensions > AE MCP Bridge): `check_setup` → `bridgeReachable` FAIL, and if `%TEMP%\CEP12-AEFT.log` holds the refusal, `panelSignature` FAIL quoting the line and the file, with `nextSteps` being the ZXPSignCmd steps, no "reopen" before step 5 and `Run the setup_panel tool` nowhere. If there is no log yet: `nextSteps` names the exact `reg add … LogLevel … 6` command; run it, relaunch AE, `check_setup` again → the finding. Sign per the steps → the panel loads; `check_setup` → `panelInstalled` detail carries `(self-signed: META-INF present)`, `panelUpToDate` OK, `panelRunningCurrent` OK. `setup_panel` → `signedInstallOverwritten: true` with the note, and the panel stops loading again until re-signed. **Record the log file's actual name** — the issue reports `CEP12-AEFT.log`, Adobe documents `csxs12-AEFT.log`; `cepLogPaths()` matches both, and a third form means adding it to `CEP_LOG_NAME`. The macOS mirror is the same sequence against `~/Library/Logs/CSXS/` with `defaults write com.adobe.CSXS.12 LogLevel 6`, and a healthy Mac install should show `panelSignature` with `evidence: "log-clean"` on a silent bridge, never a false finding.
-46. CEP LogLevel, both platforms. On a machine where `LogLevel` was never set (`defaults read com.adobe.CSXS.12 LogLevel` errors / `reg query` finds nothing), `setup_panel` → `actions` includes `Set CEP's LogLevel to 6 for CSXS 12, 11, …`; read it back → 6. Run `setup_panel` again → no such action, and a value hand-set to `0` beforehand is still 0 afterwards (present means kept, even when it is off). Relaunch AE → the log directory gains an `…-AEFT.log`; note which prefix it uses.
-
-## The issue journal
-
-`log_issue` is how one session hands a hard-won workaround to the next. Until 0.5.0 the hand-over was *pull*: every session was told to read the journal before nontrivial work, so its cost landed on every session and scaled with the size of a journal that only ever grew — one week of one project produced twelve user-scope entries, two of them the same bug under different slugs, with permanent After Effects quirks sitting beside tool bugs a release had already fixed (issue #102). It is now *push*: a failed call names the entries that match it, an entry has exits, and a re-log of the same error lands in the same entry. Eleven properties matter, and all eleven are things it would be easy to get wrong:
-
-- **The folder ignores itself.** `ensureJournalDir` writes `.ae-mcp/.gitignore` containing `*` on first use, in *both* journals. That is what keeps them untracked — not a rule in the project's `.gitignore`, which most of these folders do not have, and which the ones that do would have to remember to add. The user journal gets one for the same money: `~/.ae-mcp` is usually outside any repository, but a home directory that *is* one (dotfiles) is exactly where committing a private journal of half-diagnosed failures would be an unpleasant surprise.
-
-- **There are two journals, and the folder is the only thing that decides which is which.** `<project>/.ae-mcp/` holds what is true about *this* project — its footage, its comps, its files. `~/.ae-mcp/` holds what is true about the tools and about After Effects, and is read alongside the project one so a new project folder does not start ignorant of everything the last one worked out (issue #57). `log_issue` defaults to `project` and takes `scope: "user"`; `list_known_issues` merges both and tags every entry. The scope is **not** written into the file's frontmatter: these files are meant to be hand-edited and moved, and a `scope:` key could be edited into disagreeing with where the entry actually lives.
-
-- **The home fallback is not the user journal, and keeping them apart is the whole design.** `home` — `~/.after-effects-mcp/`, used when there is no usable working directory — is the *project* journal with nowhere to sit. Merging it into `~/.ae-mcp/` would be one line and would mean every Claude Desktop session's notes about one project's footage arriving in every other project dressed as curated cross-project knowledge. They stay separate directories, `scope: "home"` keeps saying what it always said, and `scope: "project"` on a read — like a `project:<id>` handle — covers the fallback because that is what the fallback is. `AE_MCP_HOME` has to sandbox *both* or a test writes into whoever ran it, so it puts the user journal in a child of the override.
-
-- **The title is the identity, and it is only unique within a journal.** It is slugified into the filename, so re-logging under the same title extends the entry rather than adding a near-duplicate. Two journals can hold the same slug, and both are listed — hiding one would lose whichever the reader needed. A bare id still resolves, project first, and names the other in `next`; `"user:<id>"` addresses one exactly, and falls back to the whole string as a bare id so a title that happens to begin "user:" stays reachable.
-- **Reporting state belongs to the entry, not the sighting — and to the entry *in its own journal*.** Re-logging a known problem preserves `reported`, `issueUrl` and `firstSeen`, and a `cause` worked out once survives a later sighting logged without one. Otherwise the user gets asked to report the same thing repeatedly, which is the fastest way to make them stop reading the offer. The same lesson written down in both journals is two records of two claims: sending one to the maintainers says nothing about the other, so `mark_issue_reported` moves exactly the one its id names. Archive state is a third, separate fact: `mark_issue_reported` on a retired entry leaves it retired.
-- **The files are meant to be hand-edited.** `parse()` is deliberately forgiving: missing keys, reflowed text and deleted headings degrade one entry instead of failing the whole journal. A file with no recognised headings keeps its text as the symptom rather than being read as empty. A file with none of the 0.5.0 keys loads as a live `tool-bug` with no version and no `errorText`; `archived: true` is the one line a hand-edit needs to retire an entry, and deleting it un-retires. `render` writes the archive keys only on a retired entry, so an ordinary file keeps its shape.
-- **The listing is an index, not the corpus.** `listIssues` returns one line per entry by default — id, scope, title, tools, kind, `lastSeen`, `lastVersion`, counts — and the body is fetched with `id`. The clipped summary sentence it used to carry is gone: the title is the summary, and the sentence roughly doubled every line for something the title already said. Entries naming `tool` sort ahead of ones that only mention it in the title, then most recent first, then most recurring. The failure mode to guard against is an index that leads nowhere, so the `next` pointer names the call that opens the first entry, spelled in the qualified `scope:id` form. Merging two journals doubles the listing, so `limit` defaults to 50 (500 is the ceiling the schema allows) and anything held back is counted in `omitted` and repeated in `next`. `tests/unit/issue-journal.mjs` asserts all of it.
-- **The same tool with the same error text is the same bug, whatever it was called.** Agents used to be told to `list_known_issues` before logging so they would reuse the title; they did not, reliably, and the journal forked. `logIssue` now looks for a twin when the title is new: an entry *in the same journal* whose `tools` overlap the call's and whose `errorText` matches (see the matcher below). It extends that entry — the existing id and title stay, since the title is the id and the one the index has been showing — and the result says `mergedBy: "errorText"` with a `note` that the title passed was not used. No `tools` or no `errorText` means no twin search; the merge never crosses journals, for the same reason reporting state does not. `tools` are unioned on any merge, and `errorText` is recorded on the entry, so an entry that predates the field acquires one the first time it is re-logged. The matcher is shared with the failure path on purpose: both must agree on what "the same error" means, or an agent would be told a failure is known and then fork it on logging.
-- **Every entry says what it is and when it was last seen on what.** `kind` is `tool-bug` (default — something these tools get wrong, which a release may fix) or `ae-quirk` (After Effects behaving unlike its documentation, which no release of this server changes). `firstVersion`/`lastVersion` are the server version at the first and latest sighting, written by `log_issue` and moved by a failure match. That stamp is what makes "stale" visible at all; without it there is no way to tell an entry a release fixed from one that is still biting.
-- **An entry has three exits, and only one of them is written down.** `archiveReason()` decides, on every read, whether an entry is hidden: (1) `archive_issue` retired it — `archived: true`, `archivedReason`, `archivedAt` in the frontmatter, the file kept; (2) `lastSeen` is `ARCHIVE_AFTER_DAYS` (30) or more days ago; (3) it is a `tool-bug` whose `lastVersion` is semver-older than the running server, so it is presumed fixed until seen again — an `ae-quirk` is exempt, and so is an entry with **no** `lastVersion`, because unknown is not older (see "Known fragile areas"). (2) and (3) are computed, never written into the file, which is what lets a fresh sighting bring an entry back without anyone un-archiving it: a failure match or a re-log moves `lastSeen`/`lastVersion` and the verdict flips by itself. `list_known_issues` hides archived entries, always reports `archivedCount`, says in `next` how to see them, and lists them flagged with the reason under `includeArchived: true`; a read by `id` always returns the entry, archived or not, because the failure pointer names archived entries and has to lead somewhere. A deliberate `log_issue` that lands on a retired entry (same title, or same tool and error text) clears the flag and answers `reopened: true` with `previousArchiveReason` — the entry was archived as gone, and here it is. A failure *match* never clears it: a match is not a person deciding the problem is live again, so the pointer says `(archived: <reason>)` and leaves the decision to the agent.
-- **A failed call is answered with the entries that match it.** `issues/failures.ts` is the push half. `server.ts` routes every failure-path `errorResult` in the tool-call handler — schema rejections, `run_jsx` source resolution, write-queue refusals, bridge timeouts and unreachables, `AeError`s — through `fail(name, message)`, which appends one `Known from earlier sessions: <scope:id> — <title>` line per match (`MAX_MATCHES` = 3, most recently seen first, the overflow counted) and a `list_known_issues({ id: "<scope:id>" })` pointer. A match is a sighting: `lastSeen` and `lastVersion` move, best-effort and silently. Three rules hold it: it **never throws and never masks the error** (a journal it cannot read logs to stderr and the message goes back untouched; the test points `AE_MCP_HOME` at a file where the directory should be); it is **cheap** — `JournalCache` re-parses only a file whose size or mtime changed, keyed per *file* because a directory's mtime does not move on an in-place rewrite, which is what every `mark_issue_reported` is; and it is **wired**, which `tests/unit/issue-journal.mjs` proves by running the real server against a stub bridge that fails `set_temporal_ease` with a known error and reading the pointer out of the client's result. The panel-version gate's message and `Unknown tool` are deliberately not annotated.
-- **Matching is on the letters of the message.** `normalizeErrorText` cuts the server's own decorations first — the `AE:` prefix, `(line N)`, the mapped-line and "nothing rolls back" lines `aeErrorText` adds, a `diff:true` annotation, and a `Known from earlier sessions:` block, since the natural thing to paste into `errorText` is the whole tool error, pointer included — then drops paths, quoted spans, digits, punctuation, case and whitespace. Two texts match when equal, when one is a prefix of the other and the shorter is at least 20 letters (so `ae` matches nothing), or when both are at least 60 letters and agree that far (so every `Invalid arguments for <tool>` rejection does not fold into one — asserted). An entry with no `errorText` — every file from before 0.5.0 — is matched on its symptom instead, by containment of the failure's opening, with the symptom's quotes *kept* as well as stripped because the error is usually sitting inside a pair of them. The tool must match too, case-insensitively, in both directions.
-
-The user-facing half is the offer to report. It lives in exactly two places: the `log_issue` **tool description** carries the minimum (finish the work first, phrase it for a non-programmer, don't say "GitHub issue"), and `src/prompts/report-ae-issue.md` carries the full flow — which since #100 checks the tracker with `gh issue list`/`gh issue view` before drafting, calls `archive_issue` on an entry a *closed* report already covers and `mark_issue_reported` on one an *open* report covers, sends bodies with `--body-file` rather than quoting markdown on a command line, and takes one approval for "all of them". That prompt is generated into both the MCP prompt (every client) and the Claude Code command (whose `allowed-tools` frontmatter travels verbatim), so there is nothing to keep in sync by hand. If you change the behaviour, change those two.
-
-## Known fragile areas
-
-- `saveFrameToPng` is community-known, not officially documented. Alpha edge cases reported on some comps. If it fails, fallback would be the render queue with PNG Sequence template (slow; deferred to v1.1).
-- ExtendScript single-threading: `run_jsx` with a long synchronous loop will freeze AE's UI. Document for the agent in the tool description (already done).
-- **A busy AE is indistinguishable from a dead bridge at the HTTP layer.** ExtendScript is single-threaded, so while a script runs — or a modal dialog sits unclicked — the panel cannot service its socket at all. The connection is accepted and then nothing comes back. That is why `httpClient` separates `BridgeTimeoutError` from `BridgeUnreachableError` and why `check_setup`'s `bridgeReachable` reports a timeout differently from a refusal: the two have opposite remedies, and "restart After Effects" said to someone whose script is still running throws away work for nothing. Enumerating `app.effects` (~250 entries, tens of seconds in 26.3) is the reproducible case — issue #26 — which is also why `list_available_effects` caches for the session. Never collapse the two errors back into one sentence.
-- **There are now three of those, not two, and the third one's advice is the opposite of the second's.** `WriteQueueWaitError` means the call sat behind another write for the full `AE_MCP_WRITE_QUEUE_WAIT_MS` and was dropped **without ever leaving the server**. `BridgeTimeoutError` forbids re-sending, because that call did reach After Effects and may still be running; the queue error has to say the opposite, because nothing was written and re-sending once the queue drains is the correct move. `BridgeUnreachableError` sends the reader to `check_setup`, which the queue error must not, since the bridge is answering perfectly well. Three diagnoses, three remedies, no shared sentences — `tests/unit/write-queue.mjs` asserts they stay distinct, including that neither bridge error ever mentions the queue.
-- **A `notifications/progress` sent after its request's response reaches nobody, and until 0.5.0 that was every one of them.** The MCP client registers a progress handler when a request carrying a `progressToken` goes out and deletes it the moment that request's response arrives — a notification for the token after that is dropped, and the SDK client logs it as a progress notification for an unknown token. A chunked `run_batch` answers with its `{jobId}` envelope *before the first chunk runs*; that is the whole point of the async path, and it means the request whose token the server was binding had already been answered before the panel reported anything. Every progress message went out on a token nobody held (issue #82). It was verified by reading the raw stdio stream, where the messages are plainly present, and never through a client that correlates them — the same shape of mistake as the undo groups in #69: the wire, like `endUndoGroup()`'s return value, looks identical either way. Two things follow. **Progress belongs to the call that blocks for the job**, which is `await_job`: it binds an emitter to its own token for exactly the span of its own call, and `forwardJobProgress` in `server.ts` unbinds and then awaits every send already started *before the handler returns*, so on the wire every notification precedes the response — on the timeout path as well, where the emitter would otherwise outlive the call and go on sending after the error response. It sends through the SDK's request-scoped `extra.sendNotification` rather than `server.notification`, because that is what ties a notification to a request: it carries the request id (a Streamable HTTP transport delivers it on that request's own stream) and drops anything sent after the request is cancelled. And **nothing may bind an emitter to `run_batch`'s token again**, however natural it looks beside `jobs.register` — that is the bug, exactly. `tests/unit/job-progress.mjs` drives the real SDK client with `onprogress` and records both sides of the wire, and it fails against the 0.4.0 `server.ts`; a test that only counts notifications sent would pass against it, which is what the old one did.
-- **The server's op timeout must sit above the panel's own waits, not on them.** `saveFrameToPng` is asynchronous and the panel polls for the PNG for up to 120s; with the server also at 120s it gave up at the exact moment the panel might still have succeeded. `SLOW_OPS` in `bridge/httpClient.ts` gives 300s to the ops whose duration the caller chooses, After Effects does, or the project does: the two screenshot ops, `run_jsx`, `run_batch`, `export_mogrt`, `import_footage`, `place_audio_cues` and `purge_unused_footage` (one `usedIn` per footage item, over a bin that has reached 1,863). `AE_MCP_OP_TIMEOUT_MS` overrides every op, deliberately including the slow ones — one number a user can reason about beats a matrix they cannot see.
-- CEP manifest's `<AutoVisible>false</AutoVisible>` was unreliable in early CEP 12 builds. Current manifest uses `AutoVisible=true` with a small geometry — the panel still auto-loads invisibly enough; the user can dock the small status panel out of the way.
-- CEP panels installed without signing require `PlayerDebugMode=1`. The user does this once via `npm run enable:debug` and a reboot. Except when it is not enough — see the CEP 12 signature bullet below.
-- **The port file is not the authority; the socket is.** `~/.engineroom-ae-mcp/port` is written by whichever panel bound *last*, and a panel that walked to 7780 and then died leaves 7780 there while the panel that is actually answering sits on 7777. Until 0.5.0 `HttpClient` read that file once, in its constructor, and posted every op there for the life of the process, while `check_setup` re-read it on every call — so setup passed and every op failed, four times in one week (issue #92). Two things fixed it and both are load-bearing. `discovery.ts` orders the candidates **7777 first, then the file**, because 7777 is where the panel binds unless something is wrong and the file is the thing that was wrong; and `runOp` re-runs discovery only when a call is **refused**. Refused means the request never reached a panel, so re-sending cannot run it twice; a timeout means it may still be running, and re-sending *that* is issue #43. The retry is a fresh `postOp` with its own `AbortSignal.timeout`, so a refused-then-found call never reports as slow, and it happens only when a *different* port answers as the panel — the same port answering again is the original error's story. `AE_MCP_PORT` pins the candidate list to one port and switches nothing, on purpose: a pin is how a second After Effects instance is addressed deliberately. `tests/unit/port-drift.mjs` runs all of it against stubs on ephemeral ports; nothing in it ever asks 7777, because on the machine this is developed on a real panel holds it.
-- **A walked port is a zombie panel, not a busy port.** On one machine nothing but this panel ever binds 7777, so `EADDRINUSE` at startup means a previous instance of the panel is still there — a CEPHtmlEngine that lingered across an After Effects relaunch, or a second panel window. Until 0.5.0 `startServers` walked up one port at a time to 7799 and wrote whatever it got to the port file, which routed silently around the zombie and manufactured the drift above. Now it asks `/health` on the held port first. If the answer is our own shape (`isOurHealth` — `ok` plus `bundleHash`, or `bundleLoaded` on a pre-0.3 panel; the same test as `isPanelHealth` in `discovery.ts`), it does **not** walk: the status reads "waiting — port 7777 is held by another AE MCP panel", the log names the holder's bundle hash and whether it matches, and the bind is retried every 2s so the new panel takes over the moment the zombie exits, with no restart. Anything else holding the port — or nothing answering — still walks, loudly, naming the holder and the port chosen, since that is the one case where the port file legitimately says something other than 7777. `allowPortWalk: true` in `~/.engineroom-ae-mcp/config.json` opts back into walking past our own panel for people who run two After Effects at once; `port` in the same file moves the panel, and `0` binds an ephemeral port, which is how `tests/unit/panel-boot.mjs` keeps every test panel off the real 7777. The unload hook removes the port file only if it still names this panel's port — another panel's entry is not ours to erase — and CEP does fire `unload` on a normal After Effects quit — measured 2026-09-08 on 26.3: the file was gone within a second of quitting, for a panel on 7777 and for one walked to 7778 (recipe 44).
-- **CEP 12 enforces signature verification despite PlayerDebugMode on some Windows installs, and only the CEP log says so.** The panel never loads, no CEPHtmlEngine.exe ever starts, nothing appears in AE, nothing is in the Windows event log, and `check_setup` reported every check green with the bridge refused — so it sent the user round "restart After Effects" indefinitely (issue #91; a matching report exists against Premiere on macOS, so it is not Windows-only in principle). The one line of evidence, `ERROR Signature verification failed for extension games.engine-room.ae-mcp.panel`, is in CEP's own log — `%TEMP%\CEP12-AEFT.log` as measured, `~/Library/Logs/CSXS/` on macOS, `csxs<n>-AEFT.log` per Adobe's cookbook, so `cepLogPaths()` matches both prefixes — and only once `LogLevel` is set. Three consequences. `check_setup` reads the newest log (last 256KB, so a level-6 log cannot stall it) whenever AE is running, the panel is installed and the bridge is *refused*, and a hit becomes `panelSignature` with the ZXPSignCmd self-signing steps as `nextSteps`, restart last; with no log it says how to turn logging on instead of asking for a third restart. `installPanel` sets `LogLevel` to 6 — the value measured to record the line; lower ones are undocumented — for every CSXS version where it was **never set**, leaving a present value alone even if it is 0, so the evidence exists next time. And the signed folder carries `META-INF/` and `mimetype`, which `panelInstallDiff` must go on ignoring and `setup_panel` must warn about before it strips them (`signedInstallOverwritten`). The Windows half of this has never been exercised by anyone on the project — recipe 45.
-- **Anthropic API requires JSON Schema draft 2020-12** for tool input schemas. `zod-to-json-schema` 3.x has no 2020-12 target — `openApi3` emits `nullable` (rejected) and `jsonSchema7` emits draft-07 tuple form `items:[...]` (rejected; 2020-12 wants `prefixItems`). `server.ts` uses `jsonSchema7` + `$refStrategy:"none"` + a `toDraft2020()` post-pass that rewrites tuples. Don't switch back to `openApi3`.
-
-  **What the rejection is, exactly.** Both known rejections are *invalid draft
-  2020-12*, not "valid but unsupported": `nullable` is an OpenAPI extension and
-  the draft-07 tuple form means something else in 2020-12. There is no keyword
-  whitelist to stay inside — the emitted document has to be a valid schema in
-  that dialect, and composition keywords are fine. This server already ships 16
-  `anyOf` sites and 56 `prefixItems`. **Validate, do not guess:**
-  `tests/unit/schema-constraints.mjs` checks all 76 emitted schemas against the
-  real 2020-12 metaschema and compiles each one with `ajv/dist/2020`, and CI
-  runs it. A schema the API refuses takes down *every* tool in the session, not
-  the one it belongs to, so nothing goes into that emission pass unvalidated.
-
-  **`$schema` used to be a lie, and the lie was load-bearing in the wrong
-  direction.** zod-to-json-schema stamps `http://json-schema.org/draft-07/schema#`,
-  and `toDraft2020` then writes `prefixItems` — which does not exist in draft-07
-  — and `items: false`, which there means "no array items at all". Anything
-  honouring the declared dialect would have rejected every colour and every 2D
-  point in this API; it worked only because tool schemas are read as 2020-12
-  whatever they claim. `toDraft2020` now rewrites `$schema` to
-  `https://json-schema.org/draft/2020-12/schema` (`JSON_SCHEMA_DIALECT`). That
-  also lets the test validate **exactly what ships** rather than a copy with
-  the header stripped — ajv refuses to compile a document declaring a dialect
-  it was not built for, so before this the test would have had to mutate its
-  own subject.
-
-  **`zod-to-json-schema` silently drops `.refine()` / `.superRefine()`.** Not an
-  error, not a warning — the constraint is enforced on the server and absent
-  from the document the model reads, so the only way an agent learns the rule
-  is by having a call rejected. See "Cross-field rules" below; `toolInputSchema()`
-  in `server.ts` is where declared rules are put back.
-- **`setTemporalEaseAtKey`'s array length belongs to the property, and cannot be read off the value.** Spatial properties (Position, Anchor Point) take a single entry regardless of 2D/3D, because the ease runs along the motion path. Everything else has to be measured, because the count and the value's own length disagree in *both* directions: on AE 2026 a **2D layer's Scale wants 3** while its value reads `[x, y]`, and a shape's **Ellipse Size wants 2** while its value reads `[w, h]`. Those two were documented the other way round for a release — swapped, and each individually plausible — until a live pass measured them. That is why `__applyTemporalEase` derives a count and then still walks a 1-2-3-4 ladder on failure: the derivation is the fast path, not the authority, and the arity it settles on comes back as `easeDimensions` so a caller learns the real answer instead of the documented one. Issue #96 adds a single unreproduced observation — a 2D layer's Position accepting only 3 through raw `setTemporalEaseAtKey` on 26.3 — which is one more reason the ladder, not the table, is the authority. The table is written down in exactly one guide, `extendscript-gotchas.md`; `animation.md` points at it and must not restate it.
-- **`saveFrameToPng` is asynchronous, and "the file stopped growing" is not the same statement as "the file is finished".** It returns before the bytes are on disk, so anything reading the PNG has to decide for itself when the write is done. Until 0.4.0 that decision was *settling*: two `stat` calls 30ms apart reporting the same size. What that let through is every writer pause longer than 30ms — which on a heavy comp (the report was ~88 layers, a full-frame background precomp plus several shot precomps) is routine. The panel read the file mid-flight, shipped it, and the agent got `truncated PNG: chunk IDAT runs past the end of the file` for a render that was still happening. Completion is now *structural*: the file is finished when it ends in a zero-length IEND chunk and every chunk length from the signature adds up to exactly that (`pngCodec.inspectPngStructure`), so a partial write cannot be delivered at all — only waited on. `framereader.js` polls for that, with a cheap tail probe in front of the full read because IEND is the last chunk in the format and a file that does not end in one does not need reading. Three numbers: 120s of render budget (a cold 4K render was measured over 15 seconds; the original 5s silently failed screenshots that were merely still rendering), a 6s stall window after which a file that has stopped changing and still is not a PNG is declared abandoned, and one automatic re-render. The retry is safe because both screenshot ops are read-only and leave nothing in the project — unlike `run_jsx`, where re-running duplicates side effects (#43) — and it fires **only** on a corrupt read, never on a timeout: a timeout has already spent the 120s budget and a second one would push the op past the server's 300s ceiling, turning a precise diagnosis into a bridge timeout with the opposite remedy. `growable` in `inspectPngStructure` is what keeps the fast cases fast: a wrong signature or a missing IHDR can never be fixed by more bytes, so it fails immediately instead of waiting out the stall. Reported as issue #45.
-- **A failed frame read must never be cached, and the two failures must never share a message.** The other half of #45 was the diagnosis, not the read: the old passthrough path hashed the *truncated* bytes into `framecache.js`, so the next truncation at the same byte count came back as `Stale frame` — the reported symptom was "the same 73,877 bytes for different times and downsamples". Only a frame that decoded and was delivered reaches `frameCache.remember` now. And `FRAME_INCOMPLETE` ("the file After Effects wrote is not a whole PNG"; retry at a higher downsample) and `RENDER_TIMEOUT` ("it did not finish in time"; wait, do not retry immediately) get completely separate messages, for the same reason `BridgeTimeoutError` and `BridgeUnreachableError` do: the remedies point in opposite directions. Neither message may ever suggest restarting After Effects or re-running `setup_panel`, and `tests/unit/frame-integrity.mjs` asserts that.
-- **`saveFrameToPng` re-serves stale buffers and reports success.** Past some per-frame render cost, AE hands back a frame it rendered earlier: byte-identical results for unrelated comps at unrelated times, and at *different* `downsample` factors, which cannot even be the same number of pixels. Nothing in the response distinguishes it — fresh temp file, `ok:true`, well-formed PNG — so content identity is the only signal available. `client/framecache.js` keeps the last 24 delivered frames keyed by `(op, compId, layerId, time, downsample)` and refuses any frame whose pixels match a *different* key. It is an error rather than a warning on the image because an agent that can see the picture believes the picture. It lives in the panel, not the server, because the panel sees every render — the documented workaround for this bug POSTs `/op` directly. Two consequences to keep in mind: the *first* stale buffer of a session always gets through, since there is nothing yet to compare it against; and a genuinely static comp screenshotted at two times does trip it, which is why the message says so and points at a different `downsample` to distinguish the two. Reported as issue #29. The contact-sheet path is the one place that second consequence is *resolved* rather than merely explained: inside one sheet the caller asked for several times deliberately, so a tile matching a sibling is flagged in its `note` and the picture is still sent. The relaxation is scoped to a sheet's own tiles and nothing else — a single-frame call, and a sheet tile matching anything from outside the sheet, are both still refused, and `tests/unit/screenshot-pipeline.mjs` asserts the detector still fires.
-- **A 16-bit project renders 16-bit-per-channel PNGs, and many decoders reject those outright.** `client/pngcodec.js` converts to 8 bits per channel before the panel base64-encodes; anything already 8-bit is passed through byte-for-byte and never re-encoded. Taking the high byte of each 16-bit sample is exact rather than lossy-with-drift, because 8→16 promotion multiplies by 257. The same pass reports a frame whose every pixel is transparent as `empty: true` with **no image** — the ~5KB PNG that encodes one is the other thing decoders choke on, and "the frame is empty" is the useful reading anyway. `tests/unit/png-codec.mjs` and `tests/unit/frame-cache.mjs` cover both with synthetic fixtures and a second, independent PNG implementation; CI runs them, because there is no 16-bit AE project on a runner and this is real image code.
-- **`panelSourceDir()` must prefer the checkout over the vendored copy.** After any `npm pack`, a stale `packages/mcp-server/panel/` is left on disk (gitignored). If that were checked first, `setup_panel` in a dev checkout would install the stale copy instead of what you're editing. Order matters in `setup/paths.ts`.
-- **esbuild preserves the entry point's hashbang.** Adding a `banner` with `#!/usr/bin/env node` produces a second one on line 2 and the published binary dies with a syntax error. `prepare-package.mjs` asserts there is exactly one.
-- **Text alignment is justification, never a computed anchor.** `addText()` centre-justifies point text with the anchor at the origin, so the visible left edge sits at `-width/2`. Until 0.2.1 `create_text_layer` implemented `anchorAlign` by measuring `sourceRectAtTime()` and writing that offset into the Anchor Point. It renders identically at creation and is wrong from the first edit onward: the offset is baked for the string that existed then, so retyping, an expression on Source Text, or an Essential Graphics edit in Premiere re-centres the text on a stale anchor and the layout jumps — and any `sourceRectAtTime()` expression sizing a background behind it inherits the error. `anchorAlign` now sets `ParagraphJustification.LEFT/CENTER/RIGHT_JUSTIFY` (the map lives once, in `text.jsx`) and leaves the anchor at `[0,0,0]`, which is live for whatever the layer says later. Reported as issue #24. `"none"` still means "touch nothing".
-- **`addText()` inherits the user's Character panel.** Tracking especially: a layer created with no styling arrives at whatever that workspace was last left on — the report that opened #24 measured `-20` — so the same call renders differently on two machines. Nothing in this repo ever set it. `create_text_layer` now writes tracking explicitly (`args.tracking`, or 0), which is the only way to make the tool reproducible; `anchorAlign: "none"` opts out along with everything else.
-- **The TextDocument round trip can lose the justification, and nothing says so.** Two reports against AE 26.3, and the mechanism of neither is known. `set_text({text})` on a layer that read LEFT_JUSTIFY (7413) came back CENTER (7415) — the handler reads `src.value`, changes `.text` and writes the same document back, so it is the round trip itself, not a fresh document, that drops it (issue #93). And a script assigning `CENTER_JUSTIFY` through the TextDocument stored RIGHT (7414) while `set_text({justification:"center"})` on its own landed correctly (issue #94). Neither raises, and a layer that silently re-centres is found half a frame off in a screenshot several edits later. The guard that can be built blind is the one this repo asks for anyway: **`__verifyJustification` in `text.jsx` reads the property back after every round trip** and compares it with what should be there — the requested value, or the one read before the mutation — writes the justification alone once more if it moved, and throws naming expected and actual if it still disagrees. `set_text` and `create_text_layer` both go through it (the create path removes the layer it made before throwing, so a failure never leaves a layer the caller has no id for), and both return `justification` by name plus `justificationReasserted`, which is the only way a live run can show whether the reset actually happens. `tests/unit/text-justification.mjs` models both reports as pluggable misbehaviours on a mock Source Text; which of them AE 26.3 actually is, recipe 38 measures — and on 26.3x87 (2026-09-08) *neither reproduced*: `set_text({text})` on a LEFT layer read LEFT back with `justificationReasserted: false`, and `create_text_layer` with `anchorAlign: "center"` and a non-default font landed `center` first time. Both reports were against 26.3, so the guard stays. If the reassert is measured to land reliably, keep it — one extra `setValue` is cheap and the read-back is the contract; if it is measured *never* to land, the mechanism is worth finding before anything else is changed.
-- **`TextDocument.justification` written from a script stores the wrong value.** On 26.3, `d.justification = ParagraphJustification.CENTER_JUSTIFY; prop.setValue(d)` lands as RIGHT (`7414`) on a layer made with `addText()`, while the enum reads correctly in that scope; LEFT only appears to work because it is `addText()`'s default (issue #94). `text.jsx`'s own justification map lands correctly, so the tool path is unaffected and the raw path is documented in `extendscript-gotchas.md` under Text, with the `sourceRect.left ≈ -width/2` check. If `set_text` ever starts landing RIGHT for `center`, this is where to look first.
-- **Removing the last Time Remap key hides the property.** `while (tr.numKeys) tr.removeKey(1)` on a remap-enabled layer leaves `setValueAtTime` throwing `the property or a parent property is hidden` (issue #86). Setting `timeRemapEnabled = true` already creates the two keys a loop needs, so anything in this repo that builds a loop — a bed in `audio.jsx`, say — edits those keys in place and never clears them; toggling `timeRemapEnabled` off and on restores the defaults.
-- **`OutputModule.setSettings` rejects Format, Channels, Depth and Color as read-only**, although `getSettings(GetSettingsFormat.SPEC)` lists all four — SPEC is the domain, `STRING_SETTABLE` is the writable list (issue #95, measured on 26.3 from four starting states). There is nothing to fix in code because the render queue is out of scope, but it is why any future render op must apply an output-module template by name rather than set a codec, and read `getSettings(STRING)` back before trusting it.
-- **A compiled binary has no module paths.** `import.meta.url` inside a `bun --compile` build points into the executable's virtual filesystem, so `packageRoot()` finds nothing. `setup/paths.ts` falls back to `executableDir()` — the panel, `package.json` and a real `node_modules/ws` ship *beside* the binary, which is why every binary target is a folder and not a single file. Shipping the bare executable would break `setup_panel` with no obvious cause.
-- **`require.resolve` does not throw in a compiled binary — it returns the bare specifier.** `require.resolve("ws")` gives back `"ws"`, not a path and not an exception. Anything that treats a failed resolve as a throw is therefore dead code there, and `path.dirname("ws")` is `"."` — the *working directory*. v0.2.0 copied that into the CEP extension folder, which produced an empty `node_modules/ws` for a server started somewhere empty, and would have attempted to copy the entire filesystem for one started at `/`. `wsModuleDir()` now requires `path.isAbsolute` before believing the resolver and confirms every candidate with `isWsModuleDir()`. **Validate resolver output by its contents, never by `existsSync`.**
-- **`set_house_style` writes through ExtendScript's `File`, whose macOS default `lineFeed` is `"Macintosh"` — every `\n` became a bare `\r` on disk.** The round trip hid it (`File.read` normalises line endings), the unit tests never touch a real `File`, and the only symptom was a designer's editor showing the guide as one line. `style.jsx` sets `file.lineFeed = "Unix"` before opening for write; anything else in `packages/jsx/` that ever writes a text file must do the same, since nothing offline can catch it — recipe 10 reads the bytes.
-- **Under an `AE_MCP_PORT` pin, `check_setup` must ask more ports than ops do.** `HttpClient.candidates()` is `[pinned]` on purpose — a pin is never walked past — but a diagnosis that asks only that port reports "nothing is listening" for a panel that is fine on 7777 and sends the user to restart After Effects (recipe 43's pinned half failed exactly so on 2026-09-08). `server.ts` hands `check_setup` the op candidates plus `diagnosticPortCandidates()` (the default port and the port file, after the pin), `portAgreement` says the port is *pinned* rather than stale, and `buildNextSteps` branches on that word to say "change the pin" instead of "retry" — retrying a pinned port changes nothing. `tests/unit/port-drift.mjs` holds all three.
-- **The panel cannot start without `ws`, and cannot say so.** `main.js` requires it at boot; before this was fixed, a failed require threw out of the top-level IIFE before the DOM handles existed, so the panel sat on "starting…" for ever and the only symptom was silence on port 7777. The require now runs *after* the logger is set up and bails out visibly. Keep it in that order.
-- **A panel install can be half-written, and it looks fine.** Installing while AE holds the client files open updates `jsx/bundle.jsx` and fails on the rest. `panelUpToDate` used to hash only the bundle, so it went green on a mix of two versions while every call failed — and because the bundle *was* current, `assessPanel` concluded `restart-needed` and sent the user round a loop no restart could end. `panelInstallDiff()` compares every shipped file, and `installComplete: false` outranks the restart verdict. Reported as issue #20.
-- **`ws` can never be inlined.** `setup_panel` copies the directory into the CEP extension, because AE's CEF process cannot resolve modules out of this package. Every packaging path (`prepare-package.mjs`, `build-mcpb.mjs`, `build-binaries.mjs`) has to keep it as a real directory on disk.
-- **Bare Mach-O binaries cannot be stapled.** `xcrun stapler` only writes tickets into bundle formats (.app/.pkg/.dmg). The release notarizes the *zip* and lets Gatekeeper verify online on first launch. Do not add a `stapler staple` call expecting it to work.
-- **The hardened runtime blocks JIT.** Bun embeds JavaScriptCore, so `scripts/entitlements.plist` must grant `allow-jit` and `allow-unsigned-executable-memory`. Without them the binary signs and verifies fine and then refuses to launch — on someone else's machine, not yours.
-- **Shape `Contents` renders index 1 in front, and `addProperty` appends to the end.** So the *first* node added is the one on top, which is the opposite of the layer stack, and building back-to-front (body, then title bar, then dots) produces a silent solid slab with no error. The fix an agent reaches for is worse than the bug: `property.moveTo()` looks correct when the comp is rendered standalone and leaves it serving a stale buffer in every **nested** render. `add_shape_content` therefore takes `zOrder` rather than an index — `"back"` is the append AE already does and touches nothing, and `"front"` is the single `moveTo(1)` call site in the codebase, done on the empty node before any property is set so a failure costs an empty node. The guidance everywhere (tool description, guide) is to order the calls front-to-back and never need it. Reported as issue #32; if `moveTo` is ever proven safe, the note in the description comes out, not the option.
-- **`moveTo` is a `PropertyBase` method, and a `Layer` is not a `PropertyBase`.** It re-ranks a property inside an indexed group; called on a layer it throws `parent is not an INDEXED_GROUP`, which is what every `reorder_layer` call did from the day the op shipped until 0.4.0 (issue #70). Nothing caught it because nothing offline ran the op, and the error names a concept — an indexed group — that has no counterpart in what the caller asked for, so an agent hitting it at the moment it is trying to fix a layer stack has nowhere to go. Layers reorder with `moveBefore` / `moveAfter` / `moveToBeginning` / `moveToEnd` — the first two take a **layer**, the last two take nothing at all, and none of the four takes an index. The one legitimate `moveTo` in this codebase is the shape-property `moveTo(1)` in the bullet above; `tests/unit/reorder-layer.mjs` gives its mock layer a `moveTo` that throws AE's own message, so a rewrite that reaches for it again fails there rather than in someone's project. Related: because reorder is the op that invalidates every index below it, `reorder_layer` takes `beforeLayerId` / `afterLayerId` as well as `toIndex`, and `toIndex` is documented as the index the layer **lands on** — moving up and moving down need different primitives and the two readings differ by one, silently.
-- **A shape node reference goes stale when a sibling is added.** Hold a Fill, add a Stroke to the same group, and the Fill reference starts throwing `Object is invalid`. Add every node first, then re-fetch by name before setting values or expressions. `add_shape_content` re-fetches from the parent after its own `moveTo` for exactly this reason. Reported in issue #24.
-- **A new shape layer's origin is now `[0,0]`, not AE's comp centre — and that is a deliberate behaviour change.** `addShape()` leaves Position at the comp centre with the Anchor Point at `[0,0]`, so layer space is offset from comp space by half a frame. Every path this toolset can write — `set_shape_path` vertices, `add_shape_content` vertices, a rect or ellipse `position` — is in *layer* space, while every other coordinate an agent handles (comp size, `sourceRect`, other layers' positions, a screenshot) is comp space, and nothing in the old response said which one it had been given. So a drawing authored in comp pixels came out shifted by `(width/2, height/2)`, and the check that would catch it is a downsampled screenshot: issue #51 cost a review round. `create_shape_layer` therefore takes `position`, defaulting to `[0,0]`, which makes the two spaces the same space; `"center"` is AE's own spawn point kept to one word, and the result echoes the position and anchor point it ended up with so nobody has to render a frame to learn the coordinate system. **What this breaks:** a caller that relied on the old spawn point to centre a motif — `create_shape_layer` then `add_shape_content({type:"rect", size:[200,100]})` with no explicit position — now gets that rect at the top-left corner instead of the middle. The fix is one argument (`position:"center"`), the failure is visible in the first frame rendered rather than three edits later, and the precedent is the `anchorAlign` change in 0.2.1: this repo changes a creation-time default when the old one was wrong in a way that only shows up downstream. `tests/unit/shape-spawn.mjs` holds the default, the escape hatch and the echo.
-- **Generated files under `plugin/` will be overwritten.** `plugin/skills/**` — SKILL.md and `references/*.md` alike — and `plugin/commands/**` come from `src/{guides,prompts}/*.md`. Hand-edits survive until the next `npm run build`. Every generated directory is owned *wholesale*, down to each skill folder, so a renamed or re-parented source cannot leave a second copy behind for an agent to read. CI runs `build-guides.mjs --check` to catch this at review time rather than in a release.
-- **AE hangs a 48-property `ADBE Vector Materials Group` off every vector group, and it is inert on a 2D shape layer.** It is the 3D extrusion model — Front/Bevel/Side/Back × twelve attributes — and it only means anything for an extruded shape under the Cinema 4D renderer. It was around 75% of the bytes of a shape read: one 68×68 circle in one group cost 4,400 tokens, of which the geometry was about 40 (issue #42). `explore.jsx` skips it unless `shapeMaterials` asks, which is the one place `include`-absent-means-everything does not hold — hence `materialsOmitted` and a note in the response, and hence a separate flag rather than a member of `include`, whose contract would otherwise have to bend. The group Transform beside it is elided by the same walk when every property is still at its creation value, tested against `__VECTOR_TRANSFORM_DEFAULTS` rather than through `PropertyBase.isModified`: the values can be asserted with no AE to run in, and a property that table has never heard of has to fail the test rather than be folded away unread.
-
-- **A scoped read must say what it left out.** `include`, `maxKeyframes` and `shapeDepth` on the read ops exist because a tool result is re-sent on every later request — a 65k-token `get_layer_full` is paid for once per call and then again on every request until the session ends. Two rules keep them honest: absent means *everything*, so no existing caller changes behaviour; and anything dropped is named and counted in the response (`included`, `keyframesOmitted` + `keyframesTruncated`, `childrenOmitted`), because a short answer that looks complete is the same class of lie as a swallowed error. Note what the call sites depend on: `(args && args.include) ? args.include : null` works because an empty array is truthy in JS, which is exactly what makes `include: []` mean "core fields only". Adding a `.length` guard there would quietly turn it back into "everything". **`find_layers` is the one read where absent means the core, not everything, and that is deliberate** (issue #87): it is a search, so the reason to call it is to learn which layers exist and what to address them by, and the full `__layerSummary` on every match cost ~2k tokens for nine name hits. Its default is `[]` rather than `null`, the section names are `list_layers`' own through the same function — `LAYER_SUMMARY_SECTIONS` in `schemas.ts` is the single list both schemas read, so they cannot drift — and the result is `{matches, count, compsSearched, included}` so the bounded answer still says so. `includeParam()` is not reused there because its sentence says "omit for all of them". `tests/unit/find-layers.mjs` holds the default, the echo, and that the filters cannot be hidden by the section list. Do not "fix" it back to `null` for consistency; the description promises the bounded form.
-- **ExtendScript parses chained ternaries left-associatively.** `a ? x : b ? y : z` evaluates as `((a ? x : b) ? y : z)`, so the first truthy branch becomes the next condition and everything falls through to the last alternative — no throw, just the wrong answer. `get_project_summary` labelled every project item `"folder"` for two releases on one such line (issues #21/#22). Write if/else chains in `packages/jsx/*.jsx`; parentheses parse correctly too, but a later edit can drop them. `tests/unit/jsx-ternary.mjs` scans the sources and fails the build — there is no offline ExtendScript runtime, so nothing else can.
-- **`run_jsx` must never answer `null`.** A script whose last statement is a bare expression completes and yields `undefined` — `"ping";` does not return `"ping"` — with every side effect already applied. Answering that with a bare `null` made "ran fine, returned nothing" identical on the wire to "did not run", and the natural response to a suspected failure is to run the script again: nothing rolls back, so a second run of a non-idempotent script duplicates layers, re-applies `moveTo` and writes keyframes on top of keyframes (issue #43). The guidance to prefer few large scripts makes the ones most likely to be re-run the most destructive to re-run. `__rjResult` therefore wraps *any* null — `undefined` and an explicit `return null` alike — in `{ok:true, returned:null, undoGroup, note}`. A returned value still comes back bare, falsy ones included; the envelope is for nothing, not for falsy.
-
-- **`run_jsx`'s error line counts from something the caller cannot see.** The reported number did not map onto the submitted script and the shift was not even constant between calls — the same "line 22" pointed at two different statements in consecutive calls (issue #46). It costs more here than anywhere else: nothing rolls back, so an agent that cannot locate the throw either reads the whole project back or, worse, runs the script again and applies the completed half twice. Two things fix it, and the second is the one that survives being wrong. First, the caller's line 1 is a **counted** distance down the evaluated source: `__RJ_WRAP_PREFIX` carries no newline, and `__rjBuildSource` measures the preamble it actually built rather than asserting a constant — which matters now that `libraries` are inlined into that preamble and its length changes per call. Second, the failure is reported with the line's **text**, which needs no trust in any numbering, and `__rjSourceInfo` refuses to map a line that falls outside the script rather than clamping it — a confident wrong number sends the reader to a statement that did not fail; a line that lands in an inlined library is attributed to that file by name instead. `aeErrorText()` in `util/errors.ts` is the one place this becomes prose. `tests/unit/run-jsx-lines.mjs` holds the preamble invariant, with and without libraries; nothing else can, since there is no ExtendScript to run offline.
-- **`Error.start` and `Error.end` are 0 on every ExtendScript error in AE 2026, and 0 is not an offset.** The documentation presents them as character offsets into `Error.source` — a better answer than `Error.line`, because they need no assumption about what `line` counts from. Probed inside AE, catching from a four-line script that throws on its last line: `eval("(function(){ var a=1;\nvar b=2;\nvar c=3;\nnope.boom();\n})()")` → `{ "line": 4, "start": 0, "end": 0, "srcLen": 57 }`. **`line` is already correct.** The offsets came back 0 however far into the source the throw was, so reading them as offsets put *every* failure on line 1, printed line 1's text, and demoted the true number to the parenthetical afterwards — which is how #46 was reported fixed while every error still said line 1. The branch is kept but guarded: `start === 0 && end === 0` means After Effects declined to say, not that the error is at character zero, and only a non-zero start (or a zero start with a non-zero end) is believed. Do not restore it from the documentation. `tests/unit/run-jsx-lines.mjs` carries a stub built from that probe — the old stubs all omitted `start` entirely, which is exactly why they were green.
-- **`app.executeCommand()` silently no-ops through the bridge.** `app.executeCommand(2080)` (Edit → Duplicate) runs, throws nothing, and does nothing: menu commands need host/panel focus and an active selection, and CEP's `evalScript` guarantees neither. It fails in the worst available shape — a success result for work that did not happen — and only surfaces later as a missing item. There is nothing to fix in code, so the `run_jsx` description names the failure and points at the API equivalents (`CompItem.duplicate()`, `layer.duplicate()`). Reported as issue #47.
-- **Assigning `Property.expression` succeeds whatever the text says; `Property.expressionError` is where AE reports that it does not run.** A syntax error or a bad reference throws nothing on the assignment — the failure is a warning banner in the AE UI that an agent cannot see, and until 0.5.0 `set_expression` returned `{ok:true}` for it and `get_expression` never read the field (issue #97). The skill recommends expressions over dense keyframes for anything procedural, so this was the gap between the advice and what could be verified. `__expressionError` in `expressions.jsx` reads the field after **forcing one evaluation** by reading `prop.value` inside a try: Adobe's documentation implies the field is populated when the expression is evaluated, and whether 26.3 fills it in on a bare assignment is not something an offline test can settle, so the nudge makes the answer independent of the question (a group throws on `.value`, which is not an expression error, and an AE without the field reads as no error — both handled). `set_expression` and `toggle_expression({enabled:true})` throw with the path, AE's own message and both ways forward, and say the expression *stays written*: nothing here rolls back, and a caller fixing a typo wants the property it aimed at, not a cleared one. `get_expression` carries `expressionError` alongside `expression` and `enabled`. `tests/unit/expression-error.mjs` has a mock that hides the error until `.value` is read, so a guard that only reads the field fails there. Measured on 26.3x87 (recipe 39, 2026-09-08): the field is populated on assignment, before `.value` is read — the nudge is belt-and-braces there, kept because it costs one read and covers the documented case.
-- **`$.evalFile` does not evaluate at global scope — it evaluates into the calling function's scope, exactly as `eval` does.** The whole first design of `run_jsx`'s `libraries` rested on the documented claim that it does: the server sent `{path, hash}`, the panel `$.evalFile`d each file from a loader function, and the promise was "load once, call for the rest of the After Effects session". Probed inside AE 2026, calling `$.evalFile` from the body of an eval'd script on a library declaring `function rig2()` and `var RIGVAR = 3`: `{"exists":true, "typeofRig2_local":"function", "typeofRIGVAR_local":"number", "globalRig2":"undefined", "viaGlobal":null}`, and on the next `run_jsx` call in the same session `{"typeofRig2":"undefined", "viaGlobal":"undefined"}`. Everything a library defined lived inside the loader and was gone before the wrapper ran, so `libraries` answered `Function rig is undefined` every time, for every library, in every session — and the per-session hash cache only ever skipped work whose result had already been discarded. The library source is now **inlined into the same eval as the caller's script**, ahead of it, which is the only arrangement that puts a library's declarations in the script's scope. Three things follow and all three are handled rather than left to surprise someone: the server sends `{path, text}` because the panel now needs the bytes, not a path (context is saved in the *conversation*, which the server-to-panel hop was never part of); a library is re-evaluated on every call, so libraries are for declarations, not for work; and the library text shifts the caller's line 1 down, which is #46's exact failure mode, so `__rjBuildSource` counts the preamble it built and hands it to the mapping. A library is also parse-checked on its own — `eval("(function(){ " + text + "})")`, never called — before it reaches the shared eval, because a missing brace in a library otherwise takes the whole wrapper down at whatever line AE's parser gave up on, frequently a line of the caller's script.
-
-- **An undo group does not survive an `evalScript` boundary. Measured, and it costs three releases of a false guarantee.** `app.beginUndoGroup(name)` in one `evalScript` call and `app.endUndoGroup()` in a later one does not produce one undo step — After Effects **discards** the group, and every write inside it lands as its own step with its own AE-generated name. The evidence, gathered against AE 2026 while verifying 0.4.0 (issue #69): a 600-op `run_batch`, which opened its group in `run_batch` and closed it from the last `_continue_job`, produced **~600 undo steps**; one Cmd-Z took the comp from 601 layers to 600 and the Edit menu read `Undo New Solid`, not the batch's group name. A controlled probe — begin in one call, write in a second, end in a third — reproduced it on its own. Nothing raises, nothing warns, and the return value of `endUndoGroup()` is the same either way, so the only way to see this is AE's Edit menu.
-
-  Two consequences are permanent. **Every group must open and close inside one call**, which is why `run_batch` is one group inline and one group per chunk when chunked, and why `core.jsx` funnels every `beginUndoGroup` through `__beginUndoGroup` and counts them — the `undoSteps` a batch reports is the counted delta, so the number an agent repeats to a user as "press Cmd-Z N times" is measured rather than intended. And **a design that needs a group to span calls cannot have one**: `singleUndo:true` buys the single step back only by giving up the chunking entirely, blocking AE for the whole batch, which is a real cost and is stated in the tool description rather than hidden.
-
-  This is the third bug in this release traced to Adobe's documentation asserting something AE does not do — `CompItem.posterTime` and `exportAsMotionGraphicsTemplate`'s surviving object references are the other two. **Undo behaviour, like `saveFrameToPng`, is measured against a live AE before it is claimed anywhere.** `tests/unit/batch-undo.mjs` cannot see AE's undo stack, so it asserts the property that decides it: no dispatch call ever returns with a group still open.
-
-- **`run_jsx`'s undo group collides with `copyToComp`.** AE refuses to copy a layer that has a parent or a linked expression while an undo group is open, so `dispatch()`'s wrapper broke exactly the rigs worth copying (issue #30). `run_jsx` now takes `undoGroup:false`, resolved per call through the predicate form of `__meta.noUndo`, and `core.jsx` exposes `withoutUndoGroup(fn)` for closing the group around one statement. Keep the opt-out on the handler's `__meta` — dispatch must stay stateless between calls, or one op's opt-out leaks into the next.
-- **AE's scripting DOM has no `toComp`/`toWorld`.** Those exist only in the expression language, so anything needing a world transform reimplements the matrix chain — `layers.jsx` does, for `parent_layer`'s `preserveTransform`. Two things follow: 2D only (AE's 3D rotation order is not worth guessing at), and a child's `Position` has two possible readings of its parent's space that differ by the parent's anchor point, so the position correction only fires when AE's own answer matches *neither* — the one case where AE is provably wrong.
-- **`exportAsMotionGraphicsTemplate` invalidates every reference held across it.** Not just the `CompItem` — `app.project` too. Measured on 26.3: after a successful export, a `comp` captured beforehand throws `Object is invalid` on `.name`, and so does an `app.project` captured beforehand, while a fresh `app.project.itemByID(id)` returns a working comp. The first version of `export_mogrt` built its result object from the pre-export `comp` and therefore threw *after* writing a perfectly good `.mogrt` — reporting a failure for work that did happen, which is the same class of lie as swallowing an error. `mogrt.jsx` captures `id` and `name` as primitives before the call and re-fetches after it. Nothing about the error says which object went stale, so if a mogrt op ever starts throwing `Object is invalid`, look for a handle held across the export before anything else.
-- **`app.beginSuppressDialogs()` is what makes a scripted `.mogrt` export usable, and it was worth measuring.** Issue #23 filed it as untested. It is not: with a comp using a non-Adobe font, the export returns in ~3s suppressed and blocks past 60s unsuppressed, writing nothing until someone clicks OK on "The following 1 fonts were not synced from Adobe". `endSuppressDialogs(false)` must run in a `finally` — leaving dialogs suppressed would silence every warning for the rest of the user's session.
-- **Suppression costs the only channel AE has for saying why, and that silence must never be read as a dialog.** `exportAsMotionGraphicsTemplate` answers with a bare boolean, so under `beginSuppressDialogs()` a refusal and a success-that-wrote-nothing are indistinguishable from a script. The old failure message filled that gap by naming a modal dialog — and the case that exposed it was a comp with an **empty Essential Graphics panel**, which AE simply will not export: no file, no dialog, no word of explanation. The user was sent to click something that did not exist while the real fix, adding one controller, went unmentioned (issue #71). Under suppression a blocking dialog is the one cause ruled out *by construction*, since suppressing them is precisely what the call did, so the message may not name one there; unsuppressed, it is the first thing to look at. Everything else reports as **unknown**, and the diagnostic offered is the one that actually reaches AE's own reason — the user running the same export by hand from the Essential Graphics panel, where AE shows its error in the UI. Same shape as `BridgeTimeoutError` vs `BridgeUnreachableError`: two failures, opposite remedies, no shared sentences.
-- **So `export_mogrt` checks every precondition it can *before* exporting, and refuses naming it.** `motionGraphicsTemplateControllerCount === 0` is the one from #71; the project having never been saved, a name that resolves outside the destination folder (measured through `File.parent`, not a list of illegal characters — `packages/jsx/*.jsx` may not branch on platform), a blank name, a destination that refuses a write probe, and a name collision are the others. All of them run before the project is touched at all: no rename, no `app.project.save()`, no export attempt, so a refusal costs the user nothing. Two rules hold it honest: **only an explicit `0` refuses** — a controller count the host will not answer comes back `null` and exports anyway, because an unanswered question becoming a confident refusal is the same mistake pointed the other way; and the refusal message for the empty panel contains the word "dialog" nowhere at all, denials included, since naming one is what sent people looking. `tests/unit/mogrt-preconditions.mjs` covers the lot, including that `endSuppressDialogs` still runs when the export itself throws.
-- **The `.mogrt` filename comes from `comp.motionGraphicsTemplateName`, not the comp name**, and it defaults to the literal `"Untitled"` for a template assembled by script. Left alone, every export in a project overwrites the same `Untitled.mogrt`. `export_mogrt` defaults it to the comp name but leaves a name the user actually set alone. Related: `CompItem.posterTime` does not exist (the thumbnail is the comp's first frame, hence the black one on anything that fades up), and there is no `getMotionGraphicsDataName` — only the reverse-indexed `setMotionGraphicsControllerName`.
-- **`layer.property("ADBE Audio Levels")` returns null on an audio layer.** Audio Levels sits inside the layer's `Audio` group, not on the layer, and the only reliable handle is the `layer.audioLevels` shortcut (issue #48). A null there does not throw — it just means the level is never set, on every layer, silently — which is most of the reason `place_audio_cues` exists rather than being left to a `run_jsx` loop. `audio.jsx` uses the shortcut and falls back to the group walk; if neither answers it says so instead of leaving a layer at whatever level the file happened to have. AE's Audio Levels is itself in decibels, two channels, and the tool writes `0` explicitly when the caller gives no level for the same reason `create_text_layer` writes tracking explicitly.
-- **A batch op has to be all-or-nothing, because a partial one cannot be described.** `place_audio_cues` can be handed 90 cues; a run that dies on cue 30 leaves 29 sound effects in the timeline and an error naming none of them, and the natural next move — call it again — doubles the first 29. So it plans the whole list with no side effects (resolving every `footageId`, checking every path exists, checking each resolved item has audio, checking every time is inside the comp), reports *all* the offending cue indices at once, and creates nothing if any of them failed. What planning cannot foresee — an import that turns out to be silent, an AE refusal on some particular layer — is caught by a rollback that removes every layer and every import the call made, newest first, layers before items. **The layer joins the rollback list the instant `layers.add()` returns, not once it is configured**; registering it after the last `setValue` leaves exactly the failing layer behind, which the offline test caught before this ever ran in AE. `dryRun:true` is the same planner with the creation phase skipped, and it is not an undo step either — a plan appearing in the user's undo history would make "this changed nothing" false in the one place they can see it.
-- **Each of `place_audio_cues`' per-cue options moves something After Effects then quietly resets, so the statement order in `__placeAudioCue` is load-bearing.** `layer.stretch` moves the layer's start time (reported in #85; with the re-assertion in place a stretched cue lands with `startTime` and `inPoint` both at the cue time — measured 2026-09-08: `{time: 5, stretch: 200}` on a 0.3s file → startTime 5, inPoint 5, outPoint 5.6 — while which point AE holds *without* it was not isolated; the mock in `tests/unit/audio-cues.mjs` moves it so a version that forgets the re-assertion fails), so `startTime` is set after it and the trims after that. `timeRemapEnabled = true` resets the out point to the file's own end, so a looped cue's end — the caller's `outPoint`, or the comp's — is re-asserted after remap is enabled, and set *before* the in point: an in point past the file's natural end can only land once the layer is allowed to extend, which is also why the out point goes first on an unlooped cue. **The two Time Remap keyframes AE creates on enabling stay exactly where they are.** Removing every key hides the property, and the next `setValueAtTime` on it throws (issue #86); the loop expression overrides them anyway, so there is nothing to gain. Fade keyframes go last, at the in/out the layer *actually* has, on `layer.audioLevels` — the #48 handle — and Time Remap is reached through `layer.timeRemap` for the same reason, since `layer.property("ADBE Time Remap")` is null on an audio layer even after enabling. `canSetTimeRemapEnabled === false` refuses by name; an undefined does not, on the `hasAudio` principle.
-- **The loop expression is the `%` pattern issue #85 measured, with two deliberate substitutions, and one constant that can go stale.** `(time - startTime) % thisLayer.source.duration`: `startTime` in place of the issue's `inPoint`, so a trimmed in point hides the front of the file the way a trim does on every other layer instead of delaying the loop's first cycle; and the duration read live off the layer rather than baked, so a relinked file keeps looping. An expression cannot read a layer's stretch, so a looped *and* stretched cue has `* 100 / <stretch>` baked in — change the stretch by hand afterwards and the loop keeps the old rate, which the tool description says. `loopOut("cycle")` on the remap keys would survive that edit natively and is the thing to swap in if a live pass ever shows the `%` form misbehaving; it was not chosen because its last key sits at the file's end, which for audio is one frame of silence per cycle. A fade's fit is measured against the cue's *placed* length, and `__fadeFitProblem` is pure so it can run twice: at plan time wherever the length is already known (a `footageId`, a reused item, a capped `outPoint`, a loop's chosen end) and again after the imports for the files it had not seen — still before any layer exists, so a misfit names every offending cue at once and costs only the imports, which the rollback takes back. `-48` is the default `fadeFloorDb` because it is the bottom of the range AE's own Audio Levels slider offers and 1/256 of the recorded amplitude. **What no offline test can hear or see:** that AE 2026 accepts `startTime`, `thisLayer.source.duration` and `%` on a Time Remap expression and plays the bed past the file's length; the fade being audible on a RAM preview; stretch changing pitch; and which point AE holds when `stretch` is set — recipe 40.
-- **AE fabricates dimensions for an SVG with a very large viewBox, and the numbers depend only on the viewBox.** A synthetic file with the reported `0 0 278050 333334` imports as **15906x5654** — byte for byte the dimensions in issue #33, from an entirely different SVG. It will not even rasterize: `saveFrameToPng` on a comp containing one produces no file at all, where a healthy SVG renders in seconds. That reproducibility is what makes the aspect-ratio check in `footage.jsx` a reliable detector rather than a heuristic.
-- **CEP anchors `__dirname` at the extension root, not at the folder holding the file.** So `require("ws")` resolves (node_modules is at the root) while `require("./pngcodec.js")` from `client/main.js` does not — it looks for `<ext>/pngcodec.js`, which is not where the file is. This is why the panel is the only part of the system whose bootstrap has to be tested rather than reasoned about: it shipped on `versions/0.3.0` refusing to start with "cannot start — pngcodec.js … is missing", and nothing caught it, because there is no AE on a runner, the unit tests require those modules by absolute path, and the one machine it had ever run on still had a pre-#36 panel installed. **Resolve panel-internal paths from `cs.getSystemPath(SystemPath.EXTENSION)`, never from `__dirname`** — that is authoritative, and `main.js` now builds `clientDir` from it before requiring anything. `tests/unit/panel-boot.mjs` runs the real `main.js` against a stub CEP host in a copy of the installed layout and asserts it reaches a listening `/health`.
-- **`CompItem.duplicate()` is shallow, and the copy looks finished.** The
-  duplicate's precomp layers point at the *same* nested comps as the original,
-  so "make a variant of this rig" and then editing the variant edits the
-  original too — silently, and usually noticed several scenes later.
-  `duplicate_comp` keeps that as the default because it is AE's own Duplicate
-  and changing it would surprise anyone who knows the app, but it says so in the
-  result rather than leaving it to be discovered, and `deep:true` duplicates the
-  nested comps and re-points the copy at them. Two things `deep` has to get
-  right and a hand-rolled `run_jsx` version usually does not: the same nested
-  comp appears on several layers, so it is duplicated once and reused (keyed by
-  the *original* id) rather than fanned out per reference; and the copy is
-  registered in that map *before* the walk descends into it, which is what makes
-  a cycle terminate. A nested duplication that fails part-way names every comp
-  it created in the error — the objects are real and nothing rolled them back.
-- **A solid's footage item outlives every layer that used it, and `delete_comp` used to leave all of them behind.** `layers.addSolid()` makes two things: a `FootageItem` whose `mainSource` is a `SolidSource`, filed in the project's Solids folder, and a layer pointing at it. Removing the comp — or the layer — removes only the layer. Nothing warns, and once orphaned the item is indistinguishable in the Project panel from a solid still in use unless something reads `usedIn`. A verification pass that built and discarded test comps left **1,863** of them to sweep out by name (issue #83). Two things fix it, and the scoping of the first is the whole point. `delete_comp({purgeUnusedSolids:true})` collects the solid items from the deleted comp's **own layers** before the removal and afterwards removes only those whose `usedIn` is empty — deleting comp A must never reach a solid that only some other comp uses, and an unused solid that was never A's is someone else's work in progress, not this call's to judge; a shared one is kept and reported with the comps keeping it. It is off by default because a solid can legitimately be shared, and the default result counts what it left (`unusedSolidsLeft`) so the orphan is visible at the moment it is made. `purge_unused_footage` is the project-wide sweep — AE's own Remove Unused Footage with a `dryRun` and a report — and it decides by two tests, both `instanceof`: `FootageItem` (a `CompItem` is also an AVItem with a `usedIn` of its own, and a nested comp nothing uses any more is exactly what a naive sweep deletes) and, by default, `SolidSource` on `mainSource`. Both ops collect in one pass and remove in a second, highest project index first, and both stop at the first `remove()` that throws and name it, what went before it and what was never attempted, because nothing rolls back. The dry run lists in the order the real run removes, so the plan is the truth about order too. `tests/unit/purge-footage.mjs` holds all of it; what it cannot hold is whether `usedIn` already reads empty in the same `evalScript` as the `comp.remove()` — recipe 35 is that measurement, and on 26.3 it does (measured 2026-09-08).
-- **CEP returns a file URL, not a path.** `getSystemPath` gives `file:///C:/Users/…` on Windows, so stripping only the scheme leaves `/C:/…`; `path.join` then reads it as root-relative and produces `\C:\…\bundle.jsx`, and the panel reports the bundle missing while it sits at that exact location. `client/csinterface.js` strips the slash before a drive letter — do that there, not at call sites, since it is the one place a URL becomes a native path. `tests/unit/panel-paths.mjs` covers it; there is no AE on a runner, so nothing else does.
-
-- **A directory's mtime does not move when a file inside it is rewritten in place.** The failure cache in `issues/failures.ts` was specified as "keyed by directory mtime", and that key would have missed every write this module makes: `mark_issue_reported`, `archive_issue` and a re-log all rewrite an existing file, which changes the file's mtime and size and leaves the directory entry — and therefore the directory's mtime — untouched. A directory-keyed cache would have served the pre-write entry for the rest of the session while `list_known_issues`, which reads fresh, disagreed. `JournalCache` keys per file on size + mtime, drops files that have gone, and refreshes its own writes explicitly for filesystems whose mtime resolution is coarse enough to hide a rewrite of the same size. `tests/unit/issue-journal.mjs` counts parses across an in-place `markReported`.
-- **"No version" is not "an older version".** Every journal file written before 0.5.0 has no `lastVersion`. Reading that as older than the running server would have archived the entire existing journal the day the stamp shipped — the same mistake `export_mogrt` avoids by refusing only on an explicit `0` controller count, pointed the other way. `compareVersions` returns `null` for anything it cannot parse and `archiveReason` treats `null` as live; such an entry leaves by age, or gets stamped by its next sighting and then follows the version rule like any other.
-- **The failure path must never fail twice, and must not match itself.** `annotateFailure` wraps the whole lookup: a journal it cannot read, a file it cannot parse, a stamp it cannot write — each logs to stderr and the original message goes back byte-identical. And because an agent pastes the *whole* tool error into `errorText`, pointer block included, `normalizeErrorText` cuts everything from `Known from earlier sessions:` onward before comparing; without that, every entry logged from an annotated failure would carry the previous pointer's text and match on it, and the journal would start answering failures with entries about other entries.
-- **`process.exit()` straight after a `fetch` crashes Node 24 on Windows.** A libuv assertion (`!(handle->flags & UV_HANDLE_CLOSING)`, `src\win\async.c`) fires at exit, after every test line has printed and passed — nodejs/node#56645, still reproducing on `windows-latest` under Node 24 as of mid-2026, fixed in Node 26 and never backported. It hit `tests/unit/issue-journal.mjs` twice in a row on the 0.5.0 PR while its three siblings that boot the real server the same way (`write-queue-server`, `job-progress`, `port-drift`) passed — a race, not a difference between the tests. All four now settle for 200ms before exiting, which is the workaround every affected project uses; `issue-journal` also closes the MCP pair and the stub first. The exit stays explicit because the server's WS client reconnects on a timer it owns, so the process would never drain on its own.
-- **The matcher's minimum length is load-bearing in both directions.** A normalised text under 20 letters is never trusted as a prefix (`AE: It broke.` must not match everything about a tool), and the 60-letter prefix rule exists so that two long messages differing only in a tail match — while every `Invalid arguments for <tool>` rejection, which shares its first 30-odd letters with every other rejection for that tool, does not. Both are asserted; a fixture that is too short to match is the test's fault, not the matcher's, and the test says so where it happened.
 
 ## Platform notes
 

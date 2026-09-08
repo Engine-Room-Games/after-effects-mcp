@@ -356,7 +356,7 @@ Adding a tool takes three edits: a zod schema in `packages/shared/src/schemas.ts
 
 Guidance prose is written once in `packages/mcp-server/src/{guides,prompts}/*.md` and generated into the MCP resources, the `ae_guide` tool, the server's `instructions`, and the Claude Code skills and commands. Never edit the generated copies.
 
-Releases are cut from a Mac with a Developer ID certificate; see `scripts/sign-and-notarize.sh` for the environment it expects. See [CLAUDE.md](https://github.com/Engine-Room-Games/after-effects-mcp/blob/main/CLAUDE.md) for the architecture, the ExtendScript conventions, and the known-fragile areas.
+Releases are cut from a Mac with a Developer ID certificate; see `scripts/sign-and-notarize.sh` for the environment it expects. See [CLAUDE.md](https://github.com/Engine-Room-Games/after-effects-mcp/blob/main/CLAUDE.md) for the architecture and the ExtendScript conventions, and [docs/](https://github.com/Engine-Room-Games/after-effects-mcp/tree/main/docs) for the known-fragile areas and the verification recipes.
 
 </details>
 
