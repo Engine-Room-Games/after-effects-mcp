@@ -31,7 +31,7 @@ const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "
 const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
 const { HttpClient } = await import(dist("bridge", "httpClient.js"));
 const { BridgeTimeoutError, BridgeUnreachableError } = await import(dist("util", "errors.js"));
-const { isPanelHealth, probePanel, locatePanel, portCandidates, DEFAULT_PORT } = await import(dist("bridge", "discovery.js"));
+const { isPanelHealth, probePanel, locatePanel, portCandidates, DEFAULT_PORT, diagnosticPortCandidates } = await import(dist("bridge", "discovery.js"));
 const { probeBridge, buildNextSteps } = await import(dist("setup", "check.js"));
 
 let passed = 0;
@@ -149,6 +149,33 @@ await check("AE_MCP_PORT pins the candidate list to that port alone", () => {
   // default is where the panel binds unless something went wrong, and the
   // port file is the thing that went wrong.
   assert.equal(portCandidates()[0], DEFAULT_PORT);
+});
+
+await check("a pin decides where ops go but not what check_setup may ask: the default port and the file still get probed, after the pin", () => {
+  process.env.AE_MCP_PORT = "7999";
+  try {
+    const d = diagnosticPortCandidates();
+    assert.equal(d[0], 7999, "the pinned port is asked first");
+    assert.ok(d.includes(DEFAULT_PORT), "the default port is still asked, so a pinned wrong port cannot hide a healthy panel");
+    assert.deepEqual(portCandidates(), [7999], "the op-side candidate list is unchanged by this");
+  } finally {
+    delete process.env.AE_MCP_PORT;
+  }
+  assert.deepEqual(diagnosticPortCandidates(), portCandidates(), "unpinned, the diagnostic list is the op list");
+});
+
+await check("check_setup pinned to a port with nothing on it still finds the panel and reports the disagreement", async () => {
+  process.env.AE_MCP_PORT = String(stale);
+  try {
+    // No explicit candidates: this is the default list check_setup uses.
+    const r = await probeBridge(undefined, stale);
+    assert.equal(r.atOpPort?.status, "none");
+    // The real default port may or may not hold a panel on this machine, so the
+    // assertion is about what was *asked*, not what answered.
+    assert.ok(r.probed.some((p) => p.port === DEFAULT_PORT) || r.answering?.port === DEFAULT_PORT, "the default port was probed");
+  } finally {
+    delete process.env.AE_MCP_PORT;
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -328,6 +355,21 @@ await check("a port disagreement is told to retry or reconnect, never to restart
   assert.doesNotMatch(text, /reopen After Effects/i);
   assert.doesNotMatch(text, /Quit After Effects/i);
   assert.doesNotMatch(text, /Run the setup_panel tool/i);
+});
+
+await check("a pinned disagreement says to change the pin, never to retry or to restart After Effects", () => {
+  const steps = buildNextSteps(
+    [...healthy, ok("bridgeReachable", "responding on port 7777"),
+      bad("portAgreement", "tool calls are pinned to port 7780 by AE_MCP_PORT (nothing is listening on port 7780), but the panel is answering on port 7777")],
+    false,
+    false
+  );
+  const text = steps.join("\n");
+  assert.match(steps[0], /^Do not restart After Effects/);
+  assert.match(text, /AE_MCP_PORT/);
+  assert.match(text, /retrying will not help/i);
+  assert.doesNotMatch(text, /Retry the call/i);
+  assert.doesNotMatch(text, /Quit After Effects/i);
 });
 
 await check("a busy port on a different number keeps the wait advice and names the port", () => {

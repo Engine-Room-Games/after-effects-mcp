@@ -236,21 +236,37 @@ export function resolveTarget(
   roots: string[] | undefined
 ): { dir: string; resolvedFrom: ScaffoldResult["resolvedFrom"] } {
   if (dir && dir.trim().length > 0) {
-    return { dir: path.resolve(dir.trim()), resolvedFrom: "argument" };
+    return refuseUnscoped({ dir: path.resolve(dir.trim()), resolvedFrom: "argument" });
   }
 
   const root = roots?.find((r) => r && r.trim().length > 0);
-  if (root) return { dir: path.resolve(root), resolvedFrom: "client-root" };
+  if (root) return refuseUnscoped({ dir: path.resolve(root), resolvedFrom: "client-root" });
 
   const cwd = process.cwd();
-  const isFilesystemRoot = cwd === path.parse(cwd).root;
-  if (isFilesystemRoot || cwd === os.homedir()) {
-    throw new ScaffoldError(
-      `No project folder to write to. This client did not say which folder it is working in, and the server was started in ${cwd}, ` +
-        `which is not somewhere a project should be created. Ask the user which folder they want the project in — a new one is fine — and pass it as \`dir\`.`
-    );
-  }
-  return { dir: cwd, resolvedFrom: "working-directory" };
+  return refuseUnscoped({ dir: cwd, resolvedFrom: "working-directory" });
+}
+
+/**
+ * The filesystem root and the home directory are never a project folder,
+ * whichever way they were arrived at. Claude Desktop starts servers at `/`,
+ * and an agent that resolves `~` or passes the folder it happens to be in can
+ * hand either one over as an explicit `dir` — scaffolding AGENTS.md and a
+ * renders/ folder into someone's home directory is never what anyone meant.
+ */
+function refuseUnscoped(target: { dir: string; resolvedFrom: ScaffoldResult["resolvedFrom"] }) {
+  const { dir, resolvedFrom } = target;
+  const isFilesystemRoot = dir === path.parse(dir).root;
+  if (!isFilesystemRoot && dir !== os.homedir()) return target;
+  const how =
+    resolvedFrom === "argument"
+      ? `\`dir\` is ${dir}`
+      : resolvedFrom === "client-root"
+        ? `the client says it is working in ${dir}`
+        : `this client did not say which folder it is working in, and the server was started in ${dir}`;
+  throw new ScaffoldError(
+    `No project folder to write to: ${how}, which is not somewhere a project should be created. ` +
+      `Ask the user which folder they want the project in — a new one is fine — and pass it as \`dir\`.`
+  );
 }
 
 export function scaffold(opts: ScaffoldOptions): ScaffoldResult {

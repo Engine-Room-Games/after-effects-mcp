@@ -1,7 +1,7 @@
 import type { AeSourceInfo } from "../util/errors.js";
 import { AeError, BridgeTimeoutError, BridgeUnreachableError, isTimeoutError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
-import { discoverPort, locatePanel, portCandidates, type LocateResult } from "./discovery.js";
+import { DEFAULT_PORT, discoverPort, locatePanel, pinnedPort, portCandidates, type LocateResult } from "./discovery.js";
 
 interface OpResultOk { ok: true; result: unknown; }
 interface OpResultErr { ok: false; error: string; code?: string; stack?: string; line?: number; source?: AeSourceInfo; }
@@ -76,9 +76,16 @@ function probeSummary(located: LocateResult): string {
   const busy = located.probed.find((p) => p.status === "busy");
   const parts = located.probed.map((p) => p.detail);
   const head = `Also looked for the panel on port${located.probed.length > 1 ? "s" : ""} ${located.probed.map((p) => p.port).join(", ")}: ${parts.join("; ")}.`;
+  const pinned = pinnedPort();
+  // A pin is deliberate, so it is never walked past — but the reader has to be
+  // told that it is the pin, and only the pin, that kept the search to one port.
+  const pin =
+    pinned !== null
+      ? ` AE_MCP_PORT pins this server to port ${pinned}, so no other port was tried; unset it (or point it at the port check_setup reports) to let the server look at ${DEFAULT_PORT} and the port file.`
+      : "";
   return busy
-    ? `${head} A listener on port ${busy.port} may be the panel with After Effects busy; the next call looks again.`
-    : head;
+    ? `${head} A listener on port ${busy.port} may be the panel with After Effects busy; the next call looks again.${pin}`
+    : `${head}${pin}`;
 }
 
 export class HttpClient {

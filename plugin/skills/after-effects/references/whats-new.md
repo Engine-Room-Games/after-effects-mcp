@@ -235,6 +235,24 @@ the old shape gets nothing rather than an error.
   panel (`signedInstallOverwritten`, since the fresh copy needs signing
   again), and reports a signed panel as up to date rather than partial.
   supersedes: check_setup all green but the panel never loads means restart After Effects again
+- **`check_setup` under an `AE_MCP_PORT` pin still asks 7777 and the port
+  file, and a pinned wrong port is reported as the pin, not as a dead panel.**
+  The pin decides where ops go and is never walked past; the diagnosis says so,
+  names the port the panel is really answering on, and tells you to change or
+  unset `AE_MCP_PORT` and reconnect the MCP server — never to restart After
+  Effects. A refused op under a pin says the same in its own message.
+
+### Found by the live pass
+
+- **`init_project` refuses the home directory and the filesystem root however
+  they were arrived at, an explicit `dir` included.** Before this only the
+  working-directory fallback was guarded, so `dir: "~"` resolved by a client,
+  or `dir: "/"`, scaffolded `AGENTS.md` and a `renders/` folder into a home
+  directory and reported success.
+- **`set_house_style` writes `house-style.md` with Unix line endings.**
+  ExtendScript's default on macOS turned every line break into a bare carriage
+  return: the tools read the file back correctly, so the round trip looked
+  fine, but a designer opening the file in an editor saw one long line.
 
 ## 0.4.0
 

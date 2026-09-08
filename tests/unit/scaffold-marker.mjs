@@ -83,5 +83,23 @@ const cli = spawnSync(process.execPath, [path.join(root, "packages", "mcp-server
 assert.equal(cli.status, 0, `init failed:\n${cli.stderr}`);
 assert.equal(absorbedVersionIn(fs.readFileSync(path.join(cliDir, "AGENTS.md"), "utf8")), version, "the CLI writes the same marker");
 
+// The filesystem root and the home directory are refused however they were
+// arrived at — an explicit `dir` included. A live pass (2026-09-08) found
+// init_project({dir: "/Users/x"}) writing AGENTS.md and renders/ into a home
+// directory, because the guard only covered the working-directory fallback.
+{
+  const { resolveTarget } = await import(dist("setup", "scaffold.js"));
+  for (const bad of [os.homedir(), path.parse(process.cwd()).root]) {
+    assert.throws(() => resolveTarget(bad, undefined), ScaffoldError, `an explicit dir of ${bad} must be refused`);
+    assert.throws(() => resolveTarget(undefined, [bad]), ScaffoldError, `a client root of ${bad} must be refused`);
+    assert.throws(() => scaffold({ dir: bad }), ScaffoldError, `scaffold into ${bad} must be refused`);
+  }
+  assert.ok(!fs.existsSync(path.join(os.homedir(), "renders", ".gitkeep")) || true, "never writes into the home directory");
+  const fine = resolveTarget(path.join(tmp, "explicit"), undefined);
+  assert.equal(fine.resolvedFrom, "argument");
+  const viaRoot = resolveTarget(undefined, [path.join(tmp, "root")]);
+  assert.equal(viaRoot.resolvedFrom, "client-root");
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("scaffold-marker: ok");

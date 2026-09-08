@@ -96,6 +96,11 @@ OPS.set_house_style = noUndo(function (args) {
   }
 
   file.encoding = "UTF-8";
+  // ExtendScript's default lineFeed on macOS is "Macintosh", which turns every
+  // "\n" into a bare "\r" on disk (measured on 26.3: a guide written through
+  // this op read back fine, because File.read normalises, but opened as one
+  // long line in a text editor). The file is meant to be hand-edited.
+  file.lineFeed = "Unix";
   if (!file.open("w")) throw new Error("Could not open " + file.fsName + " for writing");
   try {
     if (!file.write(content)) throw new Error("Write failed for " + file.fsName);

@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  portCandidates,
+  diagnosticPortCandidates,
+  pinnedPort,
   portFilePort,
   probePanel,
   type ProbeResult,
@@ -95,7 +96,7 @@ export interface BridgeProbe {
  * The rest are asked in the bridge client's own order, so what this reports
  * is what a refused op would have found.
  */
-export async function probeBridge(candidates: number[] = portCandidates(), opPort?: number): Promise<BridgeProbe> {
+export async function probeBridge(candidates: number[] = diagnosticPortCandidates(), opPort?: number): Promise<BridgeProbe> {
   const order: number[] = [];
   const push = (p: number | undefined) => { if (p !== undefined && !order.includes(p)) order.push(p); };
   push(opPort);
@@ -312,13 +313,22 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     if (agrees) {
       detail = `tool calls go to port ${opPort} and the panel answers there`;
     } else if (bridge.answering) {
-      detail =
-        `tool calls are being sent to port ${opPort} (${bridge.atOpPort?.detail ?? "not probed"}), ` +
-        `but the panel is answering on port ${bridge.answering.port}`;
-      fix =
-        `The server's port is stale; the panel is fine. Retry the failed call — the server re-checks the port whenever a call is refused and switches to ${bridge.answering.port} by itself. ` +
-        "If it still fails, reconnect the MCP server (restart the client's connection to it) so it starts on the right port. " +
-        "Do NOT restart After Effects for this: a panel is listening, and a restart would cost the user their work in progress for nothing.";
+      // A pin is never walked past, so "retry" is the wrong advice there: the
+      // server will keep sending to the pinned port however many times it is
+      // refused. The detail carries the word so buildNextSteps can branch on it.
+      const pinned = pinnedPort() === opPort;
+      detail = pinned
+        ? `tool calls are pinned to port ${opPort} by AE_MCP_PORT (${bridge.atOpPort?.detail ?? "not probed"}), ` +
+          `but the panel is answering on port ${bridge.answering.port}`
+        : `tool calls are being sent to port ${opPort} (${bridge.atOpPort?.detail ?? "not probed"}), ` +
+          `but the panel is answering on port ${bridge.answering.port}`;
+      fix = pinned
+        ? `AE_MCP_PORT pins tool calls to port ${opPort}, and a pin is never walked past, so retrying changes nothing. ` +
+          `Set AE_MCP_PORT to ${bridge.answering.port}, or unset it, then reconnect the MCP server (restart the client's connection to it). ` +
+          "Do NOT restart After Effects for this: a panel is listening, and a restart would cost the user their work in progress for nothing."
+        : `The server's port is stale; the panel is fine. Retry the failed call — the server re-checks the port whenever a call is refused and switches to ${bridge.answering.port} by itself. ` +
+          "If it still fails, reconnect the MCP server (restart the client's connection to it) so it starts on the right port. " +
+          "Do NOT restart After Effects for this: a panel is listening, and a restart would cost the user their work in progress for nothing.";
     } else {
       detail =
         `tool calls are being sent to port ${opPort} (${bridge.atOpPort?.detail ?? "not probed"}); ` +
@@ -433,6 +443,13 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
   // listening: the user loses their work in progress and the server comes
   // back on the same stale port (issue #92).
   const agreement = by("portAgreement");
+  if (agreement && agreement.ok === false && by("bridgeReachable")?.ok === true && /pinned to port/.test(agreement.detail)) {
+    return [
+      `Do not restart After Effects — the panel is running and answering. ${agreement.detail}.`,
+      "AE_MCP_PORT pins the server to that port and a pin is never walked past, so retrying will not help: set AE_MCP_PORT to the port the panel answers on, or unset it, then reconnect the MCP server — restart the client's connection to it, not After Effects.",
+      "Nothing about the install is wrong; setup_panel would change nothing here.",
+    ];
+  }
   if (agreement && agreement.ok === false && by("bridgeReachable")?.ok === true) {
     return [
       `Do not restart After Effects — the panel is running and answering. ${agreement.detail}.`,

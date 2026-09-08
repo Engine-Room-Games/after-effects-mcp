@@ -66,6 +66,22 @@ export function portCandidates(): number[] {
   return out;
 }
 
+/**
+ * Every port worth *asking* when diagnosing, pinned one first: the pin decides
+ * where ops go and must never be walked past, but it must not stop
+ * `check_setup` from noticing the panel answering on 7777 or on the port the
+ * file names — a pinned wrong port would otherwise report "nothing is
+ * listening" and send the user to restart After Effects for a panel that is
+ * fine (recipe 43). Unpinned, this is `portCandidates()` unchanged.
+ */
+export function diagnosticPortCandidates(): number[] {
+  const out = [...portCandidates()];
+  for (const p of [DEFAULT_PORT, portFilePort()]) {
+    if (p !== null && !out.includes(p)) out.push(p);
+  }
+  return out;
+}
+
 /** What the panel's /health answers with. `bundleHash` is absent on panels older than 0.3. */
 export interface PanelHealth {
   ok: boolean;

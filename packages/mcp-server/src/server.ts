@@ -1,4 +1,5 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { diagnosticPortCandidates } from "./bridge/discovery.js";
 import {
   CallToolRequestSchema,
   GetPromptRequestSchema,
@@ -252,7 +253,11 @@ export function createServer(opts: CreateServerOptions = {}) {
         // check_setup is told which port ops are going to, so it can say when
         // that disagrees with the port that answers — the state issue #92
         // lived in for a week with every check green.
-        const setupOpts = () => ({ opPort: bridge.port, candidates: bridge.candidates() });
+        // check_setup asks the ports ops would ask, and then the ones a pin
+        // keeps ops away from: a wrong AE_MCP_PORT must not hide the panel
+        // answering on 7777, or the report sends the user to restart After
+        // Effects for a panel that is fine (recipe 43). probeBridge dedups.
+        const setupOpts = () => ({ opPort: bridge.port, candidates: [...bridge.candidates(), ...diagnosticPortCandidates()] });
         if (name === "check_setup") {
           return textResult(await checkSetup(setupOpts()));
         }
