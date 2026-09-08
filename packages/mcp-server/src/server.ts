@@ -105,7 +105,7 @@ export interface CreateServerOptions {
 
 export function createServer(opts: CreateServerOptions = {}) {
   const server = new Server(
-    { name: "after-effects-mcp", version: "0.4.0" },
+    { name: "after-effects-mcp", version: "0.5.0" },
     {
       capabilities: { tools: {}, logging: {}, prompts: {}, resources: {} },
       // Clients that honour this fold it into the system prompt, which is the
