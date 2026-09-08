@@ -174,11 +174,14 @@ await check("a long batch holds the queue until the job finishes", async () => {
   const batch = await call("run_batch", { ops: [{ op: "create_null_layer", args: { compId: 1 } }] });
   // The undo fields have to survive the envelope: this is the only message the
   // agent sees before it starts telling the user how to undo the work.
-  assert.deepEqual(payload(batch), {
+  const { note, ...env } = payload(batch);
+  assert.deepEqual(env, {
     jobId: "j_test_1", async: true, total: 600,
     chunkSize: 25, undoStepsEstimate: 24, undoGroupName: "AE MCP Batch",
-    note: "about 24 undo steps, NOT one",
   });
+  // The panel's note survives too, with the server's own sentence about where
+  // progress goes appended — tests/unit/job-progress.mjs covers that sentence.
+  assert.ok(note.startsWith("about 24 undo steps, NOT one "), note);
 
   let landed = false;
   const queued = call("set_layer", { compId: 1, layerId: 1, name: "n" }).then((r) => { landed = true; return r; });
@@ -241,6 +244,9 @@ await check("a singleUndo batch releases the queue when its call returns", async
 });
 
 console.log(`write-queue-server: ${passed} checks passed`);
-// The bridge stub's WS client reconnects on a timer the server owns, so there
-// is nothing to await here — same reason panel-boot.mjs ends this way.
+// Settle before exiting: `process.exit()` straight after a `fetch` crashes
+// Node 24 on Windows with a libuv assertion (nodejs/node#56645; the note in
+// issue-journal.mjs). The server's WS client reconnects on a timer it owns, so
+// the process cannot simply be left to drain.
+await new Promise((r) => setTimeout(r, 200));
 process.exit(0);

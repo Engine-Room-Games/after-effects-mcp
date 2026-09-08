@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { packageVersion } from "./paths.js";
 
 /**
  * The project scaffold, shared by the `init_project` tool and the
@@ -123,7 +124,29 @@ function globalConfigHint(client: ClientKind): { path: string; json: string } | 
   }
 }
 
-const AGENTS_MD = (name: string) => `# ${name}
+/**
+ * The line in a project's docs that records which release of these tools the
+ * project has been brought up to date with. The absorb-release prompt greps for
+ * the prefix, reads `ae_guide({topic: "whats-new", since: <that version>})`,
+ * rewrites whatever the release superseded in the project's own notes, and
+ * moves the version on — so the history is read once per release per project
+ * and never again. Human-readable on purpose: designers open AGENTS.md in a
+ * text editor, and a line they can read is one they will leave alone.
+ */
+export const ABSORBED_MARKER_PREFIX = "Tools version last absorbed:";
+const ABSORBED_MARKER = new RegExp(`^\\s*${ABSORBED_MARKER_PREFIX}\\s*v?(\\d+\\.\\d+\\.\\d+)\\s*$`, "m");
+
+export function absorbedMarkerLine(version: string): string {
+  return `${ABSORBED_MARKER_PREFIX} ${version}`;
+}
+
+/** The version a project doc records as absorbed, or null when it carries no marker. */
+export function absorbedVersionIn(text: string): string | null {
+  const m = ABSORBED_MARKER.exec(text);
+  return m ? m[1]! : null;
+}
+
+const AGENTS_MD = (name: string, version: string) => `# ${name}
 
 An After Effects project folder. The AE tools drive After Effects directly from
 here — describe what you want and it gets built in the open project.
@@ -148,6 +171,14 @@ It travels with the .aep, so it applies wherever the project is opened.
 Check \`list_known_issues\` before guessing — an earlier session may already have
 solved it. Anything newly worked out goes in with \`log_issue\`, and the
 report-ae-issue prompt sends it to the maintainers.
+
+## Tool updates
+
+${absorbedMarkerLine(version)}
+
+When the After Effects tools update, the absorb-release prompt reads what
+changed since the version above, fixes any rule in this folder the update made
+stale, and moves the version on. Leave the line where it is.
 
 ## Conventions for this project
 
@@ -205,28 +236,47 @@ export function resolveTarget(
   roots: string[] | undefined
 ): { dir: string; resolvedFrom: ScaffoldResult["resolvedFrom"] } {
   if (dir && dir.trim().length > 0) {
-    return { dir: path.resolve(dir.trim()), resolvedFrom: "argument" };
+    return refuseUnscoped({ dir: path.resolve(dir.trim()), resolvedFrom: "argument" });
   }
 
   const root = roots?.find((r) => r && r.trim().length > 0);
-  if (root) return { dir: path.resolve(root), resolvedFrom: "client-root" };
+  if (root) return refuseUnscoped({ dir: path.resolve(root), resolvedFrom: "client-root" });
 
   const cwd = process.cwd();
-  const isFilesystemRoot = cwd === path.parse(cwd).root;
-  if (isFilesystemRoot || cwd === os.homedir()) {
-    throw new ScaffoldError(
-      `No project folder to write to. This client did not say which folder it is working in, and the server was started in ${cwd}, ` +
-        `which is not somewhere a project should be created. Ask the user which folder they want the project in — a new one is fine — and pass it as \`dir\`.`
-    );
-  }
-  return { dir: cwd, resolvedFrom: "working-directory" };
+  return refuseUnscoped({ dir: cwd, resolvedFrom: "working-directory" });
+}
+
+/**
+ * The filesystem root and the home directory are never a project folder,
+ * whichever way they were arrived at. Claude Desktop starts servers at `/`,
+ * and an agent that resolves `~` or passes the folder it happens to be in can
+ * hand either one over as an explicit `dir` — scaffolding AGENTS.md and a
+ * renders/ folder into someone's home directory is never what anyone meant.
+ */
+function refuseUnscoped(target: { dir: string; resolvedFrom: ScaffoldResult["resolvedFrom"] }) {
+  const { dir, resolvedFrom } = target;
+  const isFilesystemRoot = dir === path.parse(dir).root;
+  if (!isFilesystemRoot && dir !== os.homedir()) return target;
+  const how =
+    resolvedFrom === "argument"
+      ? `\`dir\` is ${dir}`
+      : resolvedFrom === "client-root"
+        ? `the client says it is working in ${dir}`
+        : `this client did not say which folder it is working in, and the server was started in ${dir}`;
+  throw new ScaffoldError(
+    `No project folder to write to: ${how}, which is not somewhere a project should be created. ` +
+      `Ask the user which folder they want the project in — a new one is fine — and pass it as \`dir\`.`
+  );
 }
 
 export function scaffold(opts: ScaffoldOptions): ScaffoldResult {
   const { dir, resolvedFrom } = resolveTarget(opts.dir, opts.roots);
   const name = opts.name?.trim() || path.basename(dir);
 
-  const files: Array<[string, string]> = [["AGENTS.md", AGENTS_MD(name)]];
+  // The version is read from package.json at call time, never compiled in: the
+  // marker has to say what the user actually installed, or the first absorb
+  // pass would re-read releases this project was scaffolded on.
+  const files: Array<[string, string]> = [["AGENTS.md", AGENTS_MD(name, packageVersion())]];
   for (const rel of pointerFiles(opts.client)) files.push([rel, pointerContent(rel)]);
   files.push([path.join("renders", ".gitkeep"), ""]);
 

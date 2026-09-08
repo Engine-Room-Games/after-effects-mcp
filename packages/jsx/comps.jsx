@@ -71,10 +71,68 @@ OPS.set_comp = function (args) {
   return __compSummary(c);
 };
 
+// A solid layer's source is a FootageItem in the project's Solids folder, and
+// removing the comp removes the layer, not the item (issue #83). The solids
+// this comp used are collected from ITS OWN layers before the removal and
+// nothing else — deleting comp A must never reach a solid that only some other
+// comp uses — and after it, `usedIn` decides: an item some other comp still
+// places is kept and reported with the comps using it. The helpers live in
+// footage.jsx beside purge_unused_footage, the project-wide sweep.
 OPS.delete_comp = function (args) {
   var c = getCompById(args.compId);
+  var compId = c.id;
+  var compName = c.name;
+  var purge = (args.purgeUnusedSolids === true);
+
+  var solids = __solidItemsOf(c);
+
   c.remove();
-  return { ok: true };
+
+  var out = { ok: true, compId: compId, name: compName };
+  var kept = [];
+  var toRemove = [];
+  var gone = [];
+  for (var i = 0; i < solids.length; i++) {
+    // Re-fetched by id after the removal rather than held across it — the
+    // handle staleness this repo has measured elsewhere is not worth risking
+    // for one lookup per solid.
+    var item = app.project.itemByID(solids[i].id);
+    if (!item) { gone.push(solids[i]); continue; }
+    var uses = __usedInList(item);
+    if (uses.length > 0) {
+      kept.push({ id: item.id, name: item.name, usedIn: uses });
+      continue;
+    }
+    toRemove.push({ item: item, id: item.id, name: item.name, kind: "solid" });
+  }
+  if (gone.length > 0) out.solidsAlreadyGone = gone;
+
+  if (!purge) {
+    out.unusedSolidsLeft = toRemove.length;
+    if (toRemove.length > 0) {
+      out.note = toRemove.length + " solid item(s) this comp used are now used by nothing and remain in the project's Solids folder. " +
+        "Pass purgeUnusedSolids:true to remove them with the comp, or purge_unused_footage to sweep the whole project.";
+    }
+    return out;
+  }
+
+  var r = __removeItems(toRemove);
+  out.removedSolids = r.removed;
+  out.keptSolids = kept;
+  if (r.failed) {
+    var msg = "delete_comp removed comp \"" + compName + "\" (id " + compId + "), then failed purging its solids at \"" +
+      r.failed.name + "\" (id " + r.failed.id + "): " + r.error + ".";
+    if (r.removed.length > 0) msg += " Removed before it: " + __nameList(r.removed, 20) + ".";
+    else msg += " No solid had been removed yet.";
+    if (r.notAttempted.length > 0) msg += " Not attempted: " + __nameList(r.notAttempted, 20) + ".";
+    msg += " The comp is gone, so do not call delete_comp for it again. One Undo in After Effects restores the comp and " +
+      "these solids together; purge_unused_footage removes whatever is still left.";
+    throw new Error(msg);
+  }
+  if (kept.length > 0) {
+    out.note = kept.length + " solid item(s) were kept because another comp still uses them; see keptSolids.usedIn.";
+  }
+  return out;
 };
 
 // ---------------------------------------------------------------------------
@@ -153,20 +211,24 @@ function __dupRepoint(comp, opts, depth) {
   }
 }
 
+// A `folderId` argument resolved to a FolderItem, or a thrown error naming the
+// id and what it actually is. Shared by duplicate_comp and purge_unused_footage.
+function __folderArg(id) {
+  var f = app.project.itemByID(id);
+  if (!f) throw new Error("No project item with id " + id + " to use as folderId");
+  if (!(f instanceof FolderItem)) {
+    throw new Error(
+      "folderId " + id + ' ("' + f.name + '") is a ' + __itemKind(f) +
+      ", not a project folder. Pass the id of a folder from get_project_summary, or omit folderId."
+    );
+  }
+  return f;
+}
+
 OPS.duplicate_comp = function (args) {
   var src = getCompById(args.compId);
   var folder = null;
-  if (args.folderId !== undefined && args.folderId !== null) {
-    var f = app.project.itemByID(args.folderId);
-    if (!f) throw new Error("No project item with id " + args.folderId + " to use as folderId");
-    if (!(f instanceof FolderItem)) {
-      throw new Error(
-        "folderId " + args.folderId + ' ("' + f.name + '") is a ' + __itemKind(f) +
-        ", not a project folder. Pass the id of a folder from get_project_summary, or omit folderId."
-      );
-    }
-    folder = f;
-  }
+  if (args.folderId !== undefined && args.folderId !== null) folder = __folderArg(args.folderId);
 
   var opts = { seen: {}, created: [], repointed: 0, nameSuffix: null };
   if (args.nameSuffix) opts.nameSuffix = args.nameSuffix;

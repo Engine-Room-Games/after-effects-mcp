@@ -1,4 +1,5 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { diagnosticPortCandidates } from "./bridge/discovery.js";
 import {
   CallToolRequestSchema,
   GetPromptRequestSchema,
@@ -7,6 +8,8 @@ import {
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { schemas } from "@engineroom/shared";
 import { HttpClient } from "./bridge/httpClient.js";
@@ -22,9 +25,11 @@ import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
 import { assessPanel, installedBundleHash, unknownOpMessage } from "./setup/panelVersion.js";
-import { installedPanelDir, panelInstallDiff, panelSourceDir } from "./setup/paths.js";
+import { installedPanelDir, packageVersion, panelInstallDiff, panelSourceDir } from "./setup/paths.js";
+import { renderWhatsNew } from "./tools/whatsNew.js";
 import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./generated/content.js";
-import { listIssues, logIssue, markReported } from "./issues/journal.js";
+import { archiveIssue, listIssues, logIssue, markReported } from "./issues/journal.js";
+import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
@@ -52,6 +57,7 @@ export const SERVER_OPS = new Set([
   "log_issue",
   "list_known_issues",
   "mark_issue_reported",
+  "archive_issue",
 ]);
 // Half server-resident: only the panel can read After Effects, only the server
 // can remember anything between calls. These forward an internal read op to
@@ -88,7 +94,16 @@ const AwaitJobSchema = schemas.AwaitJob;
 const GetJobSchema = schemas.GetJob;
 const CancelJobSchema = schemas.CancelJob;
 
-export function createServer() {
+export interface CreateServerOptions {
+  /**
+   * The bridge client to use instead of one discovered from the environment.
+   * A test hands in one pointed at a stale port with its own candidate list, so
+   * the drift path can be exercised without asking anything real on the machine.
+   */
+  bridge?: HttpClient;
+}
+
+export function createServer(opts: CreateServerOptions = {}) {
   const server = new Server(
     { name: "after-effects-mcp", version: "0.4.0" },
     {
@@ -100,20 +115,40 @@ export function createServer() {
     }
   );
 
-  const bridge = new HttpClient();
+  const bridge = opts.bridge ?? new HttpClient();
   const jobs = new JobManager();
   // One writer at a time. See bridge/writeQueue.ts for why the panel's own
   // evalScript mutex is not enough.
   const writes = new WriteQueue();
   const snapshots = new SnapshotStore();
-  const ws = new WsClient(bridge.port, jobs);
+  // Follows the bridge's port rather than copying it: see wsClient.ts.
+  const ws = new WsClient(bridge, jobs);
   ws.start();
   const panelGate = createPanelGate(bridge);
 
-  // Best-effort health probe; non-fatal.
+  // The issue journal, pushed rather than pulled: every failed tool call is
+  // answered with the journal entries that match its tool and error text, so
+  // the pointer arrives at the moment it is needed and nothing else in the
+  // session pays for the journal's size (issue #102). `annotateFailure` never
+  // throws and never touches the message when nothing matches — see
+  // issues/failures.ts. The cache is per process, like `SnapshotStore`.
+  const journalCache = new JournalCache();
+  const fail = (tool: string, message: string) => errorResult(annotateFailure(journalCache, tool, message));
+
+    // Best-effort health probe; non-fatal. A refusal here is the cheapest moment
+  // to notice the port file was stale (issue #92): the search costs a couple
+  // of seconds now, against a failed first op later.
   bridge.health().then(
     (h) => logger.info(`Bridge healthy on port ${h.port}`),
-    (e) => logger.warn(`Bridge not reachable yet: ${(e as Error).message}`)
+    async (e) => {
+      logger.warn(`Bridge not reachable yet: ${(e as Error).message}`);
+      if (!(e instanceof BridgeUnreachableError)) return;
+      const located = await bridge.rediscover().catch(() => null);
+      if (located?.found && located.found.port !== bridge.port) {
+        await bridge.switchPort(located.found.port);
+        logger.info(`Bridge healthy on port ${bridge.port}`);
+      }
+    }
   );
 
   // ---------- tools/list ----------
@@ -189,8 +224,20 @@ export function createServer() {
       try {
         if (name === "await_job") {
           const a = AwaitJobSchema.parse(rawArgs);
-          const st = await jobs.waitFor(a.jobId, a.timeoutMs ?? 600_000);
-          return textResult(st);
+          // This is the one call that blocks for the job, so it is the one
+          // call whose progress a client is still correlating while the job
+          // runs — see forwardJobProgress for why run_batch cannot be.
+          const forward = progressToken !== undefined ? forwardJobProgress(jobs, a.jobId, progressToken, extra) : null;
+          try {
+            const st = await jobs.waitFor(a.jobId, a.timeoutMs ?? 600_000);
+            return textResult(st);
+          } finally {
+            // Unbind, then wait for every notification already started to
+            // reach the transport. The response is written after this handler
+            // returns, so nothing on this token can land behind it — on the
+            // timeout path as much as on the success path.
+            await forward?.settle();
+          }
         }
         if (name === "get_job") {
           const a = GetJobSchema.parse(rawArgs);
@@ -203,8 +250,16 @@ export function createServer() {
           jobs.cancel(a.jobId);
           return textResult({ ok: true });
         }
+        // check_setup is told which port ops are going to, so it can say when
+        // that disagrees with the port that answers — the state issue #92
+        // lived in for a week with every check green.
+        // check_setup asks the ports ops would ask, and then the ones a pin
+        // keeps ops away from: a wrong AE_MCP_PORT must not hide the panel
+        // answering on 7777, or the report sends the user to restart After
+        // Effects for a panel that is fine (recipe 43). probeBridge dedups.
+        const setupOpts = () => ({ opPort: bridge.port, candidates: [...bridge.candidates(), ...diagnosticPortCandidates()] });
         if (name === "check_setup") {
-          return textResult(await checkSetup());
+          return textResult(await checkSetup(setupOpts()));
         }
         if (name === "setup_panel") {
           const a = schemas.SetupPanel.parse(rawArgs);
@@ -214,7 +269,7 @@ export function createServer() {
           panelGate.invalidate();
           // Re-run the diagnostic so the agent sees the resulting state rather
           // than having to guess whether the install was sufficient.
-          return textResult({ ...installed, setup: await checkSetup() });
+          return textResult({ ...installed, setup: await checkSetup(setupOpts()) });
         }
         if (name === "init_project") {
           const a = schemas.InitProject.parse(rawArgs);
@@ -238,6 +293,21 @@ export function createServer() {
           if (!guide) return errorResult(`Unknown guide topic: ${a.topic}`);
           // Markdown, not JSON: this is prose to be read, and JSON-escaping it
           // would hand the model a wall of \n.
+          if (a.topic === "whats-new") {
+            // The one topic with a shape a machine can filter — see
+            // tools/whatsNew.ts. The version on the first line is the server's
+            // own, read from package.json, because the guide cannot know it.
+            const rendered = renderWhatsNew(guide.body, { since: a.since, serverVersion: packageVersion() });
+            return { content: [{ type: "text" as const, text: rendered.text }] };
+          }
+          if (a.since !== undefined) {
+            // Refused rather than ignored: a filter that silently did not apply
+            // is the swallowed error this server refuses everywhere else.
+            return errorResult(
+              `\`since\` filters the whats-new topic only; the ${a.topic} topic has no release sections to filter. ` +
+                `Call ae_guide({topic: "${a.topic}"}) without \`since\`, or ae_guide({topic: "whats-new", since: "${a.since}"}) for what changed.`
+            );
+          }
           return { content: [{ type: "text" as const, text: guide.body }] };
         }
         if (name === "log_issue") {
@@ -261,6 +331,9 @@ export function createServer() {
               // that a fresh project folder does not start ignorant.
               scope: a.scope ?? "all",
               limit: a.limit,
+              // Hidden unless asked: an archived entry is one that stopped
+              // biting, was superseded by a release, or was retired on purpose.
+              includeArchived: a.includeArchived ?? false,
             })
           );
         }
@@ -271,11 +344,24 @@ export function createServer() {
           // journal, and the caller has to be able to say which one moved.
           return textResult({ ok: true, id: entry.id, scope: entry.scope, reported: true, issueUrl: entry.issueUrl });
         }
+        if (name === "archive_issue") {
+          const a = schemas.ArchiveIssue.parse(rawArgs);
+          const entry = archiveIssue(a.id, a.reason);
+          return textResult({
+            ok: true,
+            id: entry.id,
+            scope: entry.scope,
+            archived: true,
+            reason: entry.archivedReason,
+            archivedAt: entry.archivedAt,
+            note: "The file is kept and can be reopened by a later log_issue with the same title or the same tool and error text.",
+          });
+        }
       } catch (e) {
         // A zod rejection here is the same class of thing as one below, and gets
         // the same prose treatment; `invalidArgsText` passes anything else
         // through unchanged.
-        return errorResult(invalidArgsText(name, e));
+        return fail(name, invalidArgsText(name, e));
       }
     }
 
@@ -284,7 +370,7 @@ export function createServer() {
     try {
       args = (OpSchemas[name as keyof typeof OpSchemas] as z.ZodTypeAny).parse(rawArgs);
     } catch (e) {
-      return errorResult(invalidArgsText(name, e));
+      return fail(name, invalidArgsText(name, e));
     }
 
     // run_jsx can take its script, and its helper libraries, from files rather
@@ -295,7 +381,7 @@ export function createServer() {
       try {
         args = resolveRunJsxSource(args as RunJsxArgs);
       } catch (e) {
-        return errorResult((e as Error).message);
+        return fail(name, (e as Error).message);
       }
     }
 
@@ -318,7 +404,7 @@ export function createServer() {
       } catch (e) {
         // Full, timed out in the queue, or cancelled — all three mean the call
         // never reached After Effects, and all three say so.
-        return errorResult((e as Error).message);
+        return fail(name, (e as Error).message);
       }
     }
     const wait: QueueWait | null = lease?.wait ?? null;
@@ -329,7 +415,11 @@ export function createServer() {
       // the Unknown-op backstop — applies to the internal ops these forward.
       if (SNAPSHOT_OPS.has(name)) return await runSnapshotOp(name, args, bridge, snapshots);
 
-      const result = await bridge.runOp(name, args, progressToken);
+      // The request's progressToken is deliberately not forwarded. The panel
+      // does nothing with it — its WS `progress` events carry a jobId and no
+      // token — and progress is delivered on `await_job`, never here; see
+      // forwardJobProgress.
+      const result = await bridge.runOp(name, args);
 
       // Async envelope handling for run_batch
       if (ASYNC_OPS.has(name) && isAsyncEnvelope(result)) {
@@ -339,14 +429,14 @@ export function createServer() {
           undoGroupName?: string; note?: string;
         };
         jobs.register(env.jobId, env.total);
-        if (progressToken !== undefined) {
-          jobs.bindProgressEmitter(env.jobId, (jid, progress, total, message) => {
-            void server.notification({
-              method: "notifications/progress",
-              params: { progressToken, progress, total, message },
-            });
-          });
-        }
+        // No progress emitter is bound to this request, and that absence is
+        // the fix for issue #82. This handler returns the envelope a few lines
+        // down, and a `notifications/progress` sent on this request's token
+        // after that response is one a spec-compliant client has already
+        // stopped correlating — every message was on the wire and every real
+        // client saw nothing. The call that can carry progress is the one
+        // that blocks for the job, `await_job`; the note says so.
+        //
         // This is the gap the panel's own mutex leaves, and the reason this
         // queue exists at all. `run_batch` handed back a jobId and the panel now
         // drives `_continue_job` chunk by chunk; each chunk is its own turn on
@@ -376,7 +466,7 @@ export function createServer() {
             chunkSize: env.chunkSize,
             undoStepsEstimate: env.undoStepsEstimate,
             undoGroupName: env.undoGroupName,
-            note: env.note,
+            note: withProgressNote(env.note, env.jobId),
           },
           wait
         );
@@ -448,13 +538,16 @@ export function createServer() {
     } catch (e) {
       // Checked before BridgeUnreachableError because the remedies are
       // opposites: one says restart After Effects, the other says do not.
-      if (e instanceof BridgeTimeoutError) return errorResult(e.message);
-      if (e instanceof BridgeUnreachableError) return errorResult(e.message);
+      // Every branch below goes through `fail`, so a failure the journal already
+      // knows about arrives with its pointer attached — that is the push half of
+      // the journal, and the error path is the only place it can live.
+      if (e instanceof BridgeTimeoutError) return fail(name, e.message);
+      if (e instanceof BridgeUnreachableError) return fail(name, e.message);
       if (e instanceof AeError) {
         // A failure the panel diagnosed itself — a stale render buffer, so far.
         // Those messages are already a complete instruction to the agent, and
         // "AE:" in front of one would read as After Effects having raised it.
-        if (e.code) return errorResult(e.message);
+        if (e.code) return fail(name, e.message);
         // The gate above should have caught this, but it depends on /health
         // reporting a hash. On a panel too old to do that, this is the backstop
         // — and it is unambiguous, since unknown tool names never get this far.
@@ -465,9 +558,9 @@ export function createServer() {
         // The line number on its own counts from something the caller cannot
         // see, so this prints the failing line's text where the handler could
         // map it, and says so plainly where it could not (issue #46).
-        return errorResult(aeErrorText(e));
+        return fail(name, aeErrorText(e));
       }
-      return errorResult((e as Error).message);
+      return fail(name, (e as Error).message);
     } finally {
       // No-op unless a lease was taken, and deferred by `extendUntil` when a
       // long batch is still running behind the envelope we just returned.
@@ -476,6 +569,68 @@ export function createServer() {
   });
 
   return server;
+}
+
+/**
+ * Forward a job's progress to the request that is waiting on it, as
+ * `notifications/progress` on that request's own token.
+ *
+ * Bound by `await_job` and by nothing else. `run_batch` has answered with its
+ * `{jobId}` envelope before the first chunk runs, and a notification sent on a
+ * request's token after that request's response is one a spec-compliant client
+ * has already stopped listening for — the SDK client drops its progress
+ * handler the moment the response arrives. Until 0.5.0 every progress message
+ * for a long batch went out that way: plainly visible on the raw wire, and
+ * seen by no real client at all (issue #82).
+ *
+ * `extra.sendNotification` is the SDK's request-scoped sender, and it is used
+ * on purpose over `server.notification`: it tags each message with the request
+ * id, so a Streamable HTTP transport delivers it on that request's own stream,
+ * and it silently drops anything sent after the request has been cancelled.
+ *
+ * `settle()` unbinds first and then waits for every send already started. The
+ * SDK writes the response after the handler returns, so awaiting this before
+ * returning is what puts every notification ahead of the response on the wire
+ * — on the timeout path, where the emitter would otherwise outlive the call,
+ * as much as on the success path.
+ */
+function forwardJobProgress(
+  jobs: JobManager,
+  jobId: string,
+  progressToken: string | number,
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+) {
+  const inFlight = new Set<Promise<void>>();
+  const unbind = jobs.bindProgressEmitter(jobId, (_jid, progress, total, message) => {
+    const p = extra
+      .sendNotification({ method: "notifications/progress", params: { progressToken, progress, total, message } })
+      .catch((e) => logger.warn(`progress notification for job ${jobId} was not sent: ${(e as Error).message}`));
+    inFlight.add(p);
+    void p.finally(() => inFlight.delete(p));
+  });
+  return {
+    async settle(): Promise<void> {
+      unbind();
+      await Promise.all(inFlight);
+    },
+  };
+}
+
+/**
+ * The sentence on a long batch's envelope that says where its progress goes.
+ *
+ * Appended here rather than written in `batch.jsx`, because it describes this
+ * server and not After Effects: the panel does not update itself, and a note
+ * authored there would go on describing whatever the server did when that
+ * panel was installed.
+ */
+function withProgressNote(note: string | undefined, jobId: string): string {
+  const progress =
+    `Follow it with await_job({jobId: "${jobId}"}), which blocks until the batch finishes and returns its result. ` +
+    `Progress is delivered on THAT call: send it with a progressToken and notifications/progress arrive while it ` +
+    `waits, every one before its response. None can ride on this run_batch call — its response is already back ` +
+    `before the first chunk runs. get_job({jobId: "${jobId}"}) reads the same state without a token.`;
+  return note ? `${note} ${progress}` : progress;
 }
 
 /**
@@ -561,6 +716,14 @@ function createPanelGate(bridge: HttpClient) {
   const RECHECK_MS = 60_000;
   let verdict: string | null = null;
   let checkedAt = 0;
+
+  // A verdict is about the panel on one port. When the bridge moves, whatever
+  // was decided about the old one — stale or healthy — says nothing about the
+  // panel now answering, so the next call has to ask again.
+  bridge.onPortChange(() => {
+    verdict = null;
+    checkedAt = 0;
+  });
 
   return {
     /** The message to return instead of forwarding, or null to proceed. */

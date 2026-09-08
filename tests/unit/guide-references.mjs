@@ -181,9 +181,18 @@ fs.rmSync(tmp, { recursive: true, force: true });
 
 // ------------------------------------------------------- the real repo
 // The fixture proves the mechanism; this proves it is actually wired to the
-// guides that ship. Both shipped references are reachable from every carrier.
+// guides that ship. Every shipped reference is reachable from every carrier.
+// Adding a reference means adding it here — a reference this list does not
+// know about is exactly the file nothing would notice going missing.
 const REAL_REFERENCES = [
+  ["animation", "after-effects"],
+  ["assembly", "after-effects"],
   ["extendscript-gotchas", "after-effects"],
+  ["issue-journal", "after-effects"],
+  ["mogrt-and-footage", "after-effects"],
+  ["shapes", "after-effects"],
+  ["sound", "after-effects"],
+  ["text", "after-effects"],
   ["whats-new", "after-effects"],
 ];
 const schemas = fs.readFileSync(path.join(root, "packages", "shared", "src", "schemas.ts"), "utf8");

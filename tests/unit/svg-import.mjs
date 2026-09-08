@@ -72,6 +72,10 @@ function makeContext() {
   REMOVED = [];
   const ctx = {
     OPS: {},
+    // footage.jsx also declares purge_unused_footage, which needs core.jsx's
+    // noUndoWhen at load time. Not under test here; the real one is in
+    // purge-footage.mjs.
+    noUndoWhen: (pred, fn) => fn,
     File: MockFile,
     Folder: class {},
     FolderItem,

@@ -299,7 +299,15 @@ export const SetComp = z.object({
   workAreaDuration: z.number().positive().optional(),
   bgColor: Color.optional(),
 });
-export const DeleteComp = z.object({ compId: z.number() });
+export const DeleteComp = z
+  .object({
+    compId: z.number(),
+    purgeUnusedSolids: z.boolean().default(false).optional()
+      .describe(
+        "Also remove the solid footage items this comp's own layers used, once nothing else uses them. Off by default because a solid can be shared: one another comp still uses is kept and reported with the comps using it."
+      ),
+  })
+  .strict();
 export const SetActiveComp = z.object({ compId: z.number() });
 export const DuplicateComp = z
   .object({
@@ -336,9 +344,14 @@ export const DiffComp = z
   .strict();
 
 // ---------- layers ----------
+// The sections __layerSummary (layers.jsx) can add to its id/index/name/type
+// core. One list for list_layers and find_layers, because both read through
+// that one function — a section named here and not there is a field the
+// schema advertises and the panel never fills, which no test can see.
+export const LAYER_SUMMARY_SECTIONS: ["flags", "timing", "parent"] = ["flags", "timing", "parent"];
 export const ListLayers = z.object({
   compId: z.number(),
-  include: includeParam(["flags", "timing", "parent"], "the id/index/name/type map alone"),
+  include: includeParam(LAYER_SUMMARY_SECTIONS, "the id/index/name/type map alone"),
 });
 export const GetLayerFull = z.object({
   compId: z.number(),
@@ -888,6 +901,16 @@ export const FindLayers = z.object({
   namePattern: z.string().optional(),
   type: z.string().optional(),
   hasEffectMatchName: z.string().optional(),
+  // Same section names as list_layers, opposite default: a search is for
+  // learning which layers exist and what to address them by, so omitting this
+  // means the core alone rather than everything (issue #87). `includeParam`
+  // is not reused because its sentence says "omit for all of them".
+  include: z
+    .array(z.enum(LAYER_SUMMARY_SECTIONS))
+    .optional()
+    .describe(
+      `Sections to add to each match: ${LAYER_SUMMARY_SECTIONS.join(", ")} — the same names as list_layers. Omit it (or pass []) for id/index/name/sourceType plus compId/compName only; unlike list_layers, omitting it here does NOT return every section. The result echoes what was included.`
+    ),
 });
 
 // ---------- raw ----------
@@ -936,6 +959,18 @@ export const CreateFootageLayer = z.object({
   position: VecAny.optional(),
   startTime: z.number().optional(),
 });
+export const PurgeUnusedFootage = z
+  .object({
+    solidsOnly: z.boolean().default(true).optional()
+      .describe(
+        "Only remove solids — the items behind solid and adjustment layers. Pass false to remove every footage item no comp uses, imported files and placeholders included, which is what AE's own Remove Unused Footage does. Comps and folders are never removed either way."
+      ),
+    dryRun: z.boolean().default(false).optional()
+      .describe("List what would be removed without removing anything — not even an undo step."),
+    folderId: z.number().optional()
+      .describe("Restrict the sweep to one project folder and everything nested under it. A folder id from get_project_summary; omit for the whole project."),
+  })
+  .strict();
 
 // ---------- audio ----------
 export const AudioCue = z
@@ -952,6 +987,14 @@ export const AudioCue = z
     outPoint: z.number().optional().describe("Trim the layer's out point to this COMP time. Omit to play to the end of the file."),
     label: z.union([z.number().int().min(0).max(16), z.string()]).optional()
       .describe("AE label colour, as an index 0-16 or a name (red, yellow, aqua, pink, lavender, peach, seafoam, blue, green, purple, orange, brown, fuchsia, cyan, sandstone, darkgreen)."),
+    loop: z.boolean().optional()
+      .describe("Loop the sound until `outPoint`, or until the end of the comp when no outPoint is given — for beds and ambiences. Enables time remapping with a wrap-around expression on Time Remap; the layer's in point still trims the front of the file the way it does on any layer. Default false: the file plays once."),
+    fadeIn: z.number().min(0).optional()
+      .describe("Seconds to fade in from `fadeFloorDb` up to `levelDb`, as keyframes on Audio Levels starting at the layer's in point. Default 0 (no fade). fadeIn + fadeOut must fit inside the cue's placed length or the cue is refused by index."),
+    fadeOut: z.number().min(0).optional()
+      .describe("Seconds to fade out from `levelDb` down to `fadeFloorDb`, ending at the layer's out point. Default 0 (no fade). fadeIn + fadeOut must fit inside the cue's placed length or the cue is refused by index."),
+    stretch: z.number().positive().optional()
+      .describe("Time stretch as a percentage: 100 is unchanged, 200 plays at half speed (lower pitch, twice as long), 50 at double speed. Must be greater than 0. The layer's start time and any trim are re-asserted after it, since After Effects moves them when stretch changes. Default 100."),
   })
   .strict();
 export const PlaceAudioCues = z
@@ -960,8 +1003,10 @@ export const PlaceAudioCues = z
     cues: z.array(AudioCue).min(1).max(200),
     namePrefix: z.string().default("SFX_").optional()
       .describe("Prefix for cues that do not name themselves. Pass \"\" for no prefix."),
+    fadeFloorDb: z.number().optional()
+      .describe("The level in decibels that every fadeIn starts from and every fadeOut ends at. Default -48, the bottom of After Effects' own Audio Levels slider and 1/256 of the recorded amplitude — near-silence. Must be below each faded cue's levelDb. One floor for the whole list."),
     dryRun: z.boolean().default(false).optional()
-      .describe("Resolve and check the whole list without importing, creating or changing anything — not even an undo step. Reports which paths do not exist and what would be placed."),
+      .describe("Resolve and check the whole list without importing, creating or changing anything — not even an undo step. Returns counts, the files it would import, the items it would reuse and the failing cues by index — never the whole resolved list."),
   })
   .strict();
 
@@ -1010,7 +1055,7 @@ export const SetHouseStyle = z
 export const CheckSetup = z.object({}).strict();
 export const SetupPanel = z.object({
   enableDebugMode: z.boolean().default(true).optional()
-    .describe("Also enable Adobe's PlayerDebugMode preference, which AE requires to load this unsigned panel. Default true."),
+    .describe("Also set Adobe's PlayerDebugMode preference, which AE requires to load this unsigned panel, and CEP's LogLevel where it was never set, so CEP's own log records why a panel failed to load (issue #91). Default true."),
   force: z.boolean().default(false).optional()
     .describe("Replace an existing symlinked (development) install with a copy. Default false."),
 }).strict();
@@ -1020,12 +1065,32 @@ export const SetupPanel = z.object({
  * names are part of the tool contract, so they are declared here and
  * `scripts/build-guides.mjs` fails the build if the two ever disagree.
  */
-export const GUIDE_TOPICS = ["ae-setup", "after-effects", "extendscript-gotchas", "style-guide", "whats-new"] as const;
+export const GUIDE_TOPICS = [
+  "ae-setup",
+  "after-effects",
+  "animation",
+  "assembly",
+  "extendscript-gotchas",
+  "issue-journal",
+  "mogrt-and-footage",
+  "shapes",
+  "sound",
+  "style-guide",
+  "text",
+  "whats-new",
+] as const;
 export const AeGuide = z
   .object({
     topic: z.enum(GUIDE_TOPICS).describe(
-      "after-effects: building, animating, easing, expressions, the traps — start here. extendscript-gotchas: read before writing raw ExtendScript for run_jsx. whats-new: what changed recently, when a call behaves differently from what you expected. style-guide: capturing the user's look. ae-setup: connecting to AE when a tool cannot reach it."
+      "after-effects: the core — orienting, bounded reads, verifying a write, screenshots, the bridge failures — start here; it points at one topic per subject. animation: keyframes, easing, rigging, expressions. shapes: shape layers and their Contents. text: text layers. assembly: shots placed into a master comp, markers, retiming. extendscript-gotchas: read before writing raw ExtendScript for run_jsx. sound: sound effects and levels. mogrt-and-footage: exporting a .mogrt, importing footage. issue-journal: when a tool fought back. whats-new: what changed, one section per release, when a call behaves differently from what you expected or a project is being brought up to date after an upgrade. style-guide: capturing the user's look. ae-setup: connecting to AE when a tool cannot reach it."
     ),
+    since: z
+      .string()
+      .regex(/^v?\d+\.\d+\.\d+$/, "must be a version like 0.4.0")
+      .optional()
+      .describe(
+        "whats-new only: return just the releases newer than this version — the version named is the one already absorbed and is excluded — behind the guide's preamble, or one line saying nothing is newer. Use the version a project's docs record as last absorbed. The answer opens with the server's own version. Rejected on any other topic, since there is nothing there to filter."
+      ),
   })
   .strict();
 
@@ -1050,7 +1115,15 @@ export const LogIssue = z
     symptom: z.string().min(3).describe("What went wrong, including the exact error text and the call that produced it."),
     workaround: z.string().min(3).describe("What actually worked — concrete enough for the next session to apply without rediscovering it."),
     cause: z.string().optional().describe("Why it happens, if you worked it out."),
-    tools: z.array(z.string()).optional().describe("Tool names involved, e.g. ['set_temporal_ease']."),
+    tools: z.array(z.string()).optional().describe("Tool names involved, e.g. ['set_temporal_ease']. With errorText, this is what a later failure is matched on."),
+    errorText: z.string().optional()
+      .describe(
+        "The exact error text the failing call returned, verbatim. The next time a call to one of `tools` fails with matching text, its error names this entry — and a later log_issue with the same tool and error text extends this entry instead of creating a second one under a different title."
+      ),
+    kind: z.enum(["tool-bug", "ae-quirk"]).default("tool-bug").optional()
+      .describe(
+        "'tool-bug' (default): something these tools get wrong, which a later release may fix — so the entry is archived once it was last seen on an older server than the one running. 'ae-quirk': After Effects itself behaving unlike its documentation; no release changes that, so it is never archived by version."
+      ),
     scope: z.enum(["project", "user"]).default("project").optional()
       .describe(
         "'project' (default) for this project's footage, comps or files. 'user' for how these tools or After Effects behave — that journal travels with the person, so every future project starts knowing it. Reported back as 'home' when there is no project folder to write into."
@@ -1074,7 +1147,7 @@ export const ListKnownIssues = z
       .default("index")
       .optional()
       .describe(
-        "'index' (default) is one line per entry: id, title, tools, counts and a one-line summary — read the one you need with `id`. 'full' returns every matching entry's whole body and costs thousands of tokens."
+        "'index' (default) is one line per entry: id, title, tools, kind, when and on which version it was last seen, counts — read the one you need with `id`. 'full' returns every matching entry's whole body and costs thousands of tokens."
       ),
     scope: z.enum(["all", "project", "user"]).default("all").optional()
       .describe(
@@ -1082,12 +1155,22 @@ export const ListKnownIssues = z
       ),
     limit: z.number().int().positive().max(500).default(50).optional()
       .describe("Most entries to return. Anything held back is counted in `omitted`."),
+    includeArchived: z.boolean().default(false).optional()
+      .describe(
+        "Also list archived entries — not seen for 30 days, last seen on an older server than this one, or retired with archive_issue — each flagged with its reason. Default false: they are hidden and only counted in `archivedCount`. An `id` read always returns the entry, archived or not."
+      ),
   })
   .strict();
 export const MarkIssueReported = z
   .object({
     id: z.string().describe("The entry id returned by log_issue or list_known_issues. Prefix with its scope ('user:my-entry') when the same id exists in both journals."),
     url: z.string().optional().describe("Link to the issue that was opened."),
+  })
+  .strict();
+export const ArchiveIssue = z
+  .object({
+    id: z.string().describe("The entry id from log_issue or list_known_issues. Prefix with its scope ('user:my-entry') when the same id exists in both journals — only the one named moves."),
+    reason: z.string().min(3).describe("Why it is being retired, one line — the URL of the report that already covers it, the release that fixed it, or where the lesson was moved to."),
   })
   .strict();
 
@@ -1173,6 +1256,7 @@ export const OpSchemas = {
   // footage
   import_footage: ImportFootage,
   create_footage_layer: CreateFootageLayer,
+  purge_unused_footage: PurgeUnusedFootage,
   // audio
   place_audio_cues: PlaceAudioCues,
   // motion graphics templates
@@ -1196,6 +1280,7 @@ export const OpSchemas = {
   log_issue: LogIssue,
   list_known_issues: ListKnownIssues,
   mark_issue_reported: MarkIssueReported,
+  archive_issue: ArchiveIssue,
 } as const;
 
 export type OpName = keyof typeof OpSchemas;
@@ -1304,6 +1389,10 @@ export const OpMutation = {
   // footage
   import_footage: "write",
   create_footage_layer: "write",
+  // Removes project items. A dryRun changes nothing, but the table is per op,
+  // not per call — a dry run waiting behind a batch costs a little time and a
+  // real one interleaving with it costs the batch's undo step.
+  purge_unused_footage: "write",
   // audio cues — imports footage and adds layers.
   place_audio_cues: "write",
   // motion graphics templates — saves the project before exporting.
@@ -1327,6 +1416,7 @@ export const OpMutation = {
   log_issue: "server",
   list_known_issues: "server",
   mark_issue_reported: "server",
+  archive_issue: "server",
 } as const satisfies Record<OpName, "write" | "read" | "server">;
 
 export type OpEffect = (typeof OpMutation)[OpName];

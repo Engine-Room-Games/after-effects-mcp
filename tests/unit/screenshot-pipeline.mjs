@@ -217,6 +217,13 @@ function bootPanel(extDir) {
   // Neither may escape: a stray port file would point a live MCP server at a
   // port that stops existing with this test.
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "ae-shot-home-"));
+  // Bind an ephemeral port, never 7777. On the machine this is developed on a
+  // real After Effects panel holds 7777, and since #92 a panel that finds one
+  // of its own kind there waits for it to exit rather than walking — which a
+  // test panel would do for ever. Same arrangement as panel-boot.mjs.
+  const configDir = path.join(fakeHome, ".engineroom-ae-mcp");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ port: 0 }));
   const realOs = nodeRequire("node:os");
   const realHttp = nodeRequire("node:http");
   const servers = [];

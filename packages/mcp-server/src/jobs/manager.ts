@@ -24,10 +24,36 @@ export class JobManager {
     return s;
   }
 
-  bindProgressEmitter(jobId: string, fn: ProgressEmitter): void {
+  /**
+   * Forward this job's progress to `fn` until the job settles or the returned
+   * function is called.
+   *
+   * The caller owns the lifetime, and the returned unbind is not optional: an
+   * emitter is bound for the span of one MCP request — `await_job` — and one
+   * left behind would keep sending `notifications/progress` on that request's
+   * token after its response, which is exactly what a spec-compliant client
+   * stops listening for the moment the response arrives (issue #82). `flush`
+   * drops every emitter when the job finishes, so unbinding after that is a
+   * no-op rather than an error.
+   */
+  bindProgressEmitter(jobId: string, fn: ProgressEmitter): () => void {
     const arr = this.progressEmitters.get(jobId) ?? [];
     arr.push(fn);
     this.progressEmitters.set(jobId, arr);
+    return () => this.unbindProgressEmitter(jobId, fn);
+  }
+
+  unbindProgressEmitter(jobId: string, fn: ProgressEmitter): void {
+    const arr = this.progressEmitters.get(jobId);
+    if (!arr) return;
+    const i = arr.indexOf(fn);
+    if (i >= 0) arr.splice(i, 1);
+    if (arr.length === 0) this.progressEmitters.delete(jobId);
+  }
+
+  /** How many emitters a job currently has. Exists for the tests. */
+  progressEmitterCount(jobId: string): number {
+    return this.progressEmitters.get(jobId)?.length ?? 0;
   }
 
   reportProgress(jobId: string, progress: number, total?: number, message?: string): void {

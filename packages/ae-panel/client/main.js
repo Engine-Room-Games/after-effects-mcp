@@ -212,10 +212,68 @@
   }
 
   // ---------- Port file (so MCP server can discover) ----------
+  // Written only once a port is actually bound, and only with that port. The
+  // file is a hint for the server, never the authority — the socket is — and
+  // the one way it lies is by describing a bind that did not happen or a panel
+  // that has since gone (issue #92). So it is written after `listen` succeeds
+  // and removed again on unload, and never with a port this panel merely tried.
+  var portDir = path.join(os.homedir(), ".engineroom-ae-mcp");
+  var portFile = path.join(portDir, "port");
+  var configFile = path.join(portDir, "config.json");
+
   function writePortFile(port) {
-    var dir = path.join(os.homedir(), ".engineroom-ae-mcp");
-    try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
-    try { fs.writeFileSync(path.join(dir, "port"), String(port), "utf8"); } catch (e) { log("warn", "could not write port file: " + e.message); }
+    try { fs.mkdirSync(portDir, { recursive: true }); } catch (e) {}
+    try { fs.writeFileSync(portFile, String(port), "utf8"); } catch (e) { log("warn", "could not write port file: " + e.message); }
+  }
+
+  // Only this panel's own entry. Another panel may have written the file since
+  // — a second After Effects instance, say — and its port is not ours to erase.
+  function removePortFile(port) {
+    try {
+      if (fs.readFileSync(portFile, "utf8").trim() === String(port)) fs.unlinkSync(portFile);
+    } catch (e) {}
+  }
+
+  // ---------- Config ----------
+  // A CEP panel cannot read an environment variable the user set: it runs in
+  // After Effects' process, with Adobe's environment. So its two knobs live in
+  // a JSON file beside the port file, ~/.engineroom-ae-mcp/config.json:
+  //
+  //   { "port": 7777, "allowPortWalk": false }
+  //
+  //   port          the port to bind. Default 7777. 0 binds an ephemeral port,
+  //                 which is what the offline tests use.
+  //   allowPortWalk when the port is held by another AE MCP panel, move to the
+  //                 next free one instead of waiting for it. For people who run
+  //                 two After Effects instances at once. Off by default: on one
+  //                 machine the holder is a zombie, and walking around it is
+  //                 what issue #92 was.
+  //
+  // Anything unreadable is logged and ignored; the defaults are what shipped.
+  var DEFAULT_PORT = 7777;
+  function readConfig() {
+    var cfg = { port: DEFAULT_PORT, allowPortWalk: false, bindRetryMs: 2000, source: null };
+    var raw;
+    try { raw = fs.readFileSync(configFile, "utf8"); } catch (e) { return cfg; }
+    var parsed;
+    try { parsed = JSON.parse(raw); }
+    catch (e) { log("warn", "ignoring " + configFile + " — not valid JSON (" + e.message + ")"); return cfg; }
+    if (!parsed || typeof parsed !== "object") {
+      log("warn", "ignoring " + configFile + " — expected a JSON object");
+      return cfg;
+    }
+    cfg.source = configFile;
+    if (parsed.port !== undefined) {
+      if (typeof parsed.port === "number" && parsed.port >= 0 && parsed.port <= 65535 && parsed.port === Math.floor(parsed.port)) cfg.port = parsed.port;
+      else log("warn", "ignoring \"port\" in " + configFile + " — expected a whole number 0-65535, got " + JSON.stringify(parsed.port));
+    }
+    if (parsed.allowPortWalk !== undefined) {
+      if (typeof parsed.allowPortWalk === "boolean") cfg.allowPortWalk = parsed.allowPortWalk;
+      else log("warn", "ignoring \"allowPortWalk\" in " + configFile + " — expected true or false");
+    }
+    // Undocumented on purpose: how often to retry a held port. Tests shorten it.
+    if (typeof parsed.bindRetryMs === "number" && parsed.bindRetryMs >= 50) cfg.bindRetryMs = parsed.bindRetryMs;
+    return cfg;
   }
 
   // ---------- WS broadcast ----------
@@ -814,9 +872,15 @@
           res.setHeader("content-type", "application/json");
           // bundleHash identifies the code this panel is *running*, which is what
           // the server needs to know before sending an op the panel may predate.
+          // `ok` + `bundleHash` is also how another copy of this panel, and the
+          // server's discovery, recognise this as an AE MCP panel — see
+          // isOurHealth below and isPanelHealth in the server's discovery.ts.
+          // The port is read off the socket, not the argument: port 0 binds an
+          // ephemeral one and the argument would say 0.
+          var addr = server.address();
           res.end(JSON.stringify({
             ok: true,
-            port: port,
+            port: addr && addr.port ? addr.port : port,
             bundleLoaded: true,
             bundleHash: loadedBundleHash,
             ts: Date.now()
@@ -887,26 +951,156 @@
     });
   }
 
-  function startServers(startPort) {
-    var tries = 0;
-    function attempt(p) {
-      tries++;
+  // ---------- Who holds the port? ----------
+  // The same test the server's discovery makes (isPanelHealth in discovery.ts):
+  // `ok` plus `bundleHash` — or `bundleLoaded`, on a panel from before the hash
+  // existed — is what nothing else on a loopback port would answer with.
+  function isOurHealth(body) {
+    return !!body && typeof body === "object" && body.ok === true &&
+      ("bundleHash" in body || "bundleLoaded" in body);
+  }
+
+  // Never rejects: every outcome is a classification the caller acts on.
+  //   panel  — another AE MCP panel; its health body is attached
+  //   other  — something answered, but not as the panel
+  //   silent — accepted the connection and said nothing, or errored
+  function identifyHolder(port) {
+    return new Promise(function (resolve) {
+      var done = false;
+      function finish(r) { if (!done) { done = true; resolve(r); } }
+      var req = http.get({ host: "127.0.0.1", port: port, path: "/health", timeout: 1500 }, function (res) {
+        var bufs = [];
+        res.on("data", function (c) { bufs.push(c); });
+        res.on("end", function () {
+          var body = null;
+          try { body = JSON.parse(Buffer.concat(bufs).toString("utf8")); } catch (e) {}
+          if (res.statusCode === 200 && isOurHealth(body)) finish({ kind: "panel", health: body });
+          else finish({ kind: "other", detail: "answered HTTP " + res.statusCode + (body ? " with an unfamiliar body" : " with no JSON") });
+        });
+        res.on("error", function (e) { finish({ kind: "silent", detail: e.message }); });
+      });
+      req.on("timeout", function () { req.destroy(); finish({ kind: "silent", detail: "accepted the connection but did not answer within 1.5s" }); });
+      req.on("error", function (e) { finish({ kind: "silent", detail: e.message }); });
+    });
+  }
+
+  // 7777 through 7799 was the old ceiling; kept as a distance so a configured
+  // start port walks the same number of steps.
+  var WALK_LIMIT = 22;
+
+  /**
+   * Bind the configured port, and decide what to do when it is taken.
+   *
+   * It used to walk: EADDRINUSE, try the next port, up to 7799, then write
+   * whatever it got to the port file. On one machine nothing else ever holds
+   * 7777, so the thing being walked around was always a previous instance of
+   * this same panel — a CEPHtmlEngine that lingered across an After Effects
+   * relaunch, or a second panel window — and the walk routed round it in
+   * silence, leaving the port file as a second source of truth that could
+   * disagree with the socket. Four incidents in a week (issue #92).
+   *
+   * So the holder is identified first. If it is one of us, this panel does not
+   * move: it says so in its status and log, and retries the bind on an interval
+   * so it takes the port over the moment the other one exits, with no restart.
+   * If it is something else, or answers nothing, the walk happens as before —
+   * loudly, naming the holder and the port chosen, because that is the one
+   * case where the port file legitimately says something other than 7777.
+   * `allowPortWalk` in config.json opts back into walking past our own panel,
+   * for people who really run two After Effects instances.
+   */
+  function startServers(cfg) {
+    var startPort = cfg.port;
+    var retryMs = cfg.bindRetryMs;
+    var waits = 0;
+
+    function bindWith(p) {
       return startHttp(p).then(function (server) {
+        // Read back rather than assumed: port 0 binds an ephemeral one.
+        var bound = server.address().port;
         // Mount WS on the same HTTP server.
         var wss = new WebSocket.Server({ server: server, path: "/events" });
         wss.on("connection", function (ws) {
           wsClients.add(ws);
           ws.on("close", function () { wsClients.delete(ws); });
         });
-        return { port: p, server: server, wss: wss };
-      }).catch(function (e) {
-        if (e.code === "EADDRINUSE" && tries < 23 && p < 7799) {
-          return attempt(p + 1);
-        }
-        throw e;
+        return { port: bound, server: server, wss: wss };
       });
     }
-    return attempt(startPort);
+
+    function walk(p, tries, why) {
+      var next = p + 1;
+      if (tries >= WALK_LIMIT) {
+        throw new Error("ports " + startPort + " through " + p + " are all in use — nothing free to bind. Last holder: " + why);
+      }
+      log("warn", "port " + p + " is held by " + why + " — moving to port " + next + ". " +
+        "The MCP server finds this port through the port file; if tool calls fail on " + p +
+        " while check_setup passes, this is why, and the server re-checks the port on the next refused call.");
+      return attempt(next, tries + 1);
+    }
+
+    function waitForHolder(p, holder) {
+      var same = holder.health.bundleHash && holder.health.bundleHash === loadedBundleHash;
+      var hash = holder.health.bundleHash
+        ? String(holder.health.bundleHash).slice(0, 12)
+        : "no bundleHash — a panel older than 0.3";
+      setStatus("waiting — port " + p + " is held by another AE MCP panel", "warn");
+      if (waits === 0) {
+        log("warn", "port " + p + " is already held by another AE MCP panel (bundle " + hash + ", " +
+          (same ? "the same version as this one" : "a DIFFERENT version from this one") + "). " +
+          "Not moving to another port: that would leave the port file pointing at whichever panel bound last, " +
+          "and the MCP server talking to the wrong one (issue #92).");
+        log("warn", "Retrying the bind every " + (retryMs / 1000) + "s; this panel takes the port over the moment " +
+          "the other one exits, with no restart. If After Effects was relaunched and this persists, the previous " +
+          "panel process is still running: quit After Effects fully, check Activity Monitor / Task Manager for a " +
+          "leftover CEPHtmlEngine, and reopen it. To run two After Effects at once instead, set " +
+          "\"allowPortWalk\": true in " + configFile + ".");
+      } else if (waits % 30 === 0) {
+        log("info", "still waiting for port " + p + " (" + waits + " attempts)");
+      }
+      waits += 1;
+      return new Promise(function (r) { setTimeout(r, retryMs); }).then(function () { return attempt(p, 0); });
+    }
+
+    function attempt(p, tries) {
+      return bindWith(p).catch(function (e) {
+        if (e.code !== "EADDRINUSE") throw e;
+        return identifyHolder(p).then(function (holder) {
+          if (holder.kind === "panel") {
+            if (cfg.allowPortWalk) {
+              return walk(p, tries, "another AE MCP panel, and allowPortWalk is on in " + configFile);
+            }
+            return waitForHolder(p, holder);
+          }
+          var why = holder.kind === "other"
+            ? "something that is not an AE MCP panel (" + holder.detail + ")"
+            : "something that did not identify itself (" + holder.detail + ")";
+          return walk(p, tries, why);
+        });
+      });
+    }
+    return attempt(startPort, 0);
+  }
+
+  // ---------- Shutdown ----------
+  // When the panel window closes or After Effects quits, give the port back and
+  // take this panel's port-file entry with it. A panel that exits cleanly must
+  // not leave a file naming a port nobody listens on — that is the other half
+  // of how the port file came to disagree with the socket (issue #92). A
+  // process that dies without unloading still leaves the file; the server's
+  // discovery treats the file as a hint for exactly that reason.
+  var running = null;
+  function shutdown() {
+    if (!running) return;
+    var s = running;
+    running = null;
+    try { s.wss.close(); } catch (e) {}
+    try { if (typeof s.server.closeAllConnections === "function") s.server.closeAllConnections(); } catch (e) {}
+    try { s.server.close(); } catch (e) {}
+    removePortFile(s.port);
+  }
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("beforeunload", shutdown);
+    window.addEventListener("unload", shutdown);
   }
 
   // ---------- Boot sequence ----------
@@ -916,14 +1110,22 @@
     $ae.textContent = (host && host.appName ? host.appName : "AE") + " " + (host && host.appVersion ? host.appVersion : "");
   } catch (e) {}
 
+  var config = readConfig();
+  if (config.source) {
+    log("info", "read " + config.source + ": port " + config.port + (config.allowPortWalk ? ", allowPortWalk on" : ""));
+  }
+
   loadJsxBundle()
-    .then(function () { return startServers(7777); })
+    .then(function () { return startServers(config); })
     .then(function (s) {
+      running = s;
+      // The only write of the port file, and only with the port actually bound.
       writePortFile(s.port);
       $port.textContent = String(s.port);
       $port.className = "ok";
       setStatus("ready", "ok");
-      log("info", "Bridge listening on http://127.0.0.1:" + s.port);
+      log("info", "Bridge listening on http://127.0.0.1:" + s.port +
+        (s.port !== config.port && config.port !== 0 ? " (configured port " + config.port + " was taken — see above)" : ""));
     })
     .catch(function (e) {
       setStatus("failed", "err");

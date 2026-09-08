@@ -101,6 +101,20 @@ export function installedPanelDir(): string {
 }
 
 /**
+ * Has this panel folder been signed in place? `ZXPSignCmd` adds exactly two
+ * things when its .zxp is unzipped back over the folder: `META-INF/` (holding
+ * `signatures.xml`) and a `mimetype` file. Either is evidence; the signature
+ * file is what CEP actually verifies, so it is checked first.
+ */
+export function signedInstallPresent(dir: string): boolean {
+  return (
+    fs.existsSync(path.join(dir, "META-INF", "signatures.xml")) ||
+    fs.existsSync(path.join(dir, "META-INF")) ||
+    fs.existsSync(path.join(dir, "mimetype"))
+  );
+}
+
+/**
  * Is this directory really the `ws` module, with the files the panel will need
  * at runtime?
  *
@@ -190,6 +204,14 @@ function sameContents(a: string, b: string): boolean {
  * After Effects holds the client files open updates the bundle and fails on the
  * rest, leaving a mix of two versions that reported "up to date" while every
  * call failed and the advice given was to restart — which could never fix it.
+ *
+ * The walk is over the *source* tree only, and that is load-bearing: files the
+ * installed copy has that the source does not are never reported. A panel the
+ * user has self-signed (issue #91) carries `META-INF/signatures.xml` and a
+ * `mimetype` file beside the shipped ones, and a diff that counted those would
+ * call every signed install partial — sending the user to reinstall, which
+ * strips the signature, which is the one thing making the panel load.
+ * `tests/unit/panel-install.mjs` pins this.
  */
 export function panelInstallDiff(source: string, installed: string): string[] {
   return listPanelFiles(source)
