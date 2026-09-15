@@ -261,7 +261,7 @@ function bootPanel(extDir) {
     for (const s of servers) { try { s.close(); s.closeAllConnections?.(); } catch {} }
     fs.rmSync(fakeHome, { recursive: true, force: true });
   };
-  return { dom, close };
+  return { dom, close, configDir };
 }
 
 function settled(dom, timeoutMs = 8000) {
@@ -287,10 +287,16 @@ assert.equal(
 const PORT = Number(panel.dom.nodes.port.textContent);
 assert.ok(PORT > 0, "no port announced");
 
+// The bridge authenticates every call (issue #106), so this test reads the
+// token off disk exactly as the MCP server does. Reading it here rather than
+// taking it from the panel's own scope is the point: if the file is not where
+// the server looks for it, these tests fail the way a user would.
+const TOKEN = fs.readFileSync(path.join(panel.configDir, `token-${PORT}`), "utf8").trim();
+
 async function op(args, expect = "ok") {
   const res = await fetch(`http://127.0.0.1:${PORT}/op`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "x-ae-mcp-token": TOKEN },
     body: JSON.stringify({ op: "screenshot_frame", args }),
   });
   const body = await res.json();

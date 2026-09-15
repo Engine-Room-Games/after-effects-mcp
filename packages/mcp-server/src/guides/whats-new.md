@@ -43,6 +43,32 @@ it. The distinction worth reading carefully: if it says the panel is *installed*
 but the running one is older, running `setup_panel` again changes nothing and
 only quitting and reopening After Effects will.
 
+## 0.5.1
+
+One security fix, reported from outside the project. It changes nothing about
+how you drive After Effects — but it does add a fifth way a call can fail, and
+that one has a remedy of its own.
+
+- **The bridge authenticates every call, and a refused one is `bridgeToken` in
+  `check_setup` rather than a broken panel.** The panel's HTTP server is on
+  `127.0.0.1`, which a web page in the user's browser can reach, and `/op`
+  reaches `run_jsx` — an unrestricted `eval` inside After Effects. It now
+  requires a per-session token that the panel writes beside its port file, in
+  `~/.engineroom-ae-mcp/token-<port>`, and that only a local process can read
+  (issue #106). Nothing changes for you when it is working. When it is not, the
+  failure reads "the bridge token did not match", and its remedy contradicts
+  every other bridge failure: the panel is running, it answered immediately, the
+  call never reached After Effects, and re-sending, restarting After Effects and
+  `setup_panel` are all the wrong move. Run `check_setup` and relay `nextSteps`.
+  supersedes: the bridge has no authentication
+  supersedes: any local process can post to the bridge
+- **An MCP server older than the running panel is refused, and says so.** The
+  panel loads at After Effects launch and only at launch, so after this upgrade
+  a session can have a new panel answering an old server. That combination gets
+  a refusal naming the fix — update the tools and reconnect — rather than a
+  confusing failure. The reverse, a new server against an old panel, works
+  unchanged: the header is simply ignored.
+
 ## 0.5.0
 
 The release where the guidance split into a core and references, the journal

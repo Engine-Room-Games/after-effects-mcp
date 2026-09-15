@@ -16,6 +16,75 @@ export class BridgeUnreachableError extends Error {
 }
 
 /**
+ * The panel answered, and what it answered was "no".
+ *
+ * The fourth bridge failure, and like the other three it must never share a
+ * sentence with them. Refused-connection sends the reader to check_setup;
+ * timeout forbids re-sending; write-queue-wait asks for it. This one is none of
+ * those: the panel is up, it is not busy, the call never reached After Effects,
+ * and no amount of waiting or retrying changes the answer until the token does.
+ *
+ * `sentToken` is what makes the remedy specific, and the two cases point in
+ * opposite directions. Nothing sent means this server could not find the
+ * panel's token file — most often it is looking in a different home directory
+ * than the panel wrote to. Something sent and refused means the file it found
+ * belongs to a panel that is no longer the one answering.
+ */
+export class BridgeAuthError extends Error {
+  constructor(public port: number, public sentToken: boolean) {
+    super(BridgeAuthError.message(port, sentToken));
+    this.name = "BridgeAuthError";
+  }
+  static message(port: number, sentToken: boolean): string {
+    return [
+      `The After Effects panel on port ${port} refused this call: the bridge token did not match.`,
+      "",
+      "This is not a lost connection and not a busy bridge. The panel is running and",
+      "answered immediately — it answered by refusing. The call never reached After",
+      "Effects, so nothing in the project changed and nothing needs undoing.",
+      "",
+      "The panel requires a token because the bridge is an HTTP server on 127.0.0.1, and",
+      "loopback is not a boundary a browser respects: without it, any page open in the",
+      "user's browser could drive After Effects. The panel writes the token beside its",
+      `port file, at ${tokenFileHint(port)}, every time it binds.`,
+      "",
+      "What to do, in order:",
+      ...(sentToken
+        ? [
+            "1. This server did send a token and the panel rejected it, so the file it read",
+            "   belongs to a panel that is no longer the one answering — usually a previous",
+            "   After Effects session whose panel process outlived it.",
+            "2. Quit After Effects completely and reopen it. That rebinds the panel and",
+            "   rewrites the token, and the next call succeeds.",
+            "3. If it persists, check for a leftover CEPHtmlEngine in Activity Monitor or",
+            "   Task Manager holding the port — the same zombie issue #92 is about.",
+          ]
+        : [
+            "1. This server found no token file for that port, so it sent none. Either the",
+            "   panel could not write it — its own log in After Effects says so — or this",
+            "   server and the panel disagree about where home is, which happens when the",
+            "   MCP client runs the server sandboxed or as a different user.",
+            "2. Ask the user to look at the panel in After Effects (Window > Extensions).",
+            "   It logs the exact path it wrote the token to when it starts.",
+            "3. If the panel never started, run check_setup and relay its nextSteps.",
+          ]),
+      "",
+      "Do NOT re-send this call until the cause is fixed; it will be refused identically.",
+      "Running setup_panel does not help: this is not a broken install.",
+    ].join("\n");
+  }
+}
+
+/**
+ * Named here rather than imported from the bridge's discovery, which imports
+ * this module — the cycle is real and a path built for a message is not worth
+ * one. Kept in step with `tokenFilePath` there by the test that asserts both.
+ */
+function tokenFileHint(port: number): string {
+  return `${process.platform === "win32" ? "%USERPROFILE%\\.engineroom-ae-mcp\\token-" : "~/.engineroom-ae-mcp/token-"}${port}`;
+}
+
+/**
  * The panel accepted the connection and then did not answer in time.
  *
  * This is a completely different diagnosis from a refused connection and must

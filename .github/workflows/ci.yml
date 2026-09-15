@@ -146,6 +146,14 @@ jobs:
       - name: Bridge timeouts are diagnosed apart from disconnections
         run: node tests/unit/bridge-timeout.mjs
 
+      # Issue #106: the bridge is on 127.0.0.1 and /op is an eval inside After
+      # Effects, so a web page reaching it is arbitrary code execution as the
+      # user. Dropping the CORS header does not close that — a text/plain POST
+      # is never preflighted — so this asserts the token gate itself, and fires
+      # that exact request shape.
+      - name: The bridge refuses anyone who is not the MCP server
+        run: node tests/unit/bridge-auth.mjs
+
       # Issue #92: the server follows the panel when its cached port is refused,
       # and check_setup names a port disagreement instead of prescribing a restart.
       - name: A stale bridge port is rediscovered, not restarted around

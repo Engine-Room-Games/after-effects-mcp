@@ -3,9 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   diagnosticPortCandidates,
+  panelToken,
   pinnedPort,
   portFilePort,
   probePanel,
+  tokenFilePath,
   type ProbeResult,
 } from "../bridge/discovery.js";
 import {
@@ -340,6 +342,28 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     checks.push({ name: "portAgreement", ok: agrees, detail, fix });
   }
 
+  // A panel that answers and then refuses every call looks, to everyone except
+  // this check, like a panel that is working. The token is written when the
+  // panel binds and read from the same home directory here; the two disagree
+  // when the panel could not write it, or when the MCP client runs this server
+  // somewhere with a different idea of home. Panels older than issue #106 send
+  // no `auth` flag and need no token, so they are not asked about.
+  if (bridge.answering?.health?.auth === true) {
+    const port = bridge.answering.port;
+    const have = panelToken(port) !== null;
+    checks.push({
+      name: "bridgeToken",
+      ok: have,
+      detail: have
+        ? `the panel's token for port ${port} is readable at ${tokenFilePath(port)}`
+        : `the panel on port ${port} requires a token and none is readable at ${tokenFilePath(port)}`,
+      fix: have
+        ? undefined
+        : `Every tool call will be refused until this is resolved, and the panel itself is fine — do not restart After Effects for it, and do not run setup_panel. ` +
+          `The panel writes that file each time it binds, so either it could not (its log inside After Effects says so, under Window > Extensions) or this server is reading a different home directory than the panel wrote to, which happens when the MCP client runs it sandboxed or as another user. Ask the user to open the panel and read the path it logged at startup.`,
+    });
+  }
+
   // `panelUpToDate` above compares files on disk, which start matching the
   // instant setup_panel runs — while AE carries on running the old code until it
   // restarts. This is the check that notices that window, and it is the one that
@@ -456,6 +480,19 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
       "Retry the call that failed. The server re-checks the port whenever a call is refused and switches to the port that answers, so the retry normally succeeds on its own.",
       "If it still fails, reconnect the MCP server — restart the client's connection to it, not After Effects — so it starts on the right port.",
       "Nothing about the install is wrong; setup_panel would change nothing here.",
+    ];
+  }
+
+  // A panel answering and refusing is not a broken install either, and every
+  // remedy below would cost a restart that cannot fix it. It comes after the
+  // port branches because a call going to the wrong port is refused by whatever
+  // is on that port, and that is the more basic mistake of the two.
+  const token = by("bridgeToken");
+  if (token && token.ok === false) {
+    return [
+      `Do not restart After Effects and do not run setup_panel — the panel is running and answering. ${token.detail}.`,
+      token.fix!,
+      "Until the token is readable every tool call is refused before it reaches After Effects, so nothing in the user's project is being changed or half-changed.",
     ];
   }
 
