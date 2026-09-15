@@ -143,6 +143,26 @@ function settled(dom, timeoutMs = 8000) {
 
 const logText = (dom) => dom.nodes.log.childNodes.map((n) => n.textContent).join("\n");
 
+/**
+ * Run `fn` with the server's idea of home pointed at the panel's fake one.
+ *
+ * Both variables, because `os.homedir()` reads USERPROFILE on Windows and HOME
+ * everywhere else — setting only HOME passed on macOS and sent Windows at the
+ * runner's real home instead.
+ */
+async function withHome(dir, fn) {
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Boot one panel; everything below talks to it.
 // ---------------------------------------------------------------------------
@@ -178,18 +198,13 @@ await check("the token file is private to the user", function () {
   assert.equal(mode, 0o600, `token file is mode ${mode.toString(8)}, not 600 — a home directory is not private on a shared machine`);
 });
 
-await check("the server looks for the token where the panel writes it", () => {
+await check("the server looks for the token where the panel writes it", () =>
   // Keeps two files in step: the panel builds the path, the server resolves it.
-  const realHome = process.env.HOME;
-  try {
-    process.env.HOME = panel.fakeHome;
+  withHome(panel.fakeHome, () => {
     assert.equal(tokenFilePath(PORT), TOKEN_FILE);
     assert.equal(panelToken(PORT), fs.readFileSync(TOKEN_FILE, "utf8").trim());
     assert.deepEqual(authHeaders(PORT), { "x-ae-mcp-token": panelToken(PORT) });
-  } finally {
-    if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
-  }
-});
+  }));
 
 await check("no token file for a port means no header, rather than an invented one", () => {
   assert.equal(panelToken(PORT + 1), null);
@@ -312,16 +327,11 @@ await check("/events accepts the MCP server", async () => {
 // The server's half: a refusal is its own diagnosis
 // ---------------------------------------------------------------------------
 
-await check("HttpClient sends the token and the op succeeds", async () => {
-  const realHome = process.env.HOME;
-  try {
-    process.env.HOME = panel.fakeHome;
+await check("HttpClient sends the token and the op succeeds", () =>
+  withHome(panel.fakeHome, async () => {
     const client = new HttpClient(PORT, { candidates: () => [PORT] });
     assert.deepEqual(await client.runOp("list_comps", {}), { stub: true });
-  } finally {
-    if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
-  }
-});
+  }));
 
 await check("a refusal raises BridgeAuthError, never an After Effects error", async () => {
   // HOME left alone, so no token is found: a server that cannot see what the
