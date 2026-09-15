@@ -1,25 +1,10 @@
-// The bridge refuses anyone who is not the MCP server.
+// The bridge refuses anyone who is not the MCP server (issue #106).
 //
-// Issue #106, reported by a designer who read the panel before installing it.
-// The bridge is a plain HTTP server on 127.0.0.1, `/op` reaches `run_jsx`, and
-// `run_jsx` is an unrestricted `eval` inside After Effects — with no token, any
-// web page the user had open could drive their project, and ExtendScript's
-// `File`/`Folder` and `system.callSystem` mean "their project" understates it.
-//
-// The thing that makes this reachable rather than theoretical is worth writing
-// down, because it is what the first fix everyone proposes gets wrong. Dropping
-// `Access-Control-Allow-Origin: *` is NOT sufficient: a POST with
-// `content-type: text/plain` is a CORS *simple request*, so no preflight is
-// sent, the browser delivers it, and the panel — which never looked at
-// content-type — parses the body as JSON and runs the op. The page cannot read
-// the reply, and does not need to. Only a secret the page cannot obtain closes
-// it, and a file is exactly that: script in a browser cannot read one.
-//
-// So this pins both halves:
-//   - the token gate itself, on every route that reaches After Effects;
-//   - the text/plain no-preflight shape specifically, because that is the
-//     attack, and a future refactor that gates on content-type instead would
-//     pass every other test in this file.
+// Two halves, and the second is the one that matters: the token gate on every
+// route that reaches After Effects, and the text/plain no-preflight request
+// shape specifically — that is the actual attack, and a refactor that gated on
+// content-type instead of the token would pass every other test here.
+// Why CORS could not have fixed this: docs/fragile-areas-bridge.md.
 //
 //   node tests/unit/bridge-auth.mjs
 
@@ -94,13 +79,7 @@ function installLayout() {
   return dir;
 }
 
-/**
- * Boot the real main.js against a fake home and an ephemeral port.
- *
- * Never 7777: on the machine this is developed on a real panel holds it, and
- * since #92 a panel finding one of its own there waits rather than walking —
- * a test panel would wait for ever. Same arrangement as panel-boot.mjs.
- */
+/** Boot the real main.js against a fake home and an ephemeral port — never 7777 (see panel-boot.mjs). */
 function bootPanel(extDir) {
   const source = fs.readFileSync(path.join(extDir, "client", "main.js"), "utf8");
   const csSource = fs.readFileSync(path.join(extDir, "client", "csinterface.js"), "utf8");
@@ -200,9 +179,7 @@ await check("the token file is private to the user", function () {
 });
 
 await check("the server looks for the token where the panel writes it", () => {
-  // The one assertion that keeps two files in step: the panel builds the path
-  // from `portDir`, the server from `tokenFilePath`, and nothing else would
-  // notice if they drifted apart. HOME is faked to match the panel's.
+  // Keeps two files in step: the panel builds the path, the server resolves it.
   const realHome = process.env.HOME;
   try {
     process.env.HOME = panel.fakeHome;
@@ -251,11 +228,8 @@ await check("/op with a wrong token of the right length is refused", async () =>
 });
 
 await check("THE ATTACK: a text/plain POST — no preflight, no CORS permission — is refused", async () => {
-  // The whole reason a token was needed rather than just dropping the CORS
-  // header. `content-type: text/plain` makes this a simple request: the browser
-  // sends it with no preflight to fail, and the page never needs to read the
-  // reply for the JSX to have run. The panel does not look at content-type, by
-  // design — it must be the token that stops this, and nothing else.
+  // A simple request: no preflight to fail, and the page never needs to read
+  // the reply for the JSX to have run. The token must be what stops it.
   const res = await fetch(`http://127.0.0.1:${PORT}/op`, {
     method: "POST",
     headers: { "content-type": "text/plain" },
@@ -265,10 +239,7 @@ await check("THE ATTACK: a text/plain POST — no preflight, no CORS permission 
 });
 
 await check("an Origin header is refused even when the token is right", async () => {
-  // Depth, not the main lock. Browsers attach Origin to every cross-origin
-  // request and cannot be talked out of it; Node's fetch and `ws` send none. So
-  // a request carrying one is from a web page by definition, and no web page
-  // has business here however it came by a token.
+  // Depth, not the main lock: browsers always send one, Node's fetch never does.
   const res = await post({ op: "list_comps", args: {} }, { ...auth, origin: "https://evil.example" });
   assert.equal(res.status, 403, "a browser-originated call was accepted");
 });
@@ -298,10 +269,8 @@ await check("no response carries CORS headers — not /health, not even the refu
 });
 
 await check("/health stays open, and says it authenticates", async () => {
-  // Unauthenticated on purpose: discovery asks it before it knows which panel
-  // is there, and a second panel asks it to find out who holds its port (#92).
-  // It says nothing a page could use — and `auth: true` is what lets
-  // check_setup tell "needs a token" from "too old to want one".
+  // Open on purpose: discovery asks it before it knows which panel is there,
+  // and a second panel asks who holds its port (#92).
   const res = await fetch(`http://127.0.0.1:${PORT}/health`);
   assert.equal(res.status, 200);
   const body = await res.json();
@@ -355,8 +324,8 @@ await check("HttpClient sends the token and the op succeeds", async () => {
 });
 
 await check("a refusal raises BridgeAuthError, never an After Effects error", async () => {
-  // HOME left alone, so no token file is found for this port: the shape of an
-  // MCP server that cannot see what the panel wrote.
+  // HOME left alone, so no token is found: a server that cannot see what the
+  // panel wrote.
   const client = new HttpClient(PORT, { candidates: () => [PORT] });
   await assert.rejects(
     () => client.runOp("list_comps", {}),
@@ -369,9 +338,8 @@ await check("a refusal raises BridgeAuthError, never an After Effects error", as
 });
 
 await check("the refusal is not retried as a port drift", async () => {
-  // `runOp` re-discovers on a *refused connection*, which is a different thing
-  // from a connection that answered with a refusal. Re-sending this would only
-  // be refused again — and the message would then blame the wrong port.
+  // `runOp` re-discovers on a refused *connection*, not on a connection that
+  // answered with a refusal — retrying would blame the wrong port.
   const client = new HttpClient(PORT, {
     candidates: () => { throw new Error("rediscovery must not run for an auth refusal"); },
   });
@@ -391,9 +359,7 @@ await check("the two auth remedies point in opposite directions", () => {
 });
 
 await check("the fourth bridge failure does not borrow the other three's remedies", () => {
-  // The rule in CLAUDE.md: timeout forbids re-sending, unreachable sends the
-  // reader to check_setup, write-queue-wait asks for a re-send. This one is
-  // none of those, and must not be mistakable for them.
+  // The CLAUDE.md rule: four failures, four remedies, no shared sentences.
   const msg = BridgeAuthError.message(PORT, false);
   assert.match(msg, /not a lost connection and not a busy bridge/);
   assert.match(msg, /nothing in the project changed/);
@@ -444,8 +410,7 @@ await check("a second panel session mints a different token", async () => {
 });
 
 await check("the panel takes its token with it when it unloads", () => {
-  // Same rule as the port file: a file left behind names a secret for a socket
-  // that no longer exists, and the next panel on that port mints its own.
+  // Same rule as the port file: never leave one naming a socket that is gone.
   panel.fire("unload");
   assert.equal(fs.existsSync(TOKEN_FILE), false, "the token file outlived the panel that issued it");
 });

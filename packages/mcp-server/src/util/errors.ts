@@ -16,19 +16,10 @@ export class BridgeUnreachableError extends Error {
 }
 
 /**
- * The panel answered, and what it answered was "no".
- *
- * The fourth bridge failure, and like the other three it must never share a
- * sentence with them. Refused-connection sends the reader to check_setup;
- * timeout forbids re-sending; write-queue-wait asks for it. This one is none of
- * those: the panel is up, it is not busy, the call never reached After Effects,
- * and no amount of waiting or retrying changes the answer until the token does.
- *
- * `sentToken` is what makes the remedy specific, and the two cases point in
- * opposite directions. Nothing sent means this server could not find the
- * panel's token file — most often it is looking in a different home directory
- * than the panel wrote to. Something sent and refused means the file it found
- * belongs to a panel that is no longer the one answering.
+ * The panel answered, and what it answered was "no" — the fourth bridge failure,
+ * whose remedy contradicts the other three (see docs/fragile-areas-bridge.md).
+ * `sentToken` splits it: nothing sent means this server cannot see the panel's
+ * token file; sent and rejected means the file outlived the panel that wrote it.
  */
 export class BridgeAuthError extends Error {
   constructor(public port: number, public sentToken: boolean) {
@@ -75,11 +66,7 @@ export class BridgeAuthError extends Error {
   }
 }
 
-/**
- * Named here rather than imported from the bridge's discovery, which imports
- * this module — the cycle is real and a path built for a message is not worth
- * one. Kept in step with `tokenFilePath` there by the test that asserts both.
- */
+/** Duplicated rather than imported from discovery.ts, which imports this module. */
 function tokenFileHint(port: number): string {
   return `${process.platform === "win32" ? "%USERPROFILE%\\.engineroom-ae-mcp\\token-" : "~/.engineroom-ae-mcp/token-"}${port}`;
 }

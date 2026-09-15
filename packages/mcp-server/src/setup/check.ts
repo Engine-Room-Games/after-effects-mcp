@@ -342,12 +342,8 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     checks.push({ name: "portAgreement", ok: agrees, detail, fix });
   }
 
-  // A panel that answers and then refuses every call looks, to everyone except
-  // this check, like a panel that is working. The token is written when the
-  // panel binds and read from the same home directory here; the two disagree
-  // when the panel could not write it, or when the MCP client runs this server
-  // somewhere with a different idea of home. Panels older than issue #106 send
-  // no `auth` flag and need no token, so they are not asked about.
+  // A panel that answers and then refuses every call looks, to every other
+  // check here, like one that is working. Pre-#106 panels send no flag.
   if (bridge.answering?.health?.auth === true) {
     const port = bridge.answering.port;
     const have = panelToken(port) !== null;
@@ -483,10 +479,8 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
     ];
   }
 
-  // A panel answering and refusing is not a broken install either, and every
-  // remedy below would cost a restart that cannot fix it. It comes after the
-  // port branches because a call going to the wrong port is refused by whatever
-  // is on that port, and that is the more basic mistake of the two.
+  // Not a broken install either, and every remedy below costs a restart that
+  // cannot fix it. After the port branches: a wrong port is the basic mistake.
   const token = by("bridgeToken");
   if (token && token.ok === false) {
     return [

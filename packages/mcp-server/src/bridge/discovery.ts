@@ -14,26 +14,14 @@ export function portFilePath(): string {
   return path.join(os.homedir(), ".engineroom-ae-mcp", "port");
 }
 
-/**
- * Where the panel writes the token for the port it bound.
- *
- * Per port rather than one file for the whole machine, because the port file is
- * only ever a hint and can name a panel that has gone (issue #92), and because
- * two After Effects instances with `allowPortWalk` each bind their own. A server
- * that has found a panel on a port has to be able to read *that* panel's token,
- * not whichever one wrote last.
- */
+/** Where the panel writes the token for the port it bound. Per port, because the port file is only a hint (issue #92). */
 export function tokenFilePath(port: number): string {
   return path.join(os.homedir(), ".engineroom-ae-mcp", `token-${port}`);
 }
 
 /**
- * The token for a port, or null when there is no readable file.
- *
- * Read fresh on every call rather than cached. A panel mints a new token every
- * time it binds, so a cached one outlives the panel that issued it and turns
- * every op into a refusal the moment After Effects restarts — and the read is a
- * 64-byte file next to a round trip into ExtendScript.
+ * The token for a port, or null when there is no readable file. Read fresh every
+ * call: a panel that rebinds mints a new one, and a cached token would outlive it.
  */
 export function panelToken(port: number): string | null {
   try {
@@ -44,15 +32,7 @@ export function panelToken(port: number): string | null {
   }
 }
 
-/**
- * The header every call to the panel carries, or nothing when there is no token
- * to send.
- *
- * Empty is the right answer for a panel older than issue #106: it has no token
- * file and does not look for the header, and sending a header it ignores would
- * be no different. What must never happen is the reverse — a header invented
- * here to satisfy a gate we cannot actually pass.
- */
+/** The header every call carries. Empty when there is no token — a pre-#106 panel needs none. */
 export function authHeaders(port: number): Record<string, string> {
   const token = panelToken(port);
   return token ? { "x-ae-mcp-token": token } : {};
@@ -132,11 +112,7 @@ export interface PanelHealth {
   port: number;
   bundleLoaded?: boolean;
   bundleHash?: string | null;
-  /**
-   * The panel requires a bridge token. Absent on panels from before issue #106,
-   * which is the distinction that matters: `undefined` means "too old to want
-   * one", `true` means a missing token file is why every call is being refused.
-   */
+  /** Requires a bridge token. Absent before issue #106: `undefined` is "too old to want one". */
   auth?: boolean;
   ts?: number;
 }

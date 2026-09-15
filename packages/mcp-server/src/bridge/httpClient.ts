@@ -169,9 +169,6 @@ export class HttpClient {
     try {
       resp = await fetch(`${this.base}/op`, {
         method: "POST",
-        // The token comes from disk on every call, never from a field on this
-        // client: a panel that rebinds mints a new one, and a copy taken at
-        // construction would outlive the panel that issued it.
         headers: { "content-type": "application/json", ...authHeaders(this.port) },
         body: JSON.stringify({ op, args: args ?? {}, progressToken }),
         signal: AbortSignal.timeout(timeoutMs),
@@ -183,9 +180,7 @@ export class HttpClient {
       if (isTimeoutError(e)) throw new BridgeTimeoutError(this.port, timeoutMs, { op });
       throw new BridgeUnreachableError(this.port, e as Error);
     }
-    // Checked before the body, because a refusal is not an After Effects error
-    // and must not be dressed as one. The panel answers 403 for this and 500 for
-    // anything ExtendScript raised, so the status alone separates them.
+    // A refusal is not an After Effects error and must not be dressed as one.
     if (resp.status === 401 || resp.status === 403) {
       throw new BridgeAuthError(this.port, panelToken(this.port) !== null);
     }
