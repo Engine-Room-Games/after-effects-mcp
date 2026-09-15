@@ -16,6 +16,62 @@ export class BridgeUnreachableError extends Error {
 }
 
 /**
+ * The panel answered, and what it answered was "no" — the fourth bridge failure,
+ * whose remedy contradicts the other three (see docs/fragile-areas-bridge.md).
+ * `sentToken` splits it: nothing sent means this server cannot see the panel's
+ * token file; sent and rejected means the file outlived the panel that wrote it.
+ */
+export class BridgeAuthError extends Error {
+  constructor(public port: number, public sentToken: boolean) {
+    super(BridgeAuthError.message(port, sentToken));
+    this.name = "BridgeAuthError";
+  }
+  static message(port: number, sentToken: boolean): string {
+    return [
+      `The After Effects panel on port ${port} refused this call: the bridge token did not match.`,
+      "",
+      "This is not a lost connection and not a busy bridge. The panel is running and",
+      "answered immediately — it answered by refusing. The call never reached After",
+      "Effects, so nothing in the project changed and nothing needs undoing.",
+      "",
+      "The panel requires a token because the bridge is an HTTP server on 127.0.0.1, and",
+      "loopback is not a boundary a browser respects: without it, any page open in the",
+      "user's browser could drive After Effects. The panel writes the token beside its",
+      `port file, at ${tokenFileHint(port)}, every time it binds.`,
+      "",
+      "What to do, in order:",
+      ...(sentToken
+        ? [
+            "1. This server did send a token and the panel rejected it, so the file it read",
+            "   belongs to a panel that is no longer the one answering — usually a previous",
+            "   After Effects session whose panel process outlived it.",
+            "2. Quit After Effects completely and reopen it. That rebinds the panel and",
+            "   rewrites the token, and the next call succeeds.",
+            "3. If it persists, check for a leftover CEPHtmlEngine in Activity Monitor or",
+            "   Task Manager holding the port — the same zombie issue #92 is about.",
+          ]
+        : [
+            "1. This server found no token file for that port, so it sent none. Either the",
+            "   panel could not write it — its own log in After Effects says so — or this",
+            "   server and the panel disagree about where home is, which happens when the",
+            "   MCP client runs the server sandboxed or as a different user.",
+            "2. Ask the user to look at the panel in After Effects (Window > Extensions).",
+            "   It logs the exact path it wrote the token to when it starts.",
+            "3. If the panel never started, run check_setup and relay its nextSteps.",
+          ]),
+      "",
+      "Do NOT re-send this call until the cause is fixed; it will be refused identically.",
+      "Running setup_panel does not help: this is not a broken install.",
+    ].join("\n");
+  }
+}
+
+/** Duplicated rather than imported from discovery.ts, which imports this module. */
+function tokenFileHint(port: number): string {
+  return `${process.platform === "win32" ? "%USERPROFILE%\\.engineroom-ae-mcp\\token-" : "~/.engineroom-ae-mcp/token-"}${port}`;
+}
+
+/**
  * The panel accepted the connection and then did not answer in time.
  *
  * This is a completely different diagnosis from a refused connection and must

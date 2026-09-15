@@ -37,11 +37,28 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 
 const execFileAsync = promisify(execFile);
 const PORT = Number(process.env.AE_MCP_PORT || 7777);
 const BASE = `http://127.0.0.1:${PORT}`;
+
+// The bridge authenticates every call that reaches After Effects (issue #106).
+// Read the same way the MCP server reads it — off disk, per port — so this
+// script fails exactly when a real client would, and for the same reason.
+const TOKEN = (() => {
+  try {
+    return fs.readFileSync(path.join(os.homedir(), ".engineroom-ae-mcp", `token-${PORT}`), "utf8").trim();
+  } catch {
+    return null;
+  }
+})();
+if (!TOKEN) {
+  console.error(`No bridge token for port ${PORT}. Open After Effects with the panel running — it writes one each time it binds.`);
+  process.exit(1);
+}
 
 const argv = process.argv.slice(2);
 const flag = (name, fallback) => {
@@ -203,7 +220,7 @@ async function postOp(body, timeoutMs) {
   try {
     const res = await fetch(`${BASE}/op`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-ae-mcp-token": TOKEN },
       body: JSON.stringify(body),
       signal: ctl.signal,
     });

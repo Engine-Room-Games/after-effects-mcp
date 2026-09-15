@@ -14,6 +14,30 @@ export function portFilePath(): string {
   return path.join(os.homedir(), ".engineroom-ae-mcp", "port");
 }
 
+/** Where the panel writes the token for the port it bound. Per port, because the port file is only a hint (issue #92). */
+export function tokenFilePath(port: number): string {
+  return path.join(os.homedir(), ".engineroom-ae-mcp", `token-${port}`);
+}
+
+/**
+ * The token for a port, or null when there is no readable file. Read fresh every
+ * call: a panel that rebinds mints a new one, and a cached token would outlive it.
+ */
+export function panelToken(port: number): string | null {
+  try {
+    const txt = fs.readFileSync(tokenFilePath(port), "utf8").trim();
+    return txt.length > 0 ? txt : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The header every call carries. Empty when there is no token — a pre-#106 panel needs none. */
+export function authHeaders(port: number): Record<string, string> {
+  const token = panelToken(port);
+  return token ? { "x-ae-mcp-token": token } : {};
+}
+
 /** `AE_MCP_PORT`, when set to something usable. An explicit pin, so it wins outright. */
 export function pinnedPort(): number | null {
   const envPort = process.env.AE_MCP_PORT;
@@ -88,6 +112,8 @@ export interface PanelHealth {
   port: number;
   bundleLoaded?: boolean;
   bundleHash?: string | null;
+  /** Requires a bridge token. Absent before issue #106: `undefined` is "too old to want one". */
+  auth?: boolean;
   ts?: number;
 }
 

@@ -133,7 +133,7 @@ Adding a new op = touching six places. In order:
 3. **ExtendScript handler** — add to the matching module in `packages/jsx/` as `OPS.your_op = function(args){ ... }`. Use `noUndo(fn)` for read-only ops (skips the undo group wrapper).
 4. **Description** — `packages/mcp-server/src/tools/descriptions.ts`: add an entry keyed by op name. Write it for an LLM agent reading the tool list cold.
 5. **Build** — `npm run build` rebuilds TS and concatenates the .jsx bundle.
-6. **Reload in AE** (optional, dev only) — `curl -X POST http://127.0.0.1:7777/reload-jsx` re-`$.evalFile`s the bundle without restarting AE.
+6. **Reload in AE** (optional, dev only) — `curl -X POST -H "x-ae-mcp-token: $(cat ~/.engineroom-ae-mcp/token-7777)" http://127.0.0.1:7777/reload-jsx` re-`$.evalFile`s the bundle without restarting AE. The header is not optional: every route that reaches AE is authenticated (issue #106).
 
 The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring is needed unless the op needs special return packaging (vision = image content, run_batch = async envelope, jobs/* = server-resident) — or, in one case, special *input* packaging: `run_jsx` is rewritten between zod validation and the forward, so `scriptPath` becomes `code` and `libraries` become `{path, text}` before the panel ever sees them (`tools/runJsxSource.ts`).
 
@@ -165,7 +165,7 @@ breaking one produces a plausible success rather than an error.
 - **The panel does not update itself.** Gate on the *running* bundle hash, never the installed one; they diverge for the whole window between `setup_panel` and the next AE launch. → [subsystems](docs/subsystems.md)
 - **Edit `src/guides/*.md` and `src/prompts/*.md`, never the generated outputs.** `plugin/skills/**`, `plugin/commands/**` and `src/generated/content.ts` are owned wholesale and overwritten by the next build. → [guidance](docs/guidance-system.md)
 - **A bounded read must name what it left out.** Absent `include` means everything — except `find_layers`, where the bounded form is the promise. → [server](docs/fragile-areas-server.md)
-- **Three bridge failures, three contradicting remedies.** Timeout, unreachable and write-queue-wait must never share a sentence: one forbids re-sending, one asks for it, one sends the reader to `check_setup`. → [bridge](docs/fragile-areas-bridge.md)
+- **Four bridge failures, four contradicting remedies.** Timeout, unreachable, write-queue-wait and auth must never share a sentence: one forbids re-sending, one asks for it, one sends the reader to `check_setup`, and one says the panel refused on purpose and will again. The auth one is the token every route but `/health` requires; CORS is not what gates it, and could not be. → [bridge](docs/fragile-areas-bridge.md)
 - **Measure After Effects; do not trust Adobe's documentation.** Undo groups across calls, `CompItem.posterTime`, `$.evalFile`'s scope and `Error.start`/`end` were all documented one way and behave another. → [recipes](docs/verification-recipes.md)
 - **The .jsx bundle must stay a pure function of its sources** — no timestamps, no unsorted directory reads. Its hash is half the version gate. → [subsystems](docs/subsystems.md)
 - **`ws` is always a real directory on disk**, in every packaging path. It can never be inlined. → [server](docs/fragile-areas-server.md)

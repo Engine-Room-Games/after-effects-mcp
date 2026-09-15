@@ -1,7 +1,7 @@
 import type { AeSourceInfo } from "../util/errors.js";
-import { AeError, BridgeTimeoutError, BridgeUnreachableError, isTimeoutError } from "../util/errors.js";
+import { AeError, BridgeAuthError, BridgeTimeoutError, BridgeUnreachableError, isTimeoutError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
-import { DEFAULT_PORT, discoverPort, locatePanel, pinnedPort, portCandidates, type LocateResult } from "./discovery.js";
+import { authHeaders, DEFAULT_PORT, discoverPort, locatePanel, panelToken, pinnedPort, portCandidates, type LocateResult } from "./discovery.js";
 
 interface OpResultOk { ok: true; result: unknown; }
 interface OpResultErr { ok: false; error: string; code?: string; stack?: string; line?: number; source?: AeSourceInfo; }
@@ -169,7 +169,7 @@ export class HttpClient {
     try {
       resp = await fetch(`${this.base}/op`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...authHeaders(this.port) },
         body: JSON.stringify({ op, args: args ?? {}, progressToken }),
         signal: AbortSignal.timeout(timeoutMs),
       });
@@ -179,6 +179,10 @@ export class HttpClient {
       // restarting a bridge that was only busy.
       if (isTimeoutError(e)) throw new BridgeTimeoutError(this.port, timeoutMs, { op });
       throw new BridgeUnreachableError(this.port, e as Error);
+    }
+    // A refusal is not an After Effects error and must not be dressed as one.
+    if (resp.status === 401 || resp.status === 403) {
+      throw new BridgeAuthError(this.port, panelToken(this.port) !== null);
     }
     let data: OpResult;
     try { data = (await resp.json()) as OpResult; }
@@ -235,7 +239,7 @@ export class HttpClient {
     try {
       await fetch(`${this.base}/cancel`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...authHeaders(this.port) },
         body: JSON.stringify({ jobId }),
       });
     } catch (e) {

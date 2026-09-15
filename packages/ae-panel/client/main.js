@@ -234,6 +234,75 @@
     } catch (e) {}
   }
 
+  // ---------- Bridge token (issue #106) ----------
+  // Why a token and not a CORS rule, and why per port: docs/fragile-areas-bridge.md.
+  // One per panel session. 384 is 0600 for engines that predate 0o literals.
+  var sessionToken = crypto.randomBytes(32).toString("hex");
+  var TOKEN_MODE = 384;
+
+  function tokenFile(port) { return path.join(portDir, "token-" + port); }
+
+  function writeTokenFile(port) {
+    try { fs.mkdirSync(portDir, { recursive: true }); } catch (e) {}
+    try {
+      fs.writeFileSync(tokenFile(port), sessionToken, { encoding: "utf8", mode: TOKEN_MODE });
+      // writeFileSync applies `mode` only when it creates the file.
+      try { fs.chmodSync(tokenFile(port), TOKEN_MODE); } catch (e) {}
+    } catch (e) {
+      log("error", "could not write the bridge token file " + tokenFile(port) + ": " + e.message +
+        " — the MCP server will not be able to authenticate, and every tool call will be refused.");
+    }
+  }
+
+  // Same rule as the port file: only this panel's own entry.
+  function removeTokenFile(port) {
+    try {
+      if (fs.readFileSync(tokenFile(port), "utf8").trim() === sessionToken) fs.unlinkSync(tokenFile(port));
+    } catch (e) {}
+  }
+
+  function sameToken(given) {
+    if (typeof given !== "string" || given.length !== sessionToken.length) return false;
+    try {
+      return crypto.timingSafeEqual(Buffer.from(given, "utf8"), Buffer.from(sessionToken, "utf8"));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // The token is what holds. The Origin check is depth: browsers always send one,
+  // Node's fetch and `ws` never do.
+  function authFailure(req) {
+    var h = (req && req.headers) || {};
+    if (h.origin) return "it came from a web page (Origin: " + h.origin + ")";
+    if (!sameToken(h["x-ae-mcp-token"])) return "the bridge token was missing or did not match";
+    return null;
+  }
+
+  // Written for an MCP server older than this panel: it relays `error` verbatim,
+  // so the remedy has to be in here.
+  function denialMessage() {
+    return "This After Effects bridge requires a token and this request did not carry a valid one. " +
+      "Nothing was run in After Effects. The panel writes the token beside its port file, in " + portDir +
+      ", each time it binds; a local process can read it and a web page cannot, which is the entire point " +
+      "(issue #106). If you are the MCP server: you are older than the panel After Effects is running — " +
+      "update after-effects-mcp to 0.5.1 or newer and reconnect it.";
+  }
+
+  // Rate-limited: a page firing in a loop must not fill the panel's log.
+  var denied = 0;
+  var deniedLoggedAt = 0;
+  function noteDenial(what, why) {
+    denied += 1;
+    var now = Date.now();
+    if (denied === 1 || now - deniedLoggedAt > 10000) {
+      deniedLoggedAt = now;
+      log("warn", "refused a request to " + what + ": " + why +
+        (denied > 1 ? " (" + denied + " refused so far)" : "") +
+        ". If this is the MCP server rather than a web page, it is older than this panel: update it and reconnect.");
+    }
+  }
+
   // ---------- Config ----------
   // A CEP panel cannot read an environment variable the user set: it runs in
   // After Effects' process, with Adobe's environment. So its two knobs live in
@@ -864,8 +933,9 @@
     return new Promise(function (resolve, reject) {
       var server = http.createServer(function (req, res) {
         var url = req.url || "/";
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.setHeader("Access-Control-Allow-Headers", "content-type");
+
+        // No CORS headers, deliberately: nothing that legitimately calls this
+        // bridge is a web page (issue #106).
 
         if (url === "/health") {
           res.statusCode = 200;
@@ -883,6 +953,10 @@
             port: addr && addr.port ? addr.port : port,
             bundleLoaded: true,
             bundleHash: loadedBundleHash,
+            // The gate exists, never anything about the token. Absent on a
+            // pre-#106 panel, which is how the server tells "needs a token"
+            // from "too old to want one".
+            auth: true,
             ts: Date.now()
           }));
           return;
@@ -890,6 +964,17 @@
 
         if (req.method !== "POST") {
           res.statusCode = 405; res.end("POST only");
+          return;
+        }
+
+        // Every route below reaches After Effects. Checked before the body is
+        // read, so an unidentified caller cannot make us buffer anything.
+        var denial = authFailure(req);
+        if (denial) {
+          noteDenial(url, denial);
+          res.statusCode = 403;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ ok: false, error: denialMessage(), code: "bridge_unauthorized" }));
           return;
         }
 
@@ -1017,8 +1102,22 @@
       return startHttp(p).then(function (server) {
         // Read back rather than assumed: port 0 binds an ephemeral one.
         var bound = server.address().port;
+        // The socket is already accepting, so the token must be on disk before
+        // this promise resolves — not later in the boot.
+        writeTokenFile(bound);
         // Mount WS on the same HTTP server.
-        var wss = new WebSocket.Server({ server: server, path: "/events" });
+        var wss = new WebSocket.Server({
+          server: server,
+          path: "/events",
+          // WebSockets ignore the same-origin policy entirely, so without this
+          // any page could watch the user's event stream (issue #106).
+          verifyClient: function (info, cb) {
+            var why = authFailure(info.req);
+            if (!why) return cb(true);
+            noteDenial("/events", why);
+            cb(false, 403, "Forbidden");
+          },
+        });
         wss.on("connection", function (ws) {
           wsClients.add(ws);
           ws.on("close", function () { wsClients.delete(ws); });
@@ -1097,6 +1196,7 @@
     try { if (typeof s.server.closeAllConnections === "function") s.server.closeAllConnections(); } catch (e) {}
     try { s.server.close(); } catch (e) {}
     removePortFile(s.port);
+    removeTokenFile(s.port);
   }
   if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
     window.addEventListener("beforeunload", shutdown);
@@ -1126,6 +1226,7 @@
       setStatus("ready", "ok");
       log("info", "Bridge listening on http://127.0.0.1:" + s.port +
         (s.port !== config.port && config.port !== 0 ? " (configured port " + config.port + " was taken — see above)" : ""));
+      log("info", "Calls are authenticated: the MCP server reads this session's token from " + tokenFile(s.port) + ".");
     })
     .catch(function (e) {
       setStatus("failed", "err");

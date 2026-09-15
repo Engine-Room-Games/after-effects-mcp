@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import type { WsEvent } from "@engineroom/shared";
 import { logger } from "../util/logger.js";
+import { authHeaders } from "./discovery.js";
 import type { JobManager } from "../jobs/manager.js";
 import type { HttpClient } from "./httpClient.js";
 
@@ -54,7 +55,9 @@ export class WsClient {
   private connect(): Promise<void> {
     if (this.stopped) return Promise.resolve();
     const url = `ws://127.0.0.1:${this.bridge.port}/events`;
-    const ws = new WebSocket(url);
+    // Authenticated like /op (issue #106); read per connect, so a reconnect
+    // after the panel rebinds picks up the new token.
+    const ws = new WebSocket(url, { headers: authHeaders(this.bridge.port) });
     this.ws = ws;
     return new Promise<void>((resolve) => {
       ws.on("open", () => { logger.debug("WS connected", url); resolve(); });

@@ -17,7 +17,7 @@ Assume the person you are helping is a motion designer, not a developer. They sh
 
 ## A timeout is not a disconnection
 
-Before you start any repair, work out which of **four** failures you have. They
+Before you start any repair, work out which of **five** failures you have. They
 read alike and their remedies contradict each other:
 
 - **Did not answer in time** — something is listening; it is just too busy to
@@ -39,6 +39,18 @@ read alike and their remedies contradict each other:
   client's connection to it, not After Effects). **Never restart After Effects
   for this** — something is listening, and a restart costs the user their work
   in progress for nothing.
+- **Refused: the bridge token did not match** — the panel is running and
+  answered straight away, and what it answered was no. The call never reached
+  After Effects, so nothing in the project changed. The bridge requires a token
+  because it is an HTTP server on `127.0.0.1` and a web page in the user's
+  browser can reach that; the panel writes one beside its port file each time it
+  binds. **Do not restart After Effects, do not run `setup_panel`, and do not
+  re-send the call** — it will be refused identically until the cause is fixed.
+  Run `check_setup`: its `bridgeToken` check says whether the token file is
+  readable, and `nextSteps` carries the rest. The usual causes are an MCP server
+  older than the running panel (update it and reconnect) or a server that cannot
+  see the file the panel wrote, which happens when the client runs it sandboxed
+  or as another user.
 - **Waited behind another op for the write queue and was dropped** — the panel
   is fine and this call never left the server, so nothing in the project was
   changed. Writes are serialized so that they land in the order the agent issued
@@ -97,6 +109,7 @@ are in before you say anything.
 | `panelRunningCurrent` | AE is *running* an older panel than these tools ship. This is the one that predicts whether calls will actually work — `panelUpToDate` can pass while this fails, for the whole window between installing an update and restarting AE. |
 | `afterEffectsRunning` | AE is closed. If the panel also needs installing, install it now and then ask them to open AE — that saves a restart. |
 | `bridgeReachable` | Everything is installed but the panel isn't answering **on any port** — it asks the default port and the port file's port both, and reports whichever answers. Read the detail: if a port **timed out**, After Effects is busy and you should wait, not restart. If nothing is listening anywhere, one restart of AE is reasonable, because the panel loads only at launch; if that has already been tried, read `panelSignature` and `nextSteps` before suggesting a second. |
+| `bridgeToken` | The panel answers but requires a token this server cannot produce, so every call is refused before it reaches After Effects. The panel is fine: do not restart it and do not run `setup_panel`. The detail names the file the token should be in; `nextSteps` says what to do when it is not there. |
 | `portAgreement` | The panel answers, but on a different port from the one tool calls go to. The server is stale, the panel is fine. Retry the call, or reconnect the MCP server. Never restart After Effects for this. |
 | `panelSignature` | CEP's own log says it refused to load the panel because its signature failed verification — even with `cepDebugMode` on. An Adobe CEP 12 bug, seen on Windows. No restart and no reinstall helps; `nextSteps` carries the self-signing fix. When it *passes* on a silent bridge, its `evidence` says whether the log was clean or there was no log to read. |
 
