@@ -145,6 +145,19 @@ if [ "${SKIP_BINARIES:-}" != "1" ]; then
   ./scripts/sign-and-notarize.sh "$DIST"
 fi
 
+# Nothing here had ever run an artifact before uploading it (issue #168). Each
+# one is unpacked from the archive that will be uploaded, started over stdio,
+# and must serve exactly the tools OpSchemas defines. Still before the tag: a
+# bundle or binary that does not start costs a `git checkout -- .`, not a
+# public release that has to be pulled.
+step "Smoke-running the artifacts"
+node scripts/lib/release-checks.mjs smoke-mcpb "$DIST/after-effects-mcp-$VERSION.mcpb" \
+  || die "the .mcpb bundle did not start cleanly — nothing has been tagged or pushed"
+if [ "${SKIP_BINARIES:-}" != "1" ]; then
+  node scripts/lib/release-checks.mjs smoke-binaries "$DIST" \
+    || die "a standalone binary did not start cleanly — nothing has been tagged or pushed"
+fi
+
 # The staging folders are inputs to the zips; only the archives get uploaded.
 ASSETS=()
 while IFS= read -r f; do ASSETS+=("$f"); done < <(find "$DIST" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.mcpb' \) | sort)
