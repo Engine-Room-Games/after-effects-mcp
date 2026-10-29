@@ -320,6 +320,54 @@ check("is idempotent — patching a patched archive works", () => {
   assert.deepEqual([thumb.pixels[0], thumb.pixels[1], thumb.pixels[2]], [44, 55, 66]);
 });
 
+// ---------------------------------------------------------------------------
+// Premultiplied alpha (#130). The poster is raw saveFrameToPng output, whose
+// colour is already multiplied by alpha; PNG — and so thumb.png — is straight.
+// ---------------------------------------------------------------------------
+
+check("a premultiplied poster becomes a straight-alpha thumbnail, converted once", () => {
+  // Half-transparent yellow (242,191,25) as After Effects writes it.
+  const archive = fixtureMogrt(solidPng(64, 36, [0, 0, 0, 255]));
+  const res = mogrt.patchThumbnail(archive, solidPng(640, 360, [121, 96, 13, 128]));
+  const thumb = decodePng8(readZip(res.buffer).get("thumb.png"));
+  // Once: 121*255/128 -> 241. Not converted: 121 (the dark fringe). Twice: 255.
+  assert.deepEqual([...thumb.pixels.subarray(0, 4)], [241, 191, 26, 128]);
+});
+
+check("the resample averages in premultiplied space, so a clear neighbour adds no halo", () => {
+  // Opaque red beside fully transparent, reduced 2:1. Averaged as straight
+  // colour that is (128,0,0) at alpha 128 — dark red, a halo. Averaged
+  // premultiplied and then divided out it is pure red at half alpha.
+  const px = Buffer.from([255, 0, 0, 255, 0, 0, 0, 0]);
+  const archive = fixtureMogrt(solidPng(1, 1, [0, 0, 0, 255]));
+  const res = mogrt.patchThumbnail(archive, encodePng8(2, 1, 6, px));
+  const thumb = decodePng8(readZip(res.buffer).get("thumb.png"));
+  assert.deepEqual([...thumb.pixels.subarray(0, 4)], [255, 0, 0, 128]);
+});
+
+check("an opaque (RGB) thumbnail keeps premultiplied colour, which is the composite over black", () => {
+  const archive = fixtureMogrt(solidPng(64, 36, [0, 0, 0], 2));
+  const res = mogrt.patchThumbnail(archive, solidPng(640, 360, [121, 96, 13, 128]));
+  const thumb = decodePng8(readZip(res.buffer).get("thumb.png"));
+  assert.equal(thumb.channels, 3);
+  // Straight colour with its alpha dropped would be (241,191,26): a soft edge
+  // at full strength. Over black, half-transparent yellow is (121,96,13).
+  assert.deepEqual([...thumb.pixels.subarray(0, 3)], [121, 96, 13]);
+});
+
+check("an RGB poster letterboxed into an RGBA thumbnail keeps transparent bars", () => {
+  // Resampling in the poster's three channels and adding alpha afterwards
+  // would turn the zero padding into opaque black.
+  const archive = fixtureMogrt(solidPng(640, 360, [0, 0, 0, 255]));
+  const res = mogrt.patchThumbnail(archive, solidPng(1080, 1080, [255, 255, 255], 2));
+  const thumb = decodePng8(readZip(res.buffer).get("thumb.png"));
+  assert.equal(thumb.channels, 4);
+  const o = (180 * thumb.width + 2) * 4;
+  assert.deepEqual([...thumb.pixels.subarray(o, o + 4)], [0, 0, 0, 0]);
+  const c = (180 * thumb.width + 320) * 4;
+  assert.deepEqual([...thumb.pixels.subarray(c, c + 4)], [255, 255, 255, 255]);
+});
+
 check("refuses an archive with no thumb.png, naming what it did find", () => {
   const archive = buildZip([{ name: "definition.json", data: DEFINITION }]);
   assert.throws(

@@ -29,7 +29,8 @@ const read = (f) => fs.readFileSync(path.join(jsxDir, f), "utf8");
 // comps.jsx declares. In the shipped bundle every module shares one scope, so
 // this loads both rather than stubbing the helper — a stub would be free to
 // drift from the scoping the ops actually apply.
-const sources = [["comps.jsx", read("comps.jsx")], ["layers.jsx", read("layers.jsx")]];
+// values.jsx carries __setValue, which every first-class write goes through (#129).
+const sources = [["values.jsx", read("values.jsx")], ["comps.jsx", read("comps.jsx")], ["layers.jsx", read("layers.jsx")]];
 
 // ---------- the mock DOM ----------
 

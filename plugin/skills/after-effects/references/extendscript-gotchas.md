@@ -70,6 +70,8 @@ on this page, and a version you write yourself re-derives the bug.
 - **`ease(prop, keyIndex, easeIn, easeOut)`** — sizes the KeyframeEase array
   itself; see "Keyframes and easing" below for why that is not optional.
 - **`shape(comp, {name, position})`** — a shape layer whose origin is `[0,0]`.
+- **`setValueChecked(prop, value)`** — `setValue` that does not fail a write
+  that landed; see "Reading and writing values" below.
 - **`withoutUndoGroup(fn)`** — closes the undo group around one statement, which
   is what `copyToComp` needs.
 
@@ -101,7 +103,9 @@ that does it.
 - **Time remap is `layer.timeRemap`.** `layer.property("ADBE Time Remap")` is
   null on audio layers and on precomp layers, even after
   `timeRemapEnabled = true`.
-- **`instanceof` is unreliable on host objects.** Probe instead: a shape layer
+- **`instanceof` is unreliable on host objects.** `layer instanceof AVLayer`
+  is false for shape and text layers, though both have a full 2D transform
+  (issue #120). Probe instead: a shape layer
   is one where `property("ADBE Root Vectors Group")` is non-null, and a
   project item's kind is `item.typeName` — `"Composition"`, `"Footage"`,
   `"Folder"` — a string compare that needs no class.
@@ -116,9 +120,14 @@ that does it.
   you need first, then remove the expression, then the keys: each of those
   changes what the next read returns.
 - **`setValue` on a comp that is not open in a viewer can throw with the
-  value already applied.** Open the comp first — `comp.openInViewer()`, or
-  `set_active_comp` from outside — and on such a throw read the property back
-  before retrying: the write may already be there.
+  value already applied.** Seen on shape rectangle Size: `invalid numeric
+  result (divide by zero?)` for every rect after the first, with every value
+  in place when read back (issue #129). Write through `setValueChecked(prop,
+  value)` instead of `prop.setValue(value)`: on that one error it reads the
+  property back and only rethrows if the value did not land. The tools already
+  write this way. Never retry such a throw blind — read the property first.
+  `comp.openInViewer()` also avoids it, but it changes what the user is
+  looking at.
 
 ## Layers and comps
 

@@ -1,5 +1,6 @@
-// The panel's PNG normaliser: 16-bit -> 8-bit conversion, empty-frame
-// detection, and the content hash the stale-render check compares.
+// The panel's PNG normaliser: 16-bit -> 8-bit conversion, premultiplied ->
+// straight alpha (#130), empty-frame detection, and the content hash the
+// stale-render check compares.
 //
 // This is real image code that was written without an After Effects to try it
 // against, so it is exercised here instead. The fixtures and the verification
@@ -209,6 +210,49 @@ function noise(length, seed = 1) {
   return out;
 }
 
+/**
+ * Reference un-premultiply, written independently of the codec: colour divided
+ * by alpha, clamped, with alpha 0 and full alpha left alone. `alphaAt` is the
+ * index of the alpha sample within a pixel, or -1 for no alpha.
+ */
+function straight8(samples, channels, alphaAt) {
+  const out = Buffer.from(samples);
+  if (alphaAt < 0) return out;
+  for (let p = 0; p < samples.length / channels; p++) {
+    const a = samples[p * channels + alphaAt];
+    if (a === 0 || a === 255) continue;
+    for (let c = 0; c < channels; c++) {
+      if (c === alphaAt) continue;
+      out[p * channels + c] = Math.min(255, Math.round((samples[p * channels + c] * 255) / a));
+    }
+  }
+  return out;
+}
+
+/** The same at 16 bits, then narrowed by the high byte. */
+function straight16to8(data16, channels, alphaAt) {
+  const n = data16.length / 2;
+  const out = Buffer.alloc(n);
+  for (let p = 0; p < n / channels; p++) {
+    const a = alphaAt < 0 ? 65535 : data16.readUInt16BE((p * channels + alphaAt) * 2);
+    for (let c = 0; c < channels; c++) {
+      const v = data16.readUInt16BE((p * channels + c) * 2);
+      out[p * channels + c] = c === alphaAt || a === 0 || a === 65535
+        ? v >> 8
+        : Math.min(65535, Math.round((v * 65535) / a)) >> 8;
+    }
+  }
+  return out;
+}
+
+const ALPHA_AT = { 0: -1, 2: -1, 4: 1, 6: 3 };
+
+/** Force every alpha sample to 0 or 255, so nothing needs un-premultiplying. */
+function binaryAlpha(samples, channels = 4) {
+  for (let i = channels - 1; i < samples.length; i += channels) samples[i] = samples[i] & 0x80 ? 255 : 0;
+  return samples;
+}
+
 /** The 8-bit samples a 16-bit buffer must narrow to: the high byte of each pair. */
 function highBytes(data16) {
   const out = Buffer.alloc(data16.length / 2);
@@ -223,8 +267,8 @@ const ALL_FILTERS = [0, 1, 2, 3, 4];
 // ---------------------------------------------------------------------------
 // 8-bit input is passed through untouched.
 // ---------------------------------------------------------------------------
-check("8-bit RGBA passes through byte-for-byte", () => {
-  const samples = noise(W * H * 4, 7);
+check("8-bit RGBA with no partial alpha passes through byte-for-byte", () => {
+  const samples = binaryAlpha(noise(W * H * 4, 7));
   // Guarantee a non-zero alpha so the frame is not read as empty.
   samples[3] = 0xff;
   const png = makePng({ width: W, height: H, samples, filters: ALL_FILTERS });
@@ -236,6 +280,8 @@ check("8-bit RGBA passes through byte-for-byte", () => {
   assert.equal(r.passthrough, null);
   assert.equal(r.hashBasis, "pixels");
   assert.ok(r.hashInput.equals(samples), "decoded samples do not match the source");
+  assert.equal(r.unpremultiplied, false);
+  assert.ok(r.pixels.equals(samples), "pixels of an opaque/clear frame must be the source");
   assert.equal(r.width, W);
   assert.equal(r.height, H);
 });
@@ -274,8 +320,10 @@ for (const colorType of [0, 2, 4, 6]) {
     assert.equal(r.decoded, true);
     assert.equal(r.empty, false);
 
-    const expected = highBytes(samples);
-    assert.ok(r.hashInput.equals(expected), "narrowed samples are wrong");
+    // The hash is of the samples as written; the image is straight alpha.
+    assert.ok(r.hashInput.equals(highBytes(samples)), "narrowed samples are wrong");
+    const expected = straight16to8(samples, channels, ALPHA_AT[colorType]);
+    assert.ok(r.pixels.equals(expected), "pixels must be what the re-encoded file holds");
 
     const out = readPng(r.buffer);
     assert.equal(out.header.bitDepth, 8, "output is not 8 bits per channel");
@@ -293,7 +341,7 @@ check("a 16-bit value that came from 8 bits narrows back exactly", () => {
   // 8-bit -> 16-bit promotion multiplies by 257 (0x7f -> 0x7f7f); taking the
   // high byte has to invert that without drift, or every screenshot of an
   // 8-bit source rendered in a 16-bit project would shift tone.
-  const eight = noise(W * H * 4, 23);
+  const eight = binaryAlpha(noise(W * H * 4, 23));
   eight[3] = 0xff;
   const sixteen = Buffer.alloc(eight.length * 2);
   for (let i = 0; i < eight.length; i++) {
@@ -311,10 +359,11 @@ check("a 16-bit value that came from 8 bits narrows back exactly", () => {
   assert.ok(readPng(r.buffer).samples.equals(eight));
 });
 
-check("a converted frame re-normalises as an untouched 8-bit frame", () => {
+check("a converted opaque frame re-normalises as an untouched 8-bit frame", () => {
+  // Opaque only: with partial alpha the normaliser is deliberately *not*
+  // idempotent — it un-premultiplies, and must run once, on AE's file.
   const samples = noise(W * H * 4 * 2, 31);
-  samples[6] = 0x80;
-  samples[7] = 0x00;
+  for (let i = 0; i < W * H; i++) { samples[i * 8 + 6] = 0xff; samples[i * 8 + 7] = 0xff; }
   const first = normalizePng(
     makePng({ width: W, height: H, bitDepth: 16, samples, filters: ALL_FILTERS }),
   );
@@ -388,7 +437,8 @@ check("greyscale+alpha uses the right alpha channel", () => {
 // The content hash the stale-render check compares.
 // ---------------------------------------------------------------------------
 check("identical pixels hash identically however they were filtered", () => {
-  const samples = noise(W * H * 4, 13);
+  // Binary alpha, so neither file is re-encoded and they stay different files.
+  const samples = binaryAlpha(noise(W * H * 4, 13));
   samples[3] = 0xff;
   const a = normalizePng(makePng({ width: W, height: H, samples, filters: [0] }));
   const b = normalizePng(makePng({ width: W, height: H, samples, filters: [4, 3, 2, 1, 0] }));
@@ -561,7 +611,7 @@ check("a 320x180 16-bit frame converts and halves in sample count", () => {
   const w = 320;
   const h = 180;
   const samples = noise(w * h * 4 * 2, 53);
-  for (let i = 0; i < w * h; i++) samples[i * 8 + 6] = 0xff; // opaque
+  for (let i = 0; i < w * h; i++) { samples[i * 8 + 6] = 0xff; samples[i * 8 + 7] = 0xff; } // opaque
   const png = makePng({ width: w, height: h, bitDepth: 16, samples, filters: ALL_FILTERS });
   const r = normalizePng(png);
   assert.equal(r.converted, true);
@@ -569,6 +619,135 @@ check("a 320x180 16-bit frame converts and halves in sample count", () => {
   const out = readPng(r.buffer);
   assert.equal(out.header.bitDepth, 8);
   assert.ok(out.samples.equals(highBytes(samples)));
+});
+
+// ---------------------------------------------------------------------------
+// Premultiplied -> straight alpha (#130). saveFrameToPng writes colour already
+// multiplied by alpha into a format that is straight alpha by definition.
+// ---------------------------------------------------------------------------
+/** One row of pixels, each [r, g, b, a]. */
+function rowOf(pixels) {
+  return Buffer.from(pixels.flat());
+}
+const at = (buf, i) => [...buf.subarray(i * 4, i * 4 + 4)];
+
+check("a premultiplied soft edge comes out straight (#130's own numbers)", () => {
+  // The measured edge of a blurred yellow (242,191,25) solid, as AE wrote it.
+  const samples = rowOf([
+    [38, 30, 4, 40],
+    [127, 100, 13, 133],
+    [226, 178, 23, 238],
+    [242, 191, 25, 255],
+  ]);
+  const r = normalizePng(makePng({ width: 4, height: 1, samples, filters: [1] }));
+  assert.equal(r.unpremultiplied, true);
+  assert.equal(r.converted, false, "converted still means bit depth only");
+  const out = readPng(r.buffer).samples;
+  assert.ok(out.equals(r.pixels), "`pixels` must be exactly what the file decodes to");
+  // Every edge pixel is now the solid's colour to within the 8-bit rounding of
+  // the premultiplied source — no olive fringe.
+  for (let i = 0; i < 3; i++) {
+    const [cr, cg, cb] = at(out, i);
+    assert.ok(Math.abs(cr - 242) <= 4 && Math.abs(cg - 191) <= 4 && Math.abs(cb - 25) <= 4,
+      `edge pixel ${i} is ${at(out, i)}, not the solid's colour`);
+  }
+  assert.deepEqual(at(out, 3), [242, 191, 25, 255]);
+  assert.deepEqual([at(out, 0)[3], at(out, 1)[3], at(out, 2)[3]], [40, 133, 238], "alpha must not change");
+});
+
+check("alpha 0 and alpha 255 are left exactly alone", () => {
+  const samples = rowOf([
+    [9, 8, 7, 0], // invisible: colour undefined, not divided
+    [200, 100, 50, 255],
+    [10, 20, 30, 128], // the one that changes
+  ]);
+  const r = normalizePng(makePng({ width: 3, height: 1, samples, filters: [0] }));
+  const out = readPng(r.buffer).samples;
+  assert.deepEqual(at(out, 0), [9, 8, 7, 0]);
+  assert.deepEqual(at(out, 1), [200, 100, 50, 255]);
+  assert.deepEqual(at(out, 2), [20, 40, 60, 128]);
+});
+
+check("colour above its alpha clamps to 255 instead of wrapping", () => {
+  const samples = rowOf([[200, 255, 3, 100], [255, 255, 255, 1]]);
+  const r = normalizePng(makePng({ width: 2, height: 1, samples, filters: [0] }));
+  const out = readPng(r.buffer).samples;
+  assert.deepEqual(at(out, 0), [255, 255, 8, 100]);
+  assert.deepEqual(at(out, 1), [255, 255, 255, 1]);
+});
+
+check("8-bit noise matches the reference un-premultiply sample for sample", () => {
+  for (const colorType of [4, 6]) {
+    const ch = CHANNELS[colorType];
+    const samples = noise(W * H * ch, 61 + colorType);
+    samples[ch - 1] = 0x80;
+    const r = normalizePng(makePng({ width: W, height: H, colorType, samples, filters: ALL_FILTERS }));
+    const expected = straight8(samples, ch, ALPHA_AT[colorType]);
+    assert.ok(r.pixels.equals(expected), `colour type ${colorType}: pixels differ from the reference`);
+    assert.ok(readPng(r.buffer).samples.equals(expected), `colour type ${colorType}: file differs`);
+    assert.ok(r.hashInput.equals(samples), "the hash input must be the samples as written");
+  }
+});
+
+check("16-bit input is un-premultiplied at full precision, before narrowing", () => {
+  // A dim edge: 16-bit alpha 300 (8-bit 1), green 300 (8-bit 1), red 150 (8-bit
+  // 0). Divided at 16 bits red is half intensity; narrowed first it would be
+  // 0 / 1 -> black, and green 1 / 1 -> full.
+  const px = Buffer.alloc(8 * 2);
+  const set = (p, rgba) => rgba.forEach((v, c) => px.writeUInt16BE(v, (p * 4 + c) * 2));
+  set(0, [150, 300, 0, 300]);
+  set(1, [0x4000, 0x8000, 0x0100, 0x8000]); // half alpha, premultiplied
+  const r = normalizePng(makePng({ width: 2, height: 1, bitDepth: 16, samples: px, filters: [0] }));
+  assert.equal(r.converted, true);
+  assert.equal(r.unpremultiplied, true);
+  const out = readPng(r.buffer).samples;
+  assert.deepEqual(at(out, 0), [128, 255, 0, 1]);
+  assert.deepEqual(at(out, 1), [128, 255, 2, 128]);
+  assert.ok(out.equals(straight16to8(px, 4, 3)));
+  // The hash is of what AE wrote, narrowed — not of the straightened image.
+  assert.ok(r.hashInput.equals(highBytes(px)));
+});
+
+check("16-bit alpha 0 and 65535 narrow exactly as before", () => {
+  const px = Buffer.alloc(8 * 2);
+  const set = (p, rgba) => rgba.forEach((v, c) => px.writeUInt16BE(v, (p * 4 + c) * 2));
+  set(0, [0x1234, 0x5678, 0x9abc, 0]);
+  set(1, [0x1234, 0x5678, 0x9abc, 0xffff]);
+  const r = normalizePng(makePng({ width: 2, height: 1, bitDepth: 16, samples: px, filters: [0] }));
+  assert.equal(r.unpremultiplied, false, "nothing was partly transparent");
+  assert.ok(readPng(r.buffer).samples.equals(highBytes(px)));
+});
+
+check("16-bit colour above its alpha clamps instead of overflowing", () => {
+  const px = Buffer.alloc(8);
+  [0xffff, 0x9000, 0x0001, 0x8000].forEach((v, c) => px.writeUInt16BE(v, c * 2));
+  const r = normalizePng(makePng({ width: 1, height: 1, bitDepth: 16, samples: px, filters: [0] }));
+  assert.deepEqual(at(readPng(r.buffer).samples, 0), [255, 255, 0, 128]);
+});
+
+check("the hash is of the source samples, so stale detection still holds", () => {
+  const samples = noise(W * H * 4, 71);
+  samples[3] = 0x40;
+  const a = normalizePng(makePng({ width: W, height: H, samples, filters: [0] }));
+  const b = normalizePng(makePng({ width: W, height: H, samples, filters: [3, 1] }));
+  assert.ok(a.hashInput.equals(samples), "hash input is the source samples");
+  assert.ok(a.hashInput.equals(b.hashInput), "the same AE buffer must hash the same");
+  assert.ok(!a.pixels.equals(a.hashInput), "fixture was meant to need converting");
+  // A change confined to one low-alpha pixel must still change the hash.
+  const altered = Buffer.from(samples);
+  altered[0] = altered[0] ^ 0x01;
+  const c = normalizePng(makePng({ width: W, height: H, samples: altered, filters: [0] }));
+  assert.ok(!c.hashInput.equals(a.hashInput));
+});
+
+check("empty detection is unaffected: partial alpha anywhere is not empty", () => {
+  const samples = Buffer.alloc(W * H * 4, 0);
+  samples[5 * 4] = 1;
+  samples[5 * 4 + 3] = 2;
+  const r = normalizePng(makePng({ width: W, height: H, samples, filters: [0] }));
+  assert.equal(r.empty, false);
+  assert.equal(r.unpremultiplied, true);
+  assert.deepEqual(at(r.pixels, 5), [128, 0, 0, 2]);
 });
 
 console.log(`png-codec: ${passed} checks passed`);

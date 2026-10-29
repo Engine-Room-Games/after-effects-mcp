@@ -6,7 +6,8 @@ description: How to drive Adobe After Effects well through the AE MCP tools — 
 # Driving After Effects
 
 You have direct control of a live After Effects session. The user sees every
-change immediately, and every tool call is a real undo step in their project.
+change immediately, and every tool call that changes something is a real undo
+step in their project.
 Work like a motion designer at the keyboard, not like a script that fires blind.
 
 This file holds only what silently produces wrong output on *any* task. Each
@@ -90,6 +91,8 @@ English misses on a German or Japanese install. If you do not know a matchName,
 unfiltered list is several hundred entries and takes seconds every time.
 `list_effects` shows what is already on a layer, up to 200 parameters per effect
 (`maxParams` and `paramFilter` reach the rest).
+A newly added Gaussian Blur has **Repeat Edge Pixels on** by default, so a
+blurred solid keeps hard edges until you set `ADBE Gaussian Blur 2-0003` to 0.
 
 ## Identify things by id, never by index
 

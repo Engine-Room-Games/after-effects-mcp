@@ -43,6 +43,37 @@ it. The distinction worth reading carefully: if it says the panel is *installed*
 but the running one is older, running `setup_panel` again changes nothing and
 only quitting and reopening After Effects will.
 
+## 0.5.2
+
+Four fixes, all reported from outside the project. Two change what a result
+looks like: an effect read can now come back cut short, and a screenshot leaves
+at most one undo step instead of many.
+
+- **`list_effects`, `get_layer_full`'s effects and `add_effect` return at most
+  200 parameters per effect, and say what they left out.** A trimmed effect
+  carries `paramsOmitted` and a `paramsTruncated` note; raise `maxParams`, or
+  pass `paramFilter` (a regex over name and matchName) to read only the
+  parameters you need. Built-in effects never reach the cap; a particle plugin
+  used to return a megabyte in one call (issue #115).
+  supersedes: list_effects returns every parameter
+- **A screenshot leaves at most one undo step, named `AE MCP: screenshot`, and
+  none when the comp is already at the resolution asked for.** Rendering
+  borrows the comp's resolution and, for `screenshot_layer`, the solo
+  switches; each borrowed assignment used to be its own anonymous
+  "Resolution change" step, burying the user's real edits (issue #116). A
+  frame or tile the panel has to retry is a new call and adds one more.
+  supersedes: every screenshot adds Resolution change undo steps
+- **Set effect parameters by `paramMatchName`; `paramName` is the UI
+  language's display name.** A miss now names the effect, lists its
+  parameters as name = matchName, and says when After Effects is not in
+  English; `paramName` also matches regardless of case (issue #121).
+  supersedes: set_effect_param by parameter name
+- **`parent_layer` keeps shape and text layers in place.** Only a camera or
+  light in the chain skips the correction now; shape and text layers used to
+  be refused as if they were one, because `instanceof AVLayer` is false for
+  them (issue #120).
+  supersedes: not corrected: a camera or light in the chain
+
 ## 0.5.1
 
 One security fix, reported from outside the project. It changes nothing about

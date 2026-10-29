@@ -619,7 +619,7 @@ function __placeAudioCue(comp, p, item, created, floorDb) {
       levels.setValueAtTime(outP, floor);
     }
   } else {
-    levels.setValue(level);
+    __setValue(levels, level);
   }
   return layer;
 }
