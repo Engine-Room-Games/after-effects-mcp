@@ -142,4 +142,105 @@ let passed = 0;
   passed += 4;
 }
 
+// ---------------------------------------------------------------------------
+// Screenshots through the real dispatcher (issue #116)
+//
+// The screenshot ops are noUndo at the dispatcher and group themselves, because
+// whether a group is needed depends on the comp's resolution, which dispatch()
+// cannot see. This runs the real core.jsx + vision.jsx (+ batch.jsx) together,
+// so it is the actual __UNDO_OPEN and withUndo that decide — the unit file
+// tests/unit/screenshot-resolution.mjs stubs both.
+// ---------------------------------------------------------------------------
+{
+  const read = (f) => fs.readFileSync(path.join(root, "packages", "jsx", f), "utf8");
+  const loadVision = (startFactor) => {
+    const log = [];
+    const comp = {
+      id: 5, width: 1920, height: 1080, time: 0,
+      _rf: startFactor,
+      get resolutionFactor() { return this._rf; },
+      set resolutionFactor(v) { log.push("rf"); this._rf = v; },
+      numLayers: 1,
+      layer() { return lay; },
+      saveFrameToPng() { log.push("render"); },
+    };
+    const lay = {
+      id: 9, _solo: false,
+      get solo() { return this._solo; },
+      set solo(v) { log.push("solo"); this._solo = v; },
+    };
+    const ctx = {
+      app: {
+        beginUndoGroup: (n) => log.push(`begin:${n}`),
+        endUndoGroup: () => log.push("end"),
+      },
+      Folder: { temp: { fsName: "/tmp" } },
+      File: function (p) { this.path = p; },
+      getCompById: () => comp,
+      getLayerById: () => lay,
+      log,
+    };
+    vm.createContext(ctx);
+    vm.runInContext(read("core.jsx"), ctx, { filename: "core.jsx" });
+    vm.runInContext(read("snapshot.jsx"), ctx, { filename: "snapshot.jsx" });
+    vm.runInContext(read("batch.jsx"), ctx, { filename: "batch.jsx" });
+    vm.runInContext(read("vision.jsx"), ctx, { filename: "vision.jsx" });
+    const call = (op, args) => vm.runInContext("dispatch", ctx)(JSON.stringify({ op, args }));
+    return { log, call, ctx };
+  };
+
+  // Comp at Full, downsample 1: nothing to borrow, so no group and no step.
+  {
+    const { log, call } = loadVision([1, 1]);
+    assert.equal(call("screenshot_frame", { compId: 5, downsample: 1 }).ok, true);
+    assert.deepEqual(log, ["render"], "a screenshot that changes nothing must leave no undo step");
+    passed++;
+  }
+
+  // Comp at Quarter: one named group, set and restore inside it.
+  {
+    const { log, call } = loadVision([4, 4]);
+    call("screenshot_frame", { compId: 5, downsample: 1 });
+    assert.deepEqual(log, ["begin:AE MCP: screenshot", "rf", "render", "rf", "end"]);
+    passed++;
+  }
+
+  // A contact sheet: one group for every tile.
+  {
+    const { log, call } = loadVision([4, 4]);
+    call("screenshot_frame", { compId: 5, times: [0, 1, 2], downsample: 1 });
+    assert.equal(opens(log), 1, "a sheet is one undo step, not two per tile");
+    assert.equal(closes(log), 1);
+    passed += 2;
+  }
+
+  // screenshot_layer: solo and resolution borrowed inside one group.
+  {
+    const { log, call } = loadVision([4, 4]);
+    call("screenshot_layer", { compId: 5, layerId: 9, downsample: 1 });
+    assert.equal(log[0], "begin:AE MCP: screenshot");
+    assert.equal(log[log.length - 1], "end");
+    assert.equal(opens(log), 1);
+    passed += 3;
+  }
+
+  // Inside run_batch: the batch's group is the only one. A nested begin would
+  // be closed by the screenshot's own end, and the rest of the batch would land
+  // ungrouped.
+  {
+    const { log, call } = loadVision([4, 4]);
+    const r = call("run_batch", {
+      ops: [
+        { op: "screenshot_frame", args: { compId: 5, downsample: 1 } },
+        { op: "screenshot_layer", args: { compId: 5, layerId: 9, downsample: 1 } },
+      ],
+    });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(opens(log), 1, "a screenshot inside a batch must not open a group of its own");
+    assert.equal(closes(log), 1);
+    assert.equal(r.result.undoSteps, 1);
+    passed += 4;
+  }
+}
+
 console.log(`jsx-undo-group: ${passed} assertions passed`);

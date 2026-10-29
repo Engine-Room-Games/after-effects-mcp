@@ -56,18 +56,38 @@ function __resolveDownsample(comp, requested) {
 // afterwards. That is faster (a quarter of the pixels at factor 2) and needs no
 // external image tool, which is what makes it work off macOS.
 //
-// Factor 1 is *set*, not skipped. Skipping it rendered at whatever the user had
-// left the viewer on, so a comp parked at Quarter answered `downsample: 1` with
-// a quarter-size frame and `downsample: 2` came back **larger** than
-// `downsample: 1` (issue #72). Designers leave heavy comps at Quarter or Third
-// as a matter of course, so that was the common case rather than a corner. The
-// panel reads the real dimensions out of the PNG's IHDR, which means the
-// response stayed honest while the *picture* was not the one asked for — the
-// worse of the two failures, because an agent that can see a frame believes it.
-// Every factor reaching this function now names the resolution it renders at.
+// The factor always *names* the resolution the render happens at. Leaving it to
+// the viewer rendered at whatever the user had left the Resolution dropdown on,
+// so a comp parked at Quarter answered `downsample: 1` with a quarter-size frame
+// and `downsample: 2` came back **larger** than `downsample: 1` (issue #72).
+// Designers leave heavy comps at Quarter or Third as a matter of course, so that
+// was the common case rather than a corner. The panel reads the real dimensions
+// out of the PNG's IHDR, which means the response stayed honest while the
+// *picture* was not the one asked for — the worse of the two failures, because
+// an agent that can see a frame believes it.
+//
+// What is skipped is only the *assignment*, and only when the comp is already
+// at the factor asked for. Every assignment to resolutionFactor is its own undo
+// step in After Effects ("Resolution change"), so set-and-restore cost two steps
+// per rendered frame — ten for one frame plus a four-tile sheet — and buried the
+// user's real edits under no-ops (issue #116). When the factor already matches,
+// the render happens at the requested resolution with nothing assigned, which
+// keeps #72's guarantee and leaves the project untouched.
+function __factorIs(rf, f) {
+  return !!rf && rf[0] === f && rf[1] === f;
+}
+
+function __factorFor(factor) {
+  return (factor > 1) ? Math.round(factor) : 1;
+}
+
 function __saveFrameAt(comp, time, file, factor) {
-  var f = (factor > 1) ? Math.round(factor) : 1;
+  var f = __factorFor(factor);
   var previous = comp.resolutionFactor;
+  if (__factorIs(previous, f)) {
+    comp.saveFrameToPng(time, file);
+    return;
+  }
   try {
     comp.resolutionFactor = [f, f];
     comp.saveFrameToPng(time, file);
@@ -77,6 +97,32 @@ function __saveFrameAt(comp, time, file, factor) {
     // happens at Full and the viewer goes back to Quarter afterwards.
     comp.resolutionFactor = previous;
   }
+}
+
+// The one undo step a screenshot is allowed to cost (issue #116).
+//
+// A screenshot changes nothing, but it has to *borrow* the comp's resolution
+// and, for screenshot_layer, every layer's solo switch — and After Effects
+// records each of those assignments as its own step, restore included. Grouped,
+// the borrow and the restore collapse into one step the user can recognise by
+// name in Edit > History, instead of 2 + 2N anonymous ones.
+//
+// Three rules, all of which the tests hold:
+//   * no group at all when nothing will be assigned — a comp already at the
+//     requested factor, e.g. Full at downsample 1 — so that case costs zero steps;
+//   * no group of our own when one of ours is already open (a screenshot inside
+//     run_batch, or the dispatcher's group around another op): AE's groups do
+//     not nest, and an inner endUndoGroup would close the outer one and leave
+//     the rest of that batch ungrouped. The borrow joins the step already open;
+//   * the group goes through withUndo, so it opens and closes inside this one
+//     evalScript call and is counted by __beginUndoGroup like every other.
+// The ops stay `noUndo` at the dispatcher for exactly this reason: the decision
+// depends on the comp's state, which dispatch() cannot see.
+var __SCREENSHOT_UNDO_NAME = "AE MCP: screenshot";
+
+function __screenshotGroup(needed, fn) {
+  if (!needed || __UNDO_OPEN) return fn();
+  return withUndo(__SCREENSHOT_UNDO_NAME, fn);
 }
 
 // Several times in one call. Every requested time gets an entry, in order,
@@ -93,18 +139,22 @@ function __contactSheetFrames(comp, args) {
     ds = __clampDownsample(args.downsample);
   }
   var tiles = [];
-  for (var i = 0; i < times.length; i++) {
-    var entry = { time: times[i], downsample: ds };
-    try {
-      var p = __tmpPngPath();
-      __saveFrameAt(comp, times[i], new File(p), ds);
-      entry.path = p;
-    } catch (e) {
-      // One time that will not render must not cost the other five.
-      entry.error = String(e && e.message ? e.message : e);
+  // Every tile renders at the same factor, so the whole sheet is one undo step
+  // at most rather than two per tile.
+  __screenshotGroup(!__factorIs(comp.resolutionFactor, __factorFor(ds)), function () {
+    for (var i = 0; i < times.length; i++) {
+      var entry = { time: times[i], downsample: ds };
+      try {
+        var p = __tmpPngPath();
+        __saveFrameAt(comp, times[i], new File(p), ds);
+        entry.path = p;
+      } catch (e) {
+        // One time that will not render must not cost the other five.
+        entry.error = String(e && e.message ? e.message : e);
+      }
+      tiles.push(entry);
     }
-    tiles.push(entry);
-  }
+  });
   return {
     contactSheet: true,
     tiles: tiles,
@@ -122,7 +172,9 @@ OPS.screenshot_frame = noUndo(function (args) {
   var path = __tmpPngPath();
   var f = new File(path);
   // saveFrameToPng is async-ish; the panel polls the file's existence/size.
-  __saveFrameAt(c, t, f, ds);
+  __screenshotGroup(!__factorIs(c.resolutionFactor, __factorFor(ds)), function () {
+    __saveFrameAt(c, t, f, ds);
+  });
   return {
     path: path,
     width: c.width, height: c.height,
@@ -135,26 +187,35 @@ OPS.screenshot_layer = noUndo(function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
   var t = (args.time !== undefined && args.time !== null) ? args.time : c.time;
-  // Capture all current solo states; solo target; capture; restore.
-  var prevSolo = [];
+  // Solo the target alone, render, put every switch back. Only the switches
+  // that are actually wrong get assigned: each assignment is an undo step of
+  // its own, and a layer already in the right state has nothing to restore.
+  var changed = [];
   for (var i = 1; i <= c.numLayers; i++) {
     var ll = c.layer(i);
-    prevSolo.push({ idx: i, solo: ll.solo });
-    ll.solo = false;
+    var want = (ll.id === l.id);
+    if (ll.solo !== want) changed.push({ layer: ll, was: ll.solo, want: want });
   }
-  l.solo = true;
   var ds = __resolveDownsample(c, args.downsample);
   var path = __tmpPngPath();
   var f = new File(path);
-  try {
-    __saveFrameAt(c, t, f, ds);
-  } finally {
-    // restore
-    l.solo = false;
-    for (var j = 0; j < prevSolo.length; j++) {
-      try { c.layer(prevSolo[j].idx).solo = prevSolo[j].solo; } catch (e) {}
+  var needed = changed.length > 0 || !__factorIs(c.resolutionFactor, __factorFor(ds));
+  __screenshotGroup(needed, function () {
+    // Inside the try, so a switch AE refuses part-way still restores the ones
+    // that were already flipped.
+    var applied = 0;
+    try {
+      for (var k = 0; k < changed.length; k++) {
+        changed[k].layer.solo = changed[k].want;
+        applied = k + 1;
+      }
+      __saveFrameAt(c, t, f, ds);
+    } finally {
+      for (var j = applied - 1; j >= 0; j--) {
+        try { changed[j].layer.solo = changed[j].was; } catch (e) {}
+      }
     }
-  }
+  });
   return {
     path: path,
     width: c.width, height: c.height,
