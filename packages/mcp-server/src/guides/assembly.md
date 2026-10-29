@@ -88,8 +88,10 @@ have to be on before anything in the shot blurs; switch the shot comp's own on
 too, so the shot previews the same way opened alone. From `run_jsx`:
 `comp.motionBlur = true` on a comp, `layer.motionBlur = true` on a layer.
 
-**`delete_comp` on a shot takes every layer that nests it with it**, in the
-master and anywhere else, silently. To replace a shot with a rebuilt one, build
+**Deleting a comp takes every layer that nests it with it**, in the master and
+anywhere else. `delete_comp` therefore refuses a nested shot and names the comps
+nesting it; `force: true` deletes it anyway and lists the layers that went in
+`removedFromComps`. To replace a shot with a rebuilt one, build
 the new comp under a working name, point each nesting layer at it — `run_jsx`:
 `layer.replaceSource(newComp, false)`, then `startTime`, `inPoint` and
 `outPoint` written again, because the swap keeps the old timing — and delete

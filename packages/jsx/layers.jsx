@@ -252,11 +252,47 @@ OPS.duplicate_layer = function (args) {
   return out;
 };
 
+// Removing a layer has fallout After Effects does not announce (issue #160):
+// its children lose their parent, layers using it as a track matte lose the
+// matte, and a solid's footage item is left in the project. All of it is read
+// before the removal — afterwards there is nothing left to ask — and reported,
+// each key present only when non-empty.
 OPS.delete_layer = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
+  var layerId = l.id;
+  var layerName = l.name;
+  var children = [];
+  var matteUsers = [];
+  for (var i = 1; i <= c.numLayers; i++) {
+    var o = c.layer(i);
+    if (o.id === layerId) continue;
+    var par = null;
+    try { par = o.parent; } catch (e) { par = null; }
+    if (par && par.id === layerId) children.push({ id: o.id, name: o.name });
+    var mt = null;
+    try { mt = o.trackMatteLayer; } catch (e2) { mt = null; }
+    if (mt && mt.id === layerId) matteUsers.push({ id: o.id, name: o.name });
+  }
+  var srcId = null;
+  try { if (l.source && __isSolidItem(l.source)) srcId = l.source.id; } catch (e3) { srcId = null; }
+
   l.remove();
-  return { ok: true };
+
+  var out = { ok: true, layerId: layerId, name: layerName };
+  if (children.length > 0) out.unparentedChildren = children;
+  if (matteUsers.length > 0) out.lostTrackMatte = matteUsers;
+  if (srcId !== null) {
+    var item = __findItem(srcId);
+    var solidUses = item ? __usedInList(item) : null;
+    if (solidUses && solidUses.unreadable) {
+      out.solidUseUnknown = { id: item.id, name: item.name, reason: solidUses.unreadable };
+    } else if (solidUses && solidUses.length === 0) {
+      out.unusedSolidLeft = { id: item.id, name: item.name };
+      out.note = "The solid item \"" + item.name + "\" is now used by nothing and remains in the project; purge_unused_footage removes it.";
+    }
+  }
+  return out;
 };
 
 OPS.set_layer = function (args) {
