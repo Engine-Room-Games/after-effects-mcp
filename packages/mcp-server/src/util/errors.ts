@@ -308,6 +308,25 @@ export class WriteQueueCancelledError extends Error {
 }
 
 /**
+ * Fields a tool once declared and no longer takes, with where the work went.
+ * The generic unknown-field text says "check the spelling", which is wrong
+ * advice for a key that is spelt right and simply lives on another tool.
+ */
+const SHAPE_LAYER_EMPTY =
+  "create_shape_layer only creates the empty layer — create it without this, then draw into it with " +
+  "add_shape_content (a group, then a rect/ellipse/path, then a {type:\"fill\", color} or " +
+  "{type:\"stroke\", color, width} inside the group)";
+export const REMOVED_FIELD_HINTS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  // Issue #148: declared, never applied, so a filled shape came back empty.
+  create_shape_layer: {
+    fill: SHAPE_LAYER_EMPTY,
+    stroke: SHAPE_LAYER_EMPTY,
+    strokeWidth: SHAPE_LAYER_EMPTY,
+    shapes: SHAPE_LAYER_EMPTY,
+  },
+};
+
+/**
  * A rejected tool call, said in sentences.
  *
  * `ZodError.message` is `JSON.stringify(issues, null, 2)` — an array of objects
@@ -346,10 +365,27 @@ export function invalidArgsText(op: string, e: unknown): string {
     if (issue.code === "unrecognized_keys" && Array.isArray(unknownKeys)) {
       // Refused rather than stripped (issue #147): a key the tool does not know
       // is one it would have ignored while reporting success.
-      const names = unknownKeys.map((k) => "`" + String(k) + "`").join(", ");
-      text =
-        `${unknownKeys.length === 1 ? "unknown field" : "unknown fields"} ${names}: not part of this tool's arguments, ` +
-        `so ${unknownKeys.length === 1 ? "it" : "they"} would have been ignored. Check the spelling against the tool's schema.`;
+      const hints = REMOVED_FIELD_HINTS[op] ?? {};
+      const hinted = unknownKeys.filter((k) => Object.hasOwn(hints, String(k)));
+      const plain = unknownKeys.filter((k) => !Object.hasOwn(hints, String(k)));
+      const parts: string[] = [];
+      if (plain.length > 0) {
+        const names = plain.map((k) => "`" + String(k) + "`").join(", ");
+        parts.push(
+          `${plain.length === 1 ? "unknown field" : "unknown fields"} ${names}: not part of this tool's arguments, ` +
+          `so ${plain.length === 1 ? "it" : "they"} would have been ignored. Check the spelling against the tool's schema.`
+        );
+      }
+      // Grouped by hint, so four removed fields sharing one remedy say it once.
+      const byHint = new Map<string, string[]>();
+      for (const k of hinted) {
+        const h = hints[String(k)];
+        byHint.set(h, [...(byHint.get(h) ?? []), "`" + String(k) + "`"]);
+      }
+      for (const [h, names] of byHint) {
+        parts.push(`${op} does not take ${names.join(", ")}: ${h}.`);
+      }
+      text = parts.join(" ");
     } else if (issue.code === "invalid_type" && received === "undefined") {
       text = "required, and was not passed";
     } else if (issue.code === "invalid_type" && issue.expected) {

@@ -479,10 +479,10 @@ export const CreateTextLayer = z.object({
 export const CreateShapeLayer = z.object({
   compId: z.number(),
   name: z.string().optional(),
-  shapes: z.array(z.record(z.string(), z.unknown())).default([]),
-  fill: Color.optional(),
-  stroke: Color.optional(),
-  strokeWidth: z.number().nonnegative().optional(),
+  // No shapes/fill/stroke/strokeWidth (issue #148): they were declared and never
+  // applied, so a filled shape came back as an empty layer behind {ok:true}.
+  // Contents go through add_shape_content, which builds them all-or-nothing;
+  // the strict parse now refuses those keys by name instead.
   position: z.union([Vec2, Vec3, z.literal("center")]).optional()
     .describe("Where the layer's origin goes. Defaults to [0,0], which makes the layer's coordinate space the comp's — so vertices and shape positions you write afterwards are in comp pixels. 'center' is After Effects' own spawn point (the comp centre), which offsets every path you add by half a frame. The Anchor Point stays at [0,0] either way. A new shape layer is 2D, so use [x,y]; a three-component position needs set_layer threeDLayer:true first."),
 });

@@ -120,8 +120,15 @@ await check("cross-field rules and defaults survive the closing", () => {
   assert.equal(r.success, false);
   assert.match(r.error.issues[0].message, /Pass exactly one of/);
   assert.equal(StrictOpSchemas.create_comp.parse({}).name, "Untitled");
-  // A z.record is free-form by declaration: #148 is its own issue.
-  assert.equal(StrictOpSchemas.create_shape_layer.safeParse({ compId: 1, shapes: [{ type: "rect", x: 1 }] }).success, true);
+  // #148: create_shape_layer declared shapes/fill/stroke/strokeWidth and never
+  // applied them. They are gone, so each is now refused by name, not dropped.
+  for (const key of ["shapes", "fill", "stroke", "strokeWidth"]) {
+    const value = key === "shapes" ? [{ type: "rect" }] : key === "strokeWidth" ? 4 : [1, 0, 0];
+    const res = StrictOpSchemas.create_shape_layer.safeParse({ compId: 1, [key]: value });
+    assert.equal(res.success, false, `create_shape_layer accepted ${key} it would never apply`);
+    assert.deepEqual(res.error.issues[0].keys, [key]);
+  }
+  assert.equal(StrictOpSchemas.create_shape_layer.safeParse({ compId: 1, position: "center" }).success, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -271,6 +278,29 @@ await check("run_batch with one bad step sends nothing, and names it", async () 
   assert.match(res.content[0].text, /nothing in the batch was run/);
   assert.match(res.content[0].text, /ops\[1\] \(screenshot_frame\)/);
   assert.match(res.content[0].text, /ops\[2\] \(set_layer\): invalid arguments: .*nmae/);
+  assert.deepEqual(seen, []);
+});
+
+await check("create_shape_layer's removed fields point at add_shape_content, directly and as a step (#148)", async () => {
+  seen.length = 0;
+  const direct = await client.callTool({
+    name: "create_shape_layer",
+    arguments: { compId: 1, fill: [1, 0, 0], stroke: [0, 0, 0], strokeWidth: 4, shapes: [], nmae: "x" },
+  });
+  assert.equal(direct.isError, true);
+  const text = direct.content[0].text;
+  assert.match(text, /create_shape_layer does not take `fill`, `stroke`, `strokeWidth`, `shapes`: .*add_shape_content/);
+  // The removed fields are spelt right, so they must not be told to check the
+  // spelling — but a real typo alongside them still is.
+  assert.match(text, /unknown field `nmae`.*Check the spelling/);
+  assert.doesNotMatch(text, /`fill`[^\n]*Check the spelling/);
+  const batch = await client.callTool({
+    name: "run_batch",
+    arguments: { ops: [{ op: "create_shape_layer", args: { compId: 1, fill: [1, 0, 0] } }] },
+  });
+  assert.equal(batch.isError, true);
+  assert.match(batch.content[0].text, /ops\[0\] \(create_shape_layer\): invalid arguments: .*does not take `fill`: .*add_shape_content/);
+  assert.doesNotMatch(batch.content[0].text, /Check the spelling/);
   assert.deepEqual(seen, []);
 });
 
