@@ -28,8 +28,10 @@
 //   the same name on some other object credits nothing: a refusal message that
 //   says "fill" is not a read of `fill`.
 //
-//   One generic form is accepted: `for (k in v)` over a tracked object reads
-//   every field directly under it (add_shape_content applies whatever keys it
+//   A key taken from a table of names counts as that name (`p[FIELDS[i][0]]`
+//   with `FIELDS = [["position", …], …]`), but only when it indexes the
+//   arguments. One generic form is accepted: `for (k in v)` over a tracked
+//   object reads every field directly under it (add_shape_content applies whatever keys it
 //   was given, by name, and fails on any it cannot place).
 //
 //   Ops the server answers, wholly or in part, start from the TypeScript that
@@ -79,14 +81,6 @@ function check(name, fn) {
 // ---------------------------------------------------------------------------
 
 const IGNORED_FIELDS = {
-  add_text_animator: {
-    // Read as `args.range[key]` with `key` taken from a table of
-    // [field, matchName] pairs (text.jsx, `rangeKeys`), so no read names them.
-    // Behaviour is covered by tests/unit/text-animator.mjs.
-    "range.start": "read through the rangeKeys table in text.jsx",
-    "range.end": "read through the rangeKeys table in text.jsx",
-    "range.offset": "read through the rangeKeys table in text.jsx",
-  },
 };
 
 // Ops the server answers, wholly or in part. The arguments are followed from:
@@ -325,6 +319,10 @@ class ArgFlow {
   member(values, key, credit) {
     const out = [];
     for (const v of values) {
+      if (v.str !== undefined) {
+        if (key === null) out.push(v); // an element of a table of names
+        continue;
+      }
       if (v.path !== undefined) {
         if (key === null) out.push(v); // an index into an array of them
         else {
@@ -341,15 +339,39 @@ class ArgFlow {
     return uniq(out);
   }
 
+  /**
+   * The names `v[k]` can read: a string literal, or every name `k` can hold
+   * when it comes from a table of names (`p[__TRANSFORM_FIELDS[i][0]]`).
+   * Null for anything else — an array index.
+   */
+  keysOf(k, env, index) {
+    k = unwrap(k);
+    if (ts.isStringLiteralLike(k)) return [k.text];
+    const strs = this.valueOf(k, env, index).filter((v) => v.str !== undefined).map((v) => v.str);
+    return strs.length ? strs : null;
+  }
+
   /** The values `e` can evaluate to. Pure apart from entering functions it calls. */
   valueOf(e, env, index) {
     e = unwrap(e);
     if (!e) return [];
-    if (ts.isIdentifier(e)) return env.get(e.text) ?? [];
+    if (ts.isStringLiteralLike(e)) return [{ key: `s:${e.text}`, str: e.text }];
+    if (ts.isIdentifier(e)) {
+      if (env.has(e.text)) return env.get(e.text);
+      // A top-level table of names, like transforms.jsx's __TRANSFORM_FIELDS:
+      // only its strings, which matter only as keys (see keysOf).
+      const out = [];
+      for (const d of index.decls.get(e.text) ?? []) {
+        const init = ts.isVariableDeclaration(d) ? unwrap(d.initializer) : null;
+        if (init && ts.isArrayLiteralExpression(init)) out.push(...this.valueOf(init, new Map(), index).filter((v) => v.str !== undefined));
+      }
+      return uniq(out);
+    }
     if (ts.isPropertyAccessExpression(e)) return this.member(this.valueOf(e.expression, env, index), e.name.text, false);
     if (ts.isElementAccessExpression(e)) {
-      const lit = ts.isStringLiteralLike(e.argumentExpression) ? e.argumentExpression.text : null;
-      return this.member(this.valueOf(e.expression, env, index), lit, false);
+      const base = this.valueOf(e.expression, env, index);
+      const keys = this.keysOf(e.argumentExpression, env, index);
+      return keys ? uniq(keys.flatMap((k) => this.member(base, k, false))) : this.member(base, null, false);
     }
     if (ts.isBinaryExpression(e)) {
       const op = e.operatorToken.kind;
@@ -376,7 +398,7 @@ class ArgFlow {
           spreads.push(...this.valueOf(prop.expression, env, index));
         }
       }
-      const any = spreads.length || [...fields.values()].some((f) => f.length);
+      const any = spreads.length || [...fields.values()].some((f) => f.some((v) => v.str === undefined));
       // Keyed by the literal's position: the same literal is the same record.
       return any ? [{ key: `r:${e.getSourceFile().fileName}:${e.pos}`, fields, spreads: uniq(spreads) }] : [];
     }
@@ -391,7 +413,7 @@ class ArgFlow {
       }
       const out = [];
       e.arguments.forEach((arg, i) => {
-        const vs = this.valueOf(arg, env, index);
+        const vs = this.valueOf(arg, env, index).filter((v) => v.str === undefined);
         if (!vs.length) return;
         for (const [f, idx, scope] of this.callees(e, index, env)) out.push(...this.enterFn(f, i, vs, idx, scope));
       });
@@ -489,10 +511,11 @@ class ArgFlow {
         return;
       }
       if (ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)) {
-        const key = ts.isPropertyAccessExpression(n)
-          ? n.name.text
-          : ts.isStringLiteralLike(n.argumentExpression) ? n.argumentExpression.text : null;
-        if (key !== null) this.member(this.valueOf(n.expression, env, index), key, true);
+        const keys = ts.isPropertyAccessExpression(n) ? [n.name.text] : this.keysOf(n.argumentExpression, env, index);
+        if (keys) {
+          const base = this.valueOf(n.expression, env, index);
+          for (const k of keys) this.member(base, k, true);
+        }
         ts.forEachChild(n, visit);
         return;
       }
@@ -784,6 +807,21 @@ check("a part of the arguments carried in an object literal and a return value i
     };
   `);
   assert.deepEqual(paths, ["easeOut.influence", "easeOut.speed"]);
+});
+
+check("a field read by a key from a table of names is credited, and only off the arguments", () => {
+  // transforms.jsx and text.jsx: p[__TRANSFORM_FIELDS[i][0]], args.range[rangeKeys[i][0]].
+  const paths = unreadIn("add_marker", `
+    var __FIELDS = [["comment", "x"], ["url", "y"]];
+    var __OTHER = [["label", "z"]];
+    OPS.add_marker = function (args) {
+      var o = {};
+      for (var i = 0; i < __FIELDS.length; i++) { var f = __FIELDS[i][0]; if (args[f] !== undefined) o[f] = 1; }
+      for (var j = 0; j < __OTHER.length; j++) o[__OTHER[j][0]] = 2;
+      return [args.compId, args.layerId, args.time, args.duration, args.chapter, args.frameTarget];
+    };
+  `);
+  assert.deepEqual(paths, ["label"]);
 });
 
 console.log(`schema-handler-contract: ${passed} checks passed (${Object.keys(OpSchemas).length} ops)`);
