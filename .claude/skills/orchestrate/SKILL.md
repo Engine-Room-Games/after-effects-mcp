@@ -111,7 +111,8 @@ maintainer or another session may be mid-project. Brief the agent to:
   that AE until restored, so keep the window short and tell the maintainer;
 - changes under `packages/ae-panel/client/` cannot be hot-loaded. Sequence:
   ask the maintainer → quit AE → back up the whole installed extension folder
-  (`install:panel` replaces all of it) → `npm run install:panel` → launch →
+  (`install:panel` replaces all of it) → `npm run install:panel` **in the PR
+  worktree** (from the main checkout it installs main's panel) → launch →
   test → quit → restore the folder byte-identical → relaunch. Ask before every
   quit. A restore takes effect only at the next launch;
 - report what was observed, not inferred, and what could not be exercised.
