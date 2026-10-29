@@ -152,6 +152,13 @@ await check("a step with a typo, a missing field or a broken rule is refused wit
 
 await check("internal, server-resident and half-outside-AE ops are refused by name, with a reason", () => {
   for (const op of ["_render_prepare", "_continue_job", "no_such_tool"]) assert.ok(batchStepRefusal(op), op);
+  // Inherited names are not tools: `"constructor" in {}` is true.
+  for (const op of ["constructor", "toString", "hasOwnProperty", "valueOf", "__defineGetter__"]) {
+    assert.equal(batchStepRefusal(op), "there is no tool by that name", op);
+    const { problems } = prepareBatchSteps([{ op, args: {} }]);
+    assert.equal(problems.length, 1, op);
+    assert.doesNotMatch(problems[0].problem, /native code/, op);
+  }
   for (const op of ALL.filter((n) => OpMutation[n] === "server")) assert.ok(batchStepRefusal(op), op);
   for (const op of ["snapshot_comp", "diff_comp", "screenshot_frame", "screenshot_layer", "export_mogrt", "render_queue", "get_house_style"]) {
     assert.ok(BATCH_STEP_REFUSALS[op], op);
@@ -231,6 +238,20 @@ await check("a direct call with a misspelt key is refused before the bridge", as
   const res = await client.callTool({ name: "set_layer", arguments: { compId: 1, layerId: 1, nmae: "x" } });
   assert.equal(res.isError, true);
   assert.match(res.content[0].text, /unknown field `nmae`/);
+  assert.deepEqual(seen, []);
+});
+
+await check("an inherited name is an unknown tool, directly and as a step", async () => {
+  seen.length = 0;
+  for (const name of ["constructor", "toString", "hasOwnProperty"]) {
+    const res = await client.callTool({ name, arguments: {} });
+    assert.equal(res.isError, true, name);
+    assert.match(res.content[0].text, new RegExp(`Unknown tool: ${name}`));
+    const batch = await client.callTool({ name: "run_batch", arguments: { ops: [{ op: name, args: {} }] } });
+    assert.equal(batch.isError, true, name);
+    assert.match(batch.content[0].text, /there is no tool by that name/);
+    assert.doesNotMatch(batch.content[0].text, /native code/);
+  }
   assert.deepEqual(seen, []);
 });
 

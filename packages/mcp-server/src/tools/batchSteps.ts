@@ -50,7 +50,9 @@ export interface BatchStepProblem {
 
 /** Why a step cannot run, or `undefined` for one that is not refused by name. */
 export function batchStepRefusal(op: string): string | undefined {
-  if (!(op in schemas.StrictOpSchemas)) {
+  // Own keys only: `"constructor" in {}` is true, and an inherited name would
+  // reach a prototype function as though it were a schema.
+  if (!Object.hasOwn(schemas.StrictOpSchemas, op)) {
     return op.startsWith("_")
       ? "it is an internal step of another tool, not a tool, and cannot be called directly"
       : "there is no tool by that name";
@@ -58,7 +60,7 @@ export function batchStepRefusal(op: string): string | undefined {
   if ((schemas.OpMutation as Record<string, string>)[op] === "server") {
     return "it runs in the MCP server, not in After Effects, and a batch step only reaches After Effects — call it on its own";
   }
-  return BATCH_STEP_REFUSALS[op];
+  return Object.hasOwn(BATCH_STEP_REFUSALS, op) ? BATCH_STEP_REFUSALS[op] : undefined;
 }
 
 /**

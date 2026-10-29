@@ -387,7 +387,7 @@ export function createServer(opts: CreateServerOptions = {}) {
     const rawArgs = req.params.arguments ?? {};
     const progressToken = (req.params as any)?._meta?.progressToken as string | number | undefined;
 
-    if (!(name in OpSchemas) && !SERVER_OPS.has(name)) {
+    if (!Object.hasOwn(OpSchemas, name) && !SERVER_OPS.has(name)) {
       return errorResult(`Unknown tool: ${name}`);
     }
     // Not annotated from the journal, like `Unknown tool`: this is the user's
