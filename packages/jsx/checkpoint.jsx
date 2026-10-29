@@ -301,7 +301,7 @@ function __cpResolveAny(id) {
 // What `verified` compared — returned with every revert, because a verdict
 // that does not say what it looked at reads as "identical", which it is not.
 var __CP_CHECKED = "verified compares, layer by layer at the same index: name, type, in/out/start, enabled, " +
-  "parent, keyframe counts on Transform/Marker/Time Remap/Source Text/Audio Levels, expression and effect counts, " +
+  "parent, keyframe and expression counts on the Transform properties and on Marker, Time Remap, Source Text and Audio Levels only (expressions elsewhere are not counted), the number of effects," +
   "locked, shy, solo, 3D, blend mode, adjustment, motion blur, quality, label, stretch, track matte and type, and " +
   "the layer/mask a Layer Control, Displacement Map, Set Matte or text-path parameter points at; and per comp: size, " +
   "pixel aspect, frame rate, duration, work area, background colour, the other restored settings and markers. It does " +
