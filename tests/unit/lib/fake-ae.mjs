@@ -208,6 +208,13 @@ function installFakeAe(g) {
     self.enabled = true; self.solo = false; self.locked = false; self.shy = false; self.threeDLayer = false;
     self.label = 1; self.blendingMode = g.BlendingMode.NORMAL; self.preserveTransparency = false;
     self.trackMatteType = g.TrackMatteType.NO_TRACK_MATTE;
+    self.trackMatteLayer = null;
+    // The 2023+ matte API. AE switches the matte layer's video off.
+    self.setTrackMatte = function (layer, type) {
+      if (!layer || layer === self) fail("setTrackMatte needs another layer");
+      self.trackMatteLayer = layer; self.trackMatteType = type; layer.enabled = false;
+    };
+    self.removeTrackMatte = function () { self.trackMatteLayer = null; };
     self.inPoint = 0; self.outPoint = comp.duration; self.startTime = 0; self.stretch = 100;
     self.parent = null; self.source = null;
     var root = new Group(name, "ADBE AV Layer", false);

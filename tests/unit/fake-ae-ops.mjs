@@ -74,27 +74,38 @@ const OPACITY = ["Transform", "Opacity"];
 
 check("set_layer writes every switch and timing field it is given", () => {
   const ae = scene();
+  ae.run(`var MATTE = C.addLayer(3, "Matte", "av");`);
   const res = ok(
     ae.call("set_layer", {
       compId: 100, layerId: 2,
       name: "Card v2", enabled: false, locked: true, shy: true, solo: true, threeDLayer: true,
       label: 9, inPoint: 1, outPoint: 4, startTime: 0.5, stretch: 50, preserveTransparency: true,
-      blendingMode: "MULTIPLY", trackMatte: { type: "ALPHA" },
+      blendingMode: "MULTIPLY", trackMatte: { type: "ALPHA", layerId: 3 },
     }),
     "set_layer"
   );
   const l = ae.json(`(function(l){ return { name: l.name, enabled: l.enabled, locked: l.locked, shy: l.shy, solo: l.solo,
     threeDLayer: l.threeDLayer, label: l.label, inPoint: l.inPoint, outPoint: l.outPoint, startTime: l.startTime,
     stretch: l.stretch, preserveTransparency: l.preserveTransparency, blendingMode: l.blendingMode,
-    trackMatteType: l.trackMatteType }; })(CARD)`);
+    trackMatteType: l.trackMatteType, trackMatteLayer: l.trackMatteLayer && l.trackMatteLayer.id }; })(CARD)`);
   assert.deepEqual(l, {
     name: "Card v2", enabled: false, locked: true, shy: true, solo: true, threeDLayer: true,
     label: 9, inPoint: 1, outPoint: 4, startTime: 0.5, stretch: 50, preserveTransparency: true,
-    blendingMode: 5216, trackMatteType: 5013,
+    blendingMode: 5216, trackMatteType: 5013, trackMatteLayer: 3,
   });
   // It answers with the layer as it now is, by id.
   assert.equal(res.id, 2);
   assert.equal(res.name, "Card v2");
+});
+
+check("set_layer refuses a matte type with no matte layer to apply it to, and changes nothing", () => {
+  const ae = scene();
+  refused(
+    ae.call("set_layer", { compId: 100, layerId: 2, name: "renamed", trackMatte: { type: "ALPHA" } }),
+    /trackMatte\.layerId/,
+    "set_layer"
+  );
+  assert.deepEqual(ae.json(`[CARD.name, CARD.trackMatteType, CARD.trackMatteLayer]`), ["Card", 5012, null]);
 });
 
 check("set_layer leaves every field it was not given alone", () => {

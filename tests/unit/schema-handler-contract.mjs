@@ -79,12 +79,6 @@ function check(name, fn) {
 // ---------------------------------------------------------------------------
 
 const IGNORED_FIELDS = {
-  set_layer: {
-    // TODO(#149): accepted and never applied — the matte layer is never set.
-    // Fixed by PR #205; remove this entry when that lands (this file fails
-    // until you do).
-    "trackMatte.layerId": "known bug #149, fixed in PR #205",
-  },
   add_text_animator: {
     // Read as `args.range[key]` with `key` taken from a table of
     // [field, matchName] pairs (text.jsx, `rangeKeys`), so no read names them.
