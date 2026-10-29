@@ -8,7 +8,11 @@ Back to [CLAUDE.md](../CLAUDE.md). Siblings: [After Effects and ExtendScript](fr
 
 ## Tool schemas and the MCP protocol
 
-- **Anthropic API requires JSON Schema draft 2020-12** for tool input schemas. `zod-to-json-schema` 3.x has no 2020-12 target — `openApi3` emits `nullable` (rejected) and `jsonSchema7` emits draft-07 tuple form `items:[...]` (rejected; 2020-12 wants `prefixItems`). `server.ts` uses `jsonSchema7` + `$refStrategy:"none"` + a `toDraft2020()` post-pass that rewrites tuples. Don't switch back to `openApi3`.
+- **Anthropic API requires JSON Schema draft 2020-12** for tool input schemas. Since zod 4 the schemas are emitted by zod's own `z.toJSONSchema` with `target: "draft-2020-12"`, `io: "input"` and `reused: "inline"`; `toDraft2020()` stays as a defensive pass. Under zod 3 the converter was `zod-to-json-schema`, which has no 2020-12 target — `openApi3` emits `nullable` (rejected) and `jsonSchema7` emits the draft-07 tuple form `items:[...]` (rejected; 2020-12 wants `prefixItems`). Do not go back to it.
+
+  **Three things the zod 4 emitter does differently, each corrected or accepted on purpose** (measured against the zod 3 output when the dependency moved to 4.6, Dependabot GHSA-mrhx-c7xc-m3w5). A non-`.strict()` object is emitted open in `io: "input"`; the `override` in `toolInputSchema()` closes it again, because zod strips the extra key the model would have been invited to send. `.int()` carries the ±2^53 safe-integer range; the override drops it as noise paid for in every `tools/list`. A `discriminatedUnion` emits `oneOf` rather than `anyOf`, which is equivalent when the branches are disjoint by literal, and is kept.
+
+  **`.default(x).optional()` is not decorative in zod 4.** Under zod 3 the outer `.optional()` let `undefined` through and the default only ever reached the JSON Schema; zod 4 applies it, so every such field would arrive at the panel as an explicit value. The schemas use `.optional().meta({ default: x })` instead — the default shown to the model, absent left absent. A bare `.default(x)` (no `.optional()`) applies in both versions and is unchanged. `tests/unit/run-jsx-args.mjs` ("the resolver invents nothing") is the test that caught it.
 
   **What the rejection is, exactly.** Both known rejections are *invalid draft
   2020-12*, not "valid but unsupported": `nullable` is an OpenAPI extension and
@@ -22,7 +26,7 @@ Back to [CLAUDE.md](../CLAUDE.md). Siblings: [After Effects and ExtendScript](fr
   the one it belongs to, so nothing goes into that emission pass unvalidated.
 
   **`$schema` used to be a lie, and the lie was load-bearing in the wrong
-  direction.** zod-to-json-schema stamps `http://json-schema.org/draft-07/schema#`,
+  direction.** zod-to-json-schema (the zod 3 converter) stamped `http://json-schema.org/draft-07/schema#`,
   and `toDraft2020` then writes `prefixItems` — which does not exist in draft-07
   — and `items: false`, which there means "no array items at all". Anything
   honouring the declared dialect would have rejected every colour and every 2D
@@ -34,7 +38,7 @@ Back to [CLAUDE.md](../CLAUDE.md). Siblings: [After Effects and ExtendScript](fr
   it was not built for, so before this the test would have had to mutate its
   own subject.
 
-  **`zod-to-json-schema` silently drops `.refine()` / `.superRefine()`.** Not an
+  **The converter silently drops `.refine()` / `.superRefine()`** — `zod-to-json-schema` did, and `z.toJSONSchema` does too. Not an
   error, not a warning — the constraint is enforced on the server and absent
   from the document the model reads, so the only way an agent learns the rule
   is by having a call rejected. See "Cross-field rules" in [architecture.md](architecture.md); `toolInputSchema()`

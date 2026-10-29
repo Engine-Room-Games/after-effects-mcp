@@ -10,7 +10,6 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import { zodToJsonSchema } from "zod-to-json-schema";
 import { schemas } from "@engineroom/shared";
 import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
@@ -368,7 +367,7 @@ export function createServer(opts: CreateServerOptions = {}) {
     // Validate input against zod schema.
     let args: unknown;
     try {
-      args = (OpSchemas[name as keyof typeof OpSchemas] as z.ZodTypeAny).parse(rawArgs);
+      args = (OpSchemas[name as keyof typeof OpSchemas] as z.ZodType).parse(rawArgs);
     } catch (e) {
       return fail(name, invalidArgsText(name, e));
     }
@@ -811,14 +810,16 @@ function errorResult(message: string) {
 /** The dialect these schemas are, and the one the Anthropic API reads them as. */
 export const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
 
-// Rewrite a JSON Schema (draft-07 output from zod-to-json-schema) into draft 2020-12.
+// Rewrite a JSON Schema into draft 2020-12. Under zod 3 the input was zod-to-json-schema's
+// draft-07; `z.toJSONSchema` already emits 2020-12, so this is now a defensive pass.
+//
 // The Anthropic API validates tool input_schema against draft 2020-12, which rejects
 // the draft-07 tuple form `{ type: "array", items: [<schemas>] }` — that shape is
 // only valid in 2020-12 as `prefixItems`, with `items` (singular) covering trailing
 // positions. We also drop the legacy `additionalItems` keyword (renamed to `items`).
 //
 // The `$schema` rewrite is part of the same correction and not cosmetic.
-// zod-to-json-schema stamps the draft-07 URI, which after this pass is a false
+// zod-to-json-schema stamped the draft-07 URI, which after this pass is a false
 // claim: `prefixItems` does not exist in draft-07, and `items: false` means
 // something else entirely there ("no array items at all"). A consumer that
 // honoured the declared dialect would reject every tuple in these schemas —
@@ -847,7 +848,7 @@ function toDraft2020(node: any): any {
  * Put a schema's cross-field rules — "exactly one of these three" — into the
  * JSON Schema the model is shown.
  *
- * `zod-to-json-schema` drops refinements, so without this pass the rule exists
+ * The JSON Schema converter drops refinements, so without this pass the rule exists
  * only on the server and the only way to learn it is to break it. See the
  * cross-field section of `schemas.ts` for the vocabulary; the shapes injected
  * are `oneOf` / `anyOf` / `not` over `required`, which is plain composition and
@@ -901,8 +902,26 @@ function withCrossFieldConstraints(zodSchema: unknown, jsonSchema: any, opName: 
  * receives rather than a reconstruction of it.
  */
 export function toolInputSchema(opName: string): Record<string, unknown> {
-  const schema = OpSchemas[opName as keyof typeof OpSchemas] as z.ZodTypeAny;
-  const jsonSchema = zodToJsonSchema(schema, { target: "jsonSchema7", $refStrategy: "none" });
+  const schema = OpSchemas[opName as keyof typeof OpSchemas] as z.ZodType;
+  // `io: "input"` is what a caller fills in: a field with a `.default()` is
+  // optional to pass. `reused: "inline"` keeps every schema self-contained, no
+  // `$defs`/`$ref` — the shape the emission and injection passes walk.
+  const jsonSchema = z.toJSONSchema(schema, {
+    target: "draft-2020-12",
+    io: "input",
+    reused: "inline",
+    override: ({ zodSchema, jsonSchema: node }) => {
+      const def = (zodSchema as unknown as { _zod: { def: { type: string } } })._zod.def;
+      // Every object is closed to the model, as it was under zod-to-json-schema.
+      // Input mode leaves a non-`.strict()` object open, and zod would then strip
+      // whatever extra key the model was invited to send — a silent drop.
+      if (def.type === "object" && node.additionalProperties === undefined) node.additionalProperties = false;
+      // `.int()` carries the safe-integer range in zod 4. True, and of no use to
+      // a model choosing a layer id; it is paid for in every tools/list.
+      if (node.minimum === Number.MIN_SAFE_INTEGER) delete node.minimum;
+      if (node.maximum === Number.MAX_SAFE_INTEGER) delete node.maximum;
+    },
+  });
   return withCrossFieldConstraints(schema, toDraft2020(jsonSchema), opName);
 }
 

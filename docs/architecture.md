@@ -102,7 +102,7 @@ Two rules, and they are the whole of it:
 
 ### Cross-field rules ("pass exactly one of these")
 
-**A `.refine()` is invisible to the model.** `zod-to-json-schema` drops
+**A `.refine()` is invisible to the model.** The JSON Schema converter drops
 refinements without a word, so a rule written that way is enforced on the
 server and absent from the schema the agent is shown — and the only way it
 learns the rule is by making the call and having it rejected. That is a wasted

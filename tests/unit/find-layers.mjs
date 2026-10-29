@@ -278,8 +278,8 @@ const { OpSchemas, LAYER_SUMMARY_SECTIONS } = await import(sharedDist("schemas.j
 
 const enumOptions = (schema, field) => {
   // include is z.array(z.enum(...)).optional() on both ops.
-  const inner = schema.shape[field]._def.innerType;
-  return inner._def.type._def.values;
+  const inner = schema.shape[field]._zod.def.innerType;
+  return inner._zod.def.element.options;
 };
 
 check("find_layers and list_layers accept exactly the same section names", () => {
