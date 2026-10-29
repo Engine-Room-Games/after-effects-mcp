@@ -339,6 +339,16 @@ check("delete_layer reports unparented children, lost mattes and an orphaned sol
   eq(get("B.numLayers"), 0);
 });
 
+check("delete_layer reports an unreadable solid as unknown, not unused (#160)", () => {
+  const { ctx, get, data, call, success } = load();
+  fixture(ctx);
+  vm.runInContext('Object.defineProperty(S3, "usedIn", { configurable: true, get: function () { throw new Error("usedIn exploded"); } });', ctx);
+  const ids = data("({ B: B.id, own: B._layers[1].id, S3: S3.id })");
+  const res = success(call("delete_layer", { compId: ids.B, layerId: ids.own }));
+  eq(res.unusedSolidLeft, undefined, "not claimed unused");
+  eq(res.solidUseUnknown, { id: ids.S3, name: "B Only Solid", reason: "usedIn exploded" });
+});
+
 check("delete_comp with no unused solids reports zero and no note", () => {
   const { ctx, get, data, call, success } = load();
   fixture(ctx);

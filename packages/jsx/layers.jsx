@@ -269,7 +269,10 @@ OPS.delete_layer = function (args) {
   if (matteUsers.length > 0) out.lostTrackMatte = matteUsers;
   if (srcId !== null) {
     var item = __findItem(srcId);
-    if (item && __usedInList(item).length === 0) {
+    var solidUses = item ? __usedInList(item) : null;
+    if (solidUses && solidUses.unreadable) {
+      out.solidUseUnknown = { id: item.id, name: item.name, reason: solidUses.unreadable };
+    } else if (solidUses && solidUses.length === 0) {
       out.unusedSolidLeft = { id: item.id, name: item.name };
       out.note = "The solid item \"" + item.name + "\" is now used by nothing and remains in the project; purge_unused_footage removes it.";
     }
