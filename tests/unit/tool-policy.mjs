@@ -372,6 +372,28 @@ await check("what is still offered still works", async () => {
   assert.deepEqual(seen, ["list_comps", "run_batch"]);
 });
 
+// Issue #161: the switch's user-facing description once said the render queue
+// stops working without run_jsx. It does not — the render tools are their own
+// ops — and a description that names a tool the switch keeps sends the user
+// to the wrong switch. Pin both the fact and the two places that state it.
+await check("turning off run_jsx keeps the render queue, and its descriptions say so", async () => {
+  const fs = await import("node:fs");
+  const renderOps = ["add_to_render_queue", "list_render_queue", "remove_render_item", "render_queue", "await_job", "get_job", "cancel_job"];
+  const kept = enabledOps(NO_JSX);
+  for (const op of renderOps) assert.ok(kept.includes(op), `${op} is switched off with run_jsx`);
+
+  const mcpb = fs.readFileSync(path.join(root, "scripts", "build-mcpb.mjs"), "utf8");
+  const block = mcpb.slice(mcpb.indexOf("disable_run_jsx: {"));
+  const desc = block.slice(block.indexOf("description:"), block.indexOf("default:"));
+  assert.ok(desc.length > 0, "could not find the disable_run_jsx description in build-mcpb.mjs");
+  assert.doesNotMatch(desc, /render queue[^"]*impossible/i, "the .mcpb setting says the render queue stops working");
+
+  const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+  const row = readme.split("\n").find((l) => l.startsWith("| **Turn off running scripts**"));
+  assert.ok(row, "README has no 'Turn off running scripts' row");
+  assert.doesNotMatch(row, /render queue[^|]*impossible/i, "the README says the render queue stops working");
+});
+
 console.log(`tool-policy: ${passed} checks passed`);
 wss.close();
 bridge.close();
