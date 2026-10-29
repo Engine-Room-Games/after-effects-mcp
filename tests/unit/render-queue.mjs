@@ -27,7 +27,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot } =
   await import(dist("render", "aerender.js"));
 const { aerenderCandidates } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
@@ -231,11 +231,38 @@ await check("a render clears day-old snapshot folders, never a newer one or its 
   assert.ok(fs.existsSync(path.join(base, "stray.txt")));
   assert.deepEqual(sweepStaleSnapshots("x", path.join(tmp, "never-rendered")), []);
 });
+await check("a running job keeps its snapshot folder young, so a long render survives another session's sweep", () => {
+  const root = path.join(tmp, "touchTmp");
+  const src = path.join(tmp, "long.aep");
+  fs.writeFileSync(src, "aep");
+  const snap = snapshotProject(src, "r_long_9", root);
+  const dir = path.dirname(snap);
+  const old = new Date(Date.now() - 3 * 24 * 3600_000);
+  fs.utimesSync(dir, old, old);
+  touchSnapshot(snap);
+  assert.deepEqual(sweepStaleSnapshots("r_other", root), [], "a touched folder is not stale");
+  assert.ok(fs.existsSync(snap));
+  removeSnapshot(snap);
+});
 await check("missing-footage lines are recognised, ordinary ones are not", () => {
   assert.ok(isMissingFootageLine("aerender WARNING: Footage file missing: /x/clip.mov"));
   assert.ok(isMissingFootageLine("aerender ERROR: File not found: C:\\clip.mov"));
   assert.ok(!isMissingFootageLine("PROGRESS:  0:00:00:05 (6): 0 Seconds"));
   assert.ok(!isMissingFootageLine("PROGRESS:  Finished composition “Comp”."));
+  assert.ok(isMissingFootageLine("ERROR: Missing footage: “clip.mov”"));
+});
+await check("names and paths that merely contain the words do not fail a good render", () => {
+  // The two examples from review: an output path and a comp name.
+  for (const l of [
+    "PROGRESS:  Output To: /renders/missing-source-v2.mov",
+    "PROGRESS:  10/29/2026 10:00:00 AM: Starting composition “Cannot Find Me”.",
+    "PROGRESS:  Finished composition “Cannot Find Me”.",
+    "aerender WARNING: Output file /renders/missing-source-v2.mov will be overwritten",
+    "aerender WARNING: Composition “Cannot Find Me” uses Multi-Frame Rendering",
+    "aerender WARNING: Composition \"Cannot Find Me\" uses Multi-Frame Rendering",
+  ]) {
+    assert.equal(isMissingFootageLine(l), false, l);
+  }
 });
 await check("a missing-footage failure says how to fix it, other failures do not", () => {
   assert.match(missingFootageHint(["aerender ERROR: Footage file missing: /x/clip.mov"]), /save the project/);

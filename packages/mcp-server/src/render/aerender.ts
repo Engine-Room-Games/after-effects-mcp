@@ -266,6 +266,8 @@ interface Running {
   startedAt: number;
   /** The private copy of the saved .aep every item renders from. */
   snapshot: string;
+  /** When the snapshot folder's mtime was last refreshed (see touchSnapshot). */
+  touchedAt: number;
 }
 
 export interface RenderRunnerOptions {
@@ -340,6 +342,18 @@ export const STALE_SNAPSHOT_MS = 24 * 60 * 60 * 1000;
  * Failures are logged to stderr and otherwise ignored — housekeeping must not
  * stop a render. Returns the folders removed, for the test.
  */
+/**
+ * Mark a job's snapshot folder as in use, so a render longer than the sweep's
+ * age limit is not mistaken for a leftover by another session's sweep. Called
+ * as the job runs; never throws.
+ */
+export function touchSnapshot(snap: string, now: Date = new Date()): void {
+  try { fs.utimesSync(path.dirname(snap), now, now); } catch {}
+}
+
+/** How often a running job refreshes its snapshot folder's age. */
+const TOUCH_EVERY_MS = 60_000;
+
 export function sweepStaleSnapshots(
   currentJobId: string,
   tmpRoot: string = os.tmpdir(),
@@ -384,14 +398,34 @@ export function removeSnapshot(snap: string): void {
  * is not empty, so the on-disk check alone would accept it. Any such line
  * fails the item instead. The wording is aerender's own and not yet measured
  * on 26.x (recipe 57); this matches the forms After Effects uses in its UI.
+ *
+ * Two things keep a good render from failing on a coincidence of words:
+ *   - only aerender's own diagnostic lines are read — `aerender ERROR:`,
+ *     `aerender WARNING:` and the bare `ERROR:`/`WARNING:` forms — never a
+ *     PROGRESS line, which echoes comp names and output paths;
+ *   - within those, quoted names and anything that looks like a path are
+ *     removed first, so an output at /renders/missing-source-v2.mov or a
+ *     comp called "Cannot Find Me" is not read as the complaint itself.
  */
+const DIAGNOSTIC_LINE = /^\s*(?:aerender\s+)?(?:ERROR|WARNING)\b\s*:?/i;
 const MISSING_FOOTAGE_LINE =
   /file not found|could not (?:be )?(?:found|located)|unable to (?:find|locate)|cannot find/i;
 
+/** A diagnostic line with its quoted names and paths taken out. */
+export function stripNamesAndPaths(line: string): string {
+  return line
+    .replace(/“[^”]*”|"[^"]*"|‘[^’]*’|'[^']*'/g, " ")
+    // Any token holding a path separator, a drive letter, or a file extension.
+    .replace(/(?:[A-Za-z]:)?[^\s:]*[\\/][^\s]*/g, " ")
+    .replace(/\S+\.[A-Za-z0-9]{2,5}\b/g, " ");
+}
+
 export function isMissingFootageLine(line: string): boolean {
-  if (MISSING_FOOTAGE_LINE.test(line)) return true;
+  if (!DIAGNOSTIC_LINE.test(line)) return false;
+  const text = stripNamesAndPaths(line.replace(DIAGNOSTIC_LINE, " "));
+  if (MISSING_FOOTAGE_LINE.test(text)) return true;
   // "Footage file missing", "missing footage", "media is missing", …
-  return /\bmissing\b/i.test(line) && /\b(?:footage|file|files|media|source)\b/i.test(line);
+  return /\bmissing\b/i.test(text) && /\b(?:footage|file|files|media|source)\b/i.test(text);
 }
 
 /** Appended to a failure whose lines talk about footage — see snapshotProject. */
@@ -525,6 +559,7 @@ export class RenderRunner {
       rendered: [],
       startedAt: Date.now(),
       snapshot,
+      touchedAt: Date.now(),
     };
     this.current = r;
     this.arm();
@@ -550,6 +585,8 @@ export class RenderRunner {
           `Starting aerender for ${label} — a background copy of After Effects takes a while to launch`
         );
         const itemStart = Date.now();
+        r.touchedAt = itemStart;
+        touchSnapshot(r.snapshot);
         const outcome = await this.renderItem(r, item, label);
         if (r.cancelled) break;
         if (outcome.spawnError || outcome.code !== 0) {
@@ -733,6 +770,10 @@ export class RenderRunner {
         const parsed = parseAerenderLine(line);
         if (parsed.kind === "frame") {
           r.itemFrames++;
+          if (Date.now() - r.touchedAt >= TOUCH_EVERY_MS) {
+            r.touchedAt = Date.now();
+            touchSnapshot(r.snapshot);
+          }
           const done = Math.min(r.framesBefore + r.itemFrames, r.totalFrames);
           this.jobs.reportProgress(
             r.jobId,
