@@ -14,6 +14,7 @@ Describe the animation you want — a lower third, a logo reveal, an animated co
 [![After Effects 2026](https://img.shields.io/badge/After%20Effects-2026-9999ff?logo=adobeaftereffects&logoColor=white)](https://www.adobe.com/products/aftereffects.html)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 [![MCP](https://img.shields.io/badge/MCP-server-000000)](https://modelcontextprotocol.io)
+[![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/migus88)
 
 Works with **Claude**, **Cursor**, **VS Code**, **Codex**, **Windsurf** and any other MCP client.
 
@@ -363,5 +364,5 @@ Releases are cut from a Mac with a Developer ID certificate; see `scripts/sign-a
 ---
 
 <div align="center">
-<sub>Built by <a href="https://github.com/Engine-Room-Games">Engine Room</a></sub>
+<sub>Built by <a href="https://github.com/Engine-Room-Games">Engine Room</a> · free and open source — if it saves you time, <a href="https://github.com/sponsors/migus88">sponsor its development</a></sub>
 </div>
