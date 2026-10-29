@@ -101,7 +101,9 @@ that does it.
 - **Time remap is `layer.timeRemap`.** `layer.property("ADBE Time Remap")` is
   null on audio layers and on precomp layers, even after
   `timeRemapEnabled = true`.
-- **`instanceof` is unreliable on host objects.** Probe instead: a shape layer
+- **`instanceof` is unreliable on host objects.** `layer instanceof AVLayer`
+  is false for shape and text layers, though both have a full 2D transform
+  (issue #120). Probe instead: a shape layer
   is one where `property("ADBE Root Vectors Group")` is non-null, and a
   project item's kind is `item.typeName` — `"Composition"`, `"Footage"`,
   `"Folder"` — a string compare that needs no class.
