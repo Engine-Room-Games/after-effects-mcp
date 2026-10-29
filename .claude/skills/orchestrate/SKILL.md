@@ -21,7 +21,8 @@ tested and reviewed, you are responsible for merges."*
   they run in parallel.
 - **Keep what you depend on.** Agents may be refused writing report files, and
   scratch space gets cleaned. Have agents return findings in their reply, and
-  save each findings/verdict file you need yourself, outside agent scratch space.
+  save each findings/verdict file you need yourself, outside agent scratch space
+  (session scratchpads, `$TMPDIR`, agent worktrees — all of it gets cleaned).
 - **Every agent that cleans up deletes only what it created.** Brief it to
   record each file, folder, worktree and project it makes, and delete only
   those — never a folder because it looks like scratch. One cleanup deleted the
@@ -79,19 +80,26 @@ After Effects is one shared app on the maintainer's machine. **Serialize:** only
 one agent touches AE at any moment, and ask before using it while the
 maintainer or another session may be mid-project. Brief the agent to:
 
-- **protect the maintainer's AE state first.** While AE is quit and *before
-  the first launch*, back up AE's recent-projects prefs and workspaces; restore
-  them byte-identical after quitting. Scratch projects otherwise push real
-  entries off Open Recent — it happened on a first run. Restore the installed
-  panel byte-identical too;
+- **protect the maintainer's AE state first**, before the first launch of the
+  run. AE writes prefs on quit, so back up and restore with AE quit — if it is
+  running, ask the maintainer before quitting it. Back up, and afterwards
+  restore byte-identical: the prefs file holding Open Recent (macOS:
+  `~/Library/Preferences/Adobe/After Effects/<ver>/Adobe After Effects <ver>
+  Prefs.txt`, section "Most Recently Used (MRU) Files…"; `<ver>` is the
+  running AE's, e.g. `26.5`) and that folder's `ModifiedWorkspaces/`; on
+  Windows the same names under `%APPDATA%\Adobe\After Effects\<ver>\`. Scratch
+  projects otherwise push real entries off Open Recent — it happened on a first
+  run. Restore the installed panel byte-identical too;
 - follow the matching recipe in `docs/verification-recipes.md`;
 - read "Panel version gating" in `docs/subsystems.md` and
   `docs/fragile-areas-bridge.md` before touching the panel;
 - **drive the PR-built server, never this session's `after-effects` tools.**
-  Those run a server built from `main` — stale for any PR, and its gate cached
-  the old bundle hash, so it falsely says "panel out of date". Start the PR
-  worktree's own server over stdio, or POST the panel's `/op` with the
-  `x-ae-mcp-token` header (`~/.engineroom-ae-mcp/token-7777`);
+  `.mcp.json` runs the main checkout's `dist/` — whatever was last built there,
+  never the PR — and its gate cached the old bundle hash, so it falsely says
+  "panel out of date". Start the PR worktree's own server over stdio. POSTing
+  the panel's `/op` directly (header `x-ae-mcp-token`, token in
+  `~/.engineroom-ae-mcp/token-<port>`) skips zod validation, `crossField()` and
+  the `run_jsx` input rewrite, so it is valid only for a jsx-only change;
 - hot-load without breaking other sessions: back up the installed `bundle.jsx`,
   `AE_MCP_SYNC_PANEL=1 npm run build`, `POST /reload-jsx` with the token
   header, test, then restore the backup and reload again;
@@ -99,7 +107,8 @@ maintainer or another session may be mid-project. Brief the agent to:
   `npm run install:panel` with AE quit; ask the maintainer before quitting AE;
 - report what was observed, not inferred, and what could not be exercised.
 
-A live run is required before merging any AE-facing change. After a fix, re-run
+Plan a live run before merging any AE-facing change; only the maintainer can
+waive it (see §4). After a fix, re-run
 only the recipes that failed plus one regression check, not the whole set.
 
 ## 4. Merge — yours alone, one at a time
@@ -111,9 +120,9 @@ Merge a PR only when all hold:
 - live verification is done, or the maintainer explicitly waived it.
 
 Then `gh pr merge <N> --merge`, and `git push origin --delete <branch>` —
-`--delete-branch` fails when another worktree holds `main`. Merge sequentially; after each,
-send the next PR's agent to rebase on `origin/main`, rebuild, retest and push,
-then wait for CI again. GitHub closes only the **first** issue in a `Closes`
+`--delete-branch` fails when another worktree holds `main`. Merge
+sequentially; after each, send the next PR's agent to rebase on `origin/main`,
+rebuild, retest and push, then wait for CI again. GitHub closes only the **first** issue in a `Closes`
 list — close the rest with `gh issue close N --comment "Fixed in #PR"`.
 Releasing is a separate decision (`make release`, see `CLAUDE.md`); do not
 release unless asked.
