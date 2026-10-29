@@ -13,6 +13,45 @@ export const Vec2 = z.tuple([z.number(), z.number()]);
 export const Vec3 = z.tuple([z.number(), z.number(), z.number()]);
 export const VecAny = z.union([z.number(), Vec2, Vec3, z.array(z.number())]);
 
+/**
+ * A closed set of names, matched without regard to case and forwarded in the
+ * canonical spelling (issue #150). The emitted schema is a plain `enum`, so the
+ * model sees every accepted value, and `Multiply` reaches the handler as
+ * `MULTIPLY` instead of missing After Effects' enumeration and changing nothing.
+ */
+export function namedEnum<const T extends readonly [string, ...string[]]>(
+  values: T,
+  aliases: Record<string, T[number]> = {}
+) {
+  return z.preprocess((v) => {
+    if (typeof v !== "string") return v;
+    const key = v.trim().toLowerCase();
+    const hit = values.find((x) => x.toLowerCase() === key);
+    if (hit) return hit;
+    const alias = Object.keys(aliases).find((a) => a.toLowerCase() === key);
+    return alias ? aliases[alias] : v;
+  }, z.enum(values));
+}
+
+/** Adobe spells it SILHOUETE_ALPHA (one T); the English spelling is accepted and forwarded as AE's. */
+export const BLENDING_MODE_ALIASES = { SILHOUETTE_ALPHA: "SILHOUETE_ALPHA" } as const;
+
+// Keys into After Effects' own enumerations. The .jsx looks each one up by name
+// and refuses a miss rather than leaving the layer as it was, so a name here
+// that some AE build does not define is an error, never a silent no-op.
+export const BLENDING_MODES = [
+  "NORMAL", "DISSOLVE", "DANCING_DISSOLVE",
+  "DARKEN", "MULTIPLY", "COLOR_BURN", "CLASSIC_COLOR_BURN", "LINEAR_BURN", "DARKER_COLOR",
+  "ADD", "LIGHTEN", "SCREEN", "COLOR_DODGE", "CLASSIC_COLOR_DODGE", "LINEAR_DODGE", "LIGHTER_COLOR",
+  "OVERLAY", "SOFT_LIGHT", "HARD_LIGHT", "LINEAR_LIGHT", "VIVID_LIGHT", "PIN_LIGHT", "HARD_MIX",
+  "DIFFERENCE", "CLASSIC_DIFFERENCE", "EXCLUSION", "SUBTRACT", "DIVIDE",
+  "HUE", "SATURATION", "COLOR", "LUMINOSITY",
+  "STENCIL_ALPHA", "STENCIL_LUMA", "SILHOUETE_ALPHA", "SILHOUETTE_LUMA",
+  "ALPHA_ADD", "LUMINESCENT_PREMUL",
+] as const;
+export const TRACK_MATTE_TYPES = ["NO_TRACK_MATTE", "ALPHA", "ALPHA_INVERTED", "LUMA", "LUMA_INVERTED"] as const;
+export const MASK_MODES = ["ADD", "NONE", "SUBTRACT", "INTERSECT", "LIGHTEN", "DARKEN", "DIFFERENCE"] as const;
+
 export const PropertyPath = z
   .array(z.union([z.string(), z.number()]))
   .min(1)
@@ -521,13 +560,11 @@ export const SetLayer = z.object({
   shy: z.boolean().optional(),
   solo: z.boolean().optional(),
   threeDLayer: z.boolean().optional(),
-  // These two are keys into After Effects' own `BlendingMode` and
-  // `TrackMatteType` enumerations, looked up by name in `layers.jsx`. A name
-  // that is not in the enumeration is **ignored**, and the call still reports
-  // success — so the accepted spelling has to be visible here, and a value you
-  // are unsure of has to be read back off the layer rather than assumed.
-  blendingMode: z.string().optional()
-    .describe("After Effects' BlendingMode constant name, upper case with underscores: NORMAL, MULTIPLY, SCREEN, OVERLAY, ADD, SUBTRACT, DIFFERENCE, DARKEN, LIGHTEN, COLOR_DODGE, COLOR_BURN, LINEAR_DODGE, LINEAR_BURN, SOFT_LIGHT, HARD_LIGHT, VIVID_LIGHT, LINEAR_LIGHT, PIN_LIGHT, HUE, SATURATION, COLOR, LUMINOSITY, STENCIL_ALPHA, STENCIL_LUMA, ALPHA_ADD, DISSOLVE. A name After Effects does not recognise leaves the mode unchanged without erroring, so read it back with get_layer_full if you are guessing."),
+  // Keys into After Effects' own `BlendingMode` and `TrackMatteType`
+  // enumerations (issue #150). Closed here so the model sees the names, and
+  // refused again in `layers.jsx` if the running AE does not define one.
+  blendingMode: namedEnum(BLENDING_MODES, BLENDING_MODE_ALIASES).optional()
+    .describe("After Effects' BlendingMode name, case-insensitive. SILHOUETE_ALPHA is After Effects' own spelling; SILHOUETTE_ALPHA is accepted for it."),
   label: z.number().int().min(0).max(16).optional(),
   inPoint: z.number().optional(),
   outPoint: z.number().optional(),
@@ -535,9 +572,10 @@ export const SetLayer = z.object({
   stretch: z.number().optional(),
   preserveTransparency: z.boolean().optional(),
   trackMatte: z.object({
-    type: z.string()
-      .describe("NO_TRACK_MATTE, ALPHA, ALPHA_INVERTED, LUMA or LUMA_INVERTED. Anything else leaves the matte unchanged without erroring."),
-    layerId: z.number().optional(),
+    type: namedEnum(TRACK_MATTE_TYPES)
+      .describe("How the matte is read, case-insensitive. NO_TRACK_MATTE removes the matte and takes no layerId."),
+    layerId: z.number().optional()
+      .describe("Id of the layer to use as the matte: same comp, anywhere in the stack (AE 2023+). Omit to keep the current matte layer and change only the type; required when the layer has no matte yet."),
   }).optional(),
 });
 export const ParentLayer = z.object({
@@ -779,7 +817,8 @@ export const ShapeContent = z.discriminatedUnion("type", [
     name: z.string().optional(),
     color: ShapeColor.optional(),
     opacity: z.number().optional().describe("0..100"),
-    fillRule: z.number().optional(),
+    fillRule: z.union([namedEnum(["nonzero", "evenodd"]), z.literal(1), z.literal(2)]).optional()
+      .describe("nonzero (After Effects' 1, the default) or evenodd (2)."),
   }).strict(),
   z.object({
     type: z.literal("stroke"),
@@ -787,8 +826,10 @@ export const ShapeContent = z.discriminatedUnion("type", [
     color: ShapeColor.optional(),
     opacity: z.number().optional().describe("0..100"),
     width: z.number().optional(),
-    lineCap: z.number().optional(),
-    lineJoin: z.number().optional(),
+    lineCap: z.union([namedEnum(["butt", "round", "projecting"]), z.literal(1), z.literal(2), z.literal(3)]).optional()
+      .describe("butt (After Effects' 1, the default), round (2) or projecting (3)."),
+    lineJoin: z.union([namedEnum(["miter", "round", "bevel"]), z.literal(1), z.literal(2), z.literal(3)]).optional()
+      .describe("miter (After Effects' 1, the default), round (2) or bevel (3)."),
     miterLimit: z.number().optional(),
   }).strict(),
   z.object({
@@ -841,10 +882,10 @@ export const AddMask = z.object({
   inTangents: z.array(Vec2).optional(),
   outTangents: z.array(Vec2).optional(),
   closed: z.boolean().optional().meta({ default: true }),
-  // A key into AE's `MaskMode`, looked up by name in `masks.jsx`; an
-  // unrecognised one leaves the mode alone rather than erroring.
-  mode: z.string().optional().meta({ default: "ADD" })
-    .describe("Mask blend mode: ADD (default), NONE, SUBTRACT, INTERSECT, LIGHTEN, DARKEN or DIFFERENCE. Anything else leaves the mode unchanged without erroring."),
+  // A key into AE's `MaskMode`, looked up by name in `masks.jsx`, which
+  // refuses a miss (issue #150).
+  mode: namedEnum(MASK_MODES).optional().meta({ default: "ADD" })
+    .describe("Mask blend mode, case-insensitive."),
 });
 export const SetMask = z.object({
   compId: z.number(),
@@ -854,8 +895,8 @@ export const SetMask = z.object({
   inTangents: z.array(Vec2).optional(),
   outTangents: z.array(Vec2).optional(),
   closed: z.boolean().optional(),
-  mode: z.string().optional()
-    .describe("Mask blend mode: ADD, NONE, SUBTRACT, INTERSECT, LIGHTEN, DARKEN or DIFFERENCE. Anything else leaves the mode unchanged without erroring."),
+  mode: namedEnum(MASK_MODES).optional()
+    .describe("Mask blend mode, case-insensitive."),
   inverted: z.boolean().optional(),
   expansion: z.number().optional(),
   feather: Vec2.optional(),

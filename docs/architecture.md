@@ -168,16 +168,21 @@ per problem, naming the field. Passing *none* of a rule's fields and passing
 *two* must read differently — an agent that cannot tell which mistake it made
 re-sends the same call.
 
-**Two constraints deliberately left as prose.** `place_audio_cues` requires
+**One constraint deliberately left as prose.** `place_audio_cues` requires
 exactly one of `footageId`/`path` *per cue*, and `audio.jsx` reports every
 offending cue index at once so `dryRun` can answer for the whole list; a zod
 rule would reject the call through a different, less structured channel and
-change what `dryRun` is for. And `blendingMode`, `trackMatte.type` and a mask's
-`mode` are keys into After Effects' own enumerations, looked up by name — an
-unrecognised one is **ignored** and the call still reports success. That is a
-swallowed error rather than a hidden constraint, and fixing it means changing
-what the .jsx does with no AE to test against; for now the accepted names are
-in the field descriptions, along with the fact that a wrong one changes nothing.
+change what `dryRun` is for.
+
+**Names of After Effects enumerations are closed twice (issue #150).**
+`blendingMode`, `trackMatte.type` and a mask's `mode` are keys into AE's own
+`BlendingMode` / `TrackMatteType` / `MaskMode`, looked up by name. They used to
+be free strings, and a miss was **ignored** behind an `{ok}`. Now each is a
+`namedEnum()` in `schemas.ts` — a plain `enum` in the emitted schema, matched
+case-insensitively and forwarded in AE's spelling — and the .jsx refuses a name
+the running AE does not define, before anything in the call is written. The
+second check is not redundant: the lists are typed from Adobe's documentation,
+and a name a given build lacks must still be an error rather than a no-op.
 
 ### Arguments are closed, and batch steps are held to them
 

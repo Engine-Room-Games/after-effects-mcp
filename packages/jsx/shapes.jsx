@@ -88,6 +88,14 @@ var __SHAPE_ALIASES = {
   }
 };
 
+// Popup properties the schema lets a caller name (issue #150), mapped to the
+// 1-based value After Effects stores. Keyed "<content type>.<key>".
+var __SHAPE_NAMED = {
+  "fill.fillRule": { nonzero: 1, evenodd: 2 },
+  "stroke.lineCap": { butt: 1, round: 2, projecting: 3 },
+  "stroke.lineJoin": { miter: 1, round: 2, bevel: 3 }
+};
+
 // Keys consumed by the path builder rather than set as plain properties.
 var __PATH_KEYS = { vertices: 1, points: 1, inTangents: 1, outTangents: 1, closed: 1 };
 
@@ -195,8 +203,17 @@ OPS.add_shape_content = function (args) {
       }
       var target = __resolveShapeProp(node, type, k);
       if (!target) { failed.push(k); continue; }
+      var val = content[k];
+      // Named menu values (issue #150). AE's popups take 1-based numbers; the
+      // schema offers the names and still passes a bare number through.
+      var named = __SHAPE_NAMED[type + "." + k];
+      if (named && typeof val === "string") {
+        var nk = val.toLowerCase();
+        if (!named.hasOwnProperty(nk)) { failed.push(k + " ('" + val + "' is not a known name)"); continue; }
+        val = named[nk];
+      }
       try {
-        __setValue(target, content[k]);
+        __setValue(target, val);
         applied.push(k);
       } catch (e) {
         failed.push(k + " (" + e.message + ")");

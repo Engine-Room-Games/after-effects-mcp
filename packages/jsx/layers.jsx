@@ -225,7 +225,16 @@ OPS.create_camera_layer = function (args) {
   var c = getCompById(args.compId);
   var center = (args.position && args.position.length >= 2) ? [args.position[0], args.position[1]] : [c.width / 2, c.height / 2];
   var l = c.layers.addCamera(args.name || "Camera", center);
-  if (args.oneNode) { try { l.autoOrient = AutoOrientType.NO_AUTO_ORIENT; } catch (e) {} }
+  if (args.oneNode) {
+    // Issue #150: this used to swallow its failure and hand back a two-node
+    // camera as if it were the one asked for.
+    try { l.autoOrient = AutoOrientType.NO_AUTO_ORIENT; }
+    catch (e) {
+      try { l.remove(); } catch (eRm) {}
+      throw new Error("create_camera_layer could not make the camera one-node (autoOrient = NO_AUTO_ORIENT): " + e.message +
+        ". The camera was removed, so nothing changed.");
+    }
+  }
   return __layerSummary(l);
 };
 
@@ -298,30 +307,170 @@ OPS.delete_layer = function (args) {
 OPS.set_layer = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
-  if (args.name !== undefined) l.name = args.name;
-  if (args.enabled !== undefined) l.enabled = args.enabled;
-  if (args.locked !== undefined) l.locked = args.locked;
-  if (args.shy !== undefined) l.shy = args.shy;
-  if (args.solo !== undefined) l.solo = args.solo;
-  if (args.threeDLayer !== undefined) l.threeDLayer = args.threeDLayer;
+
+  // Resolve every enumeration name and the matte layer before anything is
+  // written (issues #149, #150). A name After Effects does not define used to
+  // leave the layer as it was behind an {ok}; now it refuses, and refuses
+  // before the name or switches in the same call have changed.
+  var blend;
   if (args.blendingMode !== undefined) {
-    try { l.blendingMode = BlendingMode[args.blendingMode] || l.blendingMode; }
-    catch (e) {}
-  }
-  if (args.label !== undefined) l.label = args.label;
-  if (args.inPoint !== undefined) l.inPoint = args.inPoint;
-  if (args.outPoint !== undefined) l.outPoint = args.outPoint;
-  if (args.startTime !== undefined) l.startTime = args.startTime;
-  if (args.stretch !== undefined) l.stretch = args.stretch;
-  if (args.preserveTransparency !== undefined) l.preserveTransparency = args.preserveTransparency;
-  if (args.trackMatte) {
-    if (args.trackMatte.type) {
-      try { l.trackMatteType = TrackMatteType[args.trackMatte.type] || l.trackMatteType; }
-      catch (e2) {}
+    blend = BlendingMode[args.blendingMode];
+    // Adobe documents SILHOUETE_ALPHA with one T; should a build ever define
+    // the English spelling instead, take that rather than refuse.
+    if (blend === undefined && args.blendingMode === "SILHOUETE_ALPHA") blend = BlendingMode.SILHOUETTE_ALPHA;
+    if (blend === undefined) {
+      throw new Error("set_layer: blendingMode '" + args.blendingMode + "' is not one of After Effects' BlendingMode names. Nothing was changed.");
     }
   }
-  return __layerSummary(l);
+  var tm = args.trackMatte, tmType, tmLayer = null;
+  if (tm) {
+    tmType = TrackMatteType[tm.type];
+    if (tmType === undefined) {
+      throw new Error("set_layer: trackMatte.type '" + tm.type + "' is not one of After Effects' TrackMatteType names. Nothing was changed.");
+    }
+    if (__isCamOrLight(l)) {
+      throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") is a " + __layerKind(l) + "; track mattes apply only to layers with pixels, not cameras or lights. Nothing was changed.");
+    }
+    if (tm.layerId !== undefined && tm.layerId !== null) {
+      if (tm.type === "NO_TRACK_MATTE") {
+        throw new Error("set_layer: trackMatte.type NO_TRACK_MATTE removes the matte, so it takes no layerId. Nothing was changed.");
+      }
+      if (tm.layerId === l.id) {
+        throw new Error("set_layer: a layer cannot be its own track matte (trackMatte.layerId " + tm.layerId + "). Nothing was changed.");
+      }
+      try { tmLayer = getLayerById(c, tm.layerId); }
+      catch (eM) {
+        throw new Error("set_layer: trackMatte.layerId " + tm.layerId + " is not a layer in comp " + c.id + ". Nothing was changed.");
+      }
+      if (__isCamOrLight(tmLayer)) {
+        throw new Error("set_layer: trackMatte.layerId " + tm.layerId + " is a " + __layerKind(tmLayer) + "; a camera or light has no pixels to use as a matte. Nothing was changed.");
+      }
+      if (typeof l.setTrackMatte !== "function") {
+        throw new Error("set_layer: trackMatte.layerId needs After Effects 2023 or later (Layer.setTrackMatte). Nothing was changed.");
+      }
+    } else if (tm.type !== "NO_TRACK_MATTE") {
+      // A type alone re-reads the current matte. With none there is nothing to
+      // re-read: measured on 26.5, assigning trackMatteType to a layer with no
+      // matte layer reports success and sets no matte (PR #205 live pass).
+      var curM = null;
+      try { curM = l.trackMatteLayer || null; } catch (eCurM) { curM = null; }
+      if (!curM) {
+        throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") has no track matte layer, so trackMatte.type " + tm.type +
+          " alone has nothing to apply to. Pass trackMatte.layerId to choose the matte layer. Nothing was changed.");
+      }
+    }
+  }
+
+  // What can be known to fail without writing anything is refused here too.
+  var camOrLight = __isCamOrLight(l);
+  var pixelOnly = ["blendingMode", "threeDLayer", "preserveTransparency"];
+  for (var pi = 0; pi < pixelOnly.length; pi++) {
+    if (camOrLight && args[pixelOnly[pi]] !== undefined) {
+      throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") is a " + __layerKind(l) + ", which has no " + pixelOnly[pi] + ". Nothing was changed.");
+    }
+  }
+  if (args.stretch !== undefined && args.stretch === 0) {
+    throw new Error("set_layer: stretch 0 is not a speed After Effects accepts. Nothing was changed.");
+  }
+  if (args.inPoint !== undefined && args.outPoint !== undefined && args.outPoint <= args.inPoint) {
+    throw new Error("set_layer: outPoint " + args.outPoint + " must be after inPoint " + args.inPoint + ". Nothing was changed.");
+  }
+
+  // Writes from here on. AE can still refuse one that nothing above could
+  // predict (an in-point it will not take), so every write that landed is
+  // recorded and a refusal part-way names what this call already changed and
+  // what it never reached, rather than implying it changed nothing.
+  //
+  // Order: an unlock first and a lock last, so the call's own locked switch
+  // never stands between it and its other fields. The matte next: it is the
+  // write whose result is read back, so its failure comes as early as it can.
+  var applied = [];
+  var steps = [];
+  if (args.locked === false) steps.push(["locked", false]);
+  if (tm) steps.push(["trackMatte", tm]);
+  steps.push(
+    ["name", args.name], ["enabled", args.enabled], ["shy", args.shy],
+    ["solo", args.solo], ["threeDLayer", args.threeDLayer], ["blendingMode", blend], ["label", args.label],
+    ["inPoint", args.inPoint], ["outPoint", args.outPoint], ["startTime", args.startTime],
+    ["stretch", args.stretch], ["preserveTransparency", args.preserveTransparency]
+  );
+  if (args.locked === true) steps.push(["locked", true]);
+
+  var out;
+  for (var si = 0; si < steps.length; si++) {
+    var field = steps[si][0];
+    if (steps[si][1] === undefined) continue;
+    try {
+      if (field === "trackMatte") out = __setTrackMatte(l, tm, tmType, tmLayer);
+      else l[field] = steps[si][1];
+    } catch (eW) {
+      var notReached = [];
+      for (var sj = si + 1; sj < steps.length; sj++) if (steps[sj][1] !== undefined) notReached.push(steps[sj][0]);
+      throw new Error("set_layer could not set " + field + ": " + String(eW.message || eW).replace(/^set_layer: /, "") + " " +
+        (applied.length ? "Already applied by this call: " + applied.join(", ") + "." : "Nothing else in this call was written.") +
+        (notReached.length ? " Not written: " + notReached.join(", ") + "." : ""));
+    }
+    if (field === "trackMatte") {
+      applied.push("trackMatte" + (out.layerId !== null && out.matteEnabled === false ? " (matte layer " + out.layerId + "'s video is now off)" : ""));
+    } else {
+      applied.push(field);
+    }
+  }
+  var summary = __layerSummary(l);
+  if (out) summary.trackMatte = out;
+  return summary;
 };
+
+/**
+ * Apply a resolved track matte and read it back (issue #149). The 2023+ API is
+ * `setTrackMatte(layer, type)` / `removeTrackMatte()`. A type without a
+ * layerId re-applies the current matte layer with the new type; set_layer
+ * refuses it up front when there is no current matte, because assigning
+ * `trackMatteType` alone then reports success and sets nothing (26.5).
+ * Whatever AE ends up holding is checked against the request: a matte that
+ * did not land is an error, not an {ok}.
+ */
+function __isCamOrLight(l) {
+  return (typeof CameraLayer !== "undefined" && l instanceof CameraLayer) ||
+    (typeof LightLayer !== "undefined" && l instanceof LightLayer);
+}
+
+function __setTrackMatte(l, tm, tmType, tmLayer) {
+  var cur = null;
+  try { cur = l.trackMatteLayer || null; } catch (eCur) { cur = null; }
+  if (tm.type === "NO_TRACK_MATTE") {
+    // Measured on 26.5: removeTrackMatte() clears the matte layer but leaves
+    // trackMatteType as it was (ALPHA, say); assigning NO_TRACK_MATTE after it
+    // clears the type. Both, in that order.
+    if (typeof l.removeTrackMatte === "function") l.removeTrackMatte();
+    if (l.trackMatteType !== tmType) l.trackMatteType = tmType;
+  } else if (tmLayer) {
+    l.setTrackMatte(tmLayer, tmType);
+  } else {
+    // Validated above: a type alone only reaches here with a matte layer set.
+    l.setTrackMatte(cur, tmType);
+  }
+
+  var gotType = l.trackMatteType;
+  var gotLayer = null;
+  try { gotLayer = l.trackMatteLayer || null; } catch (eGot) { gotLayer = null; }
+  if (gotType !== tmType) {
+    throw new Error("set_layer: asked for trackMatte.type " + tm.type + " but After Effects reports a different matte type afterwards. " +
+      "Read the layer back with get_layer_full.");
+  }
+  var wantLayer = tm.type === "NO_TRACK_MATTE" ? null : (tmLayer || cur);
+  if (wantLayer ? (!gotLayer || gotLayer.id !== wantLayer.id) : gotLayer) {
+    throw new Error("set_layer: asked for " + (wantLayer ? "layer " + wantLayer.id + " (\"" + wantLayer.name + "\")" : "no matte layer") +
+      " as the track matte, but After Effects reports " +
+      (gotLayer ? "layer " + gotLayer.id + " (\"" + gotLayer.name + "\")" : "no matte layer") + " afterwards. Read the layer back with get_layer_full.");
+  }
+  return {
+    type: tm.type,
+    layerId: gotLayer ? gotLayer.id : null,
+    // After Effects switches a layer's video off when it becomes a matte.
+    matteEnabled: gotLayer ? gotLayer.enabled : null
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Parenting that does not move the layer

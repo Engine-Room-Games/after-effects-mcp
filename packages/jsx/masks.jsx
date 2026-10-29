@@ -3,6 +3,8 @@
 OPS.add_mask = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
+  // Resolved before the mask exists, so a bad name leaves no mask behind.
+  var mode = args.mode ? __maskMode("add_mask", args.mode) : undefined;
   var masksGroup = l.property("Masks");
   var m = masksGroup.addProperty("ADBE Mask Atom");
   var maskPath = m.property("ADBE Mask Shape");
@@ -12,16 +14,25 @@ OPS.add_mask = function (args) {
   if (args.outTangents) shape.outTangents = args.outTangents;
   shape.closed = args.closed !== false;
   __setValue(maskPath, shape);
-  if (args.mode) {
-    try { m.maskMode = MaskMode[args.mode] || m.maskMode; } catch (e) {}
-  }
+  if (mode !== undefined) m.maskMode = mode;
   return { ok: true, maskIndex: m.propertyIndex };
 };
+
+/** A MaskMode by name, or a refusal naming it (issue #150) — never the old mode behind an {ok}. */
+function __maskMode(op, name) {
+  var v = MaskMode[name];
+  if (v === undefined) {
+    throw new Error(op + ": mode '" + name + "' is not one of After Effects' MaskMode names " +
+      "(ADD, NONE, SUBTRACT, INTERSECT, LIGHTEN, DARKEN, DIFFERENCE). Nothing was changed.");
+  }
+  return v;
+}
 
 OPS.set_mask = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
   var m = l.property("Masks").property(args.maskIndex);
+  var mode = args.mode ? __maskMode("set_mask", args.mode) : undefined;
   if (args.vertices) {
     var pathProp = m.property("ADBE Mask Shape");
     var sh = pathProp.value;
@@ -31,7 +42,7 @@ OPS.set_mask = function (args) {
     if (args.closed !== undefined) sh.closed = args.closed;
     __setValue(pathProp, sh);
   }
-  if (args.mode) { try { m.maskMode = MaskMode[args.mode] || m.maskMode; } catch (e) {} }
+  if (mode !== undefined) m.maskMode = mode;
   if (args.inverted !== undefined) m.inverted = args.inverted;
   if (args.expansion !== undefined) __setValue(m.property("ADBE Mask Offset"), args.expansion);
   if (args.feather !== undefined) __setValue(m.property("ADBE Mask Feather"), args.feather);
