@@ -16,6 +16,12 @@ description: Keyframes, easing, rigging and expressions through the AE MCP tools
 - `get_keyframes` reads them all back, with the ease on each key — the exact
   answer to "does it move right", where a screenshot is an impression.
 
+`set_transform`, `set_effect_param` and `set_shape_property` also key a value
+with `keyframe: true` — and that **requires `time`**; without it the call is
+refused rather than quietly setting a static value. Orientation and X/Y
+Rotation exist only on a 3D layer: `set_transform` refuses them on a 2D one,
+so `set_layer({threeDLayer: true})` first.
+
 **Pass one `{influence, speed}` pair per side and nothing else.**
 `set_temporal_ease` and `add_keyframe` size the ease array for the property
 themselves and report the count that worked as `easeDimensions`; pass only one

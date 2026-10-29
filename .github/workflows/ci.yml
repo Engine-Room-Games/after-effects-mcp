@@ -209,6 +209,11 @@ jobs:
       - name: Track mattes land and AE enumeration names are closed
         run: node tests/unit/layer-enum-names.mjs
 
+      # keyframe:true without time used to write a static value, and a 2D layer
+      # dropped orientation/X/Y rotation, both behind {ok:true} (#151, #152).
+      - name: A keyframe needs a time, and 3D-only transforms are refused on 2D
+        run: node tests/unit/keyframe-transform.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.

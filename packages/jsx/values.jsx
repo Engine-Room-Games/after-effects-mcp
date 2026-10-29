@@ -130,3 +130,16 @@ function __setValue(prop, value) {
     throw e;
   }
 }
+
+// keyframe:true with no time used to fall through to a static write and report
+// ok (issue #151). The schema refuses it before the call gets here; this is the
+// same refusal for a caller that reaches OPS directly (run_jsx). Used by
+// set_transform, set_effect_param and set_shape_property.
+function __requireKeyTime(keyframe, time, op) {
+  if (keyframe && (time === undefined || time === null)) {
+    throw new Error(
+      op + ": keyframe:true needs `time` (the keyframe's time in comp seconds). " +
+      "Nothing was changed. Pass `time`, or drop `keyframe` to set a static value."
+    );
+  }
+}
