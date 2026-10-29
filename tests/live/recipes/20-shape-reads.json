@@ -1,0 +1,131 @@
+{
+  "recipe": 20,
+  "title": "shape reads drop material groups unless asked; compact is one line per group",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_shape_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "Shapes"
+      },
+      "save": "shape",
+      "expect": [
+        {
+          "path": "sourceType",
+          "equals": "shape"
+        }
+      ]
+    },
+    {
+      "call": "add_shape_content",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${shape.id}",
+        "content": {
+          "type": "group",
+          "name": "G1"
+        }
+      }
+    },
+    {
+      "call": "add_shape_content",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${shape.id}",
+        "content": {
+          "type": "group",
+          "name": "G2"
+        }
+      }
+    },
+    {
+      "call": "add_shape_content",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${shape.id}",
+        "content": {
+          "type": "rect",
+          "size": [
+            200,
+            100
+          ]
+        }
+      }
+    },
+    {
+      "call": "get_layer_full",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${shape.id}",
+        "include": [
+          "shape"
+        ]
+      },
+      "expect": [
+        {
+          "path": "$text",
+          "notMatches": "ADBE Vector Materials Group"
+        },
+        {
+          "path": "$text",
+          "matches": "materialsOmitted"
+        },
+        {
+          "path": "$text",
+          "matches": "atDefaults"
+        }
+      ]
+    },
+    {
+      "call": "get_layer_full",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${shape.id}",
+        "include": [
+          "shape"
+        ],
+        "shapeMaterials": true
+      },
+      "expect": [
+        {
+          "path": "$text",
+          "notMatches": "materialsOmitted"
+        }
+      ]
+    },
+    {
+      "call": "get_layer_full",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${shape.id}",
+        "include": [
+          "shape"
+        ],
+        "shapeDetail": "compact"
+      },
+      "expect": [
+        {
+          "path": "$text",
+          "matches": "G1"
+        }
+      ]
+    }
+  ]
+}

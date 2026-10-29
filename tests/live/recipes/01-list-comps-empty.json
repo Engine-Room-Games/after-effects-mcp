@@ -1,0 +1,14 @@
+{
+  "recipe": 1,
+  "title": "list_comps on a fresh project is an empty array",
+  "steps": [
+    {
+      "call": "list_comps",
+      "expect": [
+        {
+          "equals": []
+        }
+      ]
+    }
+  ]
+}

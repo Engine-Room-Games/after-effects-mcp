@@ -1,0 +1,63 @@
+{
+  "recipe": 6,
+  "title": "run_batch of 50 solids reports one undo step",
+  "manual": "Edit menu reads 'Undo AE MCP Batch', and one Cmd-Z removes all 50 layers.",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "run_batch",
+      "args": {
+        "ops": {
+          "$repeat": 50,
+          "item": {
+            "op": "create_solid_layer",
+            "args": {
+              "compId": "${comp.id}",
+              "name": "s${n}",
+              "color": [
+                1,
+                0,
+                0
+              ]
+            }
+          }
+        },
+        "transactional": true
+      },
+      "expect": [
+        {
+          "path": "undoSteps",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "call": "list_layers",
+      "args": {
+        "compId": "${comp.id}",
+        "include": []
+      },
+      "expect": [
+        {
+          "length": 50
+        }
+      ]
+    }
+  ]
+}

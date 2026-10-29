@@ -1,0 +1,77 @@
+{
+  "recipe": 39,
+  "title": "a broken expression throws with AE's own text and stays on the property",
+  "manual": "The timeline shows the expression-error banner with the same text.",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "w",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ],
+      "save": "layer"
+    },
+    {
+      "call": "set_expression",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Position"
+        ],
+        "expression": "wiggle("
+      },
+      "expectError": "Transform > Position"
+    },
+    {
+      "call": "get_expression",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Position"
+        ]
+      },
+      "expect": [
+        {
+          "path": "expression",
+          "equals": "wiggle("
+        },
+        {
+          "path": "expressionError",
+          "type": "string"
+        }
+      ]
+    }
+  ]
+}

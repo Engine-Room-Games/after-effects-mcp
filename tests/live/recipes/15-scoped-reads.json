@@ -1,0 +1,158 @@
+{
+  "recipe": 15,
+  "title": "list_layers include:[] is the core only; get_layer_full echoes include; screenshots downsample",
+  "manual": "The issue #72 half needs the viewer set to Quarter first, and the Resolution dropdown checked afterwards.",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 3840,
+        "height": 2160,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "a",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ],
+      "save": "layer"
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "b",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "list_layers",
+      "args": {
+        "compId": "${comp.id}"
+      },
+      "expect": [
+        {
+          "length": 2
+        },
+        {
+          "path": "[0].enabled",
+          "exists": true
+        }
+      ]
+    },
+    {
+      "call": "list_layers",
+      "args": {
+        "compId": "${comp.id}",
+        "include": []
+      },
+      "expect": [
+        {
+          "length": 2
+        },
+        {
+          "path": "[0].id",
+          "type": "number"
+        },
+        {
+          "path": "[0].sourceType",
+          "type": "string"
+        },
+        {
+          "path": "[0].enabled",
+          "exists": false
+        },
+        {
+          "path": "[0].inPoint",
+          "exists": false
+        }
+      ]
+    },
+    {
+      "call": "get_layer_full",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "include": [
+          "transform",
+          "bounds"
+        ]
+      },
+      "expect": [
+        {
+          "path": "included",
+          "exists": true
+        },
+        {
+          "path": "effects",
+          "exists": false
+        }
+      ]
+    },
+    {
+      "call": "screenshot_frame",
+      "args": {
+        "compId": "${comp.id}"
+      },
+      "expect": [
+        {
+          "path": "$images",
+          "equals": 1
+        },
+        {
+          "path": "width",
+          "equals": 1280
+        },
+        {
+          "path": "downsample",
+          "equals": 3
+        }
+      ]
+    },
+    {
+      "call": "screenshot_frame",
+      "args": {
+        "compId": "${comp.id}",
+        "downsample": 1
+      },
+      "expect": [
+        {
+          "path": "width",
+          "equals": 3840
+        }
+      ]
+    }
+  ]
+}
