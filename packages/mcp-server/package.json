@@ -59,9 +59,9 @@
   },
   "devDependencies": {
     "@engineroom/shared": "*",
-    "@types/node": "^22",
+    "@types/node": "^26",
     "@types/ws": "^8.5.13",
     "esbuild": "^0.28.2",
-    "typescript": "^5.6.0"
+    "typescript": "^7.0.2"
   }
 }
