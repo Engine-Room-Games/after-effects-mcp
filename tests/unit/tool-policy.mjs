@@ -150,7 +150,7 @@ await check("a batch step naming a switched-off op is caught, with its path", ()
 // steps go to OPS[...] by name — so run_jsx two batches down is run_jsx.
 const nest = (depth, leaf) => {
   let step = leaf;
-  for (let i = 0; i < depth; i++) step = { op: "run_batch", args: { ops: [{ op: "set_layer", args: {} }, step] } };
+  for (let i = 0; i < depth; i++) step = { op: "run_batch", args: { ops: [{ op: "set_layer", args: { compId: 1, layerId: 1, name: "x" } }, step] } };
   return step;
 };
 const JSX_LEAF = { op: "run_jsx", args: { code: "return 1" } };
@@ -298,7 +298,7 @@ await check("run_batch refuses a run_jsx step whole, naming it, and sends nothin
   seen.length = 0;
   const res = await clients.noJsx.callTool({
     name: "run_batch",
-    arguments: { ops: [{ op: "set_layer", args: {} }, { op: "run_jsx", args: { code: "return 1" } }] },
+    arguments: { ops: [{ op: "set_layer", args: { compId: 1, layerId: 1, name: "x" } }, { op: "run_jsx", args: { code: "return 1" } }] },
   });
   assert.equal(res.isError, true);
   assert.match(res.content[0].text, /ops\[1\] \(run_jsx\)/);
@@ -367,7 +367,7 @@ await check("what is still offered still works", async () => {
   seen.length = 0;
   const ro = await clients.readOnly.callTool({ name: "list_comps", arguments: {} });
   assert.equal(ro.isError, undefined);
-  const batch = await clients.noJsx.callTool({ name: "run_batch", arguments: { ops: [{ op: "set_layer", args: {} }] } });
+  const batch = await clients.noJsx.callTool({ name: "run_batch", arguments: { ops: [{ op: "set_layer", args: { compId: 1, layerId: 1, name: "x" } }] } });
   assert.equal(batch.isError, undefined);
   assert.deepEqual(seen, ["list_comps", "run_batch"]);
 });

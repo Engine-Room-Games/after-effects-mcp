@@ -36,7 +36,7 @@ Numbered recipes referenced below are in [verification-recipes.md](verification-
 | `packages/ae-panel/client/mogrt.js` | Zip surgery + box-filter resample that replaces `thumb.png` inside an exported `.mogrt`. Node builtins and `pngcodec.js` only — no third-party dependencies, so a test can require it. |
 | `packages/mcp-server/src/server.ts` | Tool registry, vision/async-envelope branching, error mapping. `toolInputSchema()` is the whole of what a client sees as a tool's contract: zod → draft-07 → `toDraft2020()` → the cross-field constraints put back. Exported so a test can validate the exact document that ships. |
 | `packages/mcp-server/src/tools/descriptions.ts` | All tool descriptions in one file — including the verbatim screenshot guidance. |
-| `packages/mcp-server/src/tools/runJsxSource.ts` | `run_jsx`'s `scriptPath` and `libraries`. The **server** reads those files, never the panel — same reasoning as `init_project`. `OPS.run_jsx` throws if a `scriptPath` still reaches it, and likewise for a library with a path and no `text`: that means the call came through `run_batch` (whose steps are never validated) or a direct `/op`, and running the empty script — or skipping the library — would report success for a file nobody read. `MAX_TOTAL_BYTES` caps the script and its libraries together, because since they are inlined every byte travels on every call. It resolves those two fields and **spreads everything else through untouched** — see "The only op whose input is rewritten" below. |
+| `packages/mcp-server/src/tools/runJsxSource.ts` | `run_jsx`'s `scriptPath` and `libraries`. The **server** reads those files, never the panel — same reasoning as `init_project`. `OPS.run_jsx` throws if a `scriptPath` still reaches it, and likewise for a library with a path and no `text`: that means the call came through a direct `/op` (a `run_batch` step has been resolved by the server since #157), and running the empty script — or skipping the library — would report success for a file nobody read. `MAX_TOTAL_BYTES` caps the script and its libraries together, because since they are inlined every byte travels on every call. It resolves those two fields and **spreads everything else through untouched** — see "The only op whose input is rewritten" below. |
 | `packages/mcp-server/src/tools/policy.ts` | Read-only mode and the `run_jsx` switch (`AE_MCP_READ_ONLY`, `AE_MCP_DISABLE_RUN_JSX`). Which ops are offered, the refusal for one that is not, the batch-step check, and the runtime notice prepended to the guidance. See "Tool switches" below. |
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. `discovery.ts` holds the candidate ports (`AE_MCP_PORT` alone if pinned; otherwise 7777 *then* the port file) and `isPanelHealth`, the test that decides whether something on a port is the panel — mirrored by `isOurHealth` in the panel's `main.js`; keep the two in step. `httpClient.ts` re-runs discovery when a call is **refused** (never on a timeout) and re-sends once if a different port answers as the panel; `wsClient.ts` follows the client's port through `onPortChange` instead of keeping a copy. `discovery.ts` also owns `panelToken`/`authHeaders`, read from disk on **every** call rather than cached — a panel that rebinds mints a new token, and a cached one would outlive it (issue #106). |
 | `packages/mcp-server/src/bridge/panelGate.ts` | The panel-version gate: caches the verdict from the *running* bundle hash on `/health`. Healthy is re-checked every minute, stale every 5s — never cached for good, because restarting AE rebinds the same port and no port change fires (issue #156). Invalidated on port change, `setup_panel` and `WsClient.onReopen`; concurrent callers share one in-flight probe, and a generation counter stops a probe that started before an invalidate from restoring the old verdict. Unreachable drops the verdict; a timeout keeps it and waits 5s before probing again. |
@@ -178,6 +178,41 @@ swallowed error rather than a hidden constraint, and fixing it means changing
 what the .jsx does with no AE to test against; for now the accepted names are
 in the field descriptions, along with the fact that a wrong one changes nothing.
 
+### Arguments are closed, and batch steps are held to them
+
+**An unknown key is refused, at every depth, for every op (issue #147).** The
+emitted schema closes every object (`additionalProperties: false`), but zod's
+default for an object is to *strip* a key it does not declare — so a misspelt
+`positon` reached no handler and the tool answered `{ok: true}` for a change
+that never happened. Hand-writing `.strict()` on 79 objects is a rule that
+holds until the next schema, so `strictDeep()` in `schemas.ts` closes every
+object once, at module load, into `StrictOpSchemas`. **Parse with
+`StrictOpSchemas`; emit from `OpSchemas`.** The closed copies are zod clones:
+they keep `checks` (so `crossField()` rules travel) and lose `.describe()`/
+`.meta()`, which is why emission stays on the originals. A `z.record()` or
+`z.unknown()` is free-form by declaration and stays so. A node type
+`strictDeep` does not know is left as it was and listed in `STRICT_UNHANDLED`;
+`tests/unit/strict-args.mjs` fails the build on any, and walks every object in
+every op to prove it is closed. It does not throw at runtime, for the reason
+`toolInputSchema()` does not.
+
+**A `run_batch` step gets the same validation as a direct call (issue #157).**
+`tools/batchSteps.ts` parses each step against `StrictOpSchemas[op]`, at every
+depth of nesting, and forwards the *parsed* args — defaults applied, `run_jsx`
+sources resolved by `resolveRunJsxSource` as the tool would. Any problem
+refuses the whole batch with every bad step named by path, and nothing reaches
+the bridge. Some tools cannot be a step at all, because part of what they do
+happens outside After Effects after the ExtendScript half returns; as a step
+only that half ran. Those are refused by name, each with its reason
+(`BATCH_STEP_REFUSALS`): `snapshot_comp`/`diff_comp` (the server keeps the
+fingerprint), both screenshots (the panel builds the image; a step left a temp
+PNG), `export_mogrt` (the panel writes the thumbnail), `render_queue`
+(aerender), `get_house_style` (the server summarises). So are every
+`"server"` op and any name not in `OpSchemas`, which covers the `_`-prefixed
+internals. A new tool with a server- or panel-side half belongs in that table.
+The ExtendScript-side guards (`OPS.run_jsx` refusing a `scriptPath`, enum
+checks in handlers) stay: a hand-rolled `POST /op` still reaches them.
+
 ## Special return shapes
 
 - **Vision** (`screenshot_frame`, `screenshot_layer`): JSX returns `{path, width, height, time, compId, layerId?}`. Panel waits for the file to be a *complete* PNG (`framereader.js`), normalises it to 8-bit, base64-encodes, returns `{base64, bytes, ...}`. Server packages as MCP `image` content block. Four outcomes are deliberately *not* images: a fully transparent frame comes back as `{empty:true, reason}` and goes through `textResult`; a frame whose pixels match a different earlier request is refused as `STALE_FRAME`; a file After Effects wrote and abandoned is refused as `FRAME_INCOMPLETE`; and a render that never finished is refused as `RENDER_TIMEOUT`. Those last two must never share a sentence — see [fragile-areas-bridge.md](fragile-areas-bridge.md).
@@ -316,10 +351,12 @@ resolution factor and restores it, which can leave one net-nil undo step
 stamps `lastSeen`/`lastVersion` on a matching journal entry
 (`annotateFailure`) — bookkeeping the model does not control and cannot aim.
 
-**A `run_batch` step is a tool call by another route.** Batch steps are never
-validated by the server; `batch.jsx` looks each `op` up in the ExtendScript
-`OPS` table and calls it, so `{op: "run_jsx", args: {code}}` inside a batch
-runs the script exactly as `run_jsx` would. With any switch on, `server.ts`
+**A `run_batch` step is a tool call by another route.** `batch.jsx` looks
+each `op` up in the ExtendScript `OPS` table and calls it, so
+`{op: "run_jsx", args: {code}}` inside a batch runs the script exactly as
+`run_jsx` would. Since issue #157 every step is also *validated* as that tool
+would be — see "Arguments are closed, and batch steps are held to them"
+below — but the policy check runs first and on its own. With any switch on, `server.ts`
 checks every step against the disabled set before forwarding and refuses the
 whole batch, naming each offending step by path — refusing whole, because a
 batch that ran its first half and then stopped is the half-built result this
@@ -357,7 +394,7 @@ which ES3 treats as a line break inside a string literal. That fails the
 down, past a check that only read the outer list — the first version of the
 check had exactly that hole, found by a stdio run in review. `refusedBatchSteps`
 now recurses into every `run_batch` step's `args.ops` and reports each hit by
-path (`ops[0].args.ops[1]`). Nested steps are never validated by zod, so the
+path (`ops[0].args.ops[1]`). It runs before the steps are validated, so the
 walk refuses what it cannot read with certainty instead of assuming it
 harmless: an inner `ops` that is present but not an array (ExtendScript
 iterates an array-like object happily), nesting deeper than `MAX_BATCH_DEPTH`

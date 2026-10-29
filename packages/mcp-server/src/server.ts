@@ -39,6 +39,7 @@ import {
   withPolicyNotice,
   type ToolPolicy,
 } from "./tools/policy.js";
+import { batchProblemsMessage, prepareBatchSteps } from "./tools/batchSteps.js";
 import { findUnsafeArgKeys, unsafeArgsMessage } from "./util/argsSafety.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
@@ -109,9 +110,9 @@ export function isWriteOp(name: string): boolean {
 const GUIDE_URI_PREFIX = "ae://guide/";
 
 // Schema for await_job/get_job/cancel_job (defined inline in shared/schemas.ts).
-const AwaitJobSchema = schemas.AwaitJob;
-const GetJobSchema = schemas.GetJob;
-const CancelJobSchema = schemas.CancelJob;
+const AwaitJobSchema = schemas.StrictOpSchemas.await_job;
+const GetJobSchema = schemas.StrictOpSchemas.get_job;
+const CancelJobSchema = schemas.StrictOpSchemas.cancel_job;
 
 export interface CreateServerOptions {
   /**
@@ -455,7 +456,7 @@ export function createServer(opts: CreateServerOptions = {}) {
           return textResult(await checkSetup(setupOpts()));
         }
         if (name === "setup_panel") {
-          const a = schemas.SetupPanel.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.setup_panel.parse(rawArgs);
           const installed = await installPanel({ enableDebugMode: a.enableDebugMode, force: a.force });
           // The panel on disk just changed; whatever was cached about the
           // running one is now the wrong half of the comparison.
@@ -465,7 +466,7 @@ export function createServer(opts: CreateServerOptions = {}) {
           return textResult({ ...installed, setup: await checkSetup(setupOpts()) });
         }
         if (name === "init_project") {
-          const a = schemas.InitProject.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.init_project.parse(rawArgs);
           const client: ClientKind =
             !a.client || a.client === "auto"
               ? detectClient(server.getClientVersion()?.name)
@@ -481,7 +482,7 @@ export function createServer(opts: CreateServerOptions = {}) {
           );
         }
         if (name === "ae_guide") {
-          const a = schemas.AeGuide.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.ae_guide.parse(rawArgs);
           const guide = getGuide(a.topic);
           if (!guide) return errorResult(`Unknown guide topic: ${a.topic}`);
           // Markdown, not JSON: this is prose to be read, and JSON-escaping it
@@ -504,13 +505,13 @@ export function createServer(opts: CreateServerOptions = {}) {
           return { content: [{ type: "text" as const, text: withPolicyNotice(policy, guide.body) }] };
         }
         if (name === "log_issue") {
-          const a = schemas.LogIssue.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.log_issue.parse(rawArgs);
           // The project journal stays the default: an entry is about this
           // project's work unless the agent says it is about the tools.
           return textResult(logIssue({ ...a, scope: a.scope ?? "project" }));
         }
         if (name === "list_known_issues") {
-          const a = schemas.ListKnownIssues.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.list_known_issues.parse(rawArgs);
           return textResult(
             listIssues({
               status: a.status ?? "all",
@@ -531,14 +532,14 @@ export function createServer(opts: CreateServerOptions = {}) {
           );
         }
         if (name === "mark_issue_reported") {
-          const a = schemas.MarkIssueReported.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.mark_issue_reported.parse(rawArgs);
           const entry = markReported(a.id, a.url);
           // The scope goes back too: a bare id can name an entry in either
           // journal, and the caller has to be able to say which one moved.
           return textResult({ ok: true, id: entry.id, scope: entry.scope, reported: true, issueUrl: entry.issueUrl });
         }
         if (name === "archive_issue") {
-          const a = schemas.ArchiveIssue.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.archive_issue.parse(rawArgs);
           const entry = archiveIssue(a.id, a.reason);
           return textResult({
             ok: true,
@@ -558,10 +559,13 @@ export function createServer(opts: CreateServerOptions = {}) {
       }
     }
 
-    // Validate input against zod schema.
+    // Validate input against the op's schema, closed at every depth
+    // (`StrictOpSchemas`, issue #147). The emitted schema has always told the
+    // model an unknown key is refused; the plain schema stripped it, so a
+    // misspelt field reached no handler and the tool answered "done".
     let args: unknown;
     try {
-      args = (OpSchemas[name as keyof typeof OpSchemas] as z.ZodType).parse(rawArgs);
+      args = (schemas.StrictOpSchemas[name as keyof typeof OpSchemas] as z.ZodType).parse(rawArgs);
     } catch (e) {
       return fail(name, invalidArgsText(name, e));
     }
@@ -581,6 +585,18 @@ export function createServer(opts: CreateServerOptions = {}) {
             `do not try to do the same thing through another tool.`
         );
       }
+    }
+
+    // Every step is held to the arguments of the tool it names, at every
+    // depth, and the parsed args — defaults applied — are what is forwarded
+    // (issue #157). Before, steps went to ExtendScript raw: no defaults, typos
+    // passed, and a tool whose second half runs outside After Effects
+    // half-worked. Refused whole, like the policy check above.
+    if (name === "run_batch") {
+      const batch = args as { ops: { op: string; args?: unknown }[] };
+      const { ops, problems } = prepareBatchSteps(batch.ops);
+      if (problems.length > 0) return fail(name, batchProblemsMessage(problems));
+      args = { ...batch, ops };
     }
 
     // run_jsx can take its script, and its helper libraries, from files rather

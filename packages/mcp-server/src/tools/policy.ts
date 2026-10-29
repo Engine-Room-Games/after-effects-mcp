@@ -173,7 +173,7 @@ export const MAX_BATCH_DEPTH = 8;
  * (`core.jsx`'s `dispatch()` is the panel's own entry point, reached only
  * through the server's tool list).
  *
- * Nested steps are never validated by zod, so anything the walk cannot read
+ * This walk runs before the steps are validated (batchSteps.ts), so anything it cannot read
  * with certainty is refused rather than assumed harmless: an inner `ops` that
  * is present but not an array (ExtendScript would happily iterate an
  * array-like object), a batch deeper than `MAX_BATCH_DEPTH`, or the same array

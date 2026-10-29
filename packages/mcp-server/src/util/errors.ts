@@ -342,7 +342,15 @@ export function invalidArgsText(op: string, e: unknown): string {
     // message ("Invalid input: expected string, received undefined").
     let text = issue.message ?? "invalid";
     const received = issue.received ?? /received (\w+)\s*$/.exec(issue.message ?? "")?.[1];
-    if (issue.code === "invalid_type" && received === "undefined") {
+    const unknownKeys = (raw as { keys?: unknown }).keys;
+    if (issue.code === "unrecognized_keys" && Array.isArray(unknownKeys)) {
+      // Refused rather than stripped (issue #147): a key the tool does not know
+      // is one it would have ignored while reporting success.
+      const names = unknownKeys.map((k) => "`" + String(k) + "`").join(", ");
+      text =
+        `${unknownKeys.length === 1 ? "unknown field" : "unknown fields"} ${names}: not part of this tool's arguments, ` +
+        `so ${unknownKeys.length === 1 ? "it" : "they"} would have been ignored. Check the spelling against the tool's schema.`;
+    } else if (issue.code === "invalid_type" && received === "undefined") {
       text = "required, and was not passed";
     } else if (issue.code === "invalid_type" && issue.expected) {
       text = `expected ${issue.expected}, got ${received ?? "something else"}`;

@@ -189,6 +189,12 @@ jobs:
       - name: Release checks catch a rejected notarization and a dead artifact
         run: node tests/unit/release-checks.mjs
 
+      # Issues #147 and #157: an unknown key is refused at every depth rather
+      # than stripped behind an {ok:true}, and a run_batch step is validated —
+      # defaults applied — exactly as the tool it names, or the batch is refused.
+      - name: Tool arguments are closed, in a batch as well as direct
+        run: node tests/unit/strict-args.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.
