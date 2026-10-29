@@ -155,8 +155,8 @@
     if (!__healing) {
       log("warn", "__AEMCP is missing or not ours (another script in After Effects' shared engine " +
         "replaced it) — reloading bundle.jsx before " + op);
-      __healing = loadJsxBundle().then(
-        function () { __healing = null; },
+      __healing = loadJsxBundle({ sameAsRunning: true }).then(
+        function () { __healing = null; setStatus("ready", "ok"); },
         function (e) { __healing = null; throw e; }
       );
     }
@@ -226,25 +226,44 @@
     }
   }
 
-  function loadJsxBundle() {
+  // `opts.sameAsRunning`: the automatic heal, which must re-load the code this
+  // panel is already running and nothing newer. Between setup_panel and the
+  // next After Effects launch the installed bundle.jsx is newer than this
+  // main.js; loading it would mix the two and move `loadedBundleHash` onto the
+  // new hash, so the version gate would call a stale panel current. The heal
+  // refuses instead and the running hash keeps saying "restart needed".
+  // `/reload-jsx` is the dev route and loads whatever is on disk.
+  function loadJsxBundle(opts) {
     setStatus("Loading bundle.jsx…");
     if (!fs.existsSync(bundlePath)) {
       setStatus("bundle.jsx missing", "err");
       log("error", "bundle.jsx not found at " + bundlePath + " — run `npm run build:jsx`");
-      throw new Error("bundle.jsx missing");
+      return Promise.reject(new Error("bundle.jsx missing"));
+    }
+    var diskHash = hashFile(bundlePath);
+    if (opts && opts.sameAsRunning && loadedBundleHash && diskHash !== loadedBundleHash) {
+      setStatus("restart After Effects", "err");
+      return Promise.reject(new Error(
+        "The AE MCP bundle was removed from After Effects' shared script engine by another script, and the " +
+        "installed bundle.jsx is a newer version than this running panel, so it cannot be reloaded in place. " +
+        "Nothing ran. Restart After Effects."));
     }
     // Use $.evalFile from ExtendScript side so paths work cross-platform.
+    // Through the evalScript mutex like every other call: the heal triggers
+    // this while ops are queued, and a load must not interleave with one.
     var loadScript = "$.evalFile(" + JSON.stringify(bundlePath) + "); " + NS_READY + " ? 'ok' : 'no-namespace';";
-    return new Promise(function (resolve, reject) {
-      cs.evalScript(loadScript, function (raw) {
-        if (raw === "ok") {
-          loadedBundleHash = hashFile(bundlePath);
-          $jsx.textContent = "loaded";
-          $jsx.className = "ok";
-          resolve();
-        }
-        else { $jsx.textContent = "fail: " + raw; $jsx.className = "err"; reject(new Error("__AEMCP not defined after loading bundle.jsx: " + raw)); }
-      });
+    return evalScript(loadScript).then(function (raw) {
+      if (raw === "ok") {
+        loadedBundleHash = diskHash;
+        $jsx.textContent = "loaded";
+        $jsx.className = "ok";
+        return;
+      }
+      $jsx.textContent = "fail: " + raw; $jsx.className = "err";
+      throw new Error("__AEMCP not defined after loading bundle.jsx: " + raw);
+    }, function (e) {
+      $jsx.textContent = "fail: " + e.message; $jsx.className = "err";
+      throw e;
     });
   }
 
@@ -579,10 +598,14 @@
   function driveJob(jobId, progressToken, chunkSize) {
     var totalGuess = null;
     var size = chunkSize || 25;
+    var applied = 0;
+    var stepsTaken = 0;
     function step() {
       return runOp("_continue_job", { jobId: jobId, chunkSize: size }).then(function (res) {
         if (res.total) totalGuess = res.total;
         if (!res.done) {
+          if (typeof res.progress === "number") applied = res.progress;
+          if (typeof res.undoSteps === "number") stepsTaken = res.undoSteps;
           broadcast({ type: "progress", jobId: jobId, progress: res.progress, total: res.total, message: "running" });
           // Yield to UI so AE stays responsive.
           return new Promise(function (r) { setTimeout(r, 0); }).then(step);
@@ -619,6 +642,21 @@
           undoSteps: res.undoSteps, undoGroupName: res.undoGroupName,
           note: res.note, diff: res.diff,
         };
+      }, function (e) {
+        // The job table lives in the bundle's closure, so a bundle reload —
+        // the automatic heal after another script removed __AEMCP (issue #185),
+        // or /reload-jsx — loses every job in flight. Bare "No job: j_…" would
+        // hide that the chunks before it were applied, and invite a re-run that
+        // applies them twice.
+        if (String(e && e.message).indexOf("No job: ") !== 0) throw e;
+        var lost = new Error(
+          "Batch " + jobId + " was lost mid-run: the AE MCP bundle was reloaded in After Effects " +
+          "(another script removed it from the shared script engine, or /reload-jsx ran), which discards " +
+          "running jobs. " + applied + " of " + (totalGuess === null ? "?" : totalGuess) + " ops were already " +
+          "applied, in " + stepsTaken + " undo step(s), and stay applied. Do NOT re-run the batch as it was: " +
+          "read the comp back and send only the ops that are missing.");
+        log("error", lost.message);
+        throw lost;
       });
     }
     return step();

@@ -67,6 +67,7 @@ function makeHost(extDir) {
     // Set to true to play another script deleting __AEMCP: the next op answers
     // the panel's sentinel, as the guard in opScript() does in AE (issue #185).
     namespaceGone: false,
+    answer: null,
     getSystemPath: (which) => (which === "extension" ? extDir : extDir),
     getHostEnvironment: () => JSON.stringify({ appName: "AEFT", appVersion: "26.3" }),
     evalScript: (script, cb) => {
@@ -77,6 +78,16 @@ function makeHost(extDir) {
         return void setTimeout(() => cb("ok"), 0);
       }
       if (host.namespaceGone) return void setTimeout(() => cb("__AEMCP_MISSING__"), 0);
+      // `answer(op, args)` plays one op's ExtendScript reply; a thrown error is
+      // reported the way dispatch() reports one.
+      if (host.answer) {
+        const open = script.indexOf("__AEMCP.call(") + "__AEMCP.call(".length;
+        const p = JSON.parse(JSON.parse(script.slice(open, script.lastIndexOf(") : '"))));
+        let body;
+        try { body = { ok: true, result: host.answer(p.op, p.args) }; }
+        catch (e) { body = { ok: false, error: e.message }; }
+        return void setTimeout(() => cb(JSON.stringify(body)), 0);
+      }
       setTimeout(() => cb(JSON.stringify({ ok: true, result: {} })), 0);
     },
   };
@@ -272,6 +283,64 @@ await check("sends every op through __AEMCP, and reloads the bundle once when an
     assert.doesNotMatch(s, /(^|[^.\w])dispatch\(/, "an op must not reach a bare global dispatch()");
   }
   assert.match(logText(booted.dom), /__AEMCP is missing/);
+});
+
+await check("a batch lost to a bundle reload fails saying what was already applied, not bare 'No job'", async () => {
+  const port = Number(booted.dom.nodes.port.textContent);
+  const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
+  let turns = 0;
+  booted.host.answer = (op) => {
+    if (op === "run_batch") return { async: true, jobId: "j_1_1", total: 100, chunkSize: 25 };
+    if (op === "_continue_job") {
+      turns += 1;
+      if (turns === 1) return { done: false, jobId: "j_1_1", progress: 25, total: 100, undoSteps: 1 };
+      throw new Error("No job: j_1_1");
+    }
+    return {};
+  };
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/op`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-ae-mcp-token": token },
+      body: JSON.stringify({ op: "run_batch", args: { ops: [] } }),
+    }).then((r) => r.json());
+    assert.equal(res.result.jobId, "j_1_1");
+    const deadline = Date.now() + 5000;
+    while (!/Batch j_1_1 was lost/.test(logText(booted.dom)) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    const text = logText(booted.dom);
+    assert.match(text, /Batch j_1_1 was lost mid-run/);
+    assert.match(text, /25 of 100 ops were already applied, in 1 undo step/);
+    assert.match(text, /Do NOT re-run the batch/);
+  } finally { booted.host.answer = null; }
+});
+
+await check("the heal will not load a newer installed bundle into a running panel: the gate keeps saying restart", async () => {
+  const port = Number(booted.dom.nodes.port.textContent);
+  const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
+  const health = () => fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json());
+  const runningHash = (await health()).bundleHash;
+  const bundleFile = path.join(dir, "jsx", "bundle.jsx");
+  const original = fs.readFileSync(bundleFile);
+  fs.writeFileSync(bundleFile, Buffer.concat([original, Buffer.from("\n// a newer setup_panel install\n")]));
+  try {
+    const loadsBefore = booted.host.evalCalls.filter((s) => s.indexOf("$.evalFile") >= 0).length;
+    booted.host.namespaceGone = true;
+    const body = await fetch(`http://127.0.0.1:${port}/op`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-ae-mcp-token": token },
+      body: JSON.stringify({ op: "list_comps", args: {} }),
+    }).then((r) => r.json());
+    assert.equal(body.ok, false);
+    assert.match(body.error, /newer version than this running panel[\s\S]*Nothing ran\. Restart After Effects/);
+    const loadsAfter = booted.host.evalCalls.filter((s) => s.indexOf("$.evalFile") >= 0).length;
+    assert.equal(loadsAfter, loadsBefore, "a newer bundle must not be evaluated by the heal");
+    assert.equal((await health()).bundleHash, runningHash, "the running hash must not move to the installed one");
+  } finally {
+    fs.writeFileSync(bundleFile, original);
+    booted.host.namespaceGone = false;
+  }
 });
 
 await check("also boots if a host build anchors __dirname at the client folder", async () => {
