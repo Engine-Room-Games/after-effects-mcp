@@ -1,8 +1,10 @@
 // helpers.jsx — the scope a run_jsx script runs in.
 //
-// Everything in this file is a global function, which is what makes it visible
-// to `eval`d script bodies and to anything loaded through run_jsx's
-// `libraries`. It exists because the run_jsx description promised "helpers in
+// Everything in this file is a top-level function. In the bundle that makes it
+// a local of the bundle's closure (scripts/bundle-jsx.mjs, issue #185) — not a
+// global, since other scripts share the engine — and run_jsx's direct `eval`
+// runs inside that closure, which is what makes these visible to `eval`d script
+// bodies and to anything loaded through run_jsx's `libraries`. It exists because the run_jsx description promised "helpers in
 // scope" and never said which, so every session re-derived the same four or
 // five functions — find-a-layer-by-id, ease-with-the-right-array-size, a shape
 // builder that zeros the position (issue #53). Each of these was written from

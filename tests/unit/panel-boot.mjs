@@ -62,17 +62,25 @@ function installLayout() {
 // ---------------------------------------------------------------------------
 function makeHost(extDir) {
   const evalCalls = [];
-  return {
+  const host = {
     evalCalls,
+    // Set to true to play another script deleting __AEMCP: the next op answers
+    // the panel's sentinel, as the guard in opScript() does in AE (issue #185).
+    namespaceGone: false,
     getSystemPath: (which) => (which === "extension" ? extDir : extDir),
     getHostEnvironment: () => JSON.stringify({ appName: "AEFT", appVersion: "26.3" }),
     evalScript: (script, cb) => {
       evalCalls.push(script);
       // loadJsxBundle asks ExtendScript to evaluate the bundle and answer "ok".
-      if (script.indexOf("$.evalFile") >= 0) return void setTimeout(() => cb("ok"), 0);
+      if (script.indexOf("$.evalFile") >= 0) {
+        host.namespaceGone = false;
+        return void setTimeout(() => cb("ok"), 0);
+      }
+      if (host.namespaceGone) return void setTimeout(() => cb("__AEMCP_MISSING__"), 0);
       setTimeout(() => cb(JSON.stringify({ ok: true, result: {} })), 0);
     },
   };
+  return host;
 }
 
 function makeDom() {
@@ -239,6 +247,31 @@ await check("serves /health on the port it announced", async () => {
 await check("wrote the port file the MCP server discovers it by", () => {
   const written = fs.readFileSync(booted.portFile, "utf8").trim();
   assert.equal(written, booted.dom.nodes.port.textContent, "port file disagrees with the announced port");
+});
+
+await check("sends every op through __AEMCP, and reloads the bundle once when another script removed it", async () => {
+  const port = Number(booted.dom.nodes.port.textContent);
+  const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
+  const post = () => fetch(`http://127.0.0.1:${port}/op`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-ae-mcp-token": token },
+    body: JSON.stringify({ op: "list_comps", args: {} }),
+  }).then((r) => r.json());
+
+  const loadsBefore = booted.host.evalCalls.filter((s) => s.indexOf("$.evalFile") >= 0).length;
+  booted.host.namespaceGone = true;
+  const body = await post();
+  assert.equal(body.ok, true, `op failed after the namespace went missing: ${body.error}\n${logText(booted.dom)}`);
+  const calls = booted.host.evalCalls;
+  const loadsAfter = calls.filter((s) => s.indexOf("$.evalFile") >= 0).length;
+  assert.equal(loadsAfter, loadsBefore + 1, "the panel must re-evaluate bundle.jsx exactly once");
+  const ops = calls.filter((s) => s.indexOf("list_comps") >= 0);
+  assert.equal(ops.length, 2, "the op is sent once, answered with the sentinel, and sent again after the reload");
+  for (const s of ops) {
+    assert.match(s, /__AEMCP\.call\(/);
+    assert.doesNotMatch(s, /(^|[^.\w])dispatch\(/, "an op must not reach a bare global dispatch()");
+  }
+  assert.match(logText(booted.dom), /__AEMCP is missing/);
 });
 
 await check("also boots if a host build anchors __dirname at the client folder", async () => {

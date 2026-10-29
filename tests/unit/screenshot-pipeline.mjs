@@ -162,8 +162,8 @@ function dispatchStub(op, args) {
 }
 
 function parsePayload(script) {
-  const open = script.indexOf("dispatch(") + "dispatch(".length;
-  const close = script.lastIndexOf("))");
+  const open = script.indexOf("__AEMCP.call(") + "__AEMCP.call(".length;
+  const close = script.lastIndexOf(") : '");
   return JSON.parse(JSON.parse(script.slice(open, close)));
 }
 

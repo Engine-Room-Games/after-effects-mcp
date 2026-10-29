@@ -47,8 +47,28 @@ const order = [
 // an unchanged tree disagreed, and an upgrade that touched no JSX still told
 // the user to restart After Effects. The file's mtime already records when it
 // was written. `tests/unit/bundle-determinism.mjs` holds this.
+//
+// The whole bundle is ONE function scope (issue #185). After Effects runs every
+// CEP extension's evalScript, File > Scripts, ScriptUI panels and osascript's
+// DoScript in the same `main` ExtendScript engine, so a bare top-level
+// `function dispatch` or `var OPS` is a global anyone can overwrite — measured
+// on 26.5: a ScriptUI panel's `OPS = {}` failed every op, an osascript
+// `function dispatch(){}` failed every op, a File > Scripts `getCompById`
+// hijacked get_comp. And the reverse: our `ease`/`shape` clobbered theirs.
+//
+// Wrapping the concatenation in a function makes every declaration in
+// packages/jsx/*.jsx a local of this closure, with no edit to any of those
+// files: they are still written as plain top-level code, and the unit tests
+// still load them one at a time at a vm's global scope. The closure publishes
+// exactly one global, `__AEMCP` (`$.global.__AEMCP`), which the panel calls.
+// `OPS` and `JOBS` are deliberately not on it: nothing outside can reach the
+// closure's tables, so replacing a global cannot change what an op runs. run_jsx still
+// sees every helper, because its direct `eval` runs inside OPS.run_jsx, whose
+// scope chain is this closure. `tests/unit/bundle-namespace.mjs` holds this.
+const NAMESPACE = "__AEMCP";
 const parts = [];
 parts.push("// Auto-generated bundle. Do not edit directly — edit files in packages/jsx/.");
+parts.push("(function () {");
 for (const f of order) {
   const p = path.join(srcDir, f);
   if (!fs.existsSync(p)) {
@@ -58,6 +78,18 @@ for (const f of order) {
   parts.push(`\n// ===== ${f} =====\n`);
   parts.push(fs.readFileSync(p, "utf8"));
 }
+// The one global. `call` takes the payload JSON string and answers a JSON
+// string, stringified with the bundle's own JSON (core.jsx), so a script that
+// replaces the engine's global JSON afterwards cannot break the envelope.
+parts.push(`\n// ===== namespace =====\n`);
+parts.push(
+  `$.global.${NAMESPACE} = {\n` +
+  `  id: ${JSON.stringify(BUNDLE_ID)},\n` +
+  `  call: function (payloadJson) { return JSON.stringify(dispatch(payloadJson)); },\n` +
+  `  dispatch: dispatch\n` +
+  `};`
+);
+parts.push("})();");
 
 fs.mkdirSync(path.dirname(outFile), { recursive: true });
 fs.writeFileSync(outFile, parts.join("\n"), "utf8");

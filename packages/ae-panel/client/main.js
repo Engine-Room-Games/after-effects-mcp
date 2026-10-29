@@ -133,12 +133,49 @@
     return p;
   }
 
+  // ---------- The bundle's one global (issue #185) ----------
+  // After Effects runs every extension's evalScript, File > Scripts, ScriptUI
+  // panels and osascript in one shared ExtendScript engine. The bundle keeps
+  // everything in a closure and publishes only `__AEMCP` (scripts/bundle-jsx.mjs),
+  // so another script can no longer replace `dispatch` or `OPS` under us. It can
+  // still delete or overwrite `__AEMCP` itself, so every op checks it is ours
+  // first and answers NS_MISSING — before running anything — when it is not.
+  var NS_MISSING = "__AEMCP_MISSING__";
+  var NS_READY = "(typeof __AEMCP === 'object' && __AEMCP !== null && " +
+    "__AEMCP.id === 'games.engine-room.ae-mcp' && typeof __AEMCP.call === 'function')";
+
+  function opScript(payload) {
+    // Use \uXXXX-safe JSON pass: JSON.stringify on the panel side, JSON.parse on ExtendScript side.
+    return NS_READY + " ? __AEMCP.call(" + JSON.stringify(payload) + ") : '" + NS_MISSING + "'";
+  }
+
+  // One reload for however many ops found the namespace gone at once.
+  var __healing = null;
+  function healNamespace(op) {
+    if (!__healing) {
+      log("warn", "__AEMCP is missing or not ours (another script in After Effects' shared engine " +
+        "replaced it) — reloading bundle.jsx before " + op);
+      __healing = loadJsxBundle().then(
+        function () { __healing = null; },
+        function (e) { __healing = null; throw e; }
+      );
+    }
+    return __healing;
+  }
+
   // Run an op through the dispatch table. Returns parsed JS object.
   function runOp(op, args) {
     var payload = JSON.stringify({ op: op, args: args || {} });
-    // Use \uXXXX-safe JSON pass: JSON.stringify on the panel side, JSON.parse on ExtendScript side.
-    var script = "JSON.stringify(dispatch(" + JSON.stringify(payload) + "))";
-    return evalScript(script).then(function (raw) {
+    return evalScript(opScript(payload)).then(function (raw) {
+      if (raw !== NS_MISSING) return raw;
+      // Nothing ran: NS_MISSING is answered instead of the op, so sending it
+      // again after the reload cannot run it twice.
+      return healNamespace(op).then(function () { return evalScript(opScript(payload)); });
+    }).then(function (raw) {
+      if (raw === NS_MISSING) {
+        throw new Error("The AE MCP bundle is not loaded in After Effects (__AEMCP missing even after reloading " +
+          "bundle.jsx). Nothing ran. Restart After Effects.");
+      }
       if (raw === "undefined" || raw === undefined || raw === null) {
         throw new Error("ExtendScript returned undefined for op " + op);
       }
@@ -197,7 +234,7 @@
       throw new Error("bundle.jsx missing");
     }
     // Use $.evalFile from ExtendScript side so paths work cross-platform.
-    var loadScript = "$.evalFile(" + JSON.stringify(bundlePath) + "); typeof dispatch === 'function' ? 'ok' : 'no-dispatch';";
+    var loadScript = "$.evalFile(" + JSON.stringify(bundlePath) + "); " + NS_READY + " ? 'ok' : 'no-namespace';";
     return new Promise(function (resolve, reject) {
       cs.evalScript(loadScript, function (raw) {
         if (raw === "ok") {
@@ -206,7 +243,7 @@
           $jsx.className = "ok";
           resolve();
         }
-        else { $jsx.textContent = "fail: " + raw; $jsx.className = "err"; reject(new Error("dispatch not defined after loading bundle.jsx: " + raw)); }
+        else { $jsx.textContent = "fail: " + raw; $jsx.className = "err"; reject(new Error("__AEMCP not defined after loading bundle.jsx: " + raw)); }
       });
     });
   }

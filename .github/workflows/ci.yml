@@ -266,6 +266,12 @@ jobs:
           node tests/unit/svg-import.mjs
           node tests/unit/bundle-determinism.mjs
 
+      # Issue #185: After Effects runs every extension and script in one shared
+      # ExtendScript engine. The built bundle must publish one global, leave
+      # other scripts' globals alone, and keep working when they replace ours.
+      - name: The bundle survives a hostile neighbour in the shared engine
+        run: node tests/unit/bundle-namespace.mjs
+
       # Issue #129: a setValue that throws for a write that landed must not
       # make an op report failure, or roll back, for work that happened.
       - name: A write that landed is never reported as failed
