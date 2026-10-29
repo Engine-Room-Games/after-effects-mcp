@@ -76,7 +76,7 @@ function makeContext() {
  * throws AE's own unhelpful message for everything else. `attempts` records the
  * lengths tried, in order — which is how the fast path is told from the ladder.
  */
-function makeProp({ isSpatial = false, valueType, value, accepts, name = "Some Property", current }) {
+function makeProp({ isSpatial = false, valueType, value, accepts, name = "Some Property", current, numKeys = 3, canVaryOverTime = true }) {
   // `current` is the ease the key already has, as AE returns it from
   // keyIn/keyOutTemporalEase: one KeyframeEase per entry, per side. Absent, the
   // read throws, as it would on a property with no temporal ease to read.
@@ -93,14 +93,16 @@ function makeProp({ isSpatial = false, valueType, value, accepts, name = "Some P
     isSpatial,
     propertyValueType: valueType,
     value,
-    numKeys: 1,
+    numKeys,
+    canVaryOverTime,
     attempts: [],
+    writes: [],
     applied: null,
     keyTime: () => 0,
     keyInInterpolationType: () => "bezier",
     keyOutInterpolationType: () => "bezier",
-    setInterpolationTypeAtKey() {},
-    setValueAtTime() {},
+    setInterpolationTypeAtKey(k) { prop.writes.push(["interpolation", k]); },
+    setValueAtTime(t) { prop.writes.push(["value", t]); },
     setTemporalEaseAtKey(keyIndex, inArr, outArr) {
       prop.attempts.push(inArr.length);
       if (!accepts.includes(inArr.length)) {
@@ -303,9 +305,57 @@ check("a side that cannot be read is refused, and nothing is written", () => {
   assert.throws(
     () => ctx.__applyTemporalEase(prop, 2, EASE_IN, undefined),
     (e) => /current out ease/.test(e.message) && /Opacity/.test(e.message) && /key 2/.test(e.message)
-      && /nothing was changed/.test(e.message),
+      && /cannot read ease/.test(e.message),
+    "the refusal carries After Effects' own words",
   );
   assert.deepEqual(prop.attempts, [], "a default must never stand in for the user's ease");
+});
+
+check("a key index that does not exist is named as such, not as an unreadable ease", () => {
+  const ctx = makeContext();
+  const prop = makeProp({ name: "Opacity", valueType: VALUE_TYPES.OneD, value: 100, accepts: [1], numKeys: 2,
+    current: { in: [{ influence: 1, speed: 0 }], out: [{ influence: 1, speed: 0 }] } });
+  assert.throws(() => ctx.__applyTemporalEase(prop, 5, EASE_IN, undefined), /No key 5 on 'Opacity': it has 2 keyframes/);
+  assert.deepEqual(prop.reads, []);
+  assert.deepEqual(prop.attempts, []);
+});
+
+check("a property that cannot be keyframed is named as such", () => {
+  const ctx = makeContext();
+  const prop = makeProp({ name: "Source Text", valueType: VALUE_TYPES.OneD, value: 0, accepts: [1], canVaryOverTime: false });
+  assert.throws(() => ctx.__applyTemporalEase(prop, 1, EASE_IN, undefined), /'Source Text' cannot be keyframed/);
+  assert.deepEqual(prop.attempts, []);
+});
+
+check("a kept side with differing entries is not reshaped to another count", () => {
+  // Read back as 2 different eases, but AE only accepts 3: stretching it would
+  // rewrite the side the caller asked to keep, so the call is refused instead.
+  const ctx = makeContext();
+  const prop = makeProp({
+    name: "Scale", valueType: VALUE_TYPES.TwoD, value: [100, 100], accepts: [3],
+    current: {
+      in: [{ influence: 10, speed: 0 }, { influence: 10, speed: 0 }],
+      out: [{ influence: 80, speed: 4 }, { influence: 60, speed: 2 }],
+    },
+  });
+  assert.throws(
+    () => ctx.__applyTemporalEase(prop, 1, EASE_IN, undefined),
+    (e) => /the ease was not changed/.test(e.message) && /Not tried at 1, 3, 4/.test(e.message),
+  );
+  assert.deepEqual(prop.attempts, [2], "only the count the kept side can be written at is tried");
+});
+
+check("a kept side whose entries are all the same ease carries to any count", () => {
+  const ctx = makeContext();
+  const prop = makeProp({
+    name: "Scale", valueType: VALUE_TYPES.TwoD, value: [100, 100], accepts: [3],
+    current: {
+      in: [{ influence: 10, speed: 0 }, { influence: 10, speed: 0 }],
+      out: [{ influence: 70, speed: 1 }, { influence: 70, speed: 1 }],
+    },
+  });
+  assert.equal(ctx.__applyTemporalEase(prop, 1, EASE_IN, undefined), 3);
+  assert.deepEqual(pairs(prop.applied.outArr), [[70, 1], [70, 1], [70, 1]]);
 });
 
 check("both sides given reads nothing back", () => {
@@ -363,6 +413,34 @@ check("add_keyframe eases through the same path and reports the count", () => {
   });
   assert.equal(r.ok, true);
   assert.equal(r.easeDimensions, 2);
+});
+
+check("add_keyframe onto an existing key reads the kept side before writing anything", () => {
+  // keyTime is 0 for every key in the stub, so time 0 finds key 1 already there.
+  const prop = makeProp({ name: "Opacity", valueType: VALUE_TYPES.OneD, value: 100, accepts: [1] });
+  const ctx = withProp(prop);
+  assert.throws(
+    () => ctx.OPS.add_keyframe({
+      compId: 1, layerId: 2, propertyPath: ["Opacity"], time: 0, value: 50,
+      interpolation: { in: "linear", easeIn: EASE_IN },
+    }),
+    /current out ease/,
+  );
+  assert.deepEqual(prop.writes, [], "the refusal precedes every write");
+});
+
+check("add_keyframe that fails after the value is set says the value was set", () => {
+  const prop = makeProp({ name: "Opacity", valueType: VALUE_TYPES.OneD, value: 100, accepts: [],
+    current: { in: [{ influence: 5, speed: 0 }], out: [{ influence: 5, speed: 0 }] } });
+  const ctx = withProp(prop);
+  assert.throws(
+    () => ctx.OPS.add_keyframe({
+      compId: 1, layerId: 2, propertyPath: ["Opacity"], time: 0, value: 50,
+      interpolation: { easeIn: EASE_IN },
+    }),
+    (e) => /value at time 0 was set \(key 1\), but its interpolation\/ease was not/.test(e.message)
+      && /parameter 2/.test(e.message),
+  );
 });
 
 check("add_keyframe without an ease says nothing about ease dimensions", () => {
