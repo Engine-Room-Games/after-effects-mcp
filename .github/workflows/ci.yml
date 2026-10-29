@@ -316,6 +316,7 @@ jobs:
           node tests/unit/find-layers.mjs
           node tests/unit/effect-params.mjs
           node tests/unit/text-justification.mjs
+          node tests/unit/text-animator.mjs
           node tests/unit/expression-error.mjs
 
       # Issue #121: a display-name lookup that misses on a localised After

@@ -84,7 +84,7 @@ export const descriptions: Record<string, string> = {
   // ---------- text ----------
   set_text:
     "Set text content + styling (font, size, fill/stroke, tracking, leading, justification). Undefined fields unchanged — and for justification that is verified, not assumed: on AE 26.3 the Source Text round trip has been seen to reset a left-aligned layer to centre when only `text` was changed (issue #93), so after writing, the justification is read back and compared with what should be there (the one you passed, or the one the layer had). If it moved it is written again on its own; if it still disagrees the call throws naming expected and actual rather than reporting a success the layer does not show. The result carries `justification` (the name read back) and `justificationReasserted` (true when the second write was needed).",
-  add_text_animator: "Add a text animator group (position/scale/rotation/opacity/tracking/skew/fillColor/strokeColor). Optional range selector.",
+  add_text_animator: "Add a text animator group (position/scale/rotation/opacity/tracking/skew/fillColor/strokeColor). Optional range selector. All-or-nothing: if After Effects refuses the property or a range value, the animator this call created is removed and the error names what failed — nothing is left behind. Returns the animator name and the property matchName.",
 
   // ---------- shapes ----------
   set_shape_path: "Replace a shape path with new vertices/tangents/closed.",

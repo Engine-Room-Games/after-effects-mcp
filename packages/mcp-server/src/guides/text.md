@@ -23,7 +23,10 @@ call then renders differently on two machines.
 tracking, leading, justification, faux bold and italic, caps, baseline shift.
 `add_text_animator` adds an animator group (position, scale, rotation, opacity,
 tracking, skew, fill and stroke colour) with an optional range selector, which
-is how per-character animation is built.
+is how per-character animation is built. It is all-or-nothing: if After
+Effects refuses the property or a range value, the animator it created is
+removed and the error names what failed, so an error means the layer is as it
+was.
 
 **Verify alignment by the bounds, not by eye.** `get_layer_full({…, include:
 ["bounds"]})` returns `sourceRect`: a centred layer's `left` is about
