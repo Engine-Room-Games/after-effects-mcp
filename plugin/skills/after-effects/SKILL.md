@@ -84,10 +84,12 @@ duplicates the nested comps and re-points the copy at them.
 
 **Effects are added by matchName**, not display name:
 `add_effect({matchName: "ADBE Gaussian Blur 2"})`, then `set_effect_param` by
-parameter name. If you do not know a matchName, `list_available_effects({filter:
-"blur"})` — always with a `filter`, since the unfiltered list is several hundred
-entries and takes seconds every time. `list_effects` shows what is already on a
-layer with every parameter.
+`paramMatchName` — display names are translated, so a `paramName` that works in
+English misses on a German or Japanese install. If you do not know a matchName,
+`list_available_effects({filter: "blur"})` — always with a `filter`, since the
+unfiltered list is several hundred entries and takes seconds every time.
+`list_effects` shows what is already on a layer, up to 200 parameters per effect
+(`maxParams` and `paramFilter` reach the rest).
 
 ## Identify things by id, never by index
 

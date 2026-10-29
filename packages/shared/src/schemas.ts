@@ -617,16 +617,16 @@ export const SetEffectParam = crossField(
     layerId: z.number(),
     effectIndex: z.number().int().positive(),
     paramName: z.string().optional()
-      .describe("The parameter's display name as list_effects reports it, e.g. 'Blurriness'."),
+      .describe("The parameter's display name as list_effects reports it, in After Effects' UI language — 'Blurriness' on an English install, not on a localised one. Prefer paramMatchName."),
     paramMatchName: z.string().optional()
-      .describe("The parameter's matchName, e.g. 'ADBE Gaussian Blur 2-0001'. Tried before paramName when both are given, so it is the one to use when a display name is ambiguous or localised."),
+      .describe("Preferred. The parameter's matchName, e.g. 'ADBE Gaussian Blur 2-0001' — the same in every UI language. Tried before paramName when both are given."),
     value: VecAny,
     time: z.number().optional(),
     keyframe: z.boolean().default(false).optional(),
   }),
   // Neither one is not a call with a default — it is a call that resolves no
   // property at all, and `effects.jsx` answers it with a bare "Effect param not
-  // found", which reads like the *name* was wrong rather than absent.
+  // found"-style miss, which reads like the *name* was wrong rather than absent.
   // Both together is legal and useful: matchName wins, name is the fallback.
   {
     kind: "atLeastOne",

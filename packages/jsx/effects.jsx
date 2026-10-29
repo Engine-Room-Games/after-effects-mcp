@@ -100,23 +100,90 @@ OPS.add_effect = function (args) {
 OPS.remove_effect = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
-  var fx = l.property("Effects");
-  fx.property(args.effectIndex).remove();
+  __effectAt(l, args.effectIndex).remove();
   return { ok: true };
 };
+
+// Resolve an effect by its 1-based index, or say what is there. A bare
+// `property(n)` past the end answers null and the caller's next line throws a
+// TypeError that names nothing. The group is looked up by matchName, which is
+// the same in every UI language.
+function __effectAt(layer, index) {
+  var fx = layer.property("ADBE Effect Parade");
+  var n = fx ? fx.numProperties : 0;
+  var eff = (fx && index >= 1 && index <= n) ? fx.property(index) : null;
+  if (!eff) {
+    throw new Error(
+      "No effect at effectIndex " + index + " on layer '" + layer.name + "': it has " + n +
+      " effect" + (n === 1 ? "" : "s") + ". list_effects reports each one with its index."
+    );
+  }
+  return eff;
+}
+
+// The cap on parameters named in a miss. Most effects have under twenty; a
+// Trapcode-sized one has thousands, and the error must not become the payload.
+var __PARAM_LIST_CAP = 40;
+
+// Issue #121. `Property.property(name)` matches the display name in the UI's
+// language only, so an English 'Distance' is null on a zh_CN After Effects
+// while 'ADBE Drop Shadow-0004' resolves everywhere. The display-name lookup
+// stays (it is what a localised user would type), but a miss now names the
+// effect, lists what it does have, and points at the language-proof field.
+function __findEffectParam(eff, args) {
+  var i;
+  if (args.paramMatchName) {
+    for (i = 1; i <= eff.numProperties; i++) {
+      if (eff.property(i).matchName === args.paramMatchName) return eff.property(i);
+    }
+  }
+  if (args.paramName) {
+    var p = null;
+    try { p = eff.property(args.paramName); } catch (e) { p = null; }
+    if (p) return p;
+    // A case slip is not a localisation problem; forgive it before failing.
+    var want = String(args.paramName).toLowerCase();
+    for (i = 1; i <= eff.numProperties; i++) {
+      if (String(eff.property(i).name).toLowerCase() === want) return eff.property(i);
+    }
+  }
+  return null;
+}
+
+function __effectParamMissMessage(eff, args, lang) {
+  var asked = [];
+  if (args.paramMatchName) asked.push("paramMatchName '" + args.paramMatchName + "'");
+  if (args.paramName) asked.push("paramName '" + args.paramName + "'");
+  var msg = "Effect '" + eff.name + "' (" + eff.matchName + ") has no parameter matching " + asked.join(" or ") + ".";
+
+  var n = eff.numProperties;
+  var shown = [];
+  for (var i = 1; i <= n && shown.length < __PARAM_LIST_CAP; i++) {
+    var q = eff.property(i);
+    shown.push("'" + q.name + "' = " + q.matchName);
+  }
+  msg += " Its parameters (name = matchName): " + shown.join("; ");
+  if (n > shown.length) msg += "; ... and " + (n - shown.length) + " more not listed (list_effects has them all)";
+  msg += ".";
+
+  if (args.paramName) {
+    msg += " Display names are in After Effects' UI language";
+    if (lang && lang !== "en_US") msg += ", and this one runs in " + lang + ", so an English name will not match";
+    msg += ". Use paramMatchName instead: it is the same in every language.";
+  }
+  return msg;
+}
 
 OPS.set_effect_param = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
-  var eff = l.property("Effects").property(args.effectIndex);
-  var p = null;
-  if (args.paramMatchName) {
-    for (var i = 1; i <= eff.numProperties; i++) {
-      if (eff.property(i).matchName === args.paramMatchName) { p = eff.property(i); break; }
-    }
+  var eff = __effectAt(l, args.effectIndex);
+  var p = __findEffectParam(eff, args);
+  if (!p) {
+    var lang = null;
+    try { lang = app.isoLanguage; } catch (e) { lang = null; }
+    throw new Error(__effectParamMissMessage(eff, args, lang));
   }
-  if (!p && args.paramName) p = eff.property(args.paramName);
-  if (!p) throw new Error("Effect param not found");
   if (args.keyframe && args.time !== undefined) p.setValueAtTime(args.time, args.value);
   else if (args.time !== undefined && p.numKeys > 0) p.setValueAtTime(args.time, args.value);
   else p.setValue(args.value);
@@ -126,7 +193,7 @@ OPS.set_effect_param = function (args) {
 OPS.set_effect_enabled = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
-  l.property("Effects").property(args.effectIndex).enabled = !!args.enabled;
+  __effectAt(l, args.effectIndex).enabled = !!args.enabled;
   return { ok: true };
 };
 

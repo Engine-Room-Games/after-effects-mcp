@@ -280,6 +280,12 @@ jobs:
           node tests/unit/effect-params.mjs
           node tests/unit/text-justification.mjs
           node tests/unit/expression-error.mjs
+
+      # Issue #121: a display-name lookup that misses on a localised After
+      # Effects must name the effect's parameters and point at paramMatchName.
+      - name: Effect parameter lookup fails with the alternatives
+        run: |
+          node tests/unit/effect-param-lookup.mjs
       # Release history is read once per release per project and then never
       # again, which only works if whats-new.md keeps the shape a machine can
       # filter: every ## a release, newest first, a section for the version
