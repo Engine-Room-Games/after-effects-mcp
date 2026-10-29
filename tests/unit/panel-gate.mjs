@@ -101,6 +101,11 @@ await check("unreachable during the restart drops the verdict; a timeout keeps i
   b.mode = "timeout";
   c.t += STALE_RECHECK_MS;
   assert.equal(await gate.check(), STALE, "a busy AE is still the old panel");
+  const hits = b.hits;
+  c.t += 100;
+  assert.equal(await gate.check(), STALE);
+  assert.equal(b.hits, hits, "a timeout resets the clock: the next call does not pay the probe again");
+  c.t += STALE_RECHECK_MS;
   b.mode = "unreachable";
   assert.equal(await gate.check(), null, "unreachable is runOp's error to report, not the gate's");
   b.mode = "ok";
@@ -119,6 +124,38 @@ await check("invalidate and a port change force the next call to ask", async () 
   b.hash = "old";
   b.portListeners.forEach((l) => l(7778, 7777));
   assert.equal(await gate.check(), STALE);
+});
+
+await check("concurrent callers share one in-flight probe", async () => {
+  const b = fakeBridge();
+  let release;
+  const gate = createPanelGate(
+    { ...b, health: () => { b.hits++; return new Promise((r) => (release = r)); }, onPortChange() {} },
+    { assess, now: clock().now }
+  );
+  const calls = [gate.check(), gate.check(), gate.check()];
+  release({ ok: true, port: 7777, bundleHash: "old" });
+  assert.deepEqual(await Promise.all(calls), [STALE, STALE, STALE]);
+  assert.equal(b.hits, 1);
+});
+
+await check("a probe begun before invalidate() cannot restore the pre-restart verdict", async () => {
+  const pending = [];
+  const c = clock();
+  const gate = createPanelGate(
+    { health: () => new Promise((r) => pending.push(r)), onPortChange() {} },
+    { assess, now: c.now }
+  );
+  const before = gate.check(); // asks the old panel
+  gate.invalidate(); // the socket reopened: AE restarted
+  const after = gate.check(); // asks the new panel
+  assert.equal(pending.length, 2, "the invalidate started a fresh probe rather than joining the old one");
+  pending[1]({ ok: true, port: 7777, bundleHash: "new" });
+  assert.equal(await after, null);
+  pending[0]({ ok: true, port: 7777, bundleHash: "old" }); // the old answer lands late
+  await before;
+  c.t += 100;
+  assert.equal(await gate.check(), null, "the late pre-restart answer did not overwrite the fresh verdict");
 });
 
 await check("WsClient fires onReopen when the socket reopens, not on the first open", async () => {

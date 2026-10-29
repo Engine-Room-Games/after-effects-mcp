@@ -60,13 +60,18 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
   const assess = opts.assess ?? assessFromDisk;
   const now = opts.now ?? Date.now;
   let verdict: string | null = null;
-  let checkedAt = 0;
-  let checkedOnce = false;
+  /** When the next probe is due; 0 = ask on the next call. */
+  let nextCheckAt = 0;
+  /** Bumped by every invalidate, so a probe begun before one cannot write after it. */
+  let generation = 0;
+  /** The probe in flight, shared by every caller that arrives while it runs. */
+  let inflight: Promise<string | null> | null = null;
 
   const invalidate = () => {
+    generation++;
     verdict = null;
-    checkedAt = 0;
-    checkedOnce = false;
+    nextCheckAt = 0;
+    inflight = null;
   };
 
   // A verdict is about the panel on one port. When the bridge moves, whatever
@@ -74,31 +79,44 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
   // panel now answering, so the next call has to ask again.
   bridge.onPortChange(invalidate);
 
+  async function probe(gen: number): Promise<string | null> {
+    try {
+      const health = await bridge.health();
+      if (gen !== generation) return verdict;
+      const assessment = assess(health);
+      verdict = assessment.state === "current" || assessment.state === "unknown" ? null : assessment.message;
+      nextCheckAt = now() + (verdict !== null ? STALE_RECHECK_MS : HEALTHY_RECHECK_MS);
+      // "unknown" covers a panel too old to report a hash. Its message is a
+      // warning rather than a certainty, so it is logged, not enforced — the
+      // Unknown-op backstop catches it the moment it actually matters.
+      if (assessment.state === "unknown" && assessment.message) logger.warn(assessment.message);
+      return verdict;
+    } catch (e) {
+      if (gen !== generation) return verdict;
+      if (e instanceof BridgeUnreachableError) {
+        invalidate();
+        return null;
+      }
+      // Timed out (After Effects busy) or answered oddly: whatever was known
+      // before still stands. Wait before asking again, so a busy AE does not
+      // cost every call the full health-probe timeout.
+      nextCheckAt = now() + STALE_RECHECK_MS;
+      return verdict;
+    }
+  }
+
   return {
     /** The message to return instead of forwarding, or null to proceed. */
     async check(): Promise<string | null> {
-      const interval = verdict !== null ? STALE_RECHECK_MS : HEALTHY_RECHECK_MS;
-      if (checkedOnce && now() - checkedAt < interval) return verdict;
-      try {
-        const health = await bridge.health();
-        const assessment = assess(health);
-        checkedAt = now();
-        checkedOnce = true;
-        verdict = assessment.state === "current" || assessment.state === "unknown" ? null : assessment.message;
-        // "unknown" covers a panel too old to report a hash. Its message is a
-        // warning rather than a certainty, so it is logged, not enforced — the
-        // Unknown-op backstop catches it the moment it actually matters.
-        if (assessment.state === "unknown" && assessment.message) logger.warn(assessment.message);
-        return verdict;
-      } catch (e) {
-        if (e instanceof BridgeUnreachableError) {
-          invalidate();
-          return null;
-        }
-        // Timed out (After Effects busy) or answered oddly: whatever was known
-        // before still stands, and the next call asks again.
-        return verdict;
+      if (now() < nextCheckAt) return verdict;
+      if (!inflight) {
+        const gen = generation;
+        const p = probe(gen).finally(() => {
+          if (inflight === p) inflight = null;
+        });
+        inflight = p;
       }
+      return inflight;
     },
     invalidate,
   };
