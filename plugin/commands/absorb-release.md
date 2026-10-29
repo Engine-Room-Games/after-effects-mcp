@@ -43,7 +43,8 @@ notes under `.ae-mcp/`. `$ARGUMENTS` overrides whatever is found.
 
 Nothing recorded and nothing typed: ask whether these tools have been used in
 this project before. If they have, treat it as never absorbed and read the whole
-history — one long read, once. If the project is new, there is nothing to
+history with `since: "0.0.0"` — one long read, once. (Without `since` the
+topic returns only the two newest releases, which is not enough here.) If the project is new, there is nothing to
 absorb: go to step 5 and just record the version.
 
 ## 2. Read the delta

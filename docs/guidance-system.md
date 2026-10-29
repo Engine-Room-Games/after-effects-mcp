@@ -150,7 +150,10 @@ Three parts, and each is only useful because of the other two:
   an agent cannot tell "up to date" from "broken" by an empty answer. The compare
   is numeric (`0.10.0` > `0.9.0`); `since` is validated as a version by the
   schema and refused on any other topic, since a filter that silently did not
-  apply is the swallowed error this repo refuses elsewhere. `tools/whatsNew.ts`.
+  apply is the swallowed error this repo refuses elsewhere. Without `since`
+  the answer is bounded to the two newest releases, and its header names every
+  release left out and `since: "0.0.0"` for the whole history (issue #169) —
+  so the absorb flow passes `0.0.0` when it must read everything. `tools/whatsNew.ts`.
 - **The absorb-release prompt applies it, once per release per project.**
   `prompts/absorb-release.md`, generated into the MCP prompt and the Claude Code
   command like the others. It finds `Tools version last absorbed: <version>` in

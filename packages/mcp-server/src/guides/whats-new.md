@@ -27,10 +27,12 @@ user tells you a tool used to work another way. It is the release notes an agent
 needs rather than the ones a human reads: one section per release, newest first.
 Every entry leads with the rule as it now stands; a `supersedes:` line under it
 quotes the old rule in the words a project's own notes would have used, so those
-notes can be searched for and corrected. Pass `since` — as in
-`ae_guide({topic: "whats-new", since: "0.4.0"})` — to get only the releases
-after that version; the absorb-release prompt is the flow that applies them to
-a project once and records the version so the history is not read again.
+notes can be searched for and corrected. Without `since` this topic returns
+only the two newest releases and names the rest. Pass `since` — as in
+`ae_guide({topic: "whats-new", since: "0.4.0"})` — to get every release after
+that version, or `since: "0.0.0"` for the whole history; the absorb-release
+prompt is the flow that applies them to a project once and records the version
+so the history is not read again.
 
 **When this topic and a tool's own schema disagree, believe the schema.** It is
 refreshed at each release and a build in between can be ahead of it.

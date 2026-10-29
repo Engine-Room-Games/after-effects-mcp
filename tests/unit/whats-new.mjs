@@ -25,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseSemver, compareSemver, splitReleases, h2Headings, supersedesLines, renderWhatsNew } =
+const { parseSemver, compareSemver, splitReleases, h2Headings, supersedesLines, renderWhatsNew, RECENT_RELEASES, WHOLE_HISTORY_SINCE } =
   await import(dist("tools", "whatsNew.js"));
 const { packageVersion } = await import(dist("setup", "paths.js"));
 const { getGuide } = await import(dist("generated", "content.js"));
@@ -132,10 +132,35 @@ assert.match(r.text, /Nothing newer than 9\.0\.0: the newest release described h
 
 assert.deepEqual(renderWhatsNew(DOC, { since: "v0.9.0", serverVersion: "x" }).versions, ["0.10.0"]);
 
+// Without `since`, only the recent releases (issue #169): the whole history is
+// ~9k tokens and grows every release. A bounded read names what it left out and
+// the call that returns it.
 r = renderWhatsNew(DOC, { serverVersion: "0.10.0" });
-assert.ok(r.text.startsWith("This server is after-effects-mcp 0.10.0. Pass `since`"), "unfiltered still names the version");
-assert.ok(r.text.includes("## 0.4.0") && r.text.includes("## 0.10.0"), "and carries every release");
+assert.ok(r.text.startsWith("This server is after-effects-mcp 0.10.0. Showing the 2 newest releases: 0.10.0, 0.9.0."), `unfiltered header wrong:\n${r.text.split("\n")[0]}`);
+assert.deepEqual(r.versions, ["0.10.0", "0.9.0"], "unfiltered is the two newest releases");
+assert.deepEqual(r.omitted, ["0.4.0"]);
+assert.ok(r.text.includes("## 0.10.0") && r.text.includes("## 0.9.0"));
+assert.ok(!r.text.includes("## 0.4.0"), "older releases are left out of an unfiltered read");
+assert.ok(!r.text.includes("- **Four.**"), "and so is their content");
+assert.ok(r.text.includes("Preamble line."), "the preamble is kept");
+assert.match(r.text.split("\n")[0], /Left out 1 older release: 0\.4\.0\./, "the header names every release it left out");
+assert.match(r.text.split("\n")[0], /`since: "0\.0\.0"` for the whole history/, "and the call that returns them");
+assert.equal(RECENT_RELEASES, 2);
+
+// `since: "0.0.0"` is the whole history, as the header promises.
+r = renderWhatsNew(DOC, { since: WHOLE_HISTORY_SINCE, serverVersion: "0.10.0" });
 assert.deepEqual(r.versions, ["0.10.0", "0.9.0", "0.4.0"]);
+
+// Nothing left out: no "Left out" claim.
+r = renderWhatsNew(DOC.split("## 0.4.0")[0], { serverVersion: "0.10.0" });
+assert.deepEqual(r.omitted, []);
+assert.match(r.text, /^This server is after-effects-mcp 0\.10\.0\. Showing every release described here: 0\.10\.0, 0\.9\.0\./);
+assert.ok(!/Left out/.test(r.text));
+
+r = renderWhatsNew("# Only prose\n", { serverVersion: "1.0.0" });
+assert.deepEqual(r.versions, []);
+assert.match(r.text, /This guide describes no releases\./);
+assert.ok(r.text.includes("# Only prose"));
 
 r = renderWhatsNew("# Only prose\n", { since: "0.1.0", serverVersion: "1.0.0" });
 assert.equal(r.newest, null);
@@ -257,8 +282,18 @@ assert.equal(res.content[0].text.split("\n").length, 1, "nothing newer is a sing
 
 res = await call({ topic: "whats-new" });
 assert.equal(res.isError, undefined);
-assert.ok(res.content[0].text.startsWith(`This server is after-effects-mcp ${pkg}. Pass \`since\``));
-assert.ok(res.content[0].text.includes("## 0.3.0"), "unfiltered is the whole history");
+text = res.content[0].text;
+assert.ok(text.startsWith(`This server is after-effects-mcp ${pkg}. Showing the 2 newest releases: ${real.sections[0].version}, ${real.sections[1].version}.`), `unfiltered header:\n${text.split("\n")[0]}`);
+for (const sec of real.sections.slice(0, 2)) assert.ok(text.includes(`## ${sec.version}`), `recent ${sec.version} is in the unfiltered answer`);
+for (const sec of real.sections.slice(2)) {
+  assert.ok(!text.includes(`## ${sec.version}`), `older ${sec.version} is left out of the unfiltered answer`);
+  assert.ok(text.split("\n")[0].includes(sec.version), `and named in the header: ${sec.version}`);
+}
+assert.ok(text.length < guide.body.length / 2, `unfiltered should be a fraction of the history: ${text.length} of ${guide.body.length} chars`);
+
+res = await call({ topic: "whats-new", since: "0.0.0" });
+assert.equal(res.isError, undefined);
+for (const sec of real.sections) assert.ok(res.content[0].text.includes(`## ${sec.version}`), `since 0.0.0 carries ${sec.version}`);
 
 res = await call({ topic: "after-effects", since: "0.4.0" });
 assert.equal(res.isError, true, "`since` on any other topic is refused, not silently ignored");
