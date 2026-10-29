@@ -108,8 +108,8 @@ function __saveFrameAt(comp, time, file, factor) {
 // name in Edit > History, instead of 2 + 2N anonymous ones.
 //
 // Three rules, all of which the tests hold:
-//   * no group at all when nothing will be assigned — the common case of a comp
-//     at Full screenshotted at downsample 1 — so that case costs zero steps;
+//   * no group at all when nothing will be assigned — a comp already at the
+//     requested factor, e.g. Full at downsample 1 — so that case costs zero steps;
 //   * no group of our own when one of ours is already open (a screenshot inside
 //     run_batch, or the dispatcher's group around another op): AE's groups do
 //     not nest, and an inner endUndoGroup would close the outer one and leave
