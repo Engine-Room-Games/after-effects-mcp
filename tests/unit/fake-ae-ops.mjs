@@ -335,7 +335,7 @@ check("get_layer_full's whole answer matches the golden file", () => {
   }
   assert.equal(
     text,
-    fs.readFileSync(goldenFile, "utf8"),
+    fs.readFileSync(goldenFile, "utf8").replace(/\r\n/g, "\n"),
     "get_layer_full's output changed. If that is intended, regenerate with UPDATE_GOLDEN=1 and review the diff of tests/unit/golden/get-layer-full.json."
   );
 });
