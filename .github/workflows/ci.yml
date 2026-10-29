@@ -204,6 +204,11 @@ jobs:
       - name: Live driver guards and recipe fixtures hold without After Effects
         run: node tests/unit/live-driver.mjs
 
+      # Issues #149 and #150: set_layer's trackMatte.layerId sets the matte, and
+      # an unknown blend, matte or mask mode name is refused, not ignored.
+      - name: Track mattes land and AE enumeration names are closed
+        run: node tests/unit/layer-enum-names.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.
