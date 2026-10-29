@@ -283,18 +283,26 @@ function patchThumbnail(mogrtBuf, posterPng) {
   //     is the right picture for an opaque thumbnail; dropping it from straight
   //     colour would leave every soft edge at full strength.
   var poster = pngCodec.decodePng8(posterPng);
+  // Encode at the thumbnail's own colour type so an archive whose thumbnail has
+  // no alpha does not gain one, and vice versa.
+  var channels = existing.channels;
+  var srcAlpha = pngCodec.alphaIndexFor(poster.colorType);
+  var source = poster.pixels;
   var srcChannels = poster.channels;
-  var fitted = resampleFit(poster.pixels, poster.width, poster.height, srcChannels, existing.width, existing.height);
+  if (srcAlpha < 0 && srcChannels !== channels) {
+    // A poster with no alpha has nothing premultiplied, so convert it first:
+    // resampling in its own channel count would make the letterbox padding
+    // opaque black when the thumbnail has alpha, instead of transparent.
+    source = convertChannels(source, srcChannels, channels, poster.width * poster.height);
+    srcChannels = channels;
+  }
+  var fitted = resampleFit(source, poster.width, poster.height, srcChannels, existing.width, existing.height);
   var data = fitted.data;
   var outCount = existing.width * existing.height;
-  var srcAlpha = pngCodec.alphaIndexFor(poster.colorType);
   if (srcAlpha >= 0 && pngCodec.alphaIndexFor(existing.colorType) >= 0) {
     data = pngCodec.unpremultiply8(data, srcChannels, srcAlpha, outCount);
   }
 
-  // Encode at the thumbnail's own colour type so an archive whose thumbnail has
-  // no alpha does not gain one, and vice versa.
-  var channels = existing.channels;
   if (srcChannels !== channels) data = convertChannels(data, srcChannels, channels, outCount);
   var encoded = pngCodec.encodePng8(existing.width, existing.height, existing.colorType, data);
 

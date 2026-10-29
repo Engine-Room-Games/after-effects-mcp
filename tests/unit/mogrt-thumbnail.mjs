@@ -355,6 +355,19 @@ check("an opaque (RGB) thumbnail keeps premultiplied colour, which is the compos
   assert.deepEqual([...thumb.pixels.subarray(0, 3)], [121, 96, 13]);
 });
 
+check("an RGB poster letterboxed into an RGBA thumbnail keeps transparent bars", () => {
+  // Resampling in the poster's three channels and adding alpha afterwards
+  // would turn the zero padding into opaque black.
+  const archive = fixtureMogrt(solidPng(640, 360, [0, 0, 0, 255]));
+  const res = mogrt.patchThumbnail(archive, solidPng(1080, 1080, [255, 255, 255], 2));
+  const thumb = decodePng8(readZip(res.buffer).get("thumb.png"));
+  assert.equal(thumb.channels, 4);
+  const o = (180 * thumb.width + 2) * 4;
+  assert.deepEqual([...thumb.pixels.subarray(o, o + 4)], [0, 0, 0, 0]);
+  const c = (180 * thumb.width + 320) * 4;
+  assert.deepEqual([...thumb.pixels.subarray(c, c + 4)], [255, 255, 255, 255]);
+});
+
 check("refuses an archive with no thumb.png, naming what it did find", () => {
   const archive = buildZip([{ name: "definition.json", data: DEFINITION }]);
   assert.throws(
