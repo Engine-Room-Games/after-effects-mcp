@@ -329,8 +329,17 @@ export async function restorePrefs({ backupRoot, version, isAeRunning, force = f
  * projects and creating new ones are the driver's alone, done only through its
  * guarded helpers — a fixture that did them itself could close or overwrite the
  * maintainer's work.
+ *
+ * THIS IS NOT A SANDBOX. ExtendScript can reach the same thing a hundred ways
+ * (a computed property name, `eval`, a string built at run time) and a regex
+ * list will never close them all. It is a guard against a fixture author's
+ * *mistake* — the obvious spelling of a dangerous call — and fixtures are
+ * reviewed code like any other in this repo. Review them as such.
  */
 export const FORBIDDEN_JSX = [
+  /\.\s*open\s*\(\s*["']\s*[wae]/i, // a File opened "w", "a" or "e" (write, append, edit); "r" is fine
+  /\brenderQueue\s*\.\s*render\s*\(/, // renders write files wherever the queue points
+  /\.\s*write(?:ln)?\s*\(/, // File writes (no AE object has a write method)
   /\bapp\s*\.\s*quit\b/,
   /\bapp\s*\.\s*newProject\b/,
   /\bapp\s*\.\s*open\b/,
@@ -413,4 +422,108 @@ export function assertAeVersion(v) {
 export function aeMajorMinor(appVersion) {
   const m = /^(\d+)\.(\d+)/.exec(String(appVersion ?? ""));
   return m ? `${m[1]}.${m[2]}` : null;
+}
+
+// ---------------------------------------------------------------------------
+// Which tools a fixture may call
+// ---------------------------------------------------------------------------
+
+/** Never from a fixture: they install into, or write project folders on, the real machine. */
+export const REFUSED_TOOLS = {
+  setup_panel: "replaces the installed After Effects panel — shared by every session on this machine",
+  init_project: "writes a project folder wherever it is pointed",
+};
+
+/**
+ * Tools that write files. Allowed only when every path-like argument resolves
+ * inside the run's scratch folder; `requiredPaths` must be passed (their
+ * default destination is outside it — export_mogrt's is the user's Essential
+ * Graphics folder); `projectMustBeOurs` tools write beside, or save, the open
+ * project, so the open project must be a scratch one at the moment of the call.
+ */
+export const FILE_WRITING_TOOLS = {
+  export_mogrt: { requiredPaths: ["destDir"] },
+  add_to_render_queue: { requiredPaths: ["outputPath"] },
+  render_queue: { projectMustBeOurs: true },
+  set_house_style: { projectMustBeOurs: true },
+};
+
+/**
+ * Everything else a fixture may call, by name — an allowlist, so a tool added
+ * to the server later is refused here until someone decides which list it
+ * belongs on (tests/unit/live-driver.mjs fails until then). These touch only
+ * the open project, the server's memory, or files they read. The issue-journal
+ * tools write, but the driver points AE_MCP_HOME at its scratch folder.
+ */
+export const ALLOWED_TOOLS = new Set([
+  "list_comps", "get_comp", "get_comp_tree", "create_comp", "set_comp", "delete_comp", "set_active_comp",
+  "duplicate_comp", "checkpoint_comp", "list_checkpoints", "revert_comp", "delete_checkpoints",
+  "snapshot_comp", "diff_comp", "list_layers", "get_layer_full", "create_text_layer", "create_shape_layer",
+  "create_solid_layer", "create_null_layer", "create_adjustment_layer", "create_precomp_layer",
+  "create_camera_layer", "create_light_layer", "duplicate_layer", "delete_layer", "set_layer", "parent_layer",
+  "reorder_layer", "set_transform", "add_keyframe", "remove_keyframe", "get_keyframes", "set_interpolation",
+  "set_temporal_ease", "set_spatial_tangents", "get_expression", "set_expression", "toggle_expression",
+  "clear_expression", "list_effects", "add_effect", "remove_effect", "set_effect_param", "set_effect_enabled",
+  "list_available_effects", "set_text", "add_text_animator", "set_shape_path", "add_shape_content",
+  "set_shape_property", "add_mask", "set_mask", "remove_mask", "add_marker", "remove_marker",
+  "screenshot_frame", "screenshot_layer", "run_batch", "get_project_summary", "find_layers",
+  "import_footage", "create_footage_layer", "purge_unused_footage", "place_audio_cues",
+  "list_render_queue", "remove_render_item", "run_jsx", "get_house_style", "await_job", "get_job",
+  "cancel_job", "check_setup", "ae_guide", "log_issue", "list_known_issues", "mark_issue_reported",
+  "archive_issue",
+]);
+
+const PATH_KEY = /(?:path|dir|file|folder|output)s?$/i;
+const LOOKS_ABSOLUTE = /^(?:\/|~|[A-Za-z]:[\\/]|\\\\)/;
+
+/**
+ * Every string argument that could name a place on disk, at any depth: a key
+ * that says so (outputPath, destDir, scriptPath, libraries…) or a value that
+ * is an absolute path. Generic on purpose — a tool's new path argument is
+ * caught without anyone listing it.
+ */
+export function pathLikeArgs(args) {
+  const out = [];
+  const visit = (v, key, where) => {
+    if (typeof v === "string") {
+      if (PATH_KEY.test(key) || LOOKS_ABSOLUTE.test(v)) out.push({ where, value: v });
+    } else if (Array.isArray(v)) v.forEach((x, i) => visit(x, key, `${where}[${i}]`));
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) visit(x, k, where ? `${where}.${k}` : k);
+  };
+  visit(args, "", "");
+  return out;
+}
+
+/**
+ * Problems with calling `tool` with `args` from a fixture. `inside(path)` says
+ * whether a path is in the scratch folder. run_batch steps are checked as the
+ * tools they name. A `projectMustBeOurs` tool is reported in `needsOurProject`
+ * for the caller to check against the project actually open.
+ */
+export function checkToolUse(tool, args, inside, where = tool) {
+  const problems = [];
+  const needsOurProject = [];
+  if (tool in REFUSED_TOOLS) problems.push(`${where}: ${tool} is refused in a live run — it ${REFUSED_TOOLS[tool]}`);
+  else if (tool in FILE_WRITING_TOOLS) {
+    const rule = FILE_WRITING_TOOLS[tool];
+    for (const k of rule.requiredPaths ?? []) {
+      if (typeof args?.[k] !== "string") problems.push(`${where}: ${tool} writes files, so ${k} must be passed, inside the scratch folder`);
+    }
+    for (const p of pathLikeArgs(args)) {
+      if (!inside(p.value)) problems.push(`${where}: ${tool} writes files, and ${p.where} = ${JSON.stringify(p.value)} is outside the scratch folder`);
+    }
+    if (rule.projectMustBeOurs) needsOurProject.push(where);
+  } else if (!ALLOWED_TOOLS.has(tool)) {
+    problems.push(`${where}: ${tool} is on no list in tests/live/lib/safety.mjs — decide whether it writes files before a fixture calls it`);
+  }
+  if (tool === "run_batch" && Array.isArray(args?.ops)) {
+    args.ops.forEach((o, i) => {
+      if (o && typeof o.op === "string") {
+        const r = checkToolUse(o.op, o.args, inside, `${where} ops[${i}] (${o.op})`);
+        problems.push(...r.problems);
+        needsOurProject.push(...r.needsOurProject);
+      }
+    });
+  }
+  return { problems, needsOurProject };
 }

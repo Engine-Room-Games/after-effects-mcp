@@ -32,7 +32,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { forbiddenJsx } from "./safety.mjs";
+import { checkToolUse, forbiddenJsx } from "./safety.mjs";
 
 export const MATCHERS = ["equals", "type", "exists", "matches", "notMatches", "length", "gte", "lte", "includes", "oneOf"];
 const STEP_KINDS = ["call", "writeFile", "saveProject", "parallel"];
@@ -70,9 +70,11 @@ const ANY = /\$\{([^{}]+)\}/g;
 
 /** A scope in which every variable is the placeholder 1 — for validating a fixture with nothing run. */
 export const PLACEHOLDER = Symbol("placeholder");
+/** What `${scratch}` stands for while validating, so a path built on it is known to be inside the scratch folder. */
+export const SCRATCH_SENTINEL = "/__live_scratch__";
 
 function lookup(expr, scope) {
-  if (scope[PLACEHOLDER]) return 1;
+  if (scope[PLACEHOLDER]) return expr.trim().split(/[.[]/)[0] === "scratch" ? SCRATCH_SENTINEL : 1;
   const segs = parsePath(expr.trim());
   const [head, ...rest] = segs;
   if (!(head in scope)) throw new Error(`Unknown template variable "${head}" in \${${expr}}`);
@@ -250,7 +252,7 @@ function shapeOf(schema) {
  * caught by name too, because a non-strict schema strips them silently and the
  * live call would then pass while testing nothing.
  */
-export function validateCallArgs(tool, args, opSchemas, where, { expectsRejection = false, writtenFiles = new Map() } = {}) {
+export function validateCallArgs(tool, args, opSchemas, where, { expectsRejection = false, writtenFiles = new Map(), projectSaved = false, top = true } = {}) {
   const problems = [];
   const schema = opSchemas[tool];
   if (!schema) return [`${where}: no tool named "${tool}" in OpSchemas`];
@@ -300,9 +302,21 @@ export function validateCallArgs(tool, args, opSchemas, where, { expectsRejectio
     resolved.ops.forEach((o, i) => {
       if (o && typeof o.op === "string") {
         const rawOp = Array.isArray(args.ops) ? args.ops[i] : args.ops?.item;
-        problems.push(...validateCallArgs(o.op, rawOp?.args ?? o.args, opSchemas, `${where} ops[${i}]`, { writtenFiles }));
+        problems.push(
+          ...validateCallArgs(o.op, rawOp?.args ?? o.args, opSchemas, `${where} ops[${i}]`, { writtenFiles, projectSaved, top: false })
+        );
       }
     });
+  }
+  // Which tools, and where they may write. Checked once, from the top: it walks
+  // run_batch steps itself. Only a path built on ${scratch} is known to be
+  // inside the scratch folder before the run; the runner checks the real paths.
+  if (top) {
+    const use = checkToolUse(tool, resolved, (p) => p.startsWith(SCRATCH_SENTINEL + "/"), where);
+    problems.push(...use.problems);
+    if (use.needsOurProject.length && !projectSaved) {
+      problems.push(`${where}: writes beside the open project, so the fixture must saveProject into the scratch folder first`);
+    }
   }
   return problems;
 }
@@ -328,7 +342,7 @@ function validateExpectations(list, where) {
   return problems;
 }
 
-function validateStep(step, i, opSchemas, where, writtenFiles, nested = false) {
+function validateStep(step, i, opSchemas, where, state, nested = false) {
   const problems = [];
   const kinds = STEP_KINDS.filter((k) => k in step);
   const at = `${where} step ${i}`;
@@ -339,7 +353,8 @@ function validateStep(step, i, opSchemas, where, writtenFiles, nested = false) {
     problems.push(
       ...validateCallArgs(step.call, step.args, opSchemas, `${at} (${step.call})`, {
         expectsRejection: !!step.expectError,
-        writtenFiles,
+        writtenFiles: state.writtenFiles,
+        projectSaved: state.projectSaved,
       })
     );
     problems.push(...validateExpectations(step.expect, at));
@@ -351,7 +366,7 @@ function validateStep(step, i, opSchemas, where, writtenFiles, nested = false) {
     else
       step.parallel.forEach((s, j) => {
         if (!("call" in s)) problems.push(`${at}.${j}: only call steps run in parallel`);
-        problems.push(...validateStep(s, `${i}.${j}`, opSchemas, where, writtenFiles, true));
+        problems.push(...validateStep(s, `${i}.${j}`, opSchemas, where, state, true));
       });
   } else if (kind === "writeFile") {
     if (typeof step.writeFile !== "string" || path.isAbsolute(step.writeFile) || step.writeFile.split(/[\\/]/).includes(".."))
@@ -361,11 +376,12 @@ function validateStep(step, i, opSchemas, where, writtenFiles, nested = false) {
       // Any written file can become a scriptPath or library, so it is held to the same rules.
       const bad = forbiddenJsx(step.content);
       if (bad.length) problems.push(`${at}: writeFile content does what only the driver may: ${bad.join(", ")}`);
-      writtenFiles.set(step.save ?? "file", step.content);
+      state.writtenFiles.set(step.save ?? "file", step.content);
     }
   } else if (kind === "saveProject") {
     if (typeof step.saveProject !== "string" || !/^[^\\/]+\.aep$/.test(step.saveProject))
       problems.push(`${at}: saveProject must be a bare file name ending .aep`);
+    state.projectSaved = true;
   }
   return problems;
 }
@@ -380,8 +396,9 @@ export function validateFixture(fx, { opSchemas, recipeNumbers }) {
   if (typeof fx.title !== "string" || !fx.title) problems.push(`${where}: needs a title`);
   if (!Array.isArray(fx.steps) || fx.steps.length === 0) problems.push(`${where}: needs steps`);
   else {
-    const writtenFiles = new Map(); // writeFile save name -> content, in step order
-    fx.steps.forEach((s, i) => problems.push(...validateStep(s, i, opSchemas, where, writtenFiles)));
+    // What earlier steps made, in step order: writeFile name -> content, and whether a project was saved.
+    const state = { writtenFiles: new Map(), projectSaved: false };
+    fx.steps.forEach((s, i) => problems.push(...validateStep(s, i, opSchemas, where, state)));
   }
   const savesProject = (fx.steps ?? []).some((s) => "saveProject" in s);
   if (fx.needsSavedProject && !savesProject) problems.push(`${where}: needsSavedProject but never saves one`);

@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { checkCallResult, resolve } from "./fixtures.mjs";
-import { assertScratchPath, forbiddenInCall } from "./safety.mjs";
+import { assertScratchPath, checkToolUse, forbiddenInCall, isInside } from "./safety.mjs";
 
 function readFileOrNull(f) {
   try {
@@ -104,6 +104,11 @@ export class ProjectGuard {
     return this.#jsx(PROJECT_STATE_JSX);
   }
 
+  /** A saved project file inside a scratch root — never an unsaved one, whose folder is nowhere. */
+  isOurs(file) {
+    return typeof file === "string" && scratchPrefixes(this.scratchRoots).some((p) => file.startsWith(p));
+  }
+
   async fresh() {
     const r = await this.#jsx(freshProjectJsx(this.scratchRoots));
     if (r?.file || r?.numItems !== 0) throw new Error(`a fresh project was not empty: ${JSON.stringify(r)}`);
@@ -126,6 +131,16 @@ async function runCall(step, scope, ctx, label) {
   // run_batch steps only exist in their final form at run time.
   const bad = forbiddenInCall(step.call, args, readFileOrNull);
   if (bad.length) throw new Error(`fixture code does what only the driver may — ${bad.join("; ")}`);
+  // The tool allowlist, on the real paths this time.
+  const use = checkToolUse(step.call, args, (p) => isInside(p, ctx.scratchDir));
+  if (use.problems.length) throw new Error(`refused: ${use.problems.join("; ")}`);
+  if (use.needsOurProject.length) {
+    if (!ctx.guard) throw new Error(`refused: ${use.needsOurProject.join(", ")} writes beside the open project, and there is no project guard to check it`);
+    const open = await ctx.guard.state();
+    if (!ctx.guard.isOurs(open?.file)) {
+      throw new Error(`refused: ${use.needsOurProject.join(", ")} writes beside the open project, and ${open?.file ?? "an unsaved project"} is not a scratch project`);
+    }
+  }
   const token = step.progress ? `live-${process.pid}-${++tokenCounter}` : undefined;
   const t0 = Date.now();
   const result = await ctx.client.callTool(step.call, args, { timeoutMs: step.timeoutMs, progressToken: token });
@@ -155,7 +170,15 @@ async function runCall(step, scope, ctx, label) {
 export async function runFixture(fx, ctx) {
   const scope = { scratch: ctx.scratchDir };
   const steps = [];
-  const run = { client: ctx.client, artifactsDir: ctx.artifactsDir, fixtureId: fx.id, images: [], lateProgress: [] };
+  const run = {
+    client: ctx.client,
+    guard: ctx.guard,
+    scratchDir: ctx.scratchDir,
+    artifactsDir: ctx.artifactsDir,
+    fixtureId: fx.id,
+    images: [],
+    lateProgress: [],
+  };
   let status = "pass";
   let error;
   try {

@@ -15,7 +15,10 @@ pass, with After Effects quit to start: `node tests/live/run.mjs prefs backup
 (or `run 7 21` for some), quit AE, `node tests/live/run.mjs prefs restore
 --live`. It refuses without `--live`/`AE_MCP_LIVE=1`, without the prefs
 backup, or with any project but an empty untitled one open; it saves only
-inside its own temp folder, deletes only that, and never quits AE. Each
+inside its own temp folder, deletes only that, and never quits AE. Fixtures
+may call only allowlisted tools; file-writing ones only with every path inside
+the temp folder. Its ExtendScript ban list guards against a fixture author's
+mistake, not malice — it is not a sandbox, and fixtures are reviewed code. Each
 fixture's `manual` line — printed after the run — is the half only a person
 can see. `node tests/live/run.mjs validate` checks the fixtures against the op
 schemas with no AE; CI does the same in `tests/unit/live-driver.mjs`.

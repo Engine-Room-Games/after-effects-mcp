@@ -206,13 +206,22 @@ async function cmdRun({ flags, values, rest }) {
           ? `When done: quit it (ask first), then \`node tests/live/run.mjs prefs restore --live\` to put back the ${backupVersion} prefs backed up before this run.\n`
           : "No prefs backup was taken (--no-prefs-backup): check File > Open Recent by hand after quitting.\n")
     );
-  process.once("SIGINT", () => {
-    process.stderr.write("\nInterrupted — cleaning up what this run created.\n");
-    cleanup().finally(() => {
-      restoreReminder();
-      process.exit(130);
+  // Ctrl-C, a kill, a closed terminal: all the same — reset the scratch
+  // project, kill the server, delete the scratch folder, say what to restore.
+  // (Should cleanup itself hang, the client's own exit hook still kills the
+  // server when this process goes.)
+  let stopping = false;
+  for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
+    process.on(sig, () => {
+      if (stopping) return;
+      stopping = true;
+      process.stderr.write(`\n${sig} — cleaning up what this run created.\n`);
+      cleanup().finally(() => {
+        restoreReminder();
+        process.exit(code);
+      });
     });
-  });
+  }
 
   try {
     await client.initialize();

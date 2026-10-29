@@ -254,6 +254,54 @@ await check("every source a call would run is checked: scriptPath, libraries, an
   assert.deepEqual(safety.forbiddenInCall("create_comp", { name: "app.quit()" }, read), [], "only ExtendScript is code");
 });
 
+await check("the ban list also catches file writes and renders (best-effort, not a sandbox)", () => {
+  for (const code of ["var f = new File(p); f.open('w');", "f.open( \"a\" )", "f.open('e')", "f.write('x')", "f.writeln('x')",
+    "app.project.renderQueue.render();"]) {
+    assert.ok(safety.forbiddenJsx(code).length > 0, code);
+  }
+  assert.deepEqual(safety.forbiddenJsx("var f = Folder.appPackage; return f.fsName;"), []);
+});
+
+await check("every server tool is on exactly one fixture list, so a new tool is refused until someone decides", () => {
+  const lists = [new Set(Object.keys(safety.REFUSED_TOOLS)), new Set(Object.keys(safety.FILE_WRITING_TOOLS)), safety.ALLOWED_TOOLS];
+  for (const tool of Object.keys(OpSchemas)) {
+    assert.equal(lists.filter((l) => l.has(tool)).length, 1, `${tool} must be on exactly one list in tests/live/lib/safety.mjs`);
+  }
+  for (const l of lists) for (const t of l) assert.ok(t in OpSchemas, `${t} is listed but is not a tool`);
+  const inside = () => true;
+  assert.match(safety.checkToolUse("a_tool_added_later", {}, inside).problems.join(), /on no list/);
+});
+
+await check("refused and file-writing tools: refused, or allowed only with every path inside scratch", () => {
+  const scratch = safety.makeScratchRoot(tmpBase);
+  const inside = (p) => safety.isInside(p, scratch);
+  const problems = (tool, args) => safety.checkToolUse(tool, args, inside).problems.join("\n");
+  assert.match(problems("setup_panel", {}), /refused/);
+  assert.match(problems("init_project", { dir: path.join(scratch, "p") }), /refused/, "refused even inside scratch");
+  assert.match(problems("export_mogrt", { compId: 1 }), /destDir must be passed/);
+  assert.match(problems("export_mogrt", { compId: 1, destDir: path.join(os.homedir(), "Desktop") }), /destDir .* outside the scratch folder/);
+  assert.equal(problems("export_mogrt", { compId: 1, destDir: path.join(scratch, "m") }), "");
+  assert.match(problems("add_to_render_queue", { compId: 1, outputPath: "/tmp/elsewhere/x.mov" }), /outputPath .* outside/);
+  assert.equal(problems("add_to_render_queue", { compId: 1, outputPath: path.join(scratch, "x.mov") }), "");
+  assert.match(problems("add_to_render_queue", { compId: 1, outputPath: path.join(scratch, "x.mov"), extra: { nested: "/Users/m/y" } }), /extra\.nested/,
+    "path-like values are found at any depth");
+  assert.equal(problems("list_comps", {}), "");
+  assert.match(problems("run_batch", { ops: [{ op: "create_comp", args: {} }, { op: "setup_panel", args: {} }] }), /ops\[1\] \(setup_panel\).*refused/);
+  const hs = safety.checkToolUse("set_house_style", { content: "x" }, inside);
+  assert.deepEqual(hs.problems, []);
+  assert.deepEqual(hs.needsOurProject, ["set_house_style"]);
+  assert.deepEqual(safety.checkToolUse("run_batch", { ops: [{ op: "render_queue", args: { all: true } }] }, inside).needsOurProject, ["run_batch ops[0] (render_queue)"]);
+});
+
+await check("the validator applies the tool rules to fixtures", () => {
+  const v = (steps) => fx.validateFixture({ id: "t", recipe: 2, title: "t", steps }, { opSchemas: OpSchemas }).join("\n");
+  assert.match(v([{ call: "setup_panel" }]), /refused/);
+  assert.match(v([{ call: "add_to_render_queue", args: { compId: 1, outputPath: "/Users/m/Desktop/x.mov" } }]), /outside the scratch folder/);
+  assert.equal(v([{ call: "add_to_render_queue", args: { compId: 1, outputPath: "${scratch}/x.mov" } }]), "");
+  assert.match(v([{ call: "set_house_style", args: { content: "x" } }]), /saveProject into the scratch folder first/);
+  assert.equal(v([{ saveProject: "a.aep" }, { call: "set_house_style", args: { content: "x" } }]), "");
+});
+
 await check("AE versions: a folder-name version is validated, and app.version reduces to major.minor", () => {
   assert.equal(safety.assertAeVersion("26.5"), "26.5");
   for (const bad of ["../..", "", "26", "26.5/..", "26.5.1", undefined]) assert.throws(() => safety.assertAeVersion(bad), /not an After Effects version/);
@@ -514,6 +562,69 @@ await check("runner refuses fixture code the driver alone may run, even if valid
   assert.equal(r.status, "error");
   assert.match(r.error, /only the driver may/);
   assert.equal(client.calls.length, 0);
+});
+
+await check("runner refuses a file-writing call outside scratch, and one beside a project that is not ours", async () => {
+  const scratch = safety.makeScratchRoot(tmpBase);
+  const client = new StubClient((name, args) => (name === "run_jsx" ? { file: null, numItems: 0 } : { ok: true }));
+  const guard = new runner.ProjectGuard({ client, scratchRoots: [scratch] });
+  const r1 = await runner.runFixture(
+    { id: "w", recipe: 57, title: "w", steps: [{ call: "add_to_render_queue", args: { compId: 1, outputPath: "/Users/m/Desktop/x.mov" } }] },
+    { client, scratchDir: scratch }
+  );
+  assert.equal(r1.status, "error");
+  assert.match(r1.error, /outside the scratch folder/);
+  const r2 = await runner.runFixture(
+    { id: "h", recipe: 10, title: "h", steps: [{ call: "set_house_style", args: { content: "x" } }] },
+    { client, guard, scratchDir: scratch }
+  );
+  assert.equal(r2.status, "error");
+  assert.match(r2.error, /an unsaved project is not a scratch project/);
+  assert.ok(!client.calls.some((c) => c.name === "add_to_render_queue" || c.name === "set_house_style"), "neither reached the server");
+  assert.equal(guard.isOurs(path.join(scratch, "a.aep")), true);
+  assert.equal(guard.isOurs(scratch + "2/a.aep"), false);
+  assert.equal(guard.isOurs(null), false);
+});
+
+await check("SIGTERM and SIGHUP stop a run like Ctrl-C: server killed, restore reminder printed", async () => {
+  if (process.platform === "win32") return; // no POSIX signals to send
+  // A stand-in for run.mjs's run loop: the real one needs After Effects, so
+  // this drives the same client and the same exit hook through a child that
+  // starts a server, then is signalled.
+  const harness = path.join(tmpBase, "harness.mjs");
+  const pidFile = path.join(tmpBase, "server.pid");
+  fs.writeFileSync(
+    harness,
+    `import { StdioMcpClient } from ${JSON.stringify(live("lib", "client.mjs"))};
+     import fs from "node:fs";
+     const c = new StdioMcpClient({ command: process.execPath, args: ["-e", "process.on('SIGTERM',()=>{}); process.on('SIGHUP',()=>{}); setInterval(()=>{},1000)"] }).start();
+     fs.writeFileSync(${JSON.stringify(pidFile)}, String(c.child.pid));
+     for (const s of ["SIGTERM", "SIGHUP"]) process.on(s, () => { process.stdout.write("reminder\\n"); process.exit(1); });
+     setInterval(() => {}, 1000);`
+  );
+  for (const sig of ["SIGTERM", "SIGHUP"]) {
+    fs.rmSync(pidFile, { force: true });
+    const { spawn } = await import("node:child_process");
+    const h = spawn(process.execPath, [harness], { stdio: ["ignore", "pipe", "inherit"] });
+    let out = "";
+    h.stdout.on("data", (d) => (out += d));
+    while (!fs.existsSync(pidFile)) await new Promise((r) => setTimeout(r, 50));
+    const serverPid = Number(fs.readFileSync(pidFile, "utf8"));
+    h.kill(sig);
+    await new Promise((r) => h.on("exit", r));
+    await new Promise((r) => setTimeout(r, 200));
+    assert.match(out, /reminder/);
+    let alive = true;
+    try {
+      process.kill(serverPid, 0);
+    } catch {
+      alive = false;
+    }
+    assert.equal(alive, false, `${sig}: the server child is gone`);
+  }
+  // And run.mjs itself wires all three.
+  const src = fs.readFileSync(path.join(root, "tests", "live", "run.mjs"), "utf8");
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) assert.ok(src.includes(`["${sig}",`), `run.mjs handles ${sig}`);
 });
 
 await check("the starting project: only an empty untitled one is acceptable", () => {

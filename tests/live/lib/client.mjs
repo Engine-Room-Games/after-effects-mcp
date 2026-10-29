@@ -36,6 +36,18 @@ export class StdioMcpClient {
   start() {
     const { command, args, cwd, env } = this.spec;
     this.child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    // However this process ends — a throw nobody caught, process.exit from a
+    // signal handler — the server it started goes with it. `exit` handlers run
+    // synchronously, and kill() is synchronous.
+    const killOnExit = () => {
+      if (this.child.exitCode === null && this.child.signalCode === null) {
+        try {
+          this.child.kill("SIGKILL");
+        } catch {}
+      }
+    };
+    process.on("exit", killOnExit);
+    this.child.once("exit", () => process.removeListener("exit", killOnExit));
     const decoder = new LineDecoder({
       onMessage: (m) => this.#onMessage(m),
       onNoise: (line) => this.noise.push(line),
