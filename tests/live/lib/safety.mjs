@@ -51,17 +51,37 @@ function norm(p) {
 }
 
 /**
- * True only for a path strictly inside `root`. Compared both as given and
- * through realpath, because macOS hands out /var/... while After Effects reports
- * /private/var/... for the same folder.
+ * The path with symlinks resolved as far as it exists: the longest existing
+ * prefix goes through realpath and the not-yet-created rest is appended. A
+ * file about to be written does not exist yet, but the folder it lands in
+ * does — and a symlink there (scratch/out -> ~/Desktop) must not pass for
+ * "inside scratch".
+ */
+export function realpathLoose(p) {
+  let head = norm(p);
+  const tail = [];
+  for (;;) {
+    try {
+      return norm(path.join(fs.realpathSync(head), ...tail));
+    } catch {
+      const up = path.dirname(head);
+      if (up === head) return norm(p);
+      tail.unshift(path.basename(head));
+      head = up;
+    }
+  }
+}
+
+/**
+ * True only for a path strictly inside `root`, after resolving symlinks on
+ * both sides. The root is also compared as given, because macOS hands out
+ * /var/... while After Effects reports /private/var/... for the same folder;
+ * the target only ever through realpath, so a link cannot smuggle it out.
  */
 export function isInside(p, root) {
   if (typeof p !== "string" || !p) return false;
-  const candidates = [norm(root)];
-  try {
-    candidates.push(norm(fs.realpathSync(root)));
-  } catch {}
-  const target = norm(p);
+  const candidates = [...new Set([norm(root), realpathLoose(root)])];
+  const target = realpathLoose(p);
   return candidates.some((r) => target !== r && target.startsWith(r.endsWith(path.sep) ? r : r + path.sep));
 }
 
@@ -444,7 +464,10 @@ export const REFUSED_TOOLS = {
 export const FILE_WRITING_TOOLS = {
   export_mogrt: { requiredPaths: ["destDir"] },
   add_to_render_queue: { requiredPaths: ["outputPath"] },
-  render_queue: { projectMustBeOurs: true },
+  // Renders write wherever the queue's output modules point, and run_jsx can
+  // repoint them after add_to_render_queue checked them: the runner reads the
+  // queue back and checks every output path right before the call.
+  render_queue: { projectMustBeOurs: true, rendersQueue: true },
   set_house_style: { projectMustBeOurs: true },
 };
 
@@ -503,6 +526,7 @@ export function pathLikeArgs(args) {
 export function checkToolUse(tool, args, inside, where = tool) {
   const problems = [];
   const needsOurProject = [];
+  const rendersQueue = [];
   if (tool in REFUSED_TOOLS) problems.push(`${where}: ${tool} is refused in a live run — it ${REFUSED_TOOLS[tool]}`);
   else if (tool in FILE_WRITING_TOOLS) {
     const rule = FILE_WRITING_TOOLS[tool];
@@ -513,6 +537,7 @@ export function checkToolUse(tool, args, inside, where = tool) {
       if (!inside(p.value)) problems.push(`${where}: ${tool} writes files, and ${p.where} = ${JSON.stringify(p.value)} is outside the scratch folder`);
     }
     if (rule.projectMustBeOurs) needsOurProject.push(where);
+    if (rule.rendersQueue) rendersQueue.push(where);
   } else if (!ALLOWED_TOOLS.has(tool)) {
     problems.push(`${where}: ${tool} is on no list in tests/live/lib/safety.mjs — decide whether it writes files before a fixture calls it`);
   }
@@ -522,8 +547,28 @@ export function checkToolUse(tool, args, inside, where = tool) {
         const r = checkToolUse(o.op, o.args, inside, `${where} ops[${i}] (${o.op})`);
         problems.push(...r.problems);
         needsOurProject.push(...r.needsOurProject);
+        rendersQueue.push(...r.rendersQueue);
       }
     });
   }
-  return { problems, needsOurProject };
+  return { problems, needsOurProject, rendersQueue };
+}
+
+/**
+ * Problems with a list_render_queue result: every output of every item must
+ * write inside the scratch folder. An output with no file is refused too —
+ * "cannot tell where" is not "inside".
+ */
+export function renderOutputsOutside(queue, inside) {
+  const problems = [];
+  const items = Array.isArray(queue?.items) ? queue.items : null;
+  if (!items) return [`could not read the render queue: ${JSON.stringify(queue)?.slice(0, 200)}`];
+  for (const it of items) {
+    for (const o of Array.isArray(it?.outputs) ? it.outputs : []) {
+      if (typeof o?.path !== "string" || !inside(o.path)) {
+        problems.push(`render queue item ${it.index ?? "?"} output ${o?.index ?? "?"} writes to ${JSON.stringify(o?.path ?? null)}, outside the scratch folder`);
+      }
+    }
+  }
+  return problems;
 }

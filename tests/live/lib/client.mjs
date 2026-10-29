@@ -35,7 +35,17 @@ export class StdioMcpClient {
 
   start() {
     const { command, args, cwd, env } = this.spec;
-    this.child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    // Its own process group on POSIX: a Ctrl-C in the terminal goes to the
+    // whole foreground group, and would kill the server before the driver had
+    // used it to close the scratch project. The driver ends it itself, in
+    // order; the exit hook below covers every other way out. (On Windows a
+    // detached child gets a console of its own, so it stays attached there.)
+    this.child = spawn(command, args, {
+      cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
     // However this process ends — a throw nobody caught, process.exit from a
     // signal handler — the server it started goes with it. `exit` handlers run
     // synchronously, and kill() is synchronous.

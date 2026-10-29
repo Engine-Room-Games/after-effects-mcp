@@ -216,6 +216,33 @@ await check("removeScratchRoot deletes its own folder and refuses anything else"
   assert.equal(fs.existsSync(slashed), false);
 });
 
+await check("a symlink inside scratch that points outside does not count as inside", () => {
+  const r = safety.makeScratchRoot(tmpBase);
+  const outside = fs.mkdtempSync(path.join(tmpBase, "elsewhere-"));
+  try {
+    fs.symlinkSync(outside, path.join(r, "out"), process.platform === "win32" ? "junction" : "dir");
+  } catch (e) {
+    if (process.platform === "win32") return; // junctions may need rights the runner lacks
+    throw e;
+  }
+  assert.equal(safety.isInside(path.join(r, "out", "x.mov"), r), false, "an existing link");
+  assert.equal(safety.isInside(path.join(r, "out", "not", "yet", "x.mov"), r), false, "through a link, to folders not created yet");
+  assert.equal(safety.isInside(path.join(r, "real", "x.mov"), r), true, "a not-yet-created folder that really is inside");
+  const linkedRoot = path.join(tmpBase, "linked-root");
+  fs.symlinkSync(r, linkedRoot, "dir");
+  assert.equal(safety.isInside(path.join(linkedRoot, "a.aep"), r), true, "the root reached through a link is still the root");
+});
+
+await check("render outputs: every output of every queued item must write inside scratch", () => {
+  const scratch = safety.makeScratchRoot(tmpBase);
+  const inside = (p) => safety.isInside(p, scratch);
+  const q = (paths) => ({ items: [{ index: 1, outputs: paths.map((p, i) => ({ index: i + 1, path: p })) }], count: 1 });
+  assert.deepEqual(safety.renderOutputsOutside(q([path.join(scratch, "a.mov")]), inside), []);
+  assert.match(safety.renderOutputsOutside(q([path.join(scratch, "a.mov"), "/Users/m/Desktop/b.mov"]), inside).join(), /output 2 writes to "\/Users\/m\/Desktop\/b\.mov"/);
+  assert.match(safety.renderOutputsOutside(q([null]), inside).join(), /writes to null/);
+  assert.match(safety.renderOutputsOutside({ nope: 1 }, inside).join(), /could not read/);
+});
+
 await check("the project guard's prefixes end in a separator, however the root was written", () => {
   const p = runner.scratchPrefixes(["/tmp/ae-mcp-live-abc/", "/tmp/ae-mcp-live-abc", "C:\\T\\ae-mcp-live-x\\"]);
   assert.deepEqual(p.sort(), ["/tmp/ae-mcp-live-abc/", "/tmp/ae-mcp-live-abc\\", "C:\\T\\ae-mcp-live-x/", "C:\\T\\ae-mcp-live-x\\"].sort());
@@ -625,6 +652,34 @@ await check("SIGTERM and SIGHUP stop a run like Ctrl-C: server killed, restore r
   // And run.mjs itself wires all three.
   const src = fs.readFileSync(path.join(root, "tests", "live", "run.mjs"), "utf8");
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) assert.ok(src.includes(`["${sig}",`), `run.mjs handles ${sig}`);
+  // Shutdown order: close the scratch project through the server, then stop the server, then delete the folder.
+  const cleanupSrc = src.slice(src.indexOf("const cleanup = async"));
+  const order = ["await guard.fresh()", "await client.close()", "removeScratchRoot(scratchRoot)"].map((s) => cleanupSrc.indexOf(s));
+  assert.ok(order.every((i) => i > 0) && order[0] < order[1] && order[1] < order[2], `cleanup order ${order}`);
+  assert.match(cleanupSrc, /WITHOUT saving/, "a server already gone leaves the maintainer a note");
+  assert.match(fs.readFileSync(path.join(root, "tests", "live", "lib", "client.mjs"), "utf8"), /detached: process\.platform !== "win32"/,
+    "the server is out of the terminal's process group, so Ctrl-C does not kill it before the reset");
+});
+
+await check("runner reads the render queue back before render_queue, and refuses a repointed output", async () => {
+  const scratch = safety.makeScratchRoot(tmpBase);
+  const queue = { items: [{ index: 1, outputs: [{ index: 1, path: path.join(scratch, "ok.mov") }] }], count: 1 };
+  const client = new StubClient((name, args) => {
+    if (name === "run_jsx" && args.code.includes("DO_NOT_SAVE")) return { closed: null, numItems: 0, file: null }; // fresh()
+    if (name === "run_jsx") return { file: path.join(scratch, "p.aep"), numItems: 1 }; // state(): a saved scratch project
+    if (name === "list_render_queue") return queue;
+    return { jobId: "j" };
+  });
+  const guard = new runner.ProjectGuard({ client, scratchRoots: [scratch] });
+  const fixture = { id: "r", recipe: 59, title: "r", steps: [{ call: "render_queue", args: { all: true } }] };
+  const ok = await runner.runFixture(fixture, { client, guard, scratchDir: scratch });
+  assert.equal(ok.status, "pass", ok.error);
+  queue.items[0].outputs.push({ index: 2, path: "/Users/m/Desktop/repointed.mov" }); // what a run_jsx could do
+  const before = client.calls.filter((c) => c.name === "render_queue").length;
+  const refused = await runner.runFixture(fixture, { client, guard, scratchDir: scratch });
+  assert.equal(refused.status, "error");
+  assert.match(refused.error, /repointed\.mov.*outside the scratch folder/);
+  assert.equal(client.calls.filter((c) => c.name === "render_queue").length, before, "render_queue never reached the server");
 });
 
 await check("the starting project: only an empty untitled one is acceptable", () => {

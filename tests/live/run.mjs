@@ -183,10 +183,19 @@ async function cmdRun({ flags, values, rest }) {
     if (cleaned) return;
     cleaned = true;
     if (preflightPassed) {
+      // Through the server, BEFORE it is stopped: close the scratch project
+      // without saving and leave AE on an empty untitled one, as it was found.
+      // Done first because the scratch folder is deleted next — a project
+      // left open on deleted files is a dialog waiting for the maintainer.
       try {
-        await guard.fresh(); // leave AE on an empty untitled project, as it was found
+        if (client.child.exitCode !== null || client.child.signalCode !== null) throw new Error("the MCP server has already exited");
+        await guard.fresh();
       } catch (e) {
-        process.stderr.write(`Could not reset the scratch project: ${e.message}\n`);
+        process.stderr.write(
+          `\nCould not close the scratch project (${e.message}).\n` +
+            "After Effects may still have a scratch project open, saved in a folder this run is about to delete.\n" +
+            "Close it WITHOUT saving: File > Close Project, and answer Don't Save.\n"
+        );
       }
     }
     await client.close();

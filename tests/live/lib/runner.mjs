@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { checkCallResult, resolve } from "./fixtures.mjs";
-import { assertScratchPath, checkToolUse, forbiddenInCall, isInside } from "./safety.mjs";
+import { assertScratchPath, checkToolUse, forbiddenInCall, isInside, renderOutputsOutside } from "./safety.mjs";
 
 function readFileOrNull(f) {
   try {
@@ -140,6 +140,11 @@ async function runCall(step, scope, ctx, label) {
     if (!ctx.guard.isOurs(open?.file)) {
       throw new Error(`refused: ${use.needsOurProject.join(", ")} writes beside the open project, and ${open?.file ?? "an unsaved project"} is not a scratch project`);
     }
+  }
+  if (use.rendersQueue.length) {
+    const q = await ctx.client.callTool("list_render_queue", {});
+    const outside = q.isError ? [`could not read the render queue: ${q.text}`] : renderOutputsOutside(q.json, (p) => isInside(p, ctx.scratchDir));
+    if (outside.length) throw new Error(`refused: ${use.rendersQueue.join(", ")} — ${outside.join("; ")}`);
   }
   const token = step.progress ? `live-${process.pid}-${++tokenCounter}` : undefined;
   const t0 = Date.now();
