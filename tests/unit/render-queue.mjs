@@ -19,6 +19,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
@@ -29,7 +30,7 @@ const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "
 
 const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount } =
   await import(dist("render", "aerender.js"));
-const { aerenderCandidates, pidsWithMarker } = await import(dist("setup", "platform.js"));
+const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
 const { OpMutation } = await import(pathToFileURL(path.join(root, "packages", "shared", "dist", "schemas.js")).href);
 
@@ -261,14 +262,29 @@ await check("the measured aerender missing-footage line is caught", () => {
   assert.equal(loggedErrorCount("PROGRESS:  0:00:00:05 (6): 0 Seconds"), 0);
   assert.equal(loggedErrorCount("aerender WARNING: Composition “logged 3 errors” is empty"), 0);
 });
-await check("ps output is matched on the command line, never on this process", () => {
+await check("only aerender/aerendercore carrying THIS job's snapshot are its processes", () => {
+  const snap = "/var/folders/xx/T/ae-mcp-render/r_1_2/rq.aep";
   const out = [
-    "  101 /Applications/Adobe After Effects 2026/aerender -project /tmp/ae-mcp-render/r_1_2/rq.aep -rqindex 3",
-    "  102 /Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/aerendercore.app/Contents/MacOS/aerendercore -noui -project /private/tmp/ae-mcp-render/r_1_2/rq.aep -rqindex 3 -aerenderpid 101",
-    "  103 /bin/zsh",
-    `  ${process.pid} node server.js r_1_2`,
+    // aerender and its engine (the engine sees the /private spelling of the path).
+    "  101 /Applications/Adobe After Effects 2026/aerender -project /var/folders/xx/T/ae-mcp-render/r_1_2/rq.aep -rqindex 3",
+    "  102 /Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/aerendercore.app/Contents/MacOS/aerendercore -noui -project /private/var/folders/xx/T/ae-mcp-render/r_1_2/rq.aep -rqindex 3 -aerenderpid 101",
+    // Decoys: a shell line with the job id and the path, a non-aerender
+    // process holding the path, another job's engine, and this process.
+    "  103 /bin/zsh -c echo r_1_2 /var/folders/xx/T/ae-mcp-render/r_1_2/rq.aep",
+    "  104 /usr/bin/tail -f /var/folders/xx/T/ae-mcp-render/r_1_2/rq.aep",
+    "  105 /Applications/Adobe After Effects 2026/aerender -project /var/folders/xx/T/ae-mcp-render/r_9_9/rq.aep -rqindex 1",
+    "  106 grep aerender r_1_2",
+    `  ${process.pid} /usr/local/bin/aerender -project /var/folders/xx/T/ae-mcp-render/r_1_2/rq.aep`,
   ].join("\n");
-  assert.deepEqual(pidsWithMarker(out, "r_1_2"), [101, 102]);
+  assert.deepEqual(renderPidsFromPs(out, snap), [101, 102]);
+  assert.equal(isRenderProcessArgs("/opt/aerender-notes/edit -project /x/ae-mcp-render/r_1_2/rq.aep", snap), false);
+});
+await check("Windows: name AND command line, so the PowerShell search never matches itself", () => {
+  const snap = "C:\\Users\\u\\AppData\\Local\\Temp\\ae-mcp-render\\r_1_2\\rq.aep";
+  assert.equal(isRenderProcessWin("aerender.exe", '"C:\\Program Files\\Adobe\\Adobe After Effects 2026\\Support Files\\aerender.exe" -project C:\\Users\\u\\AppData\\Local\\Temp\\ae-mcp-render\\r_1_2\\rq.aep', snap), true);
+  assert.equal(isRenderProcessWin("powershell.exe", "powershell -Command Get-CimInstance ... ae-mcp-render\\r_1_2\\rq.aep", snap), false);
+  assert.equal(isRenderProcessWin("cmd.exe", "cmd /c echo r_1_2", snap), false);
+  assert.equal(isRenderProcessWin("aerender.exe", "aerender.exe -project C:\\other\\ae-mcp-render\\r_9_9\\rq.aep", snap), false);
 });
 await check("names and paths that merely contain the words do not fail a good render", () => {
   // The two examples from review: an output path and a comp name.
@@ -329,7 +345,9 @@ if (mode === "engine") {
   // process group, reparented away), carrying the job's -project path, and
   // deaf to SIGTERM.
   const project = args[args.indexOf("-project") + 1];
-  const g = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{}); setInterval(()=>{}, 1000)", "--", "-noui", "-project", project], { detached: true, stdio: "ignore" });
+  // Named aerendercore (a symlink to node), because only processes with that
+  // name are ever treated as the engine.
+  const g = spawn(process.env.FAKE_ENGINE, ["-e", "process.on('SIGTERM',()=>{}); setInterval(()=>{}, 1000)", "--", "-noui", "-project", project], { detached: true, stdio: "ignore" });
   g.unref();
   fs.writeFileSync(process.env.FAKE_GRANDCHILD, String(g.pid));
   fs.writeFileSync(out, "partial");
@@ -372,6 +390,10 @@ const t = setInterval(() => {
 `
 );
 fs.chmodSync(fake, 0o755);
+if (process.platform !== "win32") {
+  process.env.FAKE_ENGINE = path.join(tmp, "aerendercore");
+  fs.symlinkSync(process.execPath, process.env.FAKE_ENGINE);
+}
 
 const projectFile = path.join(tmp, "show.aep");
 // Snapshots from the runner tests go here, never into the real temp folder,
@@ -488,6 +510,26 @@ if (process.platform !== "win32") {
     assert.equal(report.stopped, true, report.note);
     assert.ok(!alive(engine), "the engine must be dead before stopped:true is reported");
     assert.equal(jobs.get(jobId).status, "cancelled");
+  });
+
+  await check("cancel never signals a decoy that mentions the job's snapshot", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, graceMs: 500 });
+    const out = path.join(tmp, "decoy.mov");
+    env("hang", out);
+    const { jobId } = runner.start(plan(out, 100), fake);
+    for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
+    const snapDir = path.join(runTmp, "ae-mcp-render", jobId);
+    const snapPath = path.join(snapDir, "show.aep");
+    // A non-aerender process whose arguments hold this job's snapshot path and id.
+    const decoy = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)", "--", jobId, snapPath], { detached: true, stdio: "ignore" });
+    decoy.unref();
+    await sleep(100);
+    const report = await runner.cancel(jobId);
+    assert.equal(report.stopped, true, report.note);
+    assert.ok(alive(decoy.pid), "a process that only mentions the snapshot must survive the cancel");
+    process.kill(decoy.pid, "SIGKILL");
+    try { process.kill(Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8")), "SIGKILL"); } catch {}
   });
 
   await check("exit 0 with missing footage is a failure, even with a fresh file on disk", async () => {

@@ -344,83 +344,188 @@ export function stopProcessTreeSync(pid: number, platform: NodeJS.Platform = pro
 }
 
 /**
- * Processes whose command line contains `marker`, other than this one.
+ * Finding a job's render processes — aerender and the engine it starts.
  *
  * Measured on macOS, AE 26.5 (live run of PR #143): aerender starts the render
  * engine as `…/aerendercore.app/Contents/MacOS/aerendercore -noui -project
  * <the job's snapshot> -rqindex N … -aerenderpid <aerender pid>`, with PPID 1
  * and a process group of its own from the start — so neither a group signal
  * nor a walk of aerender's children reaches it, and it ignored SIGTERM for 8s.
- * The job's snapshot path is unique to the job and is on that command line,
- * which makes it the handle that does reach it.
  *
- *   POSIX:   `ps -axww -o pid=,command=` (ww: never truncate the command).
- *   Windows: CIM's Win32_Process.CommandLine through PowerShell. UNVERIFIED —
- *            nobody has watched aerender.exe start its engine on Windows, so
- *            whether the engine is a child (`taskkill /T` already covers it)
- *            or detached like macOS is unknown; this covers both.
+ * A process is this job's only when BOTH hold: its executable is named
+ * `aerender` or `aerendercore` (`.exe` on Windows), and its arguments contain
+ * this job's snapshot path. The first matcher used the job id alone, and
+ * review found what that kills: any shell or agent command that merely
+ * mentions the id, and on Windows the PowerShell search itself — whose pid has
+ * usually exited and may be reused by the time `taskkill /T` runs, taking an
+ * unrelated process tree with it. Hence also: the searcher's own pid is
+ * excluded, and every pid is re-checked by name and arguments immediately
+ * before it is signalled (`isStillRenderProcess`).
  *
- * Returns [] when the lookup itself fails (no `ps`, PowerShell blocked); the
- * caller still has aerender's own exit to go on.
+ *   POSIX:   `ps -axww -o pid=,args=` (ww: never truncate). The executable is
+ *            the part of the arguments before the first ` -` flag — install
+ *            paths have spaces ("Adobe After Effects 2026"), flags start with
+ *            a dash after one.
+ *   Windows: CIM's Win32_Process (Name, CommandLine) through PowerShell.
+ *            UNVERIFIED — nobody has watched aerender.exe start its engine on
+ *            Windows. If the engine there is named something else (AfterFX),
+ *            this misses it; `taskkill /T` on aerender's own tree is then what
+ *            stops it, if it is a child.
  */
-export async function findProcessesByMarker(marker: string, platform: NodeJS.Platform = process.platform): Promise<number[]> {
+
+const RENDER_EXE = /^(?:aerender|aerendercore)(?:\.exe)?$/i;
+
+/** Snapshot path with separators normalised, for comparing against a command line. */
+function normSep(s: string): string {
+  return s.replace(/\\/g, "/");
+}
+
+/**
+ * The tail of a snapshot path that any spelling of it contains:
+ * `ae-mcp-render/<jobId>/<file>`. A /var vs /private/var symlink, or a
+ * Windows path with either slash, still ends in that.
+ */
+export function snapshotMarker(snapshotPath: string): string {
+  const parts = normSep(snapshotPath).split("/").filter(Boolean);
+  return parts.slice(-3).join("/");
+}
+
+/** POSIX: is this `ps` args string one of this job's render processes? Exported for the test. */
+export function isRenderProcessArgs(args: string, snapshotPath: string): boolean {
+  const flag = args.search(/\s-/);
+  const exe = (flag >= 0 ? args.slice(0, flag) : args).trim();
+  const base = normSep(exe).split("/").pop() ?? "";
+  if (!RENDER_EXE.test(base)) return false;
+  return normSep(args).includes(snapshotMarker(snapshotPath));
+}
+
+/** Windows: the same test over Win32_Process's Name and CommandLine. Exported for the test. */
+export function isRenderProcessWin(name: string, commandLine: string, snapshotPath: string): boolean {
+  if (!RENDER_EXE.test(name.trim())) return false;
+  return normSep(commandLine).includes(snapshotMarker(snapshotPath));
+}
+
+/** `ps -o pid=,args=` output → this job's render pids, never this process. Exported for the test. */
+export function renderPidsFromPs(psOutput: string, snapshotPath: string, selfPid: number = process.pid): number[] {
+  const out: number[] = [];
+  for (const line of psOutput.split(/\r?\n/)) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pid === selfPid) continue;
+    if (isRenderProcessArgs(m[2], snapshotPath)) out.push(pid);
+  }
+  return out;
+}
+
+/**
+ * PowerShell that prints `pid<TAB>name<TAB>commandline` per process, for the
+ * named render executables only, never itself ($PID). The node side applies
+ * the same `isRenderProcessWin` test, so the filter here only narrows.
+ */
+function winQuery(pidFilter?: number): string {
+  const filter =
+    pidFilter !== undefined
+      ? `ProcessId=${pidFilter}`
+      : "Name='aerender.exe' OR Name='aerendercore.exe'";
+  return (
+    `Get-CimInstance Win32_Process -Filter "${filter}" | Where-Object { $_.ProcessId -ne $PID } | ` +
+    "ForEach-Object { \"$($_.ProcessId)`t$($_.Name)`t$($_.CommandLine)\" }"
+  );
+}
+
+function winRows(stdout: string, snapshotPath: string): number[] {
+  const out: number[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const [pidS, name = "", cmd = ""] = line.split("\t");
+    const pid = Number(pidS);
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    if (isRenderProcessWin(name, cmd, snapshotPath)) out.push(pid);
+  }
+  return out;
+}
+
+const PS_ARGS = ["-axww", "-o", "pid=,args="];
+
+/** This job's render processes. [] when the lookup itself fails — aerender's own exit is still known. */
+export async function findRenderProcesses(snapshotPath: string, platform: NodeJS.Platform = process.platform): Promise<number[]> {
   try {
     if (platform === "win32") {
-      const ps = `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains(${psQuote(marker)}) } | ForEach-Object { $_.ProcessId }`;
-      const { stdout } = await exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], { windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
-      return parsePids(stdout);
+      const { stdout } = await exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", winQuery()], { windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+      return winRows(stdout, snapshotPath);
     }
-    const { stdout } = await exec("ps", ["-axww", "-o", "pid=,command="], { maxBuffer: 64 * 1024 * 1024 });
-    return pidsWithMarker(stdout, marker);
+    const { stdout } = await exec("ps", PS_ARGS, { maxBuffer: 64 * 1024 * 1024 });
+    return renderPidsFromPs(stdout, snapshotPath);
   } catch {
     return [];
   }
 }
 
 /** The synchronous form, for `process.on("exit")` and signal handlers. */
-export function findProcessesByMarkerSync(marker: string, platform: NodeJS.Platform = process.platform): number[] {
+export function findRenderProcessesSync(snapshotPath: string, platform: NodeJS.Platform = process.platform): number[] {
   try {
     if (platform === "win32") {
-      const ps = `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains(${psQuote(marker)}) } | ForEach-Object { $_.ProcessId }`;
-      return parsePids(execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], { windowsHide: true, encoding: "utf8" }));
+      return winRows(
+        execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", winQuery()], { windowsHide: true, encoding: "utf8" }),
+        snapshotPath
+      );
     }
-    return pidsWithMarker(execFileSync("ps", ["-axww", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }), marker);
+    return renderPidsFromPs(execFileSync("ps", PS_ARGS, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }), snapshotPath);
   } catch {
     return [];
   }
 }
 
-/** `ps -o pid=,command=` output → the pids whose command contains `marker`. Exported for the test. */
-export function pidsWithMarker(psOutput: string, marker: string): number[] {
-  const out: number[] = [];
-  for (const line of psOutput.split(/\r?\n/)) {
-    const m = /^\s*(\d+)\s+(.*)$/.exec(line);
-    if (!m) continue;
-    const pid = Number(m[1]);
-    if (pid === process.pid) continue;
-    if (m[2].includes(marker)) out.push(pid);
+/**
+ * Whether `pid` is, right now, still one of this job's render processes. Asked
+ * immediately before every signal: between the search and the kill, a process
+ * can exit and its pid be given to something else.
+ */
+export async function isStillRenderProcess(pid: number, snapshotPath: string, platform: NodeJS.Platform = process.platform): Promise<boolean> {
+  try {
+    if (platform === "win32") {
+      const { stdout } = await exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", winQuery(pid)], { windowsHide: true });
+      return winRows(stdout, snapshotPath).includes(pid);
+    }
+    const { stdout } = await exec("ps", ["-ww", "-o", "args=", "-p", String(pid)]);
+    return isRenderProcessArgs(stdout.trim(), snapshotPath);
+  } catch {
+    return false; // gone (ps exits non-zero for a pid that does not exist)
   }
-  return out;
 }
 
-function parsePids(s: string): number[] {
-  return s
-    .split(/\r?\n/)
-    .map((l) => Number(l.trim()))
-    .filter((n) => Number.isInteger(n) && n > 0 && n !== process.pid);
+export function isStillRenderProcessSync(pid: number, snapshotPath: string, platform: NodeJS.Platform = process.platform): boolean {
+  try {
+    if (platform === "win32") {
+      return winRows(
+        execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", winQuery(pid)], { windowsHide: true, encoding: "utf8" }),
+        snapshotPath
+      ).includes(pid);
+    }
+    return isRenderProcessArgs(execFileSync("ps", ["-ww", "-o", "args=", "-p", String(pid)], { encoding: "utf8" }).trim(), snapshotPath);
+  } catch {
+    return false;
+  }
 }
 
-function psQuote(s: string): string {
-  return "'" + s.replace(/'/g, "''") + "'";
-}
-
-/** Signal one process (not a group). Windows has only the forceful kill. Never throws. */
+/**
+ * Signal ONE process — never its tree; a verified pid is all this kills.
+ * Windows has only the forceful kill. Never throws.
+ */
 export async function stopPid(pid: number, force: boolean, platform: NodeJS.Platform = process.platform): Promise<void> {
   if (platform === "win32") {
-    try { await exec("taskkill", ["/PID", String(pid), "/T", "/F"]); } catch {}
+    try { await exec("taskkill", ["/PID", String(pid), "/F"]); } catch {}
     return;
   }
   try { process.kill(pid, force ? "SIGKILL" : "SIGTERM"); } catch {}
+}
+
+export function stopPidSync(pid: number, platform: NodeJS.Platform = process.platform): void {
+  if (platform === "win32") {
+    try { execFileSync("taskkill", ["/PID", String(pid), "/F"], { stdio: "ignore", windowsHide: true }); } catch {}
+    return;
+  }
+  try { process.kill(pid, "SIGKILL"); } catch {}
 }
 
 /** Whether a pid is still alive. */

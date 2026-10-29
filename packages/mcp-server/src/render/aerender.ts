@@ -5,10 +5,13 @@ import path from "node:path";
 import type { JobManager } from "../jobs/manager.js";
 import { logger } from "../util/logger.js";
 import {
-  findProcessesByMarker,
-  findProcessesByMarkerSync,
+  findRenderProcesses,
+  findRenderProcessesSync,
+  isStillRenderProcess,
+  isStillRenderProcessSync,
   pidAlive,
   stopPid,
+  stopPidSync,
   stopProcessTree,
   stopProcessTreeSync,
   treeSpawnOptions,
@@ -297,11 +300,13 @@ export interface RenderRunnerOptions {
   /** How a process tree is stopped. The platform's, unless a test needs one that fails. */
   stop?: (pid: number, force: boolean) => Promise<void>;
   /**
-   * Render-engine processes for a job, found by the job's snapshot path on
-   * their command line. The platform's (`findProcessesByMarker`), unless a test
-   * needs one that finds nothing.
+   * This job's render processes — executable aerender/aerendercore AND the
+   * job's snapshot path in the arguments. The platform's
+   * (`findRenderProcesses`), unless a test needs one that finds nothing.
    */
-  findEngines?: (marker: string) => Promise<number[]>;
+  findEngines?: (snapshotPath: string) => Promise<number[]>;
+  /** Re-check of one pid immediately before it is signalled (`isStillRenderProcess`). */
+  confirmEngine?: (pid: number, snapshotPath: string) => Promise<boolean>;
 }
 
 /**
@@ -513,7 +518,8 @@ export class RenderRunner {
   private readonly onRendered?: RenderRunnerOptions["onRendered"];
   private readonly tmpRoot: string;
   private readonly stop: (pid: number, force: boolean) => Promise<void>;
-  private readonly findEngines: (marker: string) => Promise<number[]>;
+  private readonly findEngines: (snapshotPath: string) => Promise<number[]>;
+  private readonly confirmEngine: (pid: number, snapshotPath: string) => Promise<boolean>;
   private disarm: (() => void) | null = null;
 
   constructor(private jobs: JobManager, opts: RenderRunnerOptions = {}) {
@@ -521,7 +527,8 @@ export class RenderRunner {
     this.onRendered = opts.onRendered;
     this.tmpRoot = opts.tmpRoot ?? os.tmpdir();
     this.stop = opts.stop ?? ((pid, force) => stopProcessTree(pid, force));
-    this.findEngines = opts.findEngines ?? ((marker) => findProcessesByMarker(marker));
+    this.findEngines = opts.findEngines ?? ((snap) => findRenderProcesses(snap));
+    this.confirmEngine = opts.confirmEngine ?? ((pid, snap) => isStillRenderProcess(pid, snap));
   }
 
   /**
@@ -649,7 +656,8 @@ export class RenderRunner {
             `aerender finished ${label} (exit ${outcome.code}) but reported ` +
               (outcome.missing.some(isMissingFootageLine) ? "missing footage" : "errors logged during the render") +
               `, so the file at ${item.outputs.map((x) => x.path).join(", ")} cannot be trusted — it may hold ` +
-              `After Effects' missing-footage placeholder, or be unreadable. It is NOT reported as rendered. ` +
+              `After Effects' missing-footage placeholder, or be unreadable. It is NOT reported as rendered. The file ` +
+              `was left in place: if the user opens it and judges the errors below harmless, it is theirs to use. ` +
               `aerender said: ` +
               `${outcome.missing.join(" | ")}.` +
               missingFootageHint(outcome.missing) +
@@ -889,7 +897,7 @@ export class RenderRunner {
    * with PPID 1 and a process group of its own, which ignored SIGTERM for 8s and
    * kept rendering at 3 GB after aerender was gone. Signalling aerender's group
    * reached aerender only. So the engine is found by the job's snapshot path on
-   * its command line (`findProcessesByMarker`), both are asked to stop, and
+   * its command line (`findRenderProcesses`), both are asked to stop, and
    * anything still alive after `graceMs` is killed outright.
    *
    * `stopped` is only true when aerender has been *seen* to exit AND no process
@@ -921,19 +929,19 @@ export class RenderRunner {
     if (child && child.pid !== undefined && exited) {
       // Polite first: aerender's tree, and every engine for this job.
       await this.stop(child.pid, false);
-      for (const pid of await this.findEngines(engineMarker(r))) await stopPid(pid, false);
+      await this.signalEngines(r, false);
       aerenderGone = await within(exited, this.graceMs);
       survivors = await this.engineSurvivors(r, this.graceMs);
       if (!aerenderGone || survivors.length) {
         // Then not: SIGKILL (Windows: taskkill /F, which was already forceful).
         if (!aerenderGone) await this.stop(child.pid, true);
-        for (const pid of await this.findEngines(engineMarker(r))) await stopPid(pid, true);
+        await this.signalEngines(r, true);
         if (!aerenderGone) aerenderGone = await within(exited, this.graceMs);
         survivors = await this.engineSurvivors(r, this.graceMs);
       }
     } else {
       // Between two items there is no aerender, but an engine could linger.
-      for (const pid of await this.findEngines(engineMarker(r))) await stopPid(pid, true);
+      await this.signalEngines(r, true);
       survivors = await this.engineSurvivors(r, this.graceMs);
     }
     let stopped = aerenderGone && survivors.length === 0;
@@ -975,11 +983,26 @@ export class RenderRunner {
     return report;
   }
 
+  /**
+   * Signal this job's render processes, each re-checked by name and arguments
+   * the moment before — a pid found a second ago may belong to something else
+   * now. Returns how many were signalled.
+   */
+  private async signalEngines(r: Running, force: boolean): Promise<number> {
+    let n = 0;
+    for (const pid of await this.findEngines(r.snapshot)) {
+      if (!(await this.confirmEngine(pid, r.snapshot))) continue;
+      await stopPid(pid, force);
+      n++;
+    }
+    return n;
+  }
+
   /** Engine processes for this job still alive after waiting up to `ms` for them to go. */
   private async engineSurvivors(r: Running, ms: number): Promise<number[]> {
     const deadline = Date.now() + ms;
     for (;;) {
-      const alive = (await this.findEngines(engineMarker(r))).filter(pidAlive);
+      const alive = (await this.findEngines(r.snapshot)).filter(pidAlive);
       if (!alive.length || Date.now() >= deadline) return alive;
       await new Promise((res) => setTimeout(res, 100));
     }
@@ -988,9 +1011,8 @@ export class RenderRunner {
   /** After a job ends, however it ends: no engine for it may outlive it. */
   private async reapEngines(r: Running): Promise<void> {
     try {
-      const pids = await this.findEngines(engineMarker(r));
-      for (const pid of pids) await stopPid(pid, true);
-      if (pids.length) logger.warn(`render ${r.jobId}: killed ${pids.length} render engine process(es) left after the job ended`);
+      const n = await this.signalEngines(r, true);
+      if (n) logger.warn(`render ${r.jobId}: killed ${n} render engine process(es) left after the job ended`);
     } catch {}
   }
 
@@ -1001,8 +1023,8 @@ export class RenderRunner {
     // The engine is outside aerender's tree (see cancel), so it is found by
     // the snapshot path; SIGKILL, because nothing async runs here.
     if (r) {
-      for (const p of findProcessesByMarkerSync(engineMarker(r))) {
-        try { process.kill(p, "SIGKILL"); } catch {}
+      for (const p of findRenderProcessesSync(r.snapshot)) {
+        if (isStillRenderProcessSync(p, r.snapshot)) stopPidSync(p);
       }
     }
     if (r) {
@@ -1042,14 +1064,3 @@ export function logRenderStart(jobId: string, aerender: string, plan: RenderPlan
   logger.info(`render ${jobId}: ${aerender} on ${plan.projectPath}, items ${plan.items.map((i) => i.index).join(",")}`);
 }
 
-/**
- * What identifies this job's processes on their command lines: the job id. It
- * is the snapshot's folder name (`ae-mcp-render/<jobId>/…`), so it is inside
- * the `-project` argument aerender and its engine both carry. The id rather
- * than the whole path, so a path spelled differently on the way through (a
- * /var vs /private/var symlink, Windows slash normalisation) still matches;
- * `r_<epoch ms>_<n>` occurs on no other command line.
- */
-export function engineMarker(r: { jobId: string }): string {
-  return r.jobId;
-}
