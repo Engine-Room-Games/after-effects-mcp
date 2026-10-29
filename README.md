@@ -304,7 +304,7 @@ These switches limit what your assistant can do through this connection. They do
 ---
 
 <details>
-<summary><b>🧰 All 84 tools</b></summary>
+<summary><b>🧰 All 85 tools</b></summary>
 
 <br>
 
@@ -326,7 +326,7 @@ These switches limit what your assistant can do through this connection. They do
 | Audio (1) | `place_audio_cues` — a whole cue list placed as one undo step |
 | Motion Graphics (1) | `export_mogrt` — export a comp as a `.mogrt` template for Premiere |
 | Render queue (4) | `add_to_render_queue`, `list_render_queue`, `remove_render_item`, `render_queue` — render in the background, with progress and cancel |
-| Explore (2) | `get_project_summary`, `find_layers` |
+| Explore (3) | `get_project_summary`, `find_layers`, `get_selection` — what the user has selected and where the playhead is |
 | Raw (1) | `run_jsx` |
 | House style (2) | `get_house_style`, `set_house_style` |
 | Jobs (3) | `await_job`, `get_job`, `cancel_job` |
