@@ -14,6 +14,10 @@ placing a shape layer at a sane origin and scoring a scene all have tools, and
 each wraps a trap on this page. The whole `OPS` table is in scope, so a script
 can call any tool as a function and keep to the DOM for the part no tool covers.
 
+If `run_jsx` is not in your tool list, the user has switched it off, and
+`run_batch` refuses a step that names it. Nothing on this page applies; say
+the task needs a script rather than looking for another way to run one.
+
 ## How much one call can do
 
 - **Timeouts.** A call gets 120 s by default; `run_jsx`, `run_batch`, the two

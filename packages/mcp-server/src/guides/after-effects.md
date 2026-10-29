@@ -31,6 +31,11 @@ skill, the file beside this one:
 Two topics are siblings rather than references: `style-guide`, for capturing the
 user's look, and `ae-setup`, for a connection that is not working.
 
+The user can start this server **read-only** (only the tools that look) or with
+**`run_jsx` switched off**. Either way the missing tools are simply absent from
+your tool list, though this guidance still names them. When a task needs one
+you do not have, tell the user it is switched off; do not route around it.
+
 ## Read the house style first
 
 `get_house_style` returns the project's style guide — palette, type, motion

@@ -28,7 +28,7 @@ All of them except the tool descriptions come from
 markdown, never the outputs.** The same script generates
 `packages/mcp-server/src/prompts/*.md` into MCP prompts and Claude Code commands.
 
-Three rules that keep this honest:
+Four rules that keep this honest:
 
 - **`instructions` is always resident in every session, so it stays short.** It
   says three things: that the session is live, where the real guidance is, and
@@ -43,6 +43,18 @@ Three rules that keep this honest:
 - **`ae_guide` exists because the better carriers are not universal.** Some
   clients drop `instructions`; fewer support resources. Tools are the floor
   every client reaches, so the guidance has to be available as one.
+- **The generated text names every tool; the running server may not offer
+  them all.** Read-only mode and the `run_jsx` switch (issue #135) remove tools
+  at startup, and nothing generated at build time can know which. So the
+  server prepends a runtime notice — `policyNotice()` in `tools/policy.ts` — to
+  `instructions`, `ae_guide`, the resources and the prompts when a switch is
+  on, and adds nothing when both are off. The skill is the one carrier the
+  server cannot reach at runtime, which is why `after-effects.md` and
+  `extendscript-gotchas.md` each carry one static sentence saying tools may be
+  absent. Do not write per-mode variants of a guide: one notice in front of the
+  shared text is the whole mechanism. The notice is exempt from the 1,500-character
+  `instructions` ceiling because only a session that switched something off pays it. See
+  "Tool switches" in [architecture.md](architecture.md).
 - **Only the skill has a per-session cost, so only the skill splits.** A guide
   with `reference: <parent>` in its frontmatter is still a full `ae_guide` topic
   and a full `ae://guide/…` resource — narrowing that half would be a reach

@@ -22,6 +22,16 @@ import type { CompFingerprint } from "./snapshots/store.js";
 import { descriptions } from "./tools/descriptions.js";
 import { AeError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
 import { resolveRunJsxSource, type RunJsxArgs } from "./tools/runJsxSource.js";
+import {
+  disabledOps,
+  disabledToolMessage,
+  logPolicy,
+  policyFromEnv,
+  refusedBatchSteps,
+  withPolicyNotice,
+  type ToolPolicy,
+} from "./tools/policy.js";
+import { findUnsafeArgKeys, unsafeArgsMessage } from "./util/argsSafety.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
@@ -102,9 +112,20 @@ export interface CreateServerOptions {
    * the drift path can be exercised without asking anything real on the machine.
    */
   bridge?: HttpClient;
+  /**
+   * Which tools to offer, instead of the one read from `AE_MCP_READ_ONLY` and
+   * `AE_MCP_DISABLE_RUN_JSX`. Lets a test build each mode in one process.
+   */
+  policy?: ToolPolicy;
 }
 
 export function createServer(opts: CreateServerOptions = {}) {
+  // Decided once, here: a tool list that changed mid-session would need a
+  // list_changed notification, and nothing about these switches is dynamic.
+  const policy = opts.policy ?? policyFromEnv();
+  const disabled = disabledOps(policy);
+  logPolicy(policy);
+
   const server = new Server(
     { name: "after-effects-mcp", version: "0.5.2" },
     {
@@ -112,7 +133,10 @@ export function createServer(opts: CreateServerOptions = {}) {
       // Clients that honour this fold it into the system prompt, which is the
       // only way non-Claude clients get the cross-cutting guidance at all —
       // skills and slash commands do not exist outside Claude's own clients.
-      instructions: SERVER_INSTRUCTIONS,
+      // With a switch on, prefixed by the sentence naming what is absent —
+      // the generated text names every tool and cannot know which were
+      // registered. Byte-identical to before when both switches are off.
+      instructions: withPolicyNotice(policy, SERVER_INSTRUCTIONS),
     }
   );
 
@@ -171,7 +195,9 @@ export function createServer(opts: CreateServerOptions = {}) {
 
   // ---------- tools/list ----------
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = Object.keys(OpSchemas).map((name) => ({
+    // A switched-off tool is not listed at all, rather than listed and
+    // refusing: a tool the model never sees is one it never plans around.
+    const tools = Object.keys(OpSchemas).filter((name) => !disabled.has(name)).map((name) => ({
       name,
       description: descriptions[name] ?? `AE op: ${name}`,
       inputSchema: toolInputSchema(name) as any,
@@ -202,7 +228,10 @@ export function createServer(opts: CreateServerOptions = {}) {
       messages: [
         {
           role: "user" as const,
-          content: { type: "text" as const, text: prompt.body.replaceAll("$ARGUMENTS", given) },
+          content: {
+            type: "text" as const,
+            text: withPolicyNotice(policy, prompt.body.replaceAll("$ARGUMENTS", given)),
+          },
         },
       ],
     };
@@ -224,7 +253,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       ? getGuide(uri.slice(GUIDE_URI_PREFIX.length))
       : undefined;
     if (!guide) throw new Error(`Unknown resource: ${uri}`);
-    return { contents: [{ uri, mimeType: "text/markdown", text: guide.body }] };
+    return { contents: [{ uri, mimeType: "text/markdown", text: withPolicyNotice(policy, guide.body) }] };
   });
 
   // ---------- tools/call ----------
@@ -236,6 +265,15 @@ export function createServer(opts: CreateServerOptions = {}) {
     if (!(name in OpSchemas) && !SERVER_OPS.has(name)) {
       return errorResult(`Unknown tool: ${name}`);
     }
+    // Not annotated from the journal, like `Unknown tool`: this is the user's
+    // configuration answering, and no entry about a past failure applies.
+    const off = disabled.get(name);
+    if (off !== undefined) return errorResult(disabledToolMessage(name, off));
+    // Before anything else reads them, for every op: a `__proto__` key can
+    // become a prototype on the ExtendScript side and hide a value from every
+    // check made here. See util/argsSafety.ts for why the scope is all ops.
+    const unsafe = findUnsafeArgKeys(rawArgs);
+    if (unsafe.length > 0) return errorResult(unsafeArgsMessage(name, unsafe));
 
     // Server-resident ops
     if (SERVER_OPS.has(name)) {
@@ -324,7 +362,7 @@ export function createServer(opts: CreateServerOptions = {}) {
             // tools/whatsNew.ts. The version on the first line is the server's
             // own, read from package.json, because the guide cannot know it.
             const rendered = renderWhatsNew(guide.body, { since: a.since, serverVersion: packageVersion() });
-            return { content: [{ type: "text" as const, text: rendered.text }] };
+            return { content: [{ type: "text" as const, text: withPolicyNotice(policy, rendered.text) }] };
           }
           if (a.since !== undefined) {
             // Refused rather than ignored: a filter that silently did not apply
@@ -334,7 +372,7 @@ export function createServer(opts: CreateServerOptions = {}) {
                 `Call ae_guide({topic: "${a.topic}"}) without \`since\`, or ae_guide({topic: "whats-new", since: "${a.since}"}) for what changed.`
             );
           }
-          return { content: [{ type: "text" as const, text: guide.body }] };
+          return { content: [{ type: "text" as const, text: withPolicyNotice(policy, guide.body) }] };
         }
         if (name === "log_issue") {
           const a = schemas.LogIssue.parse(rawArgs);
@@ -397,6 +435,23 @@ export function createServer(opts: CreateServerOptions = {}) {
       args = (OpSchemas[name as keyof typeof OpSchemas] as z.ZodType).parse(rawArgs);
     } catch (e) {
       return fail(name, invalidArgsText(name, e));
+    }
+
+    // A batch step goes straight to the ExtendScript OPS table, so a step
+    // naming a switched-off op is that op by another route — `run_jsx` inside
+    // `run_batch` runs the script exactly as `run_jsx` would, and so does one
+    // inside a `run_batch` nested in it, at any depth. Refused whole, before
+    // anything reaches After Effects, and every offending step named.
+    if (name === "run_batch" && disabled.size > 0) {
+      const refused = refusedBatchSteps((args as { ops: unknown[] }).ops, policy);
+      if (refused.length > 0) {
+        return errorResult(
+          `run_batch refused, and nothing in the batch was run: ` +
+            refused.map((r) => `${r.path} (${r.op}) — ${r.reason}`).join("; ") +
+            `. Remove ${refused.length === 1 ? "that step" : "those steps"}, or tell the user the tool is switched off; ` +
+            `do not try to do the same thing through another tool.`
+        );
+      }
     }
 
     // run_jsx can take its script, and its helper libraries, from files rather
