@@ -212,6 +212,26 @@ check("a property AE says it cannot add is refused, naming its value type and th
   assert.equal(names.length, 0);
 });
 
+check("a property already in the panel is named as such, not as the wrong kind", () => {
+  const { call, log } = scene({ canAdd: false, existing: ["Title", "Source Text"] });
+  const msg = messageOf(call);
+  assert.match(msg, /already in the Essential Graphics panel as "Source Text"/);
+  assert.doesNotMatch(msg, /expression control/);
+  assert.deepEqual(log, ["canAdd"]);
+});
+
+check("already present under the requested name is found too", () => {
+  const { call } = scene({ canAdd: false, existing: ["Headline"] });
+  assert.match(messageOf(() => call({ name: "Headline" })), /already in the Essential Graphics panel as "Headline"/);
+});
+
+check("an addable kind refused with no name match is reported as probably present", () => {
+  const { call } = scene({ canAdd: false, existing: ["Renamed"], valueType: PropertyValueType.COLOR });
+  const msg = messageOf(call);
+  assert.match(msg, /most likely already in the panel under another name/);
+  assert.doesNotMatch(msg, /expression control/);
+});
+
 check("an AE without the API is refused, saying so", () => {
   const { call } = scene({ noApi: true });
   assert.match(messageOf(call), /no scripting call for adding a property to Essential Graphics/);

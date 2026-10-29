@@ -453,6 +453,24 @@ function __propertyValueTypeLabel(prop) {
   return String(t);
 }
 
+/** A controller already named like this property (or the requested name), or null. */
+function __duplicateControllerName(comp, prop, requested) {
+  var names = __controllerNames(comp, __controllerCount(comp));
+  if (!names) return null;
+  var own = null;
+  try { own = String(prop.name); } catch (e) {}
+  for (var i = 0; i < names.length; i++) {
+    if ((own !== null && names[i] === own) || (requested !== null && names[i] === requested)) return names[i];
+  }
+  return null;
+}
+
+/** Value types the Essential Graphics panel takes, by AE's own enum. */
+function __isAddableValueType(prop) {
+  var t = __propertyValueTypeLabel(prop);
+  return t === "TEXT_DOCUMENT" || t === "COLOR" || t === "OneD" || t === "TwoD" || t === "TwoD_SPATIAL";
+}
+
 OPS.add_essential_property = function (args) {
   var comp = getCompById(args.compId);
   var layer = getLayerById(comp, args.layerId);
@@ -490,6 +508,27 @@ OPS.add_essential_property = function (args) {
   var can = false;
   try { can = prop.canAddToMotionGraphicsTemplate(comp) === true; } catch (eC) { can = false; }
   if (!can) {
+    // Measured live (#211 review): AE also answers false for a property that
+    // is already in the panel, and the "wrong kind" message below sent the
+    // reader to expression controls for a Source Text that was simply there.
+    // No API maps a controller back to its property, so this is matched by
+    // name — the property's own, or the one asked for — and, failing that, a
+    // value type the panel normally takes is reported as probably present.
+    var dup = __duplicateControllerName(comp, prop, hasName ? args.name : null);
+    if (dup !== null) {
+      throw new Error(
+        label + " is already in the Essential Graphics panel as \"" + dup + "\", so After Effects will " +
+        "not add it again. Nothing was added. Its controller is already there for export_mogrt; rename it " +
+        "by hand in Window > Essential Graphics if the label is wrong."
+      );
+    }
+    if (__isAddableValueType(prop)) {
+      throw new Error(
+        "After Effects refused to add " + label + " (value type " + __propertyValueTypeLabel(prop) + "), " +
+        "a kind the Essential Graphics panel normally takes, so it is most likely already in the panel " +
+        "under another name. Nothing was added. Check Window > Essential Graphics for this comp."
+      );
+    }
     throw new Error(
       "After Effects says " + label + " (value type " + __propertyValueTypeLabel(prop) + ") cannot go " +
       "into this comp's Essential Graphics panel. It takes Source Text, colours, checkboxes, single " +
