@@ -24,7 +24,7 @@ const outFile = path.join(serverPkg, "bin", "server.js");
 // Real npm dependencies stay external so npm installs them normally. `ws` in
 // particular MUST remain a resolvable directory on disk — setup_panel copies it
 // into the installed CEP extension, and a bundled copy could not be copied.
-const external = ["@modelcontextprotocol/sdk", "@modelcontextprotocol/sdk/*", "ws", "zod", "zod-to-json-schema"];
+const external = ["@modelcontextprotocol/sdk", "@modelcontextprotocol/sdk/*", "ws", "zod"];
 
 const bundleJsx = path.join(panelSrc, "jsx", "bundle.jsx");
 if (!fs.existsSync(bundleJsx)) {

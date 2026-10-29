@@ -34,9 +34,9 @@ const { resolveRunJsxSource } = await import(serverDist("tools", "runJsxSource.j
 const { OpSchemas, objectShapeOf } = await import(sharedDist("schemas.js"));
 
 const RunJsx = OpSchemas.run_jsx;
-// `RunJsx` carries a cross-field rule (`code` xor `scriptPath`), which makes it
-// a `ZodEffects` — and a `ZodEffects` has no `.shape`. `objectShapeOf` peels the
-// wrappers off, so this enumeration keeps working the next time a rule is added.
+// `RunJsx` carries a cross-field rule (`code` xor `scriptPath`). Under zod 3 that
+// wrapped it in a `ZodEffects` with no `.shape`; `objectShapeOf` reads the shape
+// either way, so this enumeration does not depend on which schemas carry a rule.
 const runJsxShape = objectShapeOf(RunJsx);
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ae-run-jsx-args-"));
@@ -68,7 +68,7 @@ try {
   /** Peel `.optional()`, `.default()`, `.nullable()` off to reach the real type. */
   const unwrap = (t) => {
     let cur = t;
-    for (let i = 0; i < 16 && cur?._def?.innerType; i++) cur = cur._def.innerType;
+    for (let i = 0; i < 16 && cur?._zod?.def?.innerType; i++) cur = cur._zod.def.innerType;
     return cur;
   };
 
@@ -81,19 +81,20 @@ try {
    */
   const sampleFor = (key, type) => {
     const inner = unwrap(type);
-    const kind = inner?._def?.typeName;
+    const def = inner?._zod?.def;
+    const kind = def?.type;
     switch (kind) {
-      case "ZodString": return `sample-${key}`;
-      case "ZodNumber": return 11370;
-      case "ZodBoolean": return true;
-      case "ZodArray": {
-        const el = unwrap(inner._def.type)?._def?.typeName;
-        if (el === "ZodString") return [`sample-${key}`];
-        if (el === "ZodNumber") return [1];
+      case "string": return `sample-${key}`;
+      case "number": return 11370;
+      case "boolean": return true;
+      case "array": {
+        const el = unwrap(def.element)?._zod?.def?.type;
+        if (el === "string") return [`sample-${key}`];
+        if (el === "number") return [1];
         break;
       }
-      case "ZodEnum": return inner._def.values[0];
-      case "ZodLiteral": return inner._def.value;
+      case "enum": return Object.values(def.entries)[0];
+      case "literal": return def.values[0];
       default: break;
     }
     throw new Error(

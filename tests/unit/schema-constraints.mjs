@@ -1,6 +1,6 @@
 // Constraints an agent can see before the call, not after it.
 //
-// `zod-to-json-schema` drops refinements. So a `.refine()` — "exactly one of
+// The JSON Schema converter drops refinements. So a `.refine()` — "exactly one of
 // these three", "not both of these two" — is enforced on the server and
 // **invisible** in the JSON Schema the model is shown. The only way an agent
 // learns such a rule is by breaking it: a call goes out, comes back rejected,
@@ -93,10 +93,10 @@ check(`all ${opNames.length} tool schemas exist and are objects`, () => {
 });
 
 check("every tool schema declares the dialect it actually is", () => {
-  // zod-to-json-schema stamps draft-07, which after the tuple rewrite is a
-  // false claim: `prefixItems` does not exist there, and `items:false` means
+  // zod-to-json-schema (the zod 3 converter) stamped draft-07, which after the
+  // tuple rewrite was a false claim: `prefixItems` does not exist there, and `items:false` means
   // "no array items at all" — so a consumer honouring the declared dialect
-  // would reject every colour and every 2D point in this API. It works today
+  // would have rejected every colour and every 2D point in this API. It worked
   // only because tool schemas are read as 2020-12 regardless of what they say.
   for (const [name, schema] of emitted) {
     if (!("$schema" in schema)) continue;
@@ -169,7 +169,7 @@ check("no op carries a refinement that is not a declared cross-field rule", () =
     unclassified,
     [],
     `Undeclared refinement(s): ${unclassified.join(", ")}\n\n` +
-      "zod-to-json-schema drops refinements, so this rule is enforced by the server and\n" +
+      "The JSON Schema converter drops refinements, so this rule is enforced by the server and\n" +
       "invisible in the schema the model is shown. The agent can only learn it by having a\n" +
       "call rejected — which is a wasted turn on every session that hits it.\n\n" +
       "Declare it with crossField() in packages/shared/src/schemas.ts. If the rule genuinely\n" +

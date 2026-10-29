@@ -2,7 +2,7 @@ import { z } from "zod";
 
 /**
  * Single source of truth for op input contracts. The MCP server uses these as
- * tool input schemas (via zod-to-json-schema). The ExtendScript side validates
+ * tool input schemas (via `z.toJSONSchema`). The ExtendScript side validates
  * loosely — it trusts that the MCP server already validated.
  */
 
@@ -42,7 +42,7 @@ const includeParam = <T extends [string, ...string[]]>(sections: T, hint: string
  * The rules about which *combinations* of fields are legal — "exactly one of
  * these three", "at least one of these two".
  *
- * **`zod-to-json-schema` drops refinements.** A `.refine()` is invisible in the
+ * **The JSON Schema conversion drops refinements.** A `.refine()` is invisible in the
  * JSON Schema the model is shown, so the only way an agent learns the rule is
  * by breaking it: the call goes out, the server rejects it, and a turn is spent
  * on something the tool definition could have said up front. Three separate
@@ -65,7 +65,7 @@ const includeParam = <T extends [string, ...string[]]>(sections: T, hint: string
  * in prose somewhere else is two statements that drift; the drift is invisible,
  * because the schema keeps working and only the *advice* goes stale.
  *
- * `tests/unit/schema-constraints.mjs` enumerates every `ZodEffects` in every op
+ * `tests/unit/schema-constraints.mjs` enumerates every refinement in every op
  * schema and fails on any that is not one of these — a refinement it cannot
  * classify is the exact thing it exists to catch, so it throws rather than
  * skipping.
@@ -173,29 +173,31 @@ export function crossFieldJsonSchema(rule: CrossFieldRule): Record<string, unkno
 /**
  * Attach a rule to an object schema.
  *
- * Returns a `ZodEffects`, so anything reaching for `.shape` on the result needs
- * `objectShapeOf()` instead — that is the one cost of this, and it is why the
- * helper exists.
+ * In zod 4 a refinement is a check on the schema itself rather than a wrapper
+ * around it, so the result is still a `ZodObject` with a `.shape`. The rule is
+ * stashed on the check, not on the schema: a schema can carry several checks,
+ * and each has to be classifiable on its own.
  */
-function crossField<T extends z.ZodTypeAny>(schema: T, rule: CrossFieldRule) {
+function crossField<T extends z.ZodType>(schema: T, rule: CrossFieldRule): T {
   const refined = schema.superRefine((value, ctx) => {
     if (crossFieldSatisfied(rule, value)) return;
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: "custom",
       message: crossFieldMessage(rule, crossFieldPresent(rule, value)),
       // The first field of the rule, so the issue has somewhere to point. The
       // message names all of them, which is the part that matters.
       path: [rule.fields[0]],
     });
-  });
-  Object.defineProperty(refined, CROSS_FIELD_RULE, { value: rule, enumerable: false });
+  }) as T;
+  const checks = (refined as unknown as { _zod: { def: { checks?: unknown[] } } })._zod.def.checks ?? [];
+  Object.defineProperty(checks[checks.length - 1], CROSS_FIELD_RULE, { value: rule, enumerable: false });
   return refined;
 }
 
-/** The rule attached to a schema node by `crossField`, if it carries one. */
-export function crossFieldRuleOf(node: unknown): CrossFieldRule | undefined {
-  if (!node || typeof node !== "object") return undefined;
-  return (node as Record<symbol, CrossFieldRule | undefined>)[CROSS_FIELD_RULE];
+/** The rule attached to a refinement check by `crossField`, if it carries one. */
+export function crossFieldRuleOf(check: unknown): CrossFieldRule | undefined {
+  if (!check || typeof check !== "object") return undefined;
+  return (check as Record<symbol, CrossFieldRule | undefined>)[CROSS_FIELD_RULE];
 }
 
 /**
@@ -205,46 +207,58 @@ export function crossFieldRuleOf(node: unknown): CrossFieldRule | undefined {
  */
 export const ARRAY_ELEMENT = "[]";
 
+interface ZodNodeDef {
+  type?: string;
+  checks?: { _zod?: { def?: { check?: string } } }[];
+  [k: string]: unknown;
+}
+
 /**
  * Every refinement in a schema, located.
  *
  * **A refinement with no rule on it is returned with `rule: undefined`**, and
  * that is the whole reason this returns a list rather than a map. The emission
- * pass and the guard test both need to see an unclassified `ZodEffects` — one
+ * pass and the guard test both need to see an unclassified refinement — one
  * is a constraint that will not reach the model, and silently walking past it
  * is the failure both of them exist to catch.
+ *
+ * A refinement is a `custom` check in the node's `checks` (zod 4). Size and
+ * range checks (`.min()`, `.max()`) are other check kinds, and the JSON Schema
+ * converter represents those, so they are not listed. A `.transform()` is a
+ * `pipe`, walked through its input side — the side a caller fills in.
  */
 export function crossFieldRulesIn(
   schema: unknown
 ): { path: string[]; rule: CrossFieldRule | undefined }[] {
   const found: { path: string[]; rule: CrossFieldRule | undefined }[] = [];
   const walk = (node: unknown, path: string[], depth: number): void => {
-    const def = (node as { _def?: { typeName?: string; [k: string]: unknown } } | undefined)?._def;
+    const def = (node as { _zod?: { def?: ZodNodeDef } } | undefined)?._zod?.def;
     if (!def || depth > 16) return;
-    switch (def.typeName) {
-      case "ZodEffects":
-        found.push({ path: [...path], rule: crossFieldRuleOf(node) });
-        return walk(def.schema, path, depth + 1);
-      case "ZodOptional":
-      case "ZodDefault":
-      case "ZodNullable":
-      case "ZodReadonly":
+    for (const check of def.checks ?? []) {
+      if (check?._zod?.def?.check === "custom") found.push({ path: [...path], rule: crossFieldRuleOf(check) });
+    }
+    switch (def.type) {
+      case "optional":
+      case "default":
+      case "prefault":
+      case "nullable":
+      case "readonly":
+      case "nonoptional":
         return walk(def.innerType, path, depth + 1);
-      case "ZodObject": {
-        const shape = (def.shape as () => Record<string, unknown>)();
+      case "pipe":
+        return walk(def.in, path, depth + 1);
+      case "object": {
+        const shape = def.shape as Record<string, unknown>;
         for (const key of Object.keys(shape)) walk(shape[key], [...path, key], depth + 1);
         return;
       }
-      case "ZodArray":
-        return walk(def.type, [...path, ARRAY_ELEMENT], depth + 1);
-      case "ZodUnion":
-      case "ZodDiscriminatedUnion": {
-        const options = def.options as unknown[] | Map<unknown, unknown>;
-        const list = Array.isArray(options) ? options : [...(options as Map<unknown, unknown>).values()];
+      case "array":
+        return walk(def.element, [...path, ARRAY_ELEMENT], depth + 1);
+      case "union": {
         // Union branches share one JSON Schema location, so a rule inside one
         // has nowhere unambiguous to be injected. None exists today; the walk
         // still descends so the guard test can refuse one that appears.
-        for (const opt of list) walk(opt, path, depth + 1);
+        for (const opt of def.options as unknown[]) walk(opt, path, depth + 1);
         return;
       }
       default:
@@ -256,19 +270,12 @@ export function crossFieldRulesIn(
 }
 
 /**
- * The object shape under any number of `.superRefine()` wrappers.
- *
- * `ZodEffects` has no `.shape`, so a schema gains one the day a cross-field
- * rule is attached to it — and the caller that broke is never the one that
- * added the rule.
+ * The object shape of an op schema. Under zod 3 a cross-field rule wrapped the
+ * object in a `ZodEffects` with no `.shape`; zod 4 keeps the object, so this is
+ * now a plain read. Kept so callers need not know which schemas carry a rule.
  */
-export function objectShapeOf(schema: unknown): Record<string, z.ZodTypeAny> | undefined {
-  let cur = schema as { _def?: { typeName?: string; schema?: unknown }; shape?: unknown };
-  for (let i = 0; i < 16 && cur?._def?.typeName === "ZodEffects"; i++) {
-    cur = cur._def.schema as typeof cur;
-  }
-  const shape = (cur as z.ZodObject<z.ZodRawShape> | undefined)?.shape;
-  return shape as Record<string, z.ZodTypeAny> | undefined;
+export function objectShapeOf(schema: unknown): Record<string, z.ZodType> | undefined {
+  return (schema as { shape?: Record<string, z.ZodType> } | undefined)?.shape;
 }
 
 // ---------- comps ----------
@@ -278,14 +285,14 @@ export const ListComps = z
   })
   .strict();
 export const GetComp = z.object({ compId: z.number() });
-export const GetCompTree = z.object({ compId: z.number(), depth: z.number().int().min(0).max(8).default(2).optional() });
+export const GetCompTree = z.object({ compId: z.number(), depth: z.number().int().min(0).max(8).optional().meta({ default: 2 }) });
 export const CreateComp = z.object({
   name: z.string().default("Untitled"),
   width: z.number().int().positive().default(1920),
   height: z.number().int().positive().default(1080),
   frameRate: z.number().positive().default(30),
   duration: z.number().positive().default(5),
-  pixelAspect: z.number().positive().default(1).optional(),
+  pixelAspect: z.number().positive().optional().meta({ default: 1 }),
   bgColor: Color.optional(),
 });
 export const SetComp = z.object({
@@ -302,7 +309,7 @@ export const SetComp = z.object({
 export const DeleteComp = z
   .object({
     compId: z.number(),
-    purgeUnusedSolids: z.boolean().default(false).optional()
+    purgeUnusedSolids: z.boolean().optional().meta({ default: false })
       .describe(
         "Also remove the solid footage items this comp's own layers used, once nothing else uses them. Off by default because a solid can be shared: one another comp still uses is kept and reported with the comps using it."
       ),
@@ -315,7 +322,7 @@ export const DuplicateComp = z
     name: z.string().optional().describe("Name for the copy. Omit to take AE's own ('<name> 2')."),
     folderId: z.number().optional()
       .describe("Project folder to put the copy in. Must be a folder item id from get_project_summary."),
-    deep: z.boolean().default(false).optional()
+    deep: z.boolean().optional().meta({ default: false })
       .describe(
         "Also duplicate the nested precomps and re-point the copy's layers at them. Off by default, which matches AE's own Duplicate: a shallow copy shares its nested comps with the original, so editing one edits both."
       ),
@@ -328,7 +335,7 @@ export const DuplicateComp = z
 export const SnapshotComp = z
   .object({
     compId: z.number(),
-    includeFingerprint: z.boolean().default(false).optional()
+    includeFingerprint: z.boolean().optional().meta({ default: false })
       .describe(
         "Return the fingerprint itself as well as its id. Off by default — returning it reintroduces exactly the context cost a snapshot exists to avoid."
       ),
@@ -338,7 +345,7 @@ export const DiffComp = z
   .object({
     since: z.string().describe("A snapshotId from an earlier snapshot_comp or diff_comp."),
     compId: z.number().optional().describe("Defaults to the comp the snapshot was taken of; pass it only to assert which comp you mean."),
-    includeFingerprint: z.boolean().default(false).optional()
+    includeFingerprint: z.boolean().optional().meta({ default: false })
       .describe("Return the new fingerprint as well as the diff. Off by default."),
   })
   .strict();
@@ -380,7 +387,7 @@ const effectParamFields = {
 export const GetLayerFull = z.object({
   compId: z.number(),
   layerId: z.number(),
-  includeChildren: z.boolean().default(false).optional(),
+  includeChildren: z.boolean().optional().meta({ default: false }),
   include: includeParam(
     ["transform", "effects", "masks", "markers", "bounds", "text", "shape", "source"],
     "the layer header alone"
@@ -405,8 +412,8 @@ export const GetLayerFull = z.object({
   // everything, and materials have to be off unless asked for.
   shapeMaterials: z
     .boolean()
-    .default(false)
     .optional()
+    .meta({ default: false })
     .describe(
       "Include each shape group's Material Options — the 48-property 3D extrusion block. Off by default: it applies only to an extruded shape under the Cinema 4D renderer, and on an ordinary 2D shape layer it is most of the bytes of the read. What was skipped is counted in the response."
     ),
@@ -427,7 +434,7 @@ export const CreateTextLayer = z.object({
   position: VecAny.optional(),
   tracking: z.number().optional()
     .describe("Letter-spacing. Omit it and the layer is created with tracking 0, because AE's addText() otherwise inherits whatever the user's Character panel was last left on (-20 is common) and the same call then renders differently on two machines. Not normalised when anchorAlign is 'none'."),
-  anchorAlign: z.enum(["left", "center", "right", "none"]).default("left").optional()
+  anchorAlign: z.enum(["left", "center", "right", "none"]).optional().meta({ default: "left" })
     .describe("How the text aligns to `position`, implemented as live paragraph justification with the anchor point left at [0,0]. Default 'left' makes `position` the start of the first baseline; 'center' and 'right' put it at the centre/end. Because it is justification rather than a measured anchor offset, the alignment stays correct when the Source Text changes later — retyped, driven by an expression, or edited through Essential Graphics. 'none' leaves AE's raw defaults alone: no justification, no anchor move, no tracking reset."),
   name: z.string().optional(),
 });
@@ -461,7 +468,7 @@ export const CreateLightLayer = z.object({
   intensity: z.number().optional(),
   position: VecAny.optional(),
 });
-export const DuplicateLayer = z.object({ compId: z.number(), layerId: z.number(), count: z.number().int().positive().default(1).optional() });
+export const DuplicateLayer = z.object({ compId: z.number(), layerId: z.number(), count: z.number().int().positive().optional().meta({ default: 1 }) });
 export const DeleteLayer = z.object({ compId: z.number(), layerId: z.number() });
 export const SetLayer = z.object({
   compId: z.number(),
@@ -495,7 +502,7 @@ export const ParentLayer = z.object({
   compId: z.number(),
   layerId: z.number(),
   parentLayerId: z.number().nullable(),
-  preserveTransform: z.boolean().default(true).optional()
+  preserveTransform: z.boolean().optional().meta({ default: true })
     .describe("Keep the layer visually where it is (what AE's UI does). Leave on unless you want the layer to jump into the parent's coordinate space."),
 });
 /**
@@ -530,7 +537,7 @@ export const SetTransform = z.object({
   compId: z.number(),
   layerId: z.number(),
   time: z.number().optional(),
-  keyframe: z.boolean().default(false).optional(),
+  keyframe: z.boolean().optional().meta({ default: false }),
   properties: z.object({
     position: VecAny.optional(),
     scale: VecAny.optional(),
@@ -622,7 +629,7 @@ export const SetEffectParam = crossField(
       .describe("Preferred. The parameter's matchName, e.g. 'ADBE Gaussian Blur 2-0001' — the same in every UI language. Tried before paramName when both are given."),
     value: VecAny,
     time: z.number().optional(),
-    keyframe: z.boolean().default(false).optional(),
+    keyframe: z.boolean().optional().meta({ default: false }),
   }),
   // Neither one is not a call with a default — it is a call that resolves no
   // property at all, and `effects.jsx` answers it with a bare "Effect param not
@@ -680,7 +687,7 @@ export const SetShapePath = z.object({
   vertices: z.array(Vec2),
   inTangents: z.array(Vec2).optional(),
   outTangents: z.array(Vec2).optional(),
-  closed: z.boolean().default(true).optional(),
+  closed: z.boolean().optional().meta({ default: true }),
 });
 /**
  * One closed variant per shape node type. These are `.strict()` on purpose: an
@@ -781,7 +788,7 @@ export const SetShapeProperty = z.object({
   property: z.string(),
   value: VecAny,
   time: z.number().optional(),
-  keyframe: z.boolean().default(false).optional(),
+  keyframe: z.boolean().optional().meta({ default: false }),
 });
 
 // ---------- masks ----------
@@ -791,10 +798,10 @@ export const AddMask = z.object({
   vertices: z.array(Vec2),
   inTangents: z.array(Vec2).optional(),
   outTangents: z.array(Vec2).optional(),
-  closed: z.boolean().default(true).optional(),
+  closed: z.boolean().optional().meta({ default: true }),
   // A key into AE's `MaskMode`, looked up by name in `masks.jsx`; an
   // unrecognised one leaves the mode alone rather than erroring.
-  mode: z.string().default("ADD").optional()
+  mode: z.string().optional().meta({ default: "ADD" })
     .describe("Mask blend mode: ADD (default), NONE, SUBTRACT, INTERSECT, LIGHTEN, DARKEN or DIFFERENCE. Anything else leaves the mode unchanged without erroring."),
 });
 export const SetMask = z.object({
@@ -819,7 +826,7 @@ export const AddMarker = z.object({
   compId: z.number(),
   layerId: z.number().optional(),
   time: z.number(),
-  duration: z.number().nonnegative().default(0).optional(),
+  duration: z.number().nonnegative().optional().meta({ default: 0 }),
   comment: z.string().optional(),
   label: z.number().int().min(0).max(16).optional(),
   chapter: z.string().optional(),
@@ -896,8 +903,8 @@ export const ScreenshotLayer = z.object({
  */
 const diffParam = z
   .boolean()
-  .default(false)
   .optional()
+  .meta({ default: false })
   .describe(
     "Fingerprint the comp before and after this call and append only what changed (layers added/removed/renamed/retimed/re-parented, keyframe counts, expression and effect counts). A few dozen tokens instead of reading the comp back. If the call fails, the diff of what landed before it stopped is appended to the error."
   );
@@ -908,12 +915,12 @@ const diffCompIdParam = z
 
 // ---------- batch ----------
 export const RunBatch = z.object({
-  ops: z.array(z.object({ op: z.string(), args: z.unknown() })),
-  transactional: z.boolean().default(true).optional()
+  ops: z.array(z.object({ op: z.string(), args: z.unknown().optional() })),
+  transactional: z.boolean().optional().meta({ default: true })
     .describe("Stop at the first failing op instead of running the rest. Nothing rolls back either way — the ops before the failure stay applied, and the error says where it stopped."),
-  undoGroupName: z.string().default("AE MCP Batch").optional()
+  undoGroupName: z.string().optional().meta({ default: "AE MCP Batch" })
     .describe("What the user sees in After Effects' Edit > Undo menu. A chunked batch numbers its steps from this, e.g. \"AE MCP Batch (3)\"."),
-  singleUndo: z.boolean().default(false).optional()
+  singleUndo: z.boolean().optional().meta({ default: false })
     .describe("Force the whole batch into ONE undo step, whatever its size, by running it in a single blocking ExtendScript call. Up to 2000 ops. The cost is real: After Effects' interface is frozen for the entire batch and no progress is reported, so the user sees nothing until it finishes. Without it a batch over 500 ops is chunked and lands as one undo step per chunk of 25 — the result reports the exact count. Reach for this only when the user has to be able to undo the work with a single Cmd-Z."),
   diff: diffParam,
   diffCompId: diffCompIdParam,
@@ -947,7 +954,7 @@ export const RunJsx = crossField(
       .describe("Absolute path to a .jsx file to run instead of `code`. The server reads it, so a long script never enters the conversation. Exactly one of `code` or `scriptPath`."),
     libraries: z.array(z.string()).optional()
       .describe("Absolute paths to .jsx files inlined ahead of the script, sharing its scope, so their functions are callable from it. The server reads them, so their text never enters the conversation. They are re-evaluated on every call — keep them to declarations, not to work. Put shared helpers here rather than pasting them into every script."),
-    undoGroup: z.boolean().default(true).optional()
+    undoGroup: z.boolean().optional().meta({ default: true })
       .describe("Wrap the script in one undo step. Set false only for the operations AE refuses while an undo group is open — copyToComp on a layer with a parent or a linked expression. The script's changes then land as whatever undo steps AE records on its own."),
     diff: diffParam,
     diffCompId: diffCompIdParam,
@@ -969,9 +976,9 @@ export const ImportFootage = z
   .object({
     path: z.string().min(1).describe("Absolute path to the file to import."),
     name: z.string().optional().describe("Rename the project item after import. Omit to keep the filename."),
-    sequence: z.boolean().default(false).optional()
+    sequence: z.boolean().optional().meta({ default: false })
       .describe("Import a numbered still as an image sequence rather than a single frame."),
-    force: z.boolean().default(false).optional()
+    force: z.boolean().optional().meta({ default: false })
       .describe(
         "Keep an item that failed validation instead of deleting it and throwing. The problem is still reported in `validation`. Only pass this when you know the dimensions are wrong and want the item anyway."
       ),
@@ -986,11 +993,11 @@ export const CreateFootageLayer = z.object({
 });
 export const PurgeUnusedFootage = z
   .object({
-    solidsOnly: z.boolean().default(true).optional()
+    solidsOnly: z.boolean().optional().meta({ default: true })
       .describe(
         "Only remove solids — the items behind solid and adjustment layers. Pass false to remove every footage item no comp uses, imported files and placeholders included, which is what AE's own Remove Unused Footage does. Comps and folders are never removed either way."
       ),
-    dryRun: z.boolean().default(false).optional()
+    dryRun: z.boolean().optional().meta({ default: false })
       .describe("List what would be removed without removing anything — not even an undo step."),
     folderId: z.number().optional()
       .describe("Restrict the sweep to one project folder and everything nested under it. A folder id from get_project_summary; omit for the whole project."),
@@ -1026,11 +1033,11 @@ export const PlaceAudioCues = z
   .object({
     compId: z.number(),
     cues: z.array(AudioCue).min(1).max(200),
-    namePrefix: z.string().default("SFX_").optional()
+    namePrefix: z.string().optional().meta({ default: "SFX_" })
       .describe("Prefix for cues that do not name themselves. Pass \"\" for no prefix."),
     fadeFloorDb: z.number().optional()
       .describe("The level in decibels that every fadeIn starts from and every fadeOut ends at. Default -48, the bottom of After Effects' own Audio Levels slider and 1/256 of the recorded amplitude — near-silence. Must be below each faded cue's levelDb. One floor for the whole list."),
-    dryRun: z.boolean().default(false).optional()
+    dryRun: z.boolean().optional().meta({ default: false })
       .describe("Resolve and check the whole list without importing, creating or changing anything — not even an undo step. Returns counts, the files it would import, the items it would reuse and the failing cues by index — never the whole resolved list."),
   })
   .strict();
@@ -1045,13 +1052,13 @@ export const ExportMogrt = z
       .describe(
         "Template name, which is also the output filename. Defaults to the comp name — AE's own default is the literal 'Untitled', so every scripted export would otherwise overwrite the same file."
       ),
-    overwrite: z.boolean().default(false).optional()
+    overwrite: z.boolean().optional().meta({ default: false })
       .describe("Required to replace an existing .mogrt at that path."),
     posterTime: z.number().optional()
       .describe(
         "Comp time to render as the template's still thumbnail, replacing the black one AE writes. Omit to leave AE's thumbnail alone."
       ),
-    suppressDialogs: z.boolean().default(true).optional()
+    suppressDialogs: z.boolean().optional().meta({ default: true })
       .describe(
         "Suppress the modal font warning during export. Leave true: an unsuppressed dialog freezes the bridge until someone clicks it in AE. Set false only to see the dialog deliberately."
       ),
@@ -1061,7 +1068,7 @@ export const ExportMogrt = z
 // ---------- house style (a markdown file beside the .aep, read over the bridge) ----------
 export const GetHouseStyle = z
   .object({
-    detail: z.enum(["summary", "full"]).default("summary").optional()
+    detail: z.enum(["summary", "full"]).optional().meta({ default: "summary" })
       .describe(
         "'summary' (default) is a few hundred tokens: palette as named hexes, type, motion defaults, layout rules, and what it could not summarise. 'full' returns the whole document — use it before editing the guide with set_house_style, or when the summary is not enough."
       ),
@@ -1070,7 +1077,7 @@ export const GetHouseStyle = z
 export const SetHouseStyle = z
   .object({
     content: z.string().min(1).describe("The complete style guide as markdown. Replaces the file, so send the whole document."),
-    overwrite: z.boolean().default(false).optional()
+    overwrite: z.boolean().optional().meta({ default: false })
       .describe("Required to replace an existing guide. Read it with get_house_style and merge first — this is not a patch."),
   })
   .strict();
@@ -1079,9 +1086,9 @@ export const SetHouseStyle = z
 // ---------- setup (handled in the MCP server, never forwarded to the panel) ----------
 export const CheckSetup = z.object({}).strict();
 export const SetupPanel = z.object({
-  enableDebugMode: z.boolean().default(true).optional()
+  enableDebugMode: z.boolean().optional().meta({ default: true })
     .describe("Also set Adobe's PlayerDebugMode preference, which AE requires to load this unsigned panel, and CEP's LogLevel where it was never set, so CEP's own log records why a panel failed to load (issue #91). Default true."),
-  force: z.boolean().default(false).optional()
+  force: z.boolean().optional().meta({ default: false })
     .describe("Replace an existing symlinked (development) install with a copy. Default false."),
 }).strict();
 
@@ -1126,9 +1133,9 @@ export const InitProject = z
       .describe("Folder to create or fill, absolute or relative to the server's working directory. Ask the user if you do not know; do not invent one."),
     name: z.string().optional().describe("Project name for the generated docs. Defaults to the folder name."),
     client: z.enum(["auto", "claude-code", "claude-desktop", "cursor", "vscode", "windsurf", "codex", "generic"])
-      .default("auto").optional()
+      .optional().meta({ default: "auto" })
       .describe("Which client's layout to write. 'auto' detects it from the MCP handshake — leave it alone unless the user says otherwise."),
-    withMcpConfig: z.boolean().default(false).optional()
+    withMcpConfig: z.boolean().optional().meta({ default: false })
       .describe("Also write a client MCP config pointing at this server. Default false: you are already connected, so the user does not need one."),
   })
   .strict();
@@ -1145,11 +1152,11 @@ export const LogIssue = z
       .describe(
         "The exact error text the failing call returned, verbatim. The next time a call to one of `tools` fails with matching text, its error names this entry — and a later log_issue with the same tool and error text extends this entry instead of creating a second one under a different title."
       ),
-    kind: z.enum(["tool-bug", "ae-quirk"]).default("tool-bug").optional()
+    kind: z.enum(["tool-bug", "ae-quirk"]).optional().meta({ default: "tool-bug" })
       .describe(
         "'tool-bug' (default): something these tools get wrong, which a later release may fix — so the entry is archived once it was last seen on an older server than the one running. 'ae-quirk': After Effects itself behaving unlike its documentation; no release changes that, so it is never archived by version."
       ),
-    scope: z.enum(["project", "user"]).default("project").optional()
+    scope: z.enum(["project", "user"]).optional().meta({ default: "project" })
       .describe(
         "'project' (default) for this project's footage, comps or files. 'user' for how these tools or After Effects behave — that journal travels with the person, so every future project starts knowing it. Reported back as 'home' when there is no project folder to write into."
       ),
@@ -1157,7 +1164,7 @@ export const LogIssue = z
   .strict();
 export const ListKnownIssues = z
   .object({
-    status: z.enum(["all", "unreported", "reported"]).default("all").optional(),
+    status: z.enum(["all", "unreported", "reported"]).optional().meta({ default: "all" }),
     tool: z.string().optional().describe("Only entries about this tool, e.g. 'set_temporal_ease'. Omit for everything."),
     query: z
       .string()
@@ -1169,18 +1176,18 @@ export const ListKnownIssues = z
       .describe("Read one entry in full — cause and workaround included — by the id from a previous listing. Ignores the filters. Ids are unique only within a journal, so prefix with the entry's scope ('user:my-entry') when the listing shows one in each."),
     detail: z
       .enum(["index", "full"])
-      .default("index")
       .optional()
+      .meta({ default: "index" })
       .describe(
         "'index' (default) is one line per entry: id, title, tools, kind, when and on which version it was last seen, counts — read the one you need with `id`. 'full' returns every matching entry's whole body and costs thousands of tokens."
       ),
-    scope: z.enum(["all", "project", "user"]).default("all").optional()
+    scope: z.enum(["all", "project", "user"]).optional().meta({ default: "all" })
       .describe(
         "Which journal to read. 'all' (default) merges this project's with the user's cross-project one and tags every entry with the scope it came from."
       ),
-    limit: z.number().int().positive().max(500).default(50).optional()
+    limit: z.number().int().positive().max(500).optional().meta({ default: 50 })
       .describe("Most entries to return. Anything held back is counted in `omitted`."),
-    includeArchived: z.boolean().default(false).optional()
+    includeArchived: z.boolean().optional().meta({ default: false })
       .describe(
         "Also list archived entries — not seen for 30 days, last seen on an older server than this one, or retired with archive_issue — each flagged with its reason. Default false: they are hidden and only counted in `archivedCount`. An `id` read always returns the entry, archived or not."
       ),
@@ -1199,7 +1206,7 @@ export const ArchiveIssue = z
   })
   .strict();
 
-export const AwaitJob = z.object({ jobId: z.string(), timeoutMs: z.number().int().positive().default(600_000).optional() });
+export const AwaitJob = z.object({ jobId: z.string(), timeoutMs: z.number().int().positive().optional().meta({ default: 600_000 }) });
 export const GetJob = z.object({ jobId: z.string() });
 export const CancelJob = z.object({ jobId: z.string() });
 

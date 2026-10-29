@@ -338,11 +338,14 @@ export function invalidArgsText(op: string, e: unknown): string {
     // A custom message is the whole reason for writing one, so it wins. The
     // type-error forms are rebuilt because zod's own reads "Required" with the
     // field name only in `path`, which is exactly the half that used to be lost.
+    // zod 4 issues carry no `received` field; the received type is only in the
+    // message ("Invalid input: expected string, received undefined").
     let text = issue.message ?? "invalid";
-    if (issue.code === "invalid_type" && issue.received === "undefined") {
+    const received = issue.received ?? /received (\w+)\s*$/.exec(issue.message ?? "")?.[1];
+    if (issue.code === "invalid_type" && received === "undefined") {
       text = "required, and was not passed";
     } else if (issue.code === "invalid_type" && issue.expected) {
-      text = `expected ${issue.expected}, got ${issue.received ?? "something else"}`;
+      text = `expected ${issue.expected}, got ${received ?? "something else"}`;
     }
     return where ? `  - ${where}: ${text}` : `  - ${text}`;
   });

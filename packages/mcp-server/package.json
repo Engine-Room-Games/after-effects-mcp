@@ -54,8 +54,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
     "ws": "^8.21.3",
-    "zod": "^3.23.8",
-    "zod-to-json-schema": "^3.23.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@engineroom/shared": "*",
