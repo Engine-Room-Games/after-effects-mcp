@@ -268,6 +268,24 @@ check("a time effect on a switched-on layer makes the whole comp read: Echo on a
   assert.match(prepare(top, { span: [2, 4] }).items[0].footageSkipped[0], /early\.mov/);
 });
 
+check("an unknown effect on an adjustment layer (Twixtor) reads other times; a listed one (Curves) does not", () => {
+  const build = (matchName, adjustmentLayer) => {
+    const top = comp("Main", [
+      layer({ name: "Adjust", source: footage("Adjustment Layer 1", { file: null }) }),
+      layer({ name: "Early", source: footage("early.mov", { missing: true }), inPoint: 0, outPoint: 1 }),
+    ]);
+    const adj = top.layer(1);
+    adj.adjustmentLayer = adjustmentLayer;
+    const fx = group([Object.assign(group([]), { matchName, name: matchName })]);
+    adj.property = (k) => (k === "ADBE Effect Parade" ? fx : null);
+    return top;
+  };
+  assert.match(throwsMsg(() => prepare(build("REVisionFX Twixtor", true), { span: [2, 4] })), /early\.mov/);
+  assert.match(prepare(build("ADBE CurvesCustom", true), { span: [2, 4] }).items[0].footageSkipped[0], /early\.mov/);
+  // On an ordinary layer an effect reads only that layer's own source.
+  assert.match(prepare(build("REVisionFX Twixtor", false), { span: [2, 4] }).items[0].footageSkipped[0], /early\.mov/);
+});
+
 check("with sampleImage in the render, present footage on a skipped layer is listed for the on-disk check", () => {
   const top = comp("Main", [
     layer({ name: "Ref", source: footage("ref.mov"), enabled: false }),

@@ -535,8 +535,25 @@ function __rqFootageUse(item) {
   // every layer below at earlier frames, so a layer that ends before the span
   // still reaches the render. A comp where any switched-on layer carries one
   // is read over all of its time. Matched loosely on match name and display
-  // name on purpose: a third-party time effect with a name like these costs a
-  // skip, an unrecognised one is the risk.
+  // name on purpose: a false match costs only a skip.
+  //
+  // A name list cannot know third-party effects (Twixtor, RSMB, …), and on an
+  // adjustment layer an unknown one is exactly the risk. So on an ADJUSTMENT
+  // layer the rule is inverted: every effect counts as reading other times
+  // unless its match name is on NON_TIME_EFFECTS, a short list of stock
+  // effects that work on the current frame alone. The cost of the inversion
+  // is an occasional refusal (out-of-span missing footage in a comp with an
+  // unlisted adjustment effect), never a placeholder. On any other layer an
+  // effect reads only that layer's own source, whose in/out the walk already
+  // judges, so the name list is enough there.
+  var NON_TIME_EFFECTS = {
+    "ADBE Lumetri": 1, "ADBE CurvesCustom": 1, "ADBE Easy Levels2": 1, "ADBE Pro Levels2": 1,
+    "ADBE HUE SATURATION": 1, "ADBE Brightness & Contrast 2": 1, "ADBE Exposure2": 1, "ADBE Tint": 1,
+    "ADBE Tritone": 1, "ADBE Color Balance 2": 1, "ADBE Black&White": 1, "ADBE Vibrance": 1,
+    "ADBE Gaussian Blur 2": 1, "ADBE Fast Blur": 1, "ADBE Box Blur2": 1, "ADBE Sharpen": 1,
+    "ADBE Unsharp Mask2": 1, "ADBE Noise2": 1, "ADBE Glo2": 1, "ADBE Invert": 1, "ADBE Fill": 1,
+    "ADBE Ramp": 1, "ADBE Vignette": 1, "ADBE Photo Filter": 1, "ADBE Change Color": 1
+  };
   var TIME_EFFECT = /echo|posterize\s*time|time\s*warp|time\s*displacement|time\s*difference|time\s*blend|wide\s*time|motion\s*blur|frame\s*blend|pixel\s*motion|time\s*remap|freeze|optical\s*flow|\btime\b/i;
   var timeFxMemo = {};
   function readsOtherTimes(c) {
@@ -549,11 +566,14 @@ function __rqFootageUse(item) {
       try {
         var L = c.layer(i);
         if (L.enabled === false) continue;
+        var adjust = L.adjustmentLayer === true;
         var fx = L.property ? L.property("ADBE Effect Parade") : null;
         var m = fx ? (fx.numProperties || 0) : 0;
         for (var j = 1; j <= m && !found; j++) {
           var ef = fx.property(j);
-          if (TIME_EFFECT.test(String(ef.matchName)) || TIME_EFFECT.test(String(ef.name))) found = true;
+          var mn = String(ef.matchName);
+          if (TIME_EFFECT.test(mn) || TIME_EFFECT.test(String(ef.name))) found = true;
+          else if (adjust && NON_TIME_EFFECTS[mn] !== 1) found = true;
         }
       } catch (e2) { found = true; }
     }
