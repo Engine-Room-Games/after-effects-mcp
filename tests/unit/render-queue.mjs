@@ -30,7 +30,7 @@ const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "
 
 const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo } =
   await import(dist("render", "aerender.js"));
-const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin } = await import(dist("setup", "platform.js"));
+const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin, stopProcessTreeSync } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
 const { OpMutation } = await import(pathToFileURL(path.join(root, "packages", "shared", "dist", "schemas.js")).href);
 
@@ -49,10 +49,12 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ae-mcp-render-"));
 
 // This suite spawns real processes, and a hang would print nothing at all —
 // which is how a reviewer once read it as "no result". Fail loudly instead.
+// Windows gets longer: every engine lookup there is a PowerShell CIM query.
+const watchdogMs = process.platform === "win32" ? 240_000 : 90_000;
 const watchdog = setTimeout(() => {
-  console.error(`render-queue FAILED: timed out after 90s with ${passed} checks passed — something is hanging`);
+  console.error(`render-queue FAILED: timed out after ${watchdogMs / 1000}s with ${passed} checks passed — something is hanging`);
   process.exit(1);
-}, 90_000);
+}, watchdogMs);
 watchdog.unref();
 
 // ---------------------------------------------------------------------------
@@ -332,9 +334,14 @@ await check("a missing-footage failure says how to fix it, other failures do not
 });
 
 // ---------------------------------------------------------------------------
-// The runner, against a fake aerender. POSIX only: the fake is a script with a
-// shebang, which Windows will not execute without a shell. The pure parts
-// above are what differ by host, and they run everywhere.
+// The runner, against a fake aerender, on both hosts (issue #173). The fake is
+// a Node script with a shebang: POSIX executes it directly, as the server
+// executes aerender; Windows will not run a shebang without a shell, so there
+// the runner starts it through `process.execPath` (the `interpreter` option)
+// and the child cancel stops is still the fake itself. The render engine the
+// fake starts is node under the engine's name -- a symlink on POSIX, a copy of
+// node.exe on Windows, where a process's name is its executable's file name --
+// because only processes named aerendercore are ever treated as the engine.
 // ---------------------------------------------------------------------------
 
 const fake = path.join(tmp, "aerender");
@@ -487,9 +494,22 @@ const t = setInterval(() => {
 `
 );
 fs.chmodSync(fake, 0o755);
-if (process.platform !== "win32") {
+const win = process.platform === "win32";
+if (win) {
+  process.env.FAKE_ENGINE = path.join(tmp, "aerendercore.exe");
+  fs.copyFileSync(process.execPath, process.env.FAKE_ENGINE);
+} else {
   process.env.FAKE_ENGINE = path.join(tmp, "aerendercore");
   fs.symlinkSync(process.execPath, process.env.FAKE_ENGINE);
+}
+function runnerFor(jobs, opts = {}) {
+  return new RenderRunner(jobs, win ? { interpreter: process.execPath, ...opts } : opts);
+}
+// Kill a process and everything it started: its group on POSIX (the runner
+// spawns aerender detached), `taskkill /T` on Windows.
+function killTree(pid) {
+  if (win) stopProcessTreeSync(pid);
+  else process.kill(-pid, "SIGKILL");
 }
 
 const projectFile = path.join(tmp, "show.aep");
@@ -524,11 +544,11 @@ function alive(pid) {
   }
 }
 
-if (process.platform !== "win32") {
+{
   await check("a render reports per-frame progress and completes with the verified file", async () => {
     const jobs = new JobManager();
     const hooked = [];
-    const runner = new RenderRunner(jobs, {
+    const runner = runnerFor(jobs, {
       tmpRoot: runTmp,
       onRendered: async (items) => { hooked.push(items.map((i) => i.index)); return items.map((i) => ({ index: i.index, marked: true })); },
     });
@@ -562,7 +582,7 @@ if (process.platform !== "win32") {
 
   await check("no readable frame lines: a movie with the right duration is judged rendered", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "quiet.mov");
     env("quiet", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -574,7 +594,7 @@ if (process.platform !== "win32") {
 
   await check("no readable frame lines: a movie of the wrong length is not a render", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "quietshort.mov");
     env("quiet", out);
     process.env.FAKE_DUR = String(2 / 30); // two frames short of four
@@ -584,7 +604,7 @@ if (process.platform !== "win32") {
 
   await check("no readable frame lines: a format that cannot be checked fails, saying why", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "quiet.avi");
     env("quiet", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -598,7 +618,7 @@ if (process.platform !== "win32") {
     for (const [n, ok] of [[4, true], [3, false]]) {
       for (const f of fs.readdirSync(seqDir)) fs.rmSync(path.join(seqDir, f));
       const jobs = new JobManager();
-      const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+      const runner = runnerFor(jobs, { tmpRoot: runTmp });
       env("quietseq", out);
       process.env.FAKE_SEQ_N = String(n);
       const { jobId } = runner.start(plan(out), fake);
@@ -609,7 +629,7 @@ if (process.platform !== "win32") {
 
   await check("a stuck engine cannot hold the job open: killed at the cap, then decided", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, drainCapMs: 1200 });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, drainCapMs: 1200 });
     const out = path.join(tmp, "stuck.mov");
     env("stuckengine", out);
     const t0 = Date.now();
@@ -624,7 +644,7 @@ if (process.platform !== "win32") {
 
   await check("an aerender that prints nothing and exits 0 is not a render", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "silent.mov");
     env("silent", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -633,7 +653,7 @@ if (process.platform !== "win32") {
 
   await check("a warning written just before exit is read before the item is decided", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "warnlast.mov");
     env("warnlast", out);
     process.env.FAKE_LINE = REAL_MISSING_FOOTAGE_LINE;
@@ -643,7 +663,7 @@ if (process.platform !== "win32") {
 
   await check("a warning the engine prints after aerender has exited is still read", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "lateengine.mov");
     env("lateengine", out);
     process.env.FAKE_LINE = REAL_MISSING_FOOTAGE_LINE;
@@ -653,7 +673,7 @@ if (process.platform !== "win32") {
 
   await check("the measured missing-footage output fails the job although aerender exits 0", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "realmissing.mov");
     env("realmissing", out);
     process.env.FAKE_LINE = REAL_MISSING_FOOTAGE_LINE;
@@ -668,7 +688,7 @@ if (process.platform !== "win32") {
     // Progress lines short of the truth (late or coalesced, as measured on
     // 26.5): two lines read for a movie that holds all four frames.
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "short.mov");
     env("shortlines", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -681,7 +701,7 @@ if (process.platform !== "win32") {
 
   await check("frames printed just before exit are all counted", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "burst.mov");
     env("burst", out);
     process.env.FAKE_DUR = "10";
@@ -692,7 +712,7 @@ if (process.platform !== "win32") {
 
   await check("cancel finds and kills a detached render engine that ignores SIGTERM", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, graceMs: 500 });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, graceMs: 500 });
     const out = path.join(tmp, "engine.mov");
     env("engine", out);
     const { jobId } = runner.start(plan(out, 100), fake);
@@ -707,7 +727,7 @@ if (process.platform !== "win32") {
 
   await check("cancel never signals a decoy that mentions the job's snapshot", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, graceMs: 500 });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, graceMs: 500 });
     const out = path.join(tmp, "decoy.mov");
     env("hang", out);
     const { jobId } = runner.start(plan(out, 100), fake);
@@ -727,7 +747,7 @@ if (process.platform !== "win32") {
 
   await check("exit 0 with missing footage is a failure, even with a fresh file on disk", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "placeholder.mov");
     env("placeholder", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -740,7 +760,7 @@ if (process.platform !== "win32") {
 
   await check("exit 0 with no file written is a failure, not a render", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "liar.mov");
     env("liar", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -750,7 +770,7 @@ if (process.platform !== "win32") {
 
   await check("a non-zero exit fails with aerender's own error lines", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "fail.mov");
     env("fail", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -762,6 +782,8 @@ if (process.platform !== "win32") {
 
   await check("an aerender that cannot be started fails the job instead of hanging it", async () => {
     const jobs = new JobManager();
+    // Never through the interpreter: node would start and fail to find the
+    // script, which is an exit code, not the spawn failure tested here.
     const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
     const { jobId } = runner.start(plan(path.join(tmp, "x.mov")), path.join(tmp, "no-such-aerender"));
     await assert.rejects(jobs.waitFor(jobId, 10_000), /could not be started/);
@@ -769,7 +791,7 @@ if (process.platform !== "win32") {
 
   await check("cancel kills the whole tree and reports stopped only after the exit", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, graceMs: 3000 });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, graceMs: 3000 });
     const out = path.join(tmp, "hang.mov");
     env("hang", out);
     const { jobId } = runner.start(plan(out, 100), fake);
@@ -793,7 +815,7 @@ if (process.platform !== "win32") {
     const jobs = new JobManager();
     // A stop that does nothing: the process outlives the cancel, as an engine
     // started outside aerender's group would.
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, graceMs: 100, stop: async () => {}, findEngines: async () => [] });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, graceMs: 100, stop: async () => {}, findEngines: async () => [] });
     const out = path.join(tmp, "stubborn.mov");
     env("hang", out);
     const { jobId } = runner.start(plan(out, 100), fake);
@@ -804,7 +826,7 @@ if (process.platform !== "win32") {
     assert.equal(report.stopped, false);
     assert.equal(jobs.get(jobId).status, "running");
     const waiting = jobs.waitFor(jobId, 5000);
-    process.kill(-pid, "SIGKILL");
+    killTree(pid);
     const st = await waiting;
     assert.equal(st.status, "cancelled");
     assert.equal(st.result.stopped, true);
@@ -814,7 +836,7 @@ if (process.platform !== "win32") {
 
   await check("cancelling a finished render says there was nothing to cancel", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "ok2.mov");
     env("ok", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -828,15 +850,13 @@ if (process.platform !== "win32") {
 
   await check("one render at a time", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "ok3.mov");
     env("ok", out);
     const { jobId } = runner.start(plan(out), fake);
     assert.throws(() => runner.start(plan(out), fake), /already running/);
     await jobs.waitFor(jobId, 10_000);
   });
-} else {
-  console.log("render-queue: runner checks skipped on Windows (the fake aerender is a shebang script)");
 }
 
 // ---------------------------------------------------------------------------

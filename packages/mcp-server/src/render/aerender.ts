@@ -514,6 +514,14 @@ export interface RenderRunnerOptions {
   findEngines?: (snapshotPath: string) => Promise<number[]>;
   /** Re-check of one pid immediately before it is signalled (`isStillRenderProcess`). */
   confirmEngine?: (pid: number, snapshotPath: string) => Promise<boolean>;
+  /**
+   * A program to start aerender through: `spawn(interpreter, [aerender, ...args])`
+   * instead of `spawn(aerender, args)`. Unset in the server. The tests set it
+   * to `process.execPath` on Windows, which will not execute the fake
+   * aerender's shebang line (issue #173); the spawned child is still the
+   * process whose tree cancel stops.
+   */
+  interpreter?: string;
 }
 
 /**
@@ -1100,6 +1108,7 @@ export class RenderRunner {
   private readonly findEngines: (snapshotPath: string) => Promise<number[]>;
   private readonly drainCapMs: number;
   private readonly confirmEngine: (pid: number, snapshotPath: string) => Promise<boolean>;
+  private readonly interpreter?: string;
   private disarm: (() => void) | null = null;
 
   constructor(private jobs: JobManager, opts: RenderRunnerOptions = {}) {
@@ -1110,6 +1119,7 @@ export class RenderRunner {
     this.findEngines = opts.findEngines ?? ((snap) => findRenderProcesses(snap));
     this.confirmEngine = opts.confirmEngine ?? ((pid, snap) => isStillRenderProcess(pid, snap));
     this.drainCapMs = opts.drainCapMs ?? DRAIN_CAP_MS;
+    this.interpreter = opts.interpreter;
   }
 
   /**
@@ -1390,7 +1400,8 @@ export class RenderRunner {
       const tail: string[] = [];
       let child: ChildProcess;
       try {
-        child = spawn(r.aerender, aerenderArgs(r.snapshot, item.index), {
+        const args = aerenderArgs(r.snapshot, item.index);
+        child = spawn(this.interpreter ?? r.aerender, this.interpreter ? [r.aerender, ...args] : args, {
           ...treeSpawnOptions(),
           stdio: ["ignore", "pipe", "pipe"],
         });

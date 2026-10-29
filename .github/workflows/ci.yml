@@ -171,8 +171,8 @@ jobs:
 
       # render_queue renders in an aerender process the server owns: progress
       # off its stdout, outputs verified on disk, and a cancel that stops the
-      # whole process tree — against a fake aerender (POSIX; the pure parts,
-      # aerender's location on both hosts included, run everywhere).
+      # whole process tree — against a fake aerender, on both hosts (#173):
+      # Windows starts the fake through node and stops it with taskkill /T.
       - name: Render queue jobs are honest about progress, output and cancel
         run: node tests/unit/render-queue.mjs
 
