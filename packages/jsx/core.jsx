@@ -1,10 +1,40 @@
 // core.jsx — JSON polyfill, dispatcher, undo wrapper, async job table.
 // ExtendScript is ES3-ish; no let/const/arrow/template-literals.
 
-// ---------- JSON polyfill (defensive; AE 2026 has JSON natively but we never know) ----------
-if (typeof JSON === "undefined") { JSON = {}; }
-if (typeof JSON.stringify !== "function") {
-  JSON.stringify = (function () {
+// ---------- JSON: a private copy (issue #185) ----------
+// The bundle runs in After Effects' shared `main` engine, where any other
+// script can replace the global JSON — json2.js-style polyfills are common in
+// AE scripts. Inside the bundle's closure (scripts/bundle-jsx.mjs) `JSON` is
+// this local, captured once at load: the engine's native one when it still
+// round-trips correctly, otherwise the polyfill below. Loaded on its own at a
+// global scope (the unit tests), the `var` keeps the existing global JSON.
+var JSON = __aemcpJSON(typeof JSON !== "undefined" ? JSON :
+  ((typeof $ !== "undefined" && $ && $.global) ? $.global.JSON : undefined));
+
+function __aemcpJSON(engineJSON) {
+  try {
+    var st = engineJSON.stringify;
+    var pa = engineJSON.parse;
+    if (typeof st === "function" && typeof pa === "function" &&
+        st.call(engineJSON, { a: [1, "x"] }) === '{"a":[1,"x"]}' &&
+        pa.call(engineJSON, '{"a":[1]}').a[0] === 1) {
+      return {
+        stringify: function (v, r, sp) {
+          return arguments.length > 1 ? st.call(engineJSON, v, r, sp) : st.call(engineJSON, v);
+        },
+        parse: function (t, r) {
+          return arguments.length > 1 ? pa.call(engineJSON, t, r) : pa.call(engineJSON, t);
+        }
+      };
+    }
+  } catch (e) {}
+  return __aemcpJSONPolyfill();
+}
+
+// AE 2026 has JSON natively; this is for an engine where it is missing or broken.
+function __aemcpJSONPolyfill() {
+  var out = {};
+  out.stringify = (function () {
     function quote(s) {
       var r = '"';
       for (var i = 0; i < s.length; i++) {
@@ -49,12 +79,14 @@ if (typeof JSON.stringify !== "function") {
     }
     return function (v) { return str(v); };
   })();
-}
-if (typeof JSON.parse !== "function") {
-  JSON.parse = function (text) { return eval("(" + text + ")"); };
+  out.parse = function (text) { return eval("(" + text + ")"); };
+  return out;
 }
 
-// ---------- Global registry ----------
+// ---------- Registry ----------
+// Inside the bundle these are locals of its closure, fresh on every load, and
+// no other script can reach them (issue #185). `X || {}` only matters when a
+// file is loaded on its own at a global scope, as the unit tests do.
 var OPS = OPS || {};
 var JOBS = JOBS || {};
 var __JOB_SEQ = __JOB_SEQ || 0;

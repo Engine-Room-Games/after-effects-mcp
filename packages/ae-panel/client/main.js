@@ -133,12 +133,49 @@
     return p;
   }
 
+  // ---------- The bundle's one global (issue #185) ----------
+  // After Effects runs every extension's evalScript, File > Scripts, ScriptUI
+  // panels and osascript in one shared ExtendScript engine. The bundle keeps
+  // everything in a closure and publishes only `__AEMCP` (scripts/bundle-jsx.mjs),
+  // so another script can no longer replace `dispatch` or `OPS` under us. It can
+  // still delete or overwrite `__AEMCP` itself, so every op checks it is ours
+  // first and answers NS_MISSING — before running anything — when it is not.
+  var NS_MISSING = "__AEMCP_MISSING__";
+  var NS_READY = "(typeof __AEMCP === 'object' && __AEMCP !== null && " +
+    "__AEMCP.id === 'games.engine-room.ae-mcp' && typeof __AEMCP.call === 'function')";
+
+  function opScript(payload) {
+    // Use \uXXXX-safe JSON pass: JSON.stringify on the panel side, JSON.parse on ExtendScript side.
+    return NS_READY + " ? __AEMCP.call(" + JSON.stringify(payload) + ") : '" + NS_MISSING + "'";
+  }
+
+  // One reload for however many ops found the namespace gone at once.
+  var __healing = null;
+  function healNamespace(op) {
+    if (!__healing) {
+      log("warn", "__AEMCP is missing or not ours (another script in After Effects' shared engine " +
+        "replaced it) — reloading bundle.jsx before " + op);
+      __healing = loadJsxBundle({ sameAsRunning: true }).then(
+        function () { __healing = null; setStatus("ready", "ok"); },
+        function (e) { __healing = null; throw e; }
+      );
+    }
+    return __healing;
+  }
+
   // Run an op through the dispatch table. Returns parsed JS object.
   function runOp(op, args) {
     var payload = JSON.stringify({ op: op, args: args || {} });
-    // Use \uXXXX-safe JSON pass: JSON.stringify on the panel side, JSON.parse on ExtendScript side.
-    var script = "JSON.stringify(dispatch(" + JSON.stringify(payload) + "))";
-    return evalScript(script).then(function (raw) {
+    return evalScript(opScript(payload)).then(function (raw) {
+      if (raw !== NS_MISSING) return raw;
+      // Nothing ran: NS_MISSING is answered instead of the op, so sending it
+      // again after the reload cannot run it twice.
+      return healNamespace(op).then(function () { return evalScript(opScript(payload)); });
+    }).then(function (raw) {
+      if (raw === NS_MISSING) {
+        throw new Error("The AE MCP bundle is not loaded in After Effects (__AEMCP missing even after reloading " +
+          "bundle.jsx). Nothing ran. Restart After Effects.");
+      }
       if (raw === "undefined" || raw === undefined || raw === null) {
         throw new Error("ExtendScript returned undefined for op " + op);
       }
@@ -189,25 +226,44 @@
     }
   }
 
-  function loadJsxBundle() {
+  // `opts.sameAsRunning`: the automatic heal, which must re-load the code this
+  // panel is already running and nothing newer. Between setup_panel and the
+  // next After Effects launch the installed bundle.jsx is newer than this
+  // main.js; loading it would mix the two and move `loadedBundleHash` onto the
+  // new hash, so the version gate would call a stale panel current. The heal
+  // refuses instead and the running hash keeps saying "restart needed".
+  // `/reload-jsx` is the dev route and loads whatever is on disk.
+  function loadJsxBundle(opts) {
     setStatus("Loading bundle.jsx…");
     if (!fs.existsSync(bundlePath)) {
       setStatus("bundle.jsx missing", "err");
       log("error", "bundle.jsx not found at " + bundlePath + " — run `npm run build:jsx`");
-      throw new Error("bundle.jsx missing");
+      return Promise.reject(new Error("bundle.jsx missing"));
+    }
+    var diskHash = hashFile(bundlePath);
+    if (opts && opts.sameAsRunning && loadedBundleHash && diskHash !== loadedBundleHash) {
+      setStatus("restart After Effects", "err");
+      return Promise.reject(new Error(
+        "The AE MCP bundle was removed from After Effects' shared script engine by another script, and the " +
+        "installed bundle.jsx is a newer version than this running panel, so it cannot be reloaded in place. " +
+        "Nothing ran. Restart After Effects."));
     }
     // Use $.evalFile from ExtendScript side so paths work cross-platform.
-    var loadScript = "$.evalFile(" + JSON.stringify(bundlePath) + "); typeof dispatch === 'function' ? 'ok' : 'no-dispatch';";
-    return new Promise(function (resolve, reject) {
-      cs.evalScript(loadScript, function (raw) {
-        if (raw === "ok") {
-          loadedBundleHash = hashFile(bundlePath);
-          $jsx.textContent = "loaded";
-          $jsx.className = "ok";
-          resolve();
-        }
-        else { $jsx.textContent = "fail: " + raw; $jsx.className = "err"; reject(new Error("dispatch not defined after loading bundle.jsx: " + raw)); }
-      });
+    // Through the evalScript mutex like every other call: the heal triggers
+    // this while ops are queued, and a load must not interleave with one.
+    var loadScript = "$.evalFile(" + JSON.stringify(bundlePath) + "); " + NS_READY + " ? 'ok' : 'no-namespace';";
+    return evalScript(loadScript).then(function (raw) {
+      if (raw === "ok") {
+        loadedBundleHash = diskHash;
+        $jsx.textContent = "loaded";
+        $jsx.className = "ok";
+        return;
+      }
+      $jsx.textContent = "fail: " + raw; $jsx.className = "err";
+      throw new Error("__AEMCP not defined after loading bundle.jsx: " + raw);
+    }, function (e) {
+      $jsx.textContent = "fail: " + e.message; $jsx.className = "err";
+      throw e;
     });
   }
 
@@ -539,13 +595,19 @@
   // only a pacing knob any more: it decides how many undo steps a long batch
   // costs the user. It comes off the job envelope so the JSX side owns the
   // number and the two cannot drift.
-  function driveJob(jobId, progressToken, chunkSize) {
-    var totalGuess = null;
+  function driveJob(jobId, progressToken, chunkSize, total) {
+    var totalGuess = (typeof total === "number") ? total : null;
     var size = chunkSize || 25;
+    // The cursor: ops attempted, not ops that succeeded — a continue-on-error
+    // batch moves past a failed op too.
+    var attempted = 0;
+    var stepsTaken = 0;
     function step() {
       return runOp("_continue_job", { jobId: jobId, chunkSize: size }).then(function (res) {
         if (res.total) totalGuess = res.total;
         if (!res.done) {
+          if (typeof res.progress === "number") attempted = res.progress;
+          if (typeof res.undoSteps === "number") stepsTaken = res.undoSteps;
           broadcast({ type: "progress", jobId: jobId, progress: res.progress, total: res.total, message: "running" });
           // Yield to UI so AE stays responsive.
           return new Promise(function (r) { setTimeout(r, 0); }).then(step);
@@ -582,6 +644,31 @@
           undoSteps: res.undoSteps, undoGroupName: res.undoGroupName,
           note: res.note, diff: res.diff,
         };
+      }, function (e) {
+        // Any failure of a continuation leaves the chunks before it in the
+        // project, and a bare error — "No job: j_…" after a bundle reload, or
+        // the heal's own "Nothing ran", which is true of that one call and
+        // false of the batch — would invite a re-run that applies them twice.
+        // So every failure path of an in-flight job says what had landed.
+        //
+        // The job table lives in the bundle's closure, so a bundle reload —
+        // the automatic heal after another script removed __AEMCP (issue #185),
+        // or /reload-jsx — loses every job in flight; that is the "No job" case.
+        var msg = String(e && e.message ? e.message : e);
+        var cause = msg.indexOf("No job: ") === 0
+          ? "the AE MCP bundle was reloaded in After Effects (another script removed it from the shared " +
+            "script engine, or /reload-jsx ran), which discards running jobs."
+          : msg.split("Nothing ran.").join("The next chunk did not run.");
+        var landed = (attempted === 0 && stepsTaken === 0)
+          ? "No op of the batch had run yet."
+          : attempted + " of " + (totalGuess === null ? "?" : totalGuess) + " ops had already been attempted, " +
+            "in " + stepsTaken + " undo step(s); whatever they changed stays applied (an op that failed under " +
+            "continue-on-error may not have changed anything, and its error is lost with the job). " +
+            "Do NOT re-run the batch as it was: read the comp back and send only the ops that are missing.";
+        var stopped = new Error("Batch " + jobId + " stopped mid-run: " + cause + " " + landed);
+        stopped.code = e && e.code;
+        log("error", stopped.message);
+        throw stopped;
       });
     }
     return step();
@@ -913,7 +1000,7 @@
     if (op === "run_batch") {
       return runOp(op, args).then(function (res) {
         if (res && res.async && res.jobId) {
-          driveJob(res.jobId, progressToken, res.chunkSize).catch(function (e) {
+          driveJob(res.jobId, progressToken, res.chunkSize, res.total).catch(function (e) {
             broadcast({ type: "error", jobId: res.jobId, error: e.message });
           });
           // The undo fields ride out with the envelope so the agent is told the

@@ -433,7 +433,7 @@ let passed = 0;
   const main = fs.readFileSync(path.join(root, "packages", "ae-panel", "client", "main.js"), "utf8");
   assert.match(
     main,
-    /driveJob\(res\.jobId, progressToken, res\.chunkSize\)/,
+    /driveJob\(res\.jobId, progressToken, res\.chunkSize[,)]/,
     "the panel must take its chunk size from the job envelope"
   );
   assert.match(main, /chunkSize: size/, "and drive _continue_job with it");
