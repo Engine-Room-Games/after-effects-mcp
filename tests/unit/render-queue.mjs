@@ -27,7 +27,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint } =
   await import(dist("render", "aerender.js"));
 const { aerenderCandidates } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
@@ -45,6 +45,14 @@ async function check(name, fn) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ae-mcp-render-"));
+
+// This suite spawns real processes, and a hang would print nothing at all —
+// which is how a reviewer once read it as "no result". Fail loudly instead.
+const watchdog = setTimeout(() => {
+  console.error(`render-queue FAILED: timed out after 90s with ${passed} checks passed — something is hanging`);
+  process.exit(1);
+}, 90_000);
+watchdog.unref();
 
 // ---------------------------------------------------------------------------
 // aerender's output
@@ -184,14 +192,24 @@ await check("existing outputs are found, files and sequence frames alike", () =>
   });
   assert.deepEqual(occupied, [taken, path.join(tmp, "seq", "shot_[#####].png")]);
 });
-await check("the snapshot sits beside the project, so relative footage resolves the same", () => {
+await check("the snapshot goes to a per-job temp folder, never beside the project", () => {
   const proj = path.join(tmp, "snap-src.aep");
   fs.writeFileSync(proj, "aep");
-  const snap = snapshotProject(proj, "r_1_1");
-  assert.equal(path.dirname(snap), tmp);
+  const tmpRoot = path.join(tmp, "osTmp");
+  const snap = snapshotProject(proj, "r_1_1", tmpRoot);
+  assert.equal(snap, path.join(tmpRoot, "ae-mcp-render", "r_1_1", "snap-src.aep"));
   assert.equal(fs.readFileSync(snap, "utf8"), "aep");
-  fs.rmSync(snap);
-  assert.throws(() => snapshotProject(path.join(tmp, "nope", "x.aep"), "r_1_2"), /nothing was rendered/);
+  assert.deepEqual(fs.readdirSync(tmp).filter((n) => n.includes("ae-mcp-render")), [], "nothing new beside the project");
+  removeSnapshot(snap);
+  assert.ok(!fs.existsSync(path.dirname(snap)), "the per-job folder goes with it");
+  // removeSnapshot only ever removes an ae-mcp-render/<job> folder.
+  removeSnapshot(proj);
+  assert.ok(fs.existsSync(proj));
+  assert.throws(() => snapshotProject(path.join(tmp, "nope", "x.aep"), "r_1_2", tmpRoot), /nothing was rendered/);
+});
+await check("a missing-footage failure says how to fix it, other failures do not", () => {
+  assert.match(missingFootageHint(["aerender ERROR: Footage file missing: /x/clip.mov"]), /save the project/);
+  assert.equal(missingFootageHint(["aerender ERROR: Out of memory"]), "");
 });
 
 // ---------------------------------------------------------------------------
@@ -274,7 +292,7 @@ if (process.platform !== "win32") {
     const jobs = new JobManager();
     const hooked = [];
     const runner = new RenderRunner(jobs, {
-      onItemRendered: async (item) => { hooked.push(item.index); return { marked: true }; },
+      onRendered: async (items) => { hooked.push(items.map((i) => i.index)); return items.map((i) => ({ index: i.index, marked: true })); },
     });
     const out = path.join(tmp, "ok.mov");
     env("ok", out);
@@ -292,11 +310,12 @@ if (process.platform !== "win32") {
     // and the copy is gone afterwards.
     const args = JSON.parse(fs.readFileSync(process.env.FAKE_ARGS, "utf8"));
     assert.equal(args[0], "-project");
-    assert.equal(path.dirname(args[1]), tmp);
-    assert.match(path.basename(args[1]), /^\.show\.ae-mcp-render-r_.*\.aep$/);
+    assert.equal(path.basename(args[1]), "show.aep");
+    assert.equal(path.basename(path.dirname(path.dirname(args[1]))), "ae-mcp-render");
+    assert.notEqual(path.dirname(args[1]), tmp);
     assert.deepEqual(args.slice(2), aerenderArgs("x", 2).slice(2));
     assert.ok(!fs.existsSync(args[1]), "the snapshot must be removed when the job ends");
-    assert.deepEqual(hooked, [2]);
+    assert.deepEqual(hooked, [[2]], "unticked once, at the end");
     assert.deepEqual(st.result.rendered[0].unqueued, { marked: true });
     const frames = seen.filter((s) => /frame \d+ of 4/.test(s.message ?? "")).map((s) => s.progress);
     assert.deepEqual(frames, [1, 2, 3, 4]);
@@ -518,7 +537,7 @@ function makeAe(opts = {}) {
   };
   const ctx = {
     OPS: {},
-    noUndo: (fn) => { fn.__meta = { noUndo: true }; return fn; },
+    JSON,
     getCompById: (id) => { const c = project.itemByID(id); if (!c) throw new Error("No comp with id " + id); return c; },
     File: MockFile,
     Folder: Object.assign(MockFolder, { appPackage: new MockFolder("/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app") }),
@@ -528,10 +547,15 @@ function makeAe(opts = {}) {
       project,
       version: "26.3",
       beginSuppressDialogs() { log.push("suppress"); },
+      beginUndoGroup(n) { log.push("undo:begin:" + n); },
+      endUndoGroup() { log.push("undo:end"); },
       endSuppressDialogs() { log.push("unsuppress"); },
     },
   };
   vm.createContext(ctx);
+  // core.jsx for dispatch(), undo grouping and noUndo/undoNamed — the real
+  // ones, so the undo step a handler takes is the one After Effects would get.
+  vm.runInContext(fs.readFileSync(path.join(root, "packages", "jsx", "core.jsx"), "utf8"), ctx, { filename: "core.jsx" });
   vm.runInContext(source, ctx, { filename: "render.jsx" });
   return { ctx, items, log };
 }
@@ -624,13 +648,22 @@ await check("a save that silently did not happen is reported, not trusted", () =
   assert.match(throwsMsg(() => ctx.OPS._render_save({})), /did not save the project.*Save As/);
   assert.deepEqual(log, ["suppress", "save", "unsuppress"]);
 });
-await check("_render_mark_done switches off only the item that still matches", () => {
-  const { ctx, items } = makeAe({ existing: ["QUEUED"] });
-  assert.equal(ctx.OPS._render_mark_done({ index: 1, compId: 7, outputPath: "/renders/other.mov" }).marked, false);
-  assert.equal(items[0].render, true);
-  assert.equal(ctx.OPS._render_mark_done({ index: 1, compId: 7, outputPath: "/renders/existing.mov" }).marked, true);
+await check("_render_mark_done unticks every matching item in ONE named undo step", () => {
+  const { ctx, items, log } = makeAe({ existing: ["QUEUED", "QUEUED"] });
+  const out = ctx.dispatch(JSON.stringify({
+    op: "_render_mark_done",
+    args: { items: [
+      { index: 1, compId: 7, outputPath: "/renders/existing.mov" },
+      { index: 2, compId: 7, outputPath: "/renders/other.mov" },
+      { index: 5, compId: 7, outputPath: "x" },
+    ] },
+  }));
+  assert.equal(out.ok, true);
+  const marked = Array.from(out.result.results, (r) => r.marked);
+  assert.deepEqual(marked, [true, false, false]);
   assert.equal(items[0].render, false);
-  assert.equal(ctx.OPS._render_mark_done({ index: 5, compId: 7, outputPath: "x" }).marked, false);
+  assert.equal(items[1].render, true, "an item that no longer matches is left alone");
+  assert.deepEqual(log.filter((l) => l.startsWith("undo")), ["undo:begin:AE MCP: mark rendered", "undo:end"]);
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

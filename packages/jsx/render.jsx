@@ -407,21 +407,37 @@ OPS._render_save = noUndo(function (args) {
 });
 
 /**
- * After a verified render, take the item out of the queue's QUEUED set so a
- * later render_queue does not render it again (aerender rendered a copy of the
- * file, so the live queue never learned it was done). Matched by comp AND
- * output path, because indices shift: an item that no longer matches is left
- * alone and reported, never guessed at.
+ * When a render job ends, take its verified items out of the queue's QUEUED
+ * set so a later render_queue does not render them again (aerender rendered a
+ * copy of the file, so the live queue never learned they were done).
+ *
+ * It changes the project, so it is ONE named undo step — "AE MCP: mark
+ * rendered" — opened and closed by dispatch() in this one call, never an
+ * unlabeled entry. All the job's items go in that one step, once, at the end:
+ * a step per item would land in the user's undo history every few minutes
+ * while they work, between their own edits. Matched by comp AND output path,
+ * because indices shift: an item that no longer matches is left alone and
+ * reported, never guessed at.
  */
-OPS._render_mark_done = noUndo(function (args) {
+OPS._render_mark_done = undoNamed("AE MCP: mark rendered", function (args) {
   var rq = app.project.renderQueue;
-  var idx = args.index;
-  if (!(idx >= 1 && idx <= rq.numItems)) return { marked: false, reason: "item " + idx + " no longer exists" };
-  var s = __rqItemSummary(rq, idx, false);
-  var firstPath = s.outputs.length ? s.outputs[0].path : null;
-  if (s.compId !== args.compId || firstPath !== args.outputPath) {
-    return { marked: false, reason: "item " + idx + " now renders something else (the queue changed during the render)" };
+  var list = args.items || [];
+  var results = [];
+  for (var k = 0; k < list.length; k++) {
+    var want = list[k];
+    var idx = want.index;
+    if (!(idx >= 1 && idx <= rq.numItems)) {
+      results.push({ index: idx, marked: false, reason: "item " + idx + " no longer exists" });
+      continue;
+    }
+    var s = __rqItemSummary(rq, idx, false);
+    var firstPath = s.outputs.length ? s.outputs[0].path : null;
+    if (s.compId !== want.compId || firstPath !== want.outputPath) {
+      results.push({ index: idx, marked: false, reason: "item " + idx + " now renders something else (the queue changed during the render)" });
+      continue;
+    }
+    rq.item(idx).render = false;
+    results.push({ index: idx, marked: true, status: __rqStatusName(rq.item(idx).status) });
   }
-  rq.item(idx).render = false;
-  return { marked: true, status: __rqStatusName(rq.item(idx).status) };
+  return { results: results };
 });

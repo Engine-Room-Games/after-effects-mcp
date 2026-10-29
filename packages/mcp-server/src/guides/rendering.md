@@ -46,15 +46,22 @@ ProRes 4444 with alpha is an **output module template** that already says so.
 - **Existing files are refused** unless `overwrite: true` — that includes an
   item the user queued by hand that points at last week's render.
 - **Edits made while it renders are not in the render.** The render reads a
-  private copy taken at its start, so neither your later edits nor a save by
-  the user mid-render change it. After Effects stays fully usable.
+  private copy in the system temp folder taken at its start, so neither your
+  later edits nor a save by the user mid-render change it. After Effects stays
+  fully usable. A failure that mentions missing footage usually means the
+  project was moved since it was last saved — the user saves it, then render
+  again.
 - **It is slow to start.** The background copy takes several seconds to launch,
   and progress sits at 0 until the first frame.
 - **One render at a time.** A second `render_queue` is refused while one runs.
-- **Rendered items are switched off.** After a verified render the item's
-  Render box is unticked (status *Unqueued*), so the next `render_queue` does
-  not render it again. `unqueued.marked: false` on an item means the queue
-  changed during the render and that item was left alone — say so.
+- **Rendered items are switched off, as one undo step.** When the job ends —
+  finished, failed or cancelled — every item whose file was verified has its
+  Render box unticked (status *Unqueued*), so the next `render_queue` does not
+  render it again. That is a change to the user's project and lands in their
+  undo history as one step, *AE MCP: mark rendered*, at the moment the render
+  finishes; tell them, so an unexpected entry in Edit > Undo is not a mystery.
+  `unqueued.marked: false` on an item means the queue changed during the
+  render and that item was left alone — say so.
 
 ## Waiting, and the result
 

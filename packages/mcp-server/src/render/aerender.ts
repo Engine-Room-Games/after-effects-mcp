@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { JobManager } from "../jobs/manager.js";
 import { logger } from "../util/logger.js";
@@ -22,7 +23,7 @@ import { stopProcessTree, stopProcessTreeSync, treeSpawnOptions } from "../setup
  *
  * The cost is that aerender renders the project **file**: the project has to be
  * saved (with the caller's explicit saveProject:true when it has unsaved
- * changes), the render reads a private copy taken at its start
+ * changes), the render reads a private copy in the temp folder taken at its start
  * (`snapshotProject`), and edits made while it runs are not in the output.
  * Every message an agent sees says so.
  */
@@ -259,6 +260,8 @@ interface Running {
   settled: boolean;
   /** cancel() could not see the exit and reported stopped:false; a late exit settles the job. */
   cancelGaveUp: boolean;
+  /** The once-per-job unticking has run (or been claimed). */
+  unqueueDone: boolean;
   rendered: RenderedItem[];
   startedAt: number;
   /** The private copy of the saved .aep every item renders from. */
@@ -269,40 +272,72 @@ export interface RenderRunnerOptions {
   /** How long a polite stop gets before the tree is killed outright, and again before giving up. */
   graceMs?: number;
   /**
-   * Called after each item's outputs are verified — the server switches the
-   * live queue item off there, so the next render_queue does not render it
-   * again. Its failure is reported on the item, never thrown.
+   * Called ONCE as the job ends — completed, failed or cancelled — with every
+   * item whose outputs were verified. The server unticks those items in the
+   * live queue there, as one named undo step, so the next render_queue does
+   * not render them again. Once rather than per item on purpose: one step the
+   * user can read in Edit > Undo ("AE MCP: mark rendered") instead of a step
+   * landing in their undo history every few minutes while they work, and an
+   * item rendered before a failure or cancel is still unticked, because its
+   * file is good. A hook failure is reported on the items, never thrown.
    */
-  onItemRendered?: (item: RenderItemPlan) => Promise<{ marked: boolean; reason?: string }>;
+  onRendered?: (items: RenderItemPlan[]) => Promise<{ index: number; marked: boolean; reason?: string }[]>;
   /** How a process tree is stopped. The platform's, unless a test needs one that fails. */
   stop?: (pid: number, force: boolean) => Promise<void>;
 }
 
 /**
- * Copy the saved project beside itself, for this job alone.
+ * Copy the saved project into the OS temp folder, for this job alone.
  *
- * aerender opens the project once per item. Rendering the live .aep would let
- * anything that saves it mid-job — the user's Cmd-S, export_mogrt — change
- * what the later items render, and move the `-rqindex` the plan was made
- * against onto a different item. A copy taken while the write lease is still
- * held is a project nothing else can touch. It sits in the SAME folder so a
- * footage path After Effects stored relative to the project resolves exactly
- * as it does for the original.
+ * Why a copy: aerender opens the project once per item. Rendering the live
+ * .aep would let anything that saves it mid-job — the user's Cmd-S,
+ * export_mogrt — change what the later items render, and move the `-rqindex`
+ * the plan was made against onto a different item. A copy taken while the
+ * write lease is still held is a project nothing else can touch.
+ *
+ * Why the temp folder and not beside the .aep: a project folder is very often
+ * a Dropbox / iCloud / OneDrive folder, and a sibling copy — a dot prefix hides
+ * nothing on Windows — would be uploaded in full on every render, and could
+ * be picked up by the user's own tools. The cost is footage After Effects can
+ * only find through the path it stored *relative* to the project: AE stores
+ * both an absolute and a relative path for each file and tries the absolute
+ * one first, and the project was just saved by an AE that had every file
+ * resolved, so the absolute paths in the copy are current. What is left is a
+ * project that was moved and never re-saved since (a clean project is not
+ * saved by render_queue) — aerender then reports missing footage, the job
+ * fails with its own error lines, and `missingFootageHint` names the fix. The
+ * copy keeps the project's file name, so aerender's messages read the same.
  */
-export function snapshotProject(projectPath: string, jobId: string): string {
-  const dir = path.dirname(projectPath);
-  const ext = path.extname(projectPath) || ".aep";
-  const base = path.basename(projectPath, ext);
-  const snap = path.join(dir, `.${base}.ae-mcp-render-${jobId}${ext}`);
+export function snapshotProject(projectPath: string, jobId: string, tmpRoot: string = os.tmpdir()): string {
+  const dir = path.join(tmpRoot, "ae-mcp-render", jobId);
+  const snap = path.join(dir, path.basename(projectPath));
   try {
+    fs.mkdirSync(dir, { recursive: true });
     fs.copyFileSync(projectPath, snap);
   } catch (e) {
+    removeSnapshot(snap);
     throw new Error(
-      `Could not copy the project to ${snap} for the render (${(e as Error).message}), so nothing was rendered. ` +
-        "The render works from a private copy beside the .aep; the project folder has to be writable."
+      `Could not copy the project to ${snap} for the render (${(e as Error).message}), so nothing was rendered.`
     );
   }
   return snap;
+}
+
+/** Remove a snapshot and the per-job folder it was made in — and nothing else. */
+export function removeSnapshot(snap: string): void {
+  const dir = path.dirname(snap);
+  if (path.basename(path.dirname(dir)) !== "ae-mcp-render") return;
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+}
+
+/** Appended to a failure whose lines talk about footage — see snapshotProject. */
+export function missingFootageHint(lines: string[]): string {
+  if (!lines.some((l) => /footage|missing|could not (?:be )?f(?:ou|i)nd|not found/i.test(l))) return "";
+  return (
+    " The render read a copy of the project in the temp folder. If the comp's footage is only found " +
+    "through a path relative to the project (the project was moved since it was last saved), ask the " +
+    "user to save the project in After Effects so it records where the files are now, then render again."
+  );
 }
 
 /**
@@ -335,13 +370,13 @@ export class RenderRunner {
   private finished = new Map<string, string>();
   private readonly graceMs: number;
 
-  private readonly onItemRendered?: RenderRunnerOptions["onItemRendered"];
+  private readonly onRendered?: RenderRunnerOptions["onRendered"];
   private readonly stop: (pid: number, force: boolean) => Promise<void>;
   private disarm: (() => void) | null = null;
 
   constructor(private jobs: JobManager, opts: RenderRunnerOptions = {}) {
     this.graceMs = opts.graceMs ?? DEFAULT_GRACE_MS;
-    this.onItemRendered = opts.onItemRendered;
+    this.onRendered = opts.onRendered;
     this.stop = opts.stop ?? ((pid, force) => stopProcessTree(pid, force));
   }
 
@@ -374,13 +409,21 @@ export class RenderRunner {
     };
     process.on("exit", onExit);
     for (const sig of signals) process.on(sig, onSignal);
-    process.stdin.on("close", onStdinGone);
-    process.stdin.on("end", onStdinGone);
+    // Only a piped stdin is an MCP client. A terminal's stdin (a test run by
+    // hand) is never the client going away, and touching it creates a TTY
+    // stream that can hold the process open.
+    const watchStdin = !process.stdin.isTTY;
+    if (watchStdin) {
+      process.stdin.on("close", onStdinGone);
+      process.stdin.on("end", onStdinGone);
+    }
     this.disarm = () => {
       process.off("exit", onExit);
       for (const sig of signals) process.off(sig, onSignal);
-      process.stdin.off("close", onStdinGone);
-      process.stdin.off("end", onStdinGone);
+      if (watchStdin) {
+        process.stdin.off("close", onStdinGone);
+        process.stdin.off("end", onStdinGone);
+      }
       this.disarm = null;
     };
   }
@@ -411,6 +454,7 @@ export class RenderRunner {
       cancelled: false,
       settled: false,
       cancelGaveUp: false,
+      unqueueDone: false,
       rendered: [],
       startedAt: Date.now(),
       snapshot,
@@ -444,20 +488,23 @@ export class RenderRunner {
         if (outcome.spawnError || outcome.code !== 0) {
           status = "failed";
           r.settled = true;
-          this.jobs.fail(r.jobId, this.failureText(r, item, outcome));
+          await this.unqueue(r);
+          this.jobs.fail(r.jobId, this.failureText(r, item, outcome) + this.unqueueText(r));
           return;
         }
         const { verified, problems } = verifyOutputs(item.outputs, itemStart);
         if (problems.length) {
           status = "failed";
           r.settled = true;
+          await this.unqueue(r);
           this.jobs.fail(
             r.jobId,
             `aerender reported success on ${label} but the output is not there: ${problems.join("; ")}. ` +
               `Nothing is claimed rendered for that item.` +
               (outcome.errors.length ? ` aerender's error lines: ${outcome.errors.join(" | ")}.` : "") +
               ` Last output: ${outcome.tail.join(" | ")}` +
-              this.renderedSoFar(r)
+              this.renderedSoFar(r) +
+              this.unqueueText(r)
           );
           return;
         }
@@ -476,12 +523,6 @@ export class RenderRunner {
             "other than English, that is the likely cause; the render itself is verified on disk.";
           logger.warn(`render ${r.jobId}: ${done.progressWarning}`);
         }
-        if (this.onItemRendered) {
-          done.unqueued = await this.onItemRendered(item).catch((e) => ({
-            marked: false,
-            reason: (e as Error).message,
-          }));
-        }
         r.rendered.push(done);
         r.framesBefore += Math.max(item.frames, r.itemFrames);
       }
@@ -493,6 +534,7 @@ export class RenderRunner {
         // await_job waits for ever on a render that is over.
         if (!r.settled && r.cancelGaveUp) {
           r.settled = true;
+          await this.unqueue(r);
           this.jobs.cancel(r.jobId, {
             jobId: r.jobId,
             stopped: true,
@@ -508,6 +550,7 @@ export class RenderRunner {
       }
       this.jobs.reportProgress(r.jobId, r.totalFrames, r.totalFrames, "done");
       r.settled = true;
+      await this.unqueue(r);
       this.jobs.complete(r.jobId, {
         rendered: r.rendered,
         projectPath: r.plan.projectPath,
@@ -516,18 +559,54 @@ export class RenderRunner {
           "Every file listed was checked on disk after the render: it exists, is not empty, and was written " +
           "by this render, which rendered a private copy of the project saved at its start. Each rendered " +
           "item was switched off in After Effects' Render Queue (its Render box unticked, status Unqueued) so " +
-          "it does not render again; `unqueued.marked:false` on an item says why that one was not.",
+          "it does not render again — all of them in ONE undo step, \"AE MCP: mark rendered\", added to the " +
+          "user's undo history as the render finished; `unqueued.marked:false` on an item says why that one " +
+          "was not.",
       });
     } catch (e) {
       status = "failed";
-      r.settled = true;
-      this.jobs.fail(r.jobId, `The render stopped unexpectedly: ${(e as Error).message}${this.renderedSoFar(r)}`);
+      if (!r.settled) {
+        r.settled = true;
+        await this.unqueue(r).catch(() => {});
+        this.jobs.fail(r.jobId, `The render stopped unexpectedly: ${(e as Error).message}${this.renderedSoFar(r)}${this.unqueueText(r)}`);
+      }
     } finally {
       this.finished.set(r.jobId, status);
       if (this.current === r) this.current = null;
-      try { fs.rmSync(r.snapshot, { force: true }); } catch {}
+      removeSnapshot(r.snapshot);
       this.disarm?.();
     }
+  }
+
+  /**
+   * Untick every verified item in the live queue, once per job, and record the
+   * answer on each rendered item. Never throws: the files are rendered either
+   * way, and a failure here is said on the items rather than raised over them.
+   */
+  private async unqueue(r: Running): Promise<void> {
+    if (r.unqueueDone || !this.onRendered) return;
+    r.unqueueDone = true;
+    if (!r.rendered.length) return;
+    const plans = r.rendered
+      .map((x) => r.plan.items.find((i) => i.index === x.index))
+      .filter((x): x is RenderItemPlan => !!x);
+    let answers: { index: number; marked: boolean; reason?: string }[];
+    try {
+      answers = await this.onRendered(plans);
+    } catch (e) {
+      answers = plans.map((p) => ({ index: p.index, marked: false, reason: (e as Error).message }));
+    }
+    for (const done of r.rendered) {
+      const a = answers.find((x) => x.index === done.index);
+      done.unqueued = a ? { marked: a.marked, ...(a.reason ? { reason: a.reason } : {}) } : { marked: false, reason: "no answer" };
+    }
+  }
+
+  /** The sentence a failure message carries about the unticking, when any happened. */
+  private unqueueText(r: Running): string {
+    const marked = r.rendered.filter((x) => x.unqueued?.marked).map((x) => x.index);
+    if (!marked.length) return "";
+    return ` The item(s) that did finish (${marked.join(", ")}) were unticked in the Render Queue in one undo step, "AE MCP: mark rendered".`;
   }
 
   private renderItem(
@@ -600,7 +679,7 @@ export class RenderRunner {
     const errs = o.errors.length ? ` Its error lines: ${o.errors.join(" | ")}.` : "";
     const tail = o.tail.length ? ` Last output: ${o.tail.join(" | ")}` : "";
     const partial = o.spawnError ? "" : ` Any file it started at ${item.outputs.map((x) => x.path).join(", ")} is incomplete.`;
-    return head + errs + tail + partial + this.renderedSoFar(r);
+    return head + errs + tail + partial + missingFootageHint([...o.errors, ...o.tail]) + this.renderedSoFar(r);
   }
 
   private renderedSoFar(r: Running): string {
@@ -675,6 +754,7 @@ export class RenderRunner {
     };
     if (stopped && !r.settled) {
       r.settled = true;
+      await this.unqueue(r);
       this.jobs.cancel(jobId, report);
     }
     return report;
@@ -685,7 +765,7 @@ export class RenderRunner {
     const pid = r?.child?.pid;
     if (pid !== undefined) stopProcessTreeSync(pid);
     if (r) {
-      try { fs.rmSync(r.snapshot, { force: true }); } catch {}
+      removeSnapshot(r.snapshot);
     }
   }
 }

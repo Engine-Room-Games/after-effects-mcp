@@ -122,18 +122,17 @@ export function createServer(opts: CreateServerOptions = {}) {
   // evalScript mutex is not enough.
   const writes = new WriteQueue();
   // render_queue's jobs run in an aerender process this server owns; see
-  // render/aerender.ts. After each verified item the live queue item is
-  // switched off so it does not render twice — a write to the project, so it
-  // queues behind any other write like one.
+  // render/aerender.ts. When a job ends, its verified items are unticked in the
+  // live queue so they do not render twice — once, as one named undo step, and
+  // a write to the project, so it queues behind any other write like one.
   const renders = new RenderRunner(jobs, {
-    onItemRendered: async (item) => {
+    onRendered: async (items) => {
       const lease = await writes.acquire("render_queue");
       try {
-        return (await bridge.runOp("_render_mark_done", {
-          index: item.index,
-          compId: item.compId,
-          outputPath: item.outputs[0]?.path ?? null,
-        })) as { marked: boolean; reason?: string };
+        const res = (await bridge.runOp("_render_mark_done", {
+          items: items.map((i) => ({ index: i.index, compId: i.compId, outputPath: i.outputs[0]?.path ?? null })),
+        })) as { results: { index: number; marked: boolean; reason?: string }[] };
+        return res.results;
       } finally {
         lease.release();
       }
