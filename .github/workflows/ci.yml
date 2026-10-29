@@ -219,6 +219,11 @@ jobs:
       - name: One set-or-keyframe path for transforms, effect params and shape properties
         run: node tests/unit/set-or-key.mjs
 
+      # Issue #207: set_mask applies closed and the tangents without new
+      # vertices; #163: set_shape_path finds its Path by match name.
+      - name: Mask and shape paths apply every field and resolve by match name
+        run: node tests/unit/mask-path.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.

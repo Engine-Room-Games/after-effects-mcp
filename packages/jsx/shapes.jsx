@@ -12,17 +12,34 @@ function __makeShape(vertices, inT, outT, closed) {
 OPS.set_shape_path = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
-  var prop = walkProperty(l, args.shapePath);
-  // The shape path is usually a "Path" property whose value is a Shape.
-  var pathProp = prop;
-  // If user passed a group, dig down to "Path"
-  if (pathProp.propertyType === PropertyType.NAMED_GROUP || pathProp.propertyType === PropertyType.INDEXED_GROUP) {
-    try { pathProp = pathProp.property("Path"); } catch (e) {}
-  }
-  var shape = __makeShape(args.vertices, args.inTangents, args.outTangents, args.closed);
+  var pathProp = __shapePathProp(walkProperty(l, args.shapePath), args.shapePath);
+  // Built (and its tangent counts checked) before anything is written.
+  var shape = __reshape("set_shape_path", null, args);
   __setValue(pathProp, shape);
   return { ok: true };
 };
+
+/**
+ * The Path property (matchName "ADBE Vector Shape") that `node` names: the node
+ * itself (or a mask's path, or a mask whose path it is), or — for a "Path N" group (ADBE Vector Shape - Group) — its Path
+ * child. Resolved by match name, never by the display name "Path", which is
+ * localized and missed on a non-English After Effects (issue #163). Anything
+ * else is refused with its match name, rather than handing setValue a group.
+ */
+function __shapePathProp(node, path) {
+  // A mask's path (ADBE Mask Shape) holds a Shape too, and has always been writable here.
+  if (node.matchName === "ADBE Vector Shape" || node.matchName === "ADBE Mask Shape") return node;
+  var child = null;
+  if (node.matchName === "ADBE Mask Atom") {
+    try { child = node.property("ADBE Mask Shape"); } catch (e0) { child = null; }
+  } else if (node.propertyType === PropertyType.NAMED_GROUP || node.propertyType === PropertyType.INDEXED_GROUP) {
+    try { child = node.property("ADBE Vector Shape"); } catch (e) { child = null; }
+  }
+  if (child) return child;
+  throw new Error("set_shape_path: " + JSON.stringify(path) + " resolves to '" + node.name + "' (" + node.matchName +
+    "), which is not a shape path. Point shapePath at a path node (ADBE Vector Shape - Group, e.g. " +
+    "[\"Contents\", \"Group 1\", \"Contents\", \"Path 1\"]) or at its Path property. Nothing was changed.");
+}
 
 var __SHAPE_MATCH = {
   rect: "ADBE Vector Shape - Rect",

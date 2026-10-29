@@ -87,13 +87,13 @@ export const descriptions: Record<string, string> = {
   add_text_animator: "Add a text animator group (position/scale/rotation/opacity/tracking/skew/fillColor/strokeColor). Optional range selector. All-or-nothing: if After Effects refuses the property or a range value, the animator this call created is removed and the error names what failed — nothing is left behind. Returns the animator name and the property matchName.",
 
   // ---------- shapes ----------
-  set_shape_path: "Replace a shape path with new vertices/tangents/closed.",
+  set_shape_path: "Replace a shape path with new vertices/tangents/closed. `shapePath` names a path node (e.g. [\"Contents\", \"Group 1\", \"Contents\", \"Path 1\"]) or its Path property; anything else (a rect, a group) is refused. Tangents not given are straight corners; a tangent array must have one entry per vertex.",
   add_shape_content: "Add shape content under Contents or a sub-group. `content.type` picks the node (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group); the other keys set its properties by friendly name (e.g. rect: size/position/roundness; fill: color/opacity; stroke: color/width/lineCap; path: vertices/inTangents/outTangents/closed). Unknown or unsettable keys are NOT ignored — the whole node is rolled back and an error lists them, so trust a success result. Use get_layer_full to see exact property names. ORDER MATTERS: index 1 renders in FRONT and each call appends behind the last, so add front-to-back — details and dots first, big background rects last. `zOrder:'front'` can override that, but it needs an internal moveTo which has disturbed nested renders in AE 26.3, so prefer call order. A reference to one node goes stale once a sibling is added to the same group (add a Stroke and an earlier Fill reference throws 'Object is invalid'): add every node first, then address them by name.",
   set_shape_property: "Set a property on a shape content node. `keyframe`:true requires `time` and writes a keyframe there; without `keyframe` it sets the static value.",
 
   // ---------- masks ----------
   add_mask: "Add a mask with vertices/tangents/closed/mode.",
-  set_mask: "Modify mask vertices/tangents/closed/mode/inverted/expansion/feather/opacity.",
+  set_mask: "Modify mask vertices/tangents/closed/mode/inverted/expansion/feather/opacity. Each path field applies on its own on top of the mask's current path: `closed:false` alone opens it, `inTangents` alone re-curves the existing vertices. Tangents not given are kept while the vertex count is unchanged and reset to straight corners when new `vertices` change it; a tangent array must have one entry per vertex or the call is refused with nothing changed. Variable-width feather points are kept; a vertex-count change on a mask that has them is refused, as is any path field on a keyframed mask path (use add_keyframe there).",
   remove_mask: "Remove a mask by 1-based index.",
 
   // ---------- markers ----------
