@@ -406,16 +406,17 @@ export function createServer(opts: CreateServerOptions = {}) {
 
     // A batch step goes straight to the ExtendScript OPS table, so a step
     // naming a switched-off op is that op by another route — `run_jsx` inside
-    // `run_batch` runs the script exactly as `run_jsx` would. Refused whole,
-    // before anything reaches After Effects, and every offending step named.
+    // `run_batch` runs the script exactly as `run_jsx` would, and so does one
+    // inside a `run_batch` nested in it, at any depth. Refused whole, before
+    // anything reaches After Effects, and every offending step named.
     if (name === "run_batch" && disabled.size > 0) {
-      const refused = refusedBatchSteps((args as { ops: { op: string }[] }).ops, policy);
+      const refused = refusedBatchSteps((args as { ops: unknown[] }).ops, policy);
       if (refused.length > 0) {
         return errorResult(
-          `run_batch refused: ${refused.map((r) => `ops[${r.index}] (${r.op})`).join(", ")} ` +
-            `${refused.length === 1 ? "names a tool" : "name tools"} switched off in this server's configuration ` +
-            `(${refused[0].reason}). Nothing in the batch was run. Remove ${refused.length === 1 ? "that step" : "those steps"}, ` +
-            `or tell the user the tool is switched off; do not try to do the same thing through another tool.`
+          `run_batch refused, and nothing in the batch was run: ` +
+            refused.map((r) => `${r.path} (${r.op}) — ${r.reason}`).join("; ") +
+            `. Remove ${refused.length === 1 ? "that step" : "those steps"}, or tell the user the tool is switched off; ` +
+            `do not try to do the same thing through another tool.`
         );
       }
     }

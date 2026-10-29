@@ -316,11 +316,26 @@ validated by the server; `batch.jsx` looks each `op` up in the ExtendScript
 `OPS` table and calls it, so `{op: "run_jsx", args: {code}}` inside a batch
 runs the script exactly as `run_jsx` would. With any switch on, `server.ts`
 checks every step against the disabled set before forwarding and refuses the
-whole batch, naming each offending step by index — refusing whole, because a
+whole batch, naming each offending step by path — refusing whole, because a
 batch that ran its first half and then stopped is the half-built result this
 repo refuses elsewhere. In read-only mode `run_batch` itself is gone, so this
 only ever fires for the `run_jsx` switch, but it checks the full disabled set
 so a third switch would not need to remember it.
+
+**The walk descends into nested batches, because `batch.jsx` runs them.** A
+`run_batch` step is an op like any other, so
+`{op:"run_batch", args:{ops:[{op:"run_jsx", …}]}}` put the script one level
+down, past a check that only read the outer list — the first version of the
+check had exactly that hole, found by a stdio run in review. `refusedBatchSteps`
+now recurses into every `run_batch` step's `args.ops` and reports each hit by
+path (`ops[0].args.ops[1]`). Nested steps are never validated by zod, so the
+walk refuses what it cannot read with certainty instead of assuming it
+harmless: an inner `ops` that is present but not an array (ExtendScript
+iterates an array-like object happily), nesting deeper than `MAX_BATCH_DEPTH`
+(8), and an array reached twice. The batch loops in `batch.jsx` are the only
+places in the bundle that dispatch `OPS[...]` by a caller-chosen name;
+`core.jsx`'s `dispatch()` is the panel's own entry, reached only through the
+tool list.
 
 **The guidance names every tool and cannot know which were registered.** The
 guides are generated once, at build time. So when a switch is on,
@@ -338,10 +353,23 @@ needs to know.
 **Parsing fails closed, with one exception.** `parseSwitch` reads the usual
 on/off spellings; anything unrecognised is *on*, with a stderr warning,
 because these are safety switches and `AE_MCP_READ_ONLY=enabled` meant it. The
-exception is an unexpanded `${…}` placeholder, which is *off*: the `.mcpb`
-maps each switch to `${user_config.…}`, and a client that ever passed that
+exception is an unexpanded `${user_config.<key>}` placeholder, which is *off*:
+the `.mcpb` maps each switch to exactly that, and a client that ever passed it
 through literally would otherwise put every Claude Desktop install into
-read-only mode with nobody having asked.
+read-only mode with nobody having asked. Only that form is excused, because
+only that form is one this project writes. Any other `${…}` — `${READ_ONLY}`
+from a shell config that did not expand, another tool's template syntax — was
+put there by a person who may well have meant "on", so it falls through to the
+fail-closed rule with the same stderr warning as any unrecognised value. The
+cost of being wrong that way is a session with fewer tools and a log line
+saying why; the cost the other way is a switch silently not applied.
+
+**The `.mcpb` manifest's tool list cannot follow the switches.** Its `tools`
+array is static metadata, written at build time and shown by Claude Desktop
+before the server ever runs; `user_config` values are substituted into the
+server's environment, not into the manifest. So it lists all 76 whatever is
+ticked. What the model actually gets is `tools/list` from the running server,
+which does follow them.
 
 **What the switches are not.** They restrict what *the model* can do through
 this server. They do not restrict the panel: its HTTP bridge still accepts

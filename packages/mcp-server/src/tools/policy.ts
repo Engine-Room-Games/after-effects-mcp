@@ -65,19 +65,23 @@ export const READ_ONLY_SERVER_OPS: Record<ServerOp, "keep" | string> = {
  * `on` are on. Anything else is **on**, with a warning: these are safety
  * switches, and someone who wrote `AE_MCP_READ_ONLY=enabled` meant it.
  *
- * The one exception is an unexpanded `${…}` placeholder, which is **off**.
- * The `.mcpb` manifest maps each switch to `${user_config.…}`; were that ever
- * passed through unexpanded, failing closed would put every Claude Desktop
- * install into read-only mode without anyone having asked for it. A literal
- * placeholder is not a value anybody chose.
+ * The one exception is an unexpanded `${user_config.…}` placeholder, which
+ * is **off**. The `.mcpb` manifest maps each switch to exactly that; were it
+ * ever passed through unexpanded, failing closed would put every Claude
+ * Desktop install into read-only mode without anyone having asked for it.
+ * Only that form is excused, because only that form is one this project
+ * writes: any other `${…}` (`${READ_ONLY}` from a shell config that did not
+ * expand, a template from some other tool) is something a person put there on
+ * purpose and may well have meant as "on", so it falls through to the
+ * fail-closed rule with the same warning as any other unrecognised value.
  */
 export function parseSwitch(name: string, raw: string | undefined): boolean {
   if (raw === undefined) return false;
   const v = raw.trim().toLowerCase();
   if (v === "" || v === "0" || v === "false" || v === "no" || v === "off") return false;
   if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
-  if (/^\$\{.*\}$/.test(v)) {
-    logger.warn(`${name} is the unexpanded placeholder ${raw}; treating it as off.`);
+  if (/^\$\{user_config\.[a-z0-9_]+\}$/.test(v)) {
+    logger.warn(`${name} is the unexpanded .mcpb placeholder ${raw}; treating it as off.`);
     return false;
   }
   logger.warn(`${name}=${raw} is not one of 1/0, true/false, yes/no, on/off; treating it as on.`);
@@ -143,23 +147,71 @@ export function disabledToolMessage(name: string, reason: string): string {
 }
 
 export interface RefusedStep {
-  index: number;
+  /** Where the step sits, e.g. `ops[0].args.ops[2]` for a step inside a nested batch. */
+  path: string;
   op: string;
   reason: string;
 }
 
 /**
- * Batch steps that name a switched-off op. `run_batch` forwards each step's
- * `op` straight to the ExtendScript `OPS` table, so a step is a tool call by
- * another route and is held to the same list.
+ * How deep a batch may nest before the check gives up and refuses it. Nesting
+ * is legal (batch.jsx runs an inner batch inside the outer one's undo group)
+ * but nobody needs it eight levels down, and a bound keeps a hostile payload
+ * from recursing the check into a stack overflow.
  */
-export function refusedBatchSteps(ops: ReadonlyArray<{ op: string }>, policy: ToolPolicy): RefusedStep[] {
+export const MAX_BATCH_DEPTH = 8;
+
+/**
+ * Batch steps that name a switched-off op, at any depth.
+ *
+ * `run_batch` forwards each step's `op` straight to the ExtendScript `OPS`
+ * table, so a step is a tool call by another route and is held to the same
+ * list. That includes a step that is itself `run_batch`: batch.jsx runs it,
+ * and its own steps go to `OPS` the same way — so the walk descends into every
+ * nested `run_batch`'s `args.ops`. The batch path in `batch.jsx` is the only
+ * place in the bundle that dispatches `OPS[...]` by a name the caller chose
+ * (`core.jsx`'s `dispatch()` is the panel's own entry point, reached only
+ * through the server's tool list).
+ *
+ * Nested steps are never validated by zod, so anything the walk cannot read
+ * with certainty is refused rather than assumed harmless: an inner `ops` that
+ * is present but not an array (ExtendScript would happily iterate an
+ * array-like object), a batch deeper than `MAX_BATCH_DEPTH`, or the same array
+ * reached twice. JSON cannot express a cycle, but this is called on whatever
+ * object it is handed.
+ */
+export function refusedBatchSteps(ops: ReadonlyArray<unknown>, policy: ToolPolicy): RefusedStep[] {
   const off = disabledOps(policy);
   const refused: RefusedStep[] = [];
-  ops.forEach((s, i) => {
-    const reason = off.get(s.op);
-    if (reason !== undefined) refused.push({ index: i, op: s.op, reason });
-  });
+  const seen = new Set<unknown>();
+  const walk = (list: ReadonlyArray<unknown>, prefix: string, depth: number) => {
+    if (seen.has(list)) {
+      refused.push({ path: prefix || "ops", op: "run_batch", reason: "the batch refers to itself" });
+      return;
+    }
+    seen.add(list);
+    list.forEach((raw, i) => {
+      const path = `${prefix}ops[${i}]`;
+      if (raw === null || typeof raw !== "object") return; // batch.jsx fails it as "Unknown op"
+      const step = raw as { op?: unknown; args?: unknown };
+      const op = typeof step.op === "string" ? step.op : String(step.op);
+      const reason = off.get(op);
+      if (reason !== undefined) refused.push({ path, op, reason });
+      if (op !== "run_batch") return;
+      const inner = (step.args as { ops?: unknown } | null | undefined)?.ops;
+      if (inner === undefined || inner === null) return; // batch.jsx runs `args.ops || []`
+      if (!Array.isArray(inner)) {
+        refused.push({ path, op, reason: "its nested `ops` is not an array, so its steps cannot be checked" });
+        return;
+      }
+      if (depth + 1 > MAX_BATCH_DEPTH) {
+        refused.push({ path, op, reason: `batches nested more than ${MAX_BATCH_DEPTH} deep cannot be checked` });
+        return;
+      }
+      walk(inner, `${path}.args.`, depth + 1);
+    });
+  };
+  walk(ops, "", 1);
   return refused;
 }
 

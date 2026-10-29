@@ -22,7 +22,7 @@ const sharedDist = (...p) => pathToFileURL(path.join(root, "packages", "shared",
 const policyMod = await import(dist("tools", "policy.js"));
 const {
   DEFAULT_POLICY, READ_ONLY_SERVER_OPS, parseSwitch, policyFromEnv, disabledOps, enabledOps,
-  refusedBatchSteps, policyNotice,
+  refusedBatchSteps, policyNotice, MAX_BATCH_DEPTH,
 } = policyMod;
 const { OpSchemas, OpMutation } = await import(sharedDist("schemas.js"));
 const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
@@ -65,6 +65,15 @@ await check("an unexpanded ${user_config…} placeholder is off, not on", () => 
   // Failing closed here would put every Claude Desktop install into read-only
   // mode the day a client stopped substituting.
   assert.equal(parseSwitch("X", "${user_config.read_only}"), false);
+  assert.equal(parseSwitch("X", "${user_config.disable_run_jsx}"), false);
+});
+
+await check("any other ${…} is a value somebody wrote, and fails closed", () => {
+  // Only the form the .mcpb writes is excused. `${READ_ONLY}` from a shell
+  // config that did not expand is a person's setting, and may well mean on.
+  for (const v of ["${READ_ONLY}", "${env:AE_MCP_READ_ONLY}", "${user_config}", "${}"]) {
+    assert.equal(parseSwitch("X", v), true, v);
+  }
 });
 
 await check("policyFromEnv reads both variables", () => {
@@ -131,10 +140,56 @@ await check("both switches together are read-only (run_jsx is already a write)",
   assert.deepEqual(enabledOps(BOTH), enabledOps(READ_ONLY));
 });
 
-await check("a batch step naming a switched-off op is caught, with its index", () => {
+await check("a batch step naming a switched-off op is caught, with its path", () => {
   const steps = [{ op: "set_layer" }, { op: "run_jsx" }, { op: "add_keyframe" }, { op: "run_jsx" }];
   assert.deepEqual(refusedBatchSteps(steps, DEFAULT_POLICY), []);
-  assert.deepEqual(refusedBatchSteps(steps, NO_JSX).map((r) => `${r.op}@${r.index}`), ["run_jsx@1", "run_jsx@3"]);
+  assert.deepEqual(refusedBatchSteps(steps, NO_JSX).map((r) => `${r.op}@${r.path}`), ["run_jsx@ops[1]", "run_jsx@ops[3]"]);
+});
+
+// batch.jsx runs a run_batch step like any other op, and the inner batch's
+// steps go to OPS[...] by name — so run_jsx two batches down is run_jsx.
+const nest = (depth, leaf) => {
+  let step = leaf;
+  for (let i = 0; i < depth; i++) step = { op: "run_batch", args: { ops: [{ op: "set_layer", args: {} }, step] } };
+  return step;
+};
+const JSX_LEAF = { op: "run_jsx", args: { code: "return 1" } };
+
+await check("a run_jsx step inside a nested run_batch is caught", () => {
+  const refused = refusedBatchSteps([nest(1, JSX_LEAF)], NO_JSX);
+  assert.deepEqual(refused.map((r) => r.path), ["ops[0].args.ops[1]"]);
+  assert.equal(refused[0].op, "run_jsx");
+});
+
+await check("a run_jsx step several batches deep is caught, up to the depth bound", () => {
+  const refused = refusedBatchSteps([nest(5, JSX_LEAF)], NO_JSX);
+  assert.equal(refused.length, 1);
+  assert.equal(refused[0].op, "run_jsx");
+  assert.equal(refused[0].path.split("args.ops").length - 1, 5);
+});
+
+await check("a batch nested past the bound is refused, not trusted", () => {
+  const refused = refusedBatchSteps([nest(MAX_BATCH_DEPTH + 3, { op: "set_layer" })], NO_JSX);
+  assert.equal(refused.length, 1);
+  assert.match(refused[0].reason, /nested more than/);
+});
+
+await check("a nested ops that is not an array is refused (ExtendScript iterates array-likes)", () => {
+  const sneaky = { op: "run_batch", args: { ops: { 0: JSX_LEAF, length: 1 } } };
+  const refused = refusedBatchSteps([sneaky], NO_JSX);
+  assert.equal(refused.length, 1);
+  assert.match(refused[0].reason, /not an array/);
+});
+
+await check("a batch that refers to itself terminates and is refused", () => {
+  const ops = [];
+  ops.push({ op: "run_batch", args: { ops } });
+  const refused = refusedBatchSteps(ops, NO_JSX);
+  assert.ok(refused.some((r) => /refers to itself/.test(r.reason)));
+});
+
+await check("a clean nested batch passes", () => {
+  assert.deepEqual(refusedBatchSteps([nest(3, { op: "add_keyframe" })], NO_JSX), []);
 });
 
 // ---------------------------------------------------------------------------
@@ -235,8 +290,19 @@ await check("run_batch refuses a run_jsx step whole, naming it, and sends nothin
   });
   assert.equal(res.isError, true);
   assert.match(res.content[0].text, /ops\[1\] \(run_jsx\)/);
-  assert.match(res.content[0].text, /Nothing in the batch was run/);
+  assert.match(res.content[0].text, /nothing in the batch was run/i);
   assert.deepEqual(seen, []);
+});
+
+await check("run_batch refuses run_jsx hidden in a nested batch, and sends nothing", async () => {
+  // The shape of the payload a stdio run got past the first version of this check.
+  seen.length = 0;
+  for (const depth of [1, 4]) {
+    const res = await clients.noJsx.callTool({ name: "run_batch", arguments: { ops: [nest(depth, JSX_LEAF)] } });
+    assert.equal(res.isError, true, `depth ${depth} was not refused`);
+    assert.match(res.content[0].text, /\(run_jsx\)/);
+  }
+  assert.deepEqual(seen, [], "a nested run_jsx reached the bridge");
 });
 
 await check("what is still offered still works", async () => {

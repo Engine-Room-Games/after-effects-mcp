@@ -158,6 +158,9 @@ const manifest = {
       required: false,
     },
   },
+  // Static, so it lists every tool whatever `user_config` says: the manifest is
+  // written at build time and the switches only reach the server's
+  // environment. The running server's tools/list is what follows them.
   tools: Object.keys(OpSchemas).map((name) => ({
     name,
     description: (descriptions[name] ?? `AE op: ${name}`).split(". ")[0] + ".",
