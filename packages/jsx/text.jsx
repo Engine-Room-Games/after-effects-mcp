@@ -117,9 +117,9 @@ OPS.add_text_animator = function (args) {
     var selectors = anim.property("ADBE Text Selectors");
     if (selectors.numProperties === 0) selectors.addProperty("ADBE Text Selector");
     var sel = selectors.property(1);
-    if (args.range.start !== undefined) sel.property("ADBE Text Percent Start").setValue(args.range.start);
-    if (args.range.end !== undefined) sel.property("ADBE Text Percent End").setValue(args.range.end);
-    if (args.range.offset !== undefined) sel.property("ADBE Text Percent Offset").setValue(args.range.offset);
+    if (args.range.start !== undefined) __setValue(sel.property("ADBE Text Percent Start"), args.range.start);
+    if (args.range.end !== undefined) __setValue(sel.property("ADBE Text Percent End"), args.range.end);
+    if (args.range.offset !== undefined) __setValue(sel.property("ADBE Text Percent Offset"), args.range.offset);
   }
   return { ok: true, animatorName: anim.name };
 };

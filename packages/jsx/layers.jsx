@@ -220,8 +220,8 @@ OPS.create_light_layer = function (args) {
   var l = c.layers.addLight(args.name || "Light", center);
   var lightTypeMap = { parallel: LightType.PARALLEL, spot: LightType.SPOT, point: LightType.POINT, ambient: LightType.AMBIENT };
   if (args.lightType && lightTypeMap[args.lightType]) l.lightType = lightTypeMap[args.lightType];
-  if (args.color) l.lightOption.property("Color").setValue([args.color[0], args.color[1], args.color[2]]);
-  if (args.intensity !== undefined) l.lightOption.property("Intensity").setValue(args.intensity);
+  if (args.color) __setValue(l.lightOption.property("Color"), [args.color[0], args.color[1], args.color[2]]);
+  if (args.intensity !== undefined) __setValue(l.lightOption.property("Intensity"), args.intensity);
   return __layerSummary(l);
 };
 

@@ -51,16 +51,25 @@ function __numArrayClose(want, got, allowExtra) {
   // A 2D layer's Position reads back with a third component of 0 when it was
   // written with two. Extra components are tolerated only when they are zero —
   // the value AE fills in — and only where the caller allows it.
+  // A colour written as [r, g, b] reads back as [r, g, b, 1] — AE fills in the
+  // alpha (measured on a shape Fill Color, AE 26.5). That one extra component
+  // is tolerated at 1 as well.
   if (got.length > want.length) {
     if (!allowExtra) return false;
-    for (var x = want.length; x < got.length; x++) { if (!__numClose(0, got[x])) return false; }
+    for (var x = want.length; x < got.length; x++) {
+      if (__numClose(0, got[x])) continue;
+      if (want.length === 3 && got.length === 4 && x === 3 && __numClose(1, got[x])) continue;
+      return false;
+    }
   }
   for (var i = 0; i < want.length; i++) { if (!__numClose(want[i], got[i])) return false; }
   return true;
 }
 
 function __pointListClose(want, got) {
-  if (!want) return !got || got.length === 0 || __allZeroPoints(got);
+  // Omitted tangents: a fresh `new Shape()` holds `[]` for them (not
+  // undefined), and AE reads them back as one [0, 0] per vertex. Measured, AE 26.5.
+  if (!want || want.length === 0) return !got || got.length === 0 || __allZeroPoints(got);
   if (!got || want.length !== got.length) return false;
   for (var i = 0; i < want.length; i++) { if (!__numArrayClose(want[i], got[i], false)) return false; }
   return true;

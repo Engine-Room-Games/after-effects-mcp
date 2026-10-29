@@ -121,8 +121,14 @@ check("numbers and colours compare within a relative tolerance, not exactly", ()
   const r = run(ctx, `
     var a = new MockProp(0, "spurious", function (x) { return x + 1e-9; });
     var b = new MockProp([0,0,0,0], "spurious", function (x) { return [x[0] + 1e-7, x[1], x[2], x[3]]; });
-    [__setValue(a, 12.5), __setValue(b, [0.075, 0.08, 0.11, 1])]`);
-  assert.deepEqual(plain(r), [true, true]);
+    var c3 = new MockProp([0,0,0,1], "spurious", function (x) { return [x[0], x[1], x[2], 1]; });
+    [__setValue(a, 12.5), __setValue(b, [0.075, 0.08, 0.11, 1]), __setValue(c3, [1, 0, 0])]`);
+  assert.deepEqual(plain(r), [true, true, true], "an RGB write reads back with alpha 1");
+  assert.throws(
+    () => run(ctx, `__setValue(new MockProp([0,0,0,1], "spurious", function (x) { return [x[0], x[1], x[2], 0.5]; }), [1, 0, 0])`),
+    (e) => e.message === AE_MSG,
+    "only an alpha of exactly 1 is the one AE fills in"
+  );
   assert.throws(
     () => run(ctx, `__setValue(new MockProp(0, "spurious", function (x) { return x + 0.5; }), 12)`),
     (e) => e.message === AE_MSG,
@@ -148,7 +154,8 @@ check("a 2D Position padded with a zero third component counts; a non-zero one d
 check("Shapes compare vertex by vertex, with omitted tangents read as zero", () => {
   const ctx = makeCtx();
   const ok = run(ctx, `
-    var want = new Shape(); want.vertices = [[0,0],[10,0],[10,10]]; want.inTangents = undefined; want.outTangents = undefined; want.closed = true;
+    // A real new Shape() holds [] for tangents it was not given, not undefined.
+    var want = new Shape(); want.vertices = [[0,0],[10,0],[10,10]]; want.closed = true;
     var p = new MockProp(new Shape(), "spurious", function (x) {
       var s = new Shape(); s.vertices = copy(x.vertices); s.inTangents = [[0,0],[0,0],[0,0]]; s.outTangents = [[0,0],[0,0],[0,0]]; s.closed = x.closed; return s;
     });

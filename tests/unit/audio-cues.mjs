@@ -39,7 +39,7 @@ const jsxDir = path.join(root, "packages", "jsx");
 const read = (f) => fs.readFileSync(path.join(jsxDir, f), "utf8");
 // core.jsx for dispatch/noUndoWhen, footage.jsx for the import and the project
 // scan audio.jsx reuses. In the shipped bundle all three share one scope.
-const sources = [["core.jsx", read("core.jsx")], ["footage.jsx", read("footage.jsx")], ["audio.jsx", read("audio.jsx")]];
+const sources = [["core.jsx", read("core.jsx")], ["values.jsx", read("values.jsx")], ["footage.jsx", read("footage.jsx")], ["audio.jsx", read("audio.jsx")]];
 
 const plain = (a) => Array.prototype.slice.call(a);
 
