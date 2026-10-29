@@ -392,7 +392,10 @@ function __ptLocalMatrix(l, t) {
 function __ptChain(l, t, depth) {
   if (!l) return { ok: true, m: __ptMId(), wb: [0, 0], animated: false };
   if (depth > 32) return { ok: false, reason: "parent chain deeper than 32 layers" };
-  if (!(l instanceof AVLayer)) return { ok: false, reason: 'a camera or light in the chain ("' + l.name + '") has no 2D transform' };
+  // Name the exclusions rather than testing for AVLayer: in ExtendScript a
+  // ShapeLayer or TextLayer is not `instanceof AVLayer`, despite Adobe's class
+  // docs, so that test refused every shape and text layer as a "camera" (#120).
+  if (l instanceof CameraLayer || l instanceof LightLayer) return { ok: false, reason: 'a camera or light in the chain ("' + l.name + '") has no 2D transform' };
   if (l.threeDLayer) return { ok: false, reason: 'a 3D layer in the chain ("' + l.name + '")' };
   var up = __ptChain(l.parent, t, depth + 1);
   if (!up.ok) return up;
