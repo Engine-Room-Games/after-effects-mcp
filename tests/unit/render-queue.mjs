@@ -27,9 +27,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount } =
   await import(dist("render", "aerender.js"));
-const { aerenderCandidates } = await import(dist("setup", "platform.js"));
+const { aerenderCandidates, pidsWithMarker } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
 const { OpMutation } = await import(pathToFileURL(path.join(root, "packages", "shared", "dist", "schemas.js")).href);
 
@@ -251,6 +251,25 @@ await check("missing-footage lines are recognised, ordinary ones are not", () =>
   assert.ok(!isMissingFootageLine("PROGRESS:  Finished composition “Comp”."));
   assert.ok(isMissingFootageLine("ERROR: Missing footage: “clip.mov”"));
 });
+// Measured on AE 26.5 (macOS, English): aerender printed exactly this and then
+// exited 0, leaving a corrupt file. The words that matter are INSIDE the curly
+// quotes — the first matcher stripped them and passed the line.
+const REAL_MISSING_FOOTAGE_LINE = "WARNING:After Effects warning: logged 9 errors, please check log.  First error was “error: Unable to Render: File Not Found /Users/x/scratch/foot/pic.png”";
+await check("the measured aerender missing-footage line is caught", () => {
+  assert.equal(isMissingFootageLine(REAL_MISSING_FOOTAGE_LINE), true);
+  assert.equal(loggedErrorCount(REAL_MISSING_FOOTAGE_LINE), 9);
+  assert.equal(loggedErrorCount("PROGRESS:  0:00:00:05 (6): 0 Seconds"), 0);
+  assert.equal(loggedErrorCount("aerender WARNING: Composition “logged 3 errors” is empty"), 0);
+});
+await check("ps output is matched on the command line, never on this process", () => {
+  const out = [
+    "  101 /Applications/Adobe After Effects 2026/aerender -project /tmp/ae-mcp-render/r_1_2/rq.aep -rqindex 3",
+    "  102 /Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/aerendercore.app/Contents/MacOS/aerendercore -noui -project /private/tmp/ae-mcp-render/r_1_2/rq.aep -rqindex 3 -aerenderpid 101",
+    "  103 /bin/zsh",
+    `  ${process.pid} node server.js r_1_2`,
+  ].join("\n");
+  assert.deepEqual(pidsWithMarker(out, "r_1_2"), [101, 102]);
+});
 await check("names and paths that merely contain the words do not fail a good render", () => {
   // The two examples from review: an output path and a comp name.
   for (const l of [
@@ -288,6 +307,36 @@ fs.writeFileSync(process.env.FAKE_ARGS, JSON.stringify(args));
 console.log("PROGRESS:  10/29/2026 10:00:00 AM: Starting composition “Comp”.");
 console.log("PROGRESS:  Duration: 0:00:00:04");
 if (mode === "fail") { console.log("aerender ERROR: Unable to find comp"); process.exit(3); }
+if (mode === "realmissing") {
+  // The measured 26.5 output for missing footage, then exit 0.
+  console.log("PROGRESS:  0:00:00:00 (1): 0 Seconds");
+  console.log(process.env.FAKE_LINE);
+  console.log("Error Code: 1");
+  console.log("Please restart After Effects and retry the export.");
+  fs.writeFileSync(out, "not a movie");
+  process.exit(0);
+}
+if (mode === "burst") {
+  // Many frames, then an immediate exit: the last lines must still be read.
+  let text = "";
+  for (let n = 0; n < 300; n++) text += "PROGRESS:  0:00:00:00 (" + (n + 1) + "): 0 Seconds\\n";
+  process.stdout.write(text);
+  fs.writeFileSync(out, "rendered movie");
+  process.exit(0);
+}
+if (mode === "engine") {
+  // Stands in for aerendercore as measured on 26.5: started detached (its own
+  // process group, reparented away), carrying the job's -project path, and
+  // deaf to SIGTERM.
+  const project = args[args.indexOf("-project") + 1];
+  const g = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{}); setInterval(()=>{}, 1000)", "--", "-noui", "-project", project], { detached: true, stdio: "ignore" });
+  g.unref();
+  fs.writeFileSync(process.env.FAKE_GRANDCHILD, String(g.pid));
+  fs.writeFileSync(out, "partial");
+  console.log("PROGRESS:  0:00:00:00 (1): 0 Seconds");
+  setInterval(() => {}, 1000);
+  return;
+}
 if (mode === "placeholder") {
   // Exit 0 with a fresh, non-empty file — but the footage was missing, so
   // the file holds AE's placeholder rather than the real media.
@@ -403,6 +452,44 @@ if (process.platform !== "win32") {
     assert.match(st.result.rendered[0].progressWarning, /FORTSCHRITT/);
   });
 
+  await check("the measured missing-footage output fails the job although aerender exits 0", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const out = path.join(tmp, "realmissing.mov");
+    env("realmissing", out);
+    process.env.FAKE_LINE = REAL_MISSING_FOOTAGE_LINE;
+    const { jobId } = runner.start(plan(out), fake);
+    await assert.rejects(
+      jobs.waitFor(jobId, 10_000),
+      (e) => /missing footage/.test(e.message) && /NOT reported as rendered/.test(e.message) && /File Not Found/.test(e.message)
+    );
+  });
+
+  await check("frames printed just before exit are all counted", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const out = path.join(tmp, "burst.mov");
+    env("burst", out);
+    const { jobId } = runner.start(plan(out, 300), fake);
+    const st = await jobs.waitFor(jobId, 10_000);
+    assert.equal(st.result.rendered[0].frames, 300);
+  });
+
+  await check("cancel finds and kills a detached render engine that ignores SIGTERM", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, graceMs: 500 });
+    const out = path.join(tmp, "engine.mov");
+    env("engine", out);
+    const { jobId } = runner.start(plan(out, 100), fake);
+    for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
+    const engine = Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8"));
+    assert.ok(alive(engine));
+    const report = await runner.cancel(jobId);
+    assert.equal(report.stopped, true, report.note);
+    assert.ok(!alive(engine), "the engine must be dead before stopped:true is reported");
+    assert.equal(jobs.get(jobId).status, "cancelled");
+  });
+
   await check("exit 0 with missing footage is a failure, even with a fresh file on disk", async () => {
     const jobs = new JobManager();
     const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
@@ -471,7 +558,7 @@ if (process.platform !== "win32") {
     const jobs = new JobManager();
     // A stop that does nothing: the process outlives the cancel, as an engine
     // started outside aerender's group would.
-    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, graceMs: 100, stop: async () => {} });
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, graceMs: 100, stop: async () => {}, findEngines: async () => [] });
     const out = path.join(tmp, "stubborn.mov");
     env("hang", out);
     const { jobId } = runner.start(plan(out, 100), fake);
@@ -607,7 +694,7 @@ function makeAe(opts = {}) {
     save() {
       log.push("save");
       if (opts.saveNoop) return; // a converted or locked project, under suppressed dialogs
-      mtime += 1000;
+      if (!opts.sameSecond) mtime += 1000; // File.modified has 1s resolution
       this.dirty = false;
     },
     itemByID: (id) => (id === 7 ? comp : null),
@@ -724,6 +811,11 @@ await check("_render_save refuses a read-only project before trying", () => {
   const { ctx, log } = makeAe({ readOnly: true });
   assert.match(throwsMsg(() => ctx.OPS._render_save({})), /read-only/);
   assert.deepEqual(log, []);
+});
+await check("a save in the same second as the last one is still a save (measured on 26.5)", () => {
+  const { ctx, log } = makeAe({ sameSecond: true });
+  assert.equal(ctx.OPS._render_save({}).saved, true);
+  assert.deepEqual(log, ["suppress", "save", "unsuppress"]);
 });
 await check("a save that silently did not happen is reported, not trusted", () => {
   const { ctx, log } = makeAe({ saveNoop: true });

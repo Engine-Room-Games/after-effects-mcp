@@ -287,6 +287,11 @@ export function createServer(opts: CreateServerOptions = {}) {
           try {
             const st = await jobs.waitFor(a.jobId, a.timeoutMs ?? 600_000);
             return textResult(st);
+          } catch (e) {
+            // The job failed (or the wait timed out). Answered here rather
+            // than by the catch below, which would label it "Invalid
+            // arguments for await_job" — a schema error, which it is not.
+            return fail(name, (e as Error).message);
           } finally {
             // Unbind, then wait for every notification already started to
             // reach the transport. The response is written after this handler

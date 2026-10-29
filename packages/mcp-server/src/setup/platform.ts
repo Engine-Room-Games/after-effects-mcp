@@ -342,3 +342,94 @@ export function stopProcessTreeSync(pid: number, platform: NodeJS.Platform = pro
     try { process.kill(pid, "SIGKILL"); } catch {}
   }
 }
+
+/**
+ * Processes whose command line contains `marker`, other than this one.
+ *
+ * Measured on macOS, AE 26.5 (live run of PR #143): aerender starts the render
+ * engine as `…/aerendercore.app/Contents/MacOS/aerendercore -noui -project
+ * <the job's snapshot> -rqindex N … -aerenderpid <aerender pid>`, with PPID 1
+ * and a process group of its own from the start — so neither a group signal
+ * nor a walk of aerender's children reaches it, and it ignored SIGTERM for 8s.
+ * The job's snapshot path is unique to the job and is on that command line,
+ * which makes it the handle that does reach it.
+ *
+ *   POSIX:   `ps -axww -o pid=,command=` (ww: never truncate the command).
+ *   Windows: CIM's Win32_Process.CommandLine through PowerShell. UNVERIFIED —
+ *            nobody has watched aerender.exe start its engine on Windows, so
+ *            whether the engine is a child (`taskkill /T` already covers it)
+ *            or detached like macOS is unknown; this covers both.
+ *
+ * Returns [] when the lookup itself fails (no `ps`, PowerShell blocked); the
+ * caller still has aerender's own exit to go on.
+ */
+export async function findProcessesByMarker(marker: string, platform: NodeJS.Platform = process.platform): Promise<number[]> {
+  try {
+    if (platform === "win32") {
+      const ps = `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains(${psQuote(marker)}) } | ForEach-Object { $_.ProcessId }`;
+      const { stdout } = await exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], { windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+      return parsePids(stdout);
+    }
+    const { stdout } = await exec("ps", ["-axww", "-o", "pid=,command="], { maxBuffer: 64 * 1024 * 1024 });
+    return pidsWithMarker(stdout, marker);
+  } catch {
+    return [];
+  }
+}
+
+/** The synchronous form, for `process.on("exit")` and signal handlers. */
+export function findProcessesByMarkerSync(marker: string, platform: NodeJS.Platform = process.platform): number[] {
+  try {
+    if (platform === "win32") {
+      const ps = `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains(${psQuote(marker)}) } | ForEach-Object { $_.ProcessId }`;
+      return parsePids(execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], { windowsHide: true, encoding: "utf8" }));
+    }
+    return pidsWithMarker(execFileSync("ps", ["-axww", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }), marker);
+  } catch {
+    return [];
+  }
+}
+
+/** `ps -o pid=,command=` output → the pids whose command contains `marker`. Exported for the test. */
+export function pidsWithMarker(psOutput: string, marker: string): number[] {
+  const out: number[] = [];
+  for (const line of psOutput.split(/\r?\n/)) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pid === process.pid) continue;
+    if (m[2].includes(marker)) out.push(pid);
+  }
+  return out;
+}
+
+function parsePids(s: string): number[] {
+  return s
+    .split(/\r?\n/)
+    .map((l) => Number(l.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0 && n !== process.pid);
+}
+
+function psQuote(s: string): string {
+  return "'" + s.replace(/'/g, "''") + "'";
+}
+
+/** Signal one process (not a group). Windows has only the forceful kill. Never throws. */
+export async function stopPid(pid: number, force: boolean, platform: NodeJS.Platform = process.platform): Promise<void> {
+  if (platform === "win32") {
+    try { await exec("taskkill", ["/PID", String(pid), "/T", "/F"]); } catch {}
+    return;
+  }
+  try { process.kill(pid, force ? "SIGKILL" : "SIGTERM"); } catch {}
+}
+
+/** Whether a pid is still alive. */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM: it exists but is not ours to signal.
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}

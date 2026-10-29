@@ -4,7 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import type { JobManager } from "../jobs/manager.js";
 import { logger } from "../util/logger.js";
-import { stopProcessTree, stopProcessTreeSync, treeSpawnOptions } from "../setup/platform.js";
+import {
+  findProcessesByMarker,
+  findProcessesByMarkerSync,
+  pidAlive,
+  stopPid,
+  stopProcessTree,
+  stopProcessTreeSync,
+  treeSpawnOptions,
+} from "../setup/platform.js";
 
 /**
  * `render_queue` — rendering the project's render queue in a separate
@@ -288,6 +296,12 @@ export interface RenderRunnerOptions {
   tmpRoot?: string;
   /** How a process tree is stopped. The platform's, unless a test needs one that fails. */
   stop?: (pid: number, force: boolean) => Promise<void>;
+  /**
+   * Render-engine processes for a job, found by the job's snapshot path on
+   * their command line. The platform's (`findProcessesByMarker`), unless a test
+   * needs one that finds nothing.
+   */
+  findEngines?: (marker: string) => Promise<number[]>;
 }
 
 /**
@@ -396,16 +410,26 @@ export function removeSnapshot(snap: string): void {
  * aerender has been seen to exit 0 with footage missing, rendering AE's
  * placeholder (colour bars) into the file — a file that exists, is fresh and
  * is not empty, so the on-disk check alone would accept it. Any such line
- * fails the item instead. The wording is aerender's own and not yet measured
- * on 26.x (recipe 57); this matches the forms After Effects uses in its UI.
+ * fails the item instead.
  *
- * Two things keep a good render from failing on a coincidence of words:
- *   - only aerender's own diagnostic lines are read — `aerender ERROR:`,
- *     `aerender WARNING:` and the bare `ERROR:`/`WARNING:` forms — never a
- *     PROGRESS line, which echoes comp names and output paths;
- *   - within those, quoted names and anything that looks like a path are
- *     removed first, so an output at /renders/missing-source-v2.mov or a
- *     comp called "Cannot Find Me" is not read as the complaint itself.
+ * MEASURED (AE 26.5, macOS, English) — the line aerender prints, verbatim, and
+ * then it exits 0 with a corrupt file:
+ *
+ *   WARNING:After Effects warning: logged 9 errors, please check log.  First error was “error: Unable to Render: File Not Found /…/foot/pic.png”
+ *
+ * Note where the words are: inside the curly quotes. AE quotes the first
+ * error's own text, so quoted spans cannot all be thrown away — the first
+ * version of this did, and passed exactly the line it exists to catch.
+ *
+ * What keeps a good render from failing on a coincidence of words:
+ *   - only aerender's diagnostic lines are read — `aerender ERROR:`,
+ *     `aerender WARNING:`, `ERROR:`/`WARNING:` (with or without a space) —
+ *     never a PROGRESS line, which echoes comp names and output paths;
+ *   - a quoted span is removed UNLESS it is a quoted error (“error: …”), which
+ *     is AE's own message, so a comp called "Cannot Find Me" is not read as a
+ *     complaint while “error: Unable to Render: File Not Found …” is;
+ *   - anything that looks like a path is removed, so an output at
+ *     /renders/missing-source-v2.mov does not count.
  */
 const DIAGNOSTIC_LINE = /^\s*(?:aerender\s+)?(?:ERROR|WARNING)\b\s*:?/i;
 const MISSING_FOOTAGE_LINE =
@@ -414,7 +438,10 @@ const MISSING_FOOTAGE_LINE =
 /** A diagnostic line with its quoted names and paths taken out. */
 export function stripNamesAndPaths(line: string): string {
   return line
-    .replace(/“[^”]*”|"[^"]*"|‘[^’]*’|'[^']*'/g, " ")
+    .replace(/“([^”]*)”|"([^"]*)"|‘([^’]*)’|'([^']*)'/g, (_m, a, b, c, d) => {
+      const inner = String(a ?? b ?? c ?? d ?? "");
+      return /^\s*error\s*:/i.test(inner) ? " " + inner + " " : " ";
+    })
     // Any token holding a path separator, a drive letter, or a file extension.
     .replace(/(?:[A-Za-z]:)?[^\s:]*[\\/][^\s]*/g, " ")
     .replace(/\S+\.[A-Za-z0-9]{2,5}\b/g, " ");
@@ -426,6 +453,19 @@ export function isMissingFootageLine(line: string): boolean {
   if (MISSING_FOOTAGE_LINE.test(text)) return true;
   // "Footage file missing", "missing footage", "media is missing", …
   return /\bmissing\b/i.test(text) && /\b(?:footage|file|files|media|source)\b/i.test(text);
+}
+
+/**
+ * How many errors After Effects says it logged during the render, from the
+ * measured summary line (above): `After Effects warning: logged 9 errors`.
+ * 0 for every other line. Any error logged means the file cannot be trusted —
+ * the live run's file had no readable duration — even when the first error is
+ * not one this server recognises.
+ */
+export function loggedErrorCount(line: string): number {
+  if (!DIAGNOSTIC_LINE.test(line)) return 0;
+  const m = /\blogged\s+(\d+)\s+errors?\b/i.exec(stripNamesAndPaths(line));
+  return m ? Number(m[1]) : 0;
 }
 
 /** Appended to a failure whose lines talk about footage — see snapshotProject. */
@@ -451,6 +491,8 @@ export function occupiedOutputs(plan: RenderPlan): string[] {
 }
 
 const DEFAULT_GRACE_MS = 5000;
+/** How long after aerender exits its pipes may take to drain. */
+const CLOSE_WAIT_MS = 2000;
 const TAIL_LINES = 12;
 
 let seq = 0;
@@ -471,6 +513,7 @@ export class RenderRunner {
   private readonly onRendered?: RenderRunnerOptions["onRendered"];
   private readonly tmpRoot: string;
   private readonly stop: (pid: number, force: boolean) => Promise<void>;
+  private readonly findEngines: (marker: string) => Promise<number[]>;
   private disarm: (() => void) | null = null;
 
   constructor(private jobs: JobManager, opts: RenderRunnerOptions = {}) {
@@ -478,6 +521,7 @@ export class RenderRunner {
     this.onRendered = opts.onRendered;
     this.tmpRoot = opts.tmpRoot ?? os.tmpdir();
     this.stop = opts.stop ?? ((pid, force) => stopProcessTree(pid, force));
+    this.findEngines = opts.findEngines ?? ((marker) => findProcessesByMarker(marker));
   }
 
   /**
@@ -602,9 +646,11 @@ export class RenderRunner {
           await this.unqueue(r);
           this.jobs.fail(
             r.jobId,
-            `aerender finished ${label} but reported missing footage, so the file at ` +
-              `${item.outputs.map((x) => x.path).join(", ")} may contain After Effects' missing-footage ` +
-              `placeholder instead of the real media. It is NOT reported as rendered. aerender said: ` +
+            `aerender finished ${label} (exit ${outcome.code}) but reported ` +
+              (outcome.missing.some(isMissingFootageLine) ? "missing footage" : "errors logged during the render") +
+              `, so the file at ${item.outputs.map((x) => x.path).join(", ")} cannot be trusted — it may hold ` +
+              `After Effects' missing-footage placeholder, or be unreadable. It is NOT reported as rendered. ` +
+              `aerender said: ` +
               `${outcome.missing.join(" | ")}.` +
               missingFootageHint(outcome.missing) +
               this.renderedSoFar(r) +
@@ -695,6 +741,10 @@ export class RenderRunner {
       if (this.current === r) this.current = null;
       removeSnapshot(r.snapshot);
       this.disarm?.();
+      // Last, because it is the one async step: the job is settled and its
+      // copy gone by now, and an engine that outlived aerender (see cancel)
+      // has nothing left to render from, but must still not outlive the job.
+      await this.reapEngines(r);
     }
   }
 
@@ -761,12 +811,25 @@ export class RenderRunner {
           resolve({ code, signal, spawnError, errors, tail, missing });
         };
         child.on("error", (e) => finish(null, null, e));
-        child.on("exit", (code, signal) => finish(code, signal));
+        // `exit` can fire before the last of stdout has been read — the live
+        // run reported 299 of 300 frames — so wait for `close`, which comes
+        // after the pipes drain. Bounded, because a render engine that
+        // inherited the pipe can hold it open after aerender itself is gone.
+        let closed = false;
+        child.on("close", (code, signal) => {
+          closed = true;
+          finish(code, signal);
+        });
+        child.on("exit", (code, signal) => {
+          setTimeout(() => {
+            if (!closed) finish(code, signal);
+          }, CLOSE_WAIT_MS).unref?.();
+        });
       });
       const onLine = (line: string) => {
         tail.push(line.trim());
         if (tail.length > TAIL_LINES) tail.shift();
-        if (isMissingFootageLine(line) && missing.length < 20) missing.push(line.trim());
+        if ((isMissingFootageLine(line) || loggedErrorCount(line) > 0) && missing.length < 20) missing.push(line.trim());
         const parsed = parseAerenderLine(line);
         if (parsed.kind === "frame") {
           r.itemFrames++;
@@ -821,9 +884,20 @@ export class RenderRunner {
    * Stop a render and report what was left. Null when `jobId` is not a render
    * job this runner has seen — the caller then treats it as a batch job.
    *
-   * `stopped` is only true when the aerender process was *seen* to exit: a
-   * signal sent is not a render stopped, and a cancel that reports success
-   * while the engine keeps writing frames is the lie this exists to avoid.
+   * Two things have to stop, and the live run (AE 26.5, macOS) showed they are
+   * not one tree: aerender, and the render engine it launches — aerendercore,
+   * with PPID 1 and a process group of its own, which ignored SIGTERM for 8s and
+   * kept rendering at 3 GB after aerender was gone. Signalling aerender's group
+   * reached aerender only. So the engine is found by the job's snapshot path on
+   * its command line (`findProcessesByMarker`), both are asked to stop, and
+   * anything still alive after `graceMs` is killed outright.
+   *
+   * `stopped` is only true when aerender has been *seen* to exit AND no process
+   * carrying this job's snapshot path is left: a signal sent is not a render
+   * stopped, and a cancel that reports success while the engine keeps writing
+   * frames is the lie this exists to avoid. On Windows, `taskkill /T /F` takes
+   * aerender's tree and the same command-line lookup covers an engine that is
+   * not in it — UNVERIFIED there (recipe 50).
    */
   async cancel(jobId: string): Promise<CancelReport | null> {
     const r = this.current;
@@ -842,21 +916,33 @@ export class RenderRunner {
     const item = r.plan.items[r.itemPos];
     const child = r.child;
     const exited = r.exited;
-    let stopped = true;
+    let aerenderGone = true;
+    let survivors: number[] = [];
     if (child && child.pid !== undefined && exited) {
+      // Polite first: aerender's tree, and every engine for this job.
       await this.stop(child.pid, false);
-      stopped = await within(exited, this.graceMs);
-      if (!stopped) {
-        await this.stop(child.pid, true);
-        stopped = await within(exited, this.graceMs);
+      for (const pid of await this.findEngines(engineMarker(r))) await stopPid(pid, false);
+      aerenderGone = await within(exited, this.graceMs);
+      survivors = await this.engineSurvivors(r, this.graceMs);
+      if (!aerenderGone || survivors.length) {
+        // Then not: SIGKILL (Windows: taskkill /F, which was already forceful).
+        if (!aerenderGone) await this.stop(child.pid, true);
+        for (const pid of await this.findEngines(engineMarker(r))) await stopPid(pid, true);
+        if (!aerenderGone) aerenderGone = await within(exited, this.graceMs);
+        survivors = await this.engineSurvivors(r, this.graceMs);
       }
-      if (!stopped) {
-        // From here on the late exit, if it ever comes, is run()'s to settle.
-        // It may already have come in the instant since the last check, in
-        // which case run() has finished and this report can say so honestly.
-        r.cancelGaveUp = true;
-        if (this.current !== r) stopped = true;
-      }
+    } else {
+      // Between two items there is no aerender, but an engine could linger.
+      for (const pid of await this.findEngines(engineMarker(r))) await stopPid(pid, true);
+      survivors = await this.engineSurvivors(r, this.graceMs);
+    }
+    let stopped = aerenderGone && survivors.length === 0;
+    if (!stopped) {
+      // From here on the late exit, if it ever comes, is run()'s to settle.
+      // It may already have come in the instant since the last check, in
+      // which case run() has finished and this report can say so honestly.
+      r.cancelGaveUp = true;
+      if (this.current !== r && survivors.length === 0) stopped = true;
     }
     const partialFiles = item ? existingOutputs(item.outputs) : [];
     const report: CancelReport = {
@@ -869,14 +955,17 @@ export class RenderRunner {
         : null,
       partialFiles,
       note: stopped
-        ? "The aerender process was stopped and has exited; no later item was started. " +
+        ? "aerender and its render engine were stopped and have exited; no later item was started. " +
           (partialFiles.length
             ? `The interrupted item's output is INCOMPLETE and was left on disk: ${partialFiles.join(", ")} — tell the user, or delete it, rather than presenting it as a render. `
             : "") +
           (r.rendered.length ? "Items listed in `rendered` finished and were verified before the cancel." : "No item had finished.")
-        : `aerender (pid ${child?.pid}) did not exit after being told to stop and then killed. It may still be ` +
-          "rendering. Ask the user to check for an aerender or After Effects render process in Activity " +
-          "Monitor / Task Manager and end it.",
+        : (aerenderGone ? "" : `aerender (pid ${child?.pid}) did not exit after being told to stop and then killed. `) +
+          (survivors.length
+            ? `Render engine process(es) ${survivors.join(", ")} for this job are still alive after SIGTERM and SIGKILL. `
+            : "") +
+          "The render may still be running. Ask the user to end any aerender / aerendercore (Windows: aerender.exe, " +
+          "AfterFX) process in Activity Monitor or Task Manager.",
     };
     if (stopped && !r.settled) {
       r.settled = true;
@@ -886,10 +975,36 @@ export class RenderRunner {
     return report;
   }
 
+  /** Engine processes for this job still alive after waiting up to `ms` for them to go. */
+  private async engineSurvivors(r: Running, ms: number): Promise<number[]> {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const alive = (await this.findEngines(engineMarker(r))).filter(pidAlive);
+      if (!alive.length || Date.now() >= deadline) return alive;
+      await new Promise((res) => setTimeout(res, 100));
+    }
+  }
+
+  /** After a job ends, however it ends: no engine for it may outlive it. */
+  private async reapEngines(r: Running): Promise<void> {
+    try {
+      const pids = await this.findEngines(engineMarker(r));
+      for (const pid of pids) await stopPid(pid, true);
+      if (pids.length) logger.warn(`render ${r.jobId}: killed ${pids.length} render engine process(es) left after the job ended`);
+    } catch {}
+  }
+
   private killSync(): void {
     const r = this.current;
     const pid = r?.child?.pid;
     if (pid !== undefined) stopProcessTreeSync(pid);
+    // The engine is outside aerender's tree (see cancel), so it is found by
+    // the snapshot path; SIGKILL, because nothing async runs here.
+    if (r) {
+      for (const p of findProcessesByMarkerSync(engineMarker(r))) {
+        try { process.kill(p, "SIGKILL"); } catch {}
+      }
+    }
     if (r) {
       removeSnapshot(r.snapshot);
     }
@@ -925,4 +1040,16 @@ function existingOutputs(outputs: RenderOutputPlan[]): string[] {
 
 export function logRenderStart(jobId: string, aerender: string, plan: RenderPlan): void {
   logger.info(`render ${jobId}: ${aerender} on ${plan.projectPath}, items ${plan.items.map((i) => i.index).join(",")}`);
+}
+
+/**
+ * What identifies this job's processes on their command lines: the job id. It
+ * is the snapshot's folder name (`ae-mcp-render/<jobId>/…`), so it is inside
+ * the `-project` argument aerender and its engine both carry. The id rather
+ * than the whole path, so a path spelled differently on the way through (a
+ * /var vs /private/var symlink, Windows slash normalisation) still matches;
+ * `r_<epoch ms>_<n>` occurs on no other command line.
+ */
+export function engineMarker(r: { jobId: string }): string {
+  return r.jobId;
 }

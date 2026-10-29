@@ -354,10 +354,6 @@ function __rqProjectReadOnly() {
   try { return app.project.file.readonly === true; } catch (e) { return null; }
 }
 
-function __rqModified(f) {
-  try { return f.modified ? f.modified.getTime() : null; } catch (e) { return null; }
-}
-
 /**
  * Save the project so the separate render process sees what the user sees.
  *
@@ -367,6 +363,12 @@ function __rqModified(f) {
  * only Save As) or a locked one would otherwise raise a modal that freezes this
  * connection while the write lease is held. Under suppression such a save just
  * does not happen, so it is checked afterwards rather than trusted.
+ *
+ * The check is AE's own dirty flag, NOT the file's modified time. File.modified
+ * has one-second resolution, and the live run (AE 26.5) refused a save that
+ * had happened, because it landed in the same second as the one before: the
+ * mtime read identical while `dirty` had gone false. A save that did not
+ * happen leaves the project dirty; that is the signal.
  */
 OPS._render_save = noUndo(function (args) {
   if (!app.project.file) {
@@ -382,7 +384,6 @@ OPS._render_save = noUndo(function (args) {
     return { projectPath: app.project.file.fsName, saved: false, reason: "no unsaved changes" };
   }
   var file = app.project.file;
-  var before = __rqModified(file);
   var threw = null;
   app.beginSuppressDialogs();
   try {
@@ -392,10 +393,8 @@ OPS._render_save = noUndo(function (args) {
   } finally {
     app.endSuppressDialogs(false);
   }
-  var after = __rqModified(new File(file.fsName));
   var stillDirty = app.project.dirty === true;
-  var unchanged = before !== null && after !== null && after === before;
-  if (threw || stillDirty || unchanged) {
+  if (threw || stillDirty) {
     throw new Error(
       "After Effects did not save the project (" + file.fsName + ")" +
       (threw ? ": " + threw.message : "") + ". Nothing was rendered. The usual causes are a file that is " +
