@@ -99,6 +99,7 @@ One line each. The annotated version — why each file is the way it is — is i
 | `packages/mcp-server/src/server.ts` | Tool registry, return-shape branching, error mapping, `toolInputSchema()`. |
 | `…/tools/descriptions.ts` | All tool descriptions, written for an LLM reading the tool list cold. |
 | `…/tools/runJsxSource.ts` | `scriptPath` and `libraries`. The **server** reads those files, never the panel. |
+| `…/tools/policy.ts` | Read-only mode and the `run_jsx` switch: which tools are offered, refused, and noted in the guidance. |
 | `…/tools/whatsNew.ts` | The `since` filter on the whats-new topic: semver compare, splitter, version header. |
 | `…/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing, port candidates, the panel-health test. |
 | `…/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` for a lease that outlives its call. |
@@ -130,7 +131,7 @@ One line each. The annotated version — why each file is the way it is — is i
 Adding a new op = touching six places. In order:
 
 1. **Schema** — `packages/shared/src/schemas.ts`: add zod schema and an entry in `OpSchemas`. If two fields are alternatives ("exactly one of these"), declare it with `crossField()` rather than `.refine()` — a bare refinement is dropped by the converter and `tests/unit/schema-constraints.mjs` fails the build. See "Cross-field rules" in [`docs/architecture.md`](docs/architecture.md).
-2. **Classification** — the `OpMutation` table at the bottom of the same file: `"write"`, `"read"` or `"server"`. `tests/unit/write-queue.mjs` fails the build if you skip it, on purpose — see "Serializing writes" in [`docs/architecture.md`](docs/architecture.md).
+2. **Classification** — the `OpMutation` table at the bottom of the same file: `"write"`, `"read"` or `"server"`. `tests/unit/write-queue.mjs` fails the build if you skip it, on purpose — see "Serializing writes" in [`docs/architecture.md`](docs/architecture.md). The classification also decides read-only mode: a `"write"` is hidden there, a `"read"` is offered, and a `"server"` op needs its own entry in `READ_ONLY_SERVER_OPS` (`tools/policy.ts`) — the compiler insists.
 3. **ExtendScript handler** — add to the matching module in `packages/jsx/` as `OPS.your_op = function(args){ ... }`. Use `noUndo(fn)` for read-only ops (skips the undo group wrapper).
 4. **Description** — `packages/mcp-server/src/tools/descriptions.ts`: add an entry keyed by op name. Write it for an LLM agent reading the tool list cold.
 5. **Build** — `npm run build` rebuilds TS and concatenates the .jsx bundle.
@@ -160,6 +161,7 @@ The full reasoning for each is one click away. What they have in common is that
 breaking one produces a plausible success rather than an error.
 
 - **Every op must be classified `write` / `read` / `server`** in `OpMutation`. There is no default — silence would classify it as a read, which is the bug the write queue exists to fix. The build fails if the tables disagree. → [architecture](docs/architecture.md)
+- **A switched-off tool is off at three doors: `tools/list`, `tools/call`, and a `run_batch` step.** Batch steps reach the ExtendScript `OPS` table by name, so `run_jsx` inside a batch is `run_jsx`. A new `"server"` op will not compile until `READ_ONLY_SERVER_OPS` decides it. And no op's args may carry `__proto__`/`constructor`/`prototype` keys (`util/argsSafety.ts`): ExtendScript may read the first as a prototype and see a value every server-side check missed. → [architecture](docs/architecture.md)
 - **A cross-field rule is declared once, with `crossField()`.** `.refine()` is dropped by the converter without a word. → [architecture](docs/architecture.md)
 - **Every emitted tool schema must be valid draft 2020-12.** One invalid schema takes down *every* tool in the session, not just its own, so nothing goes into that emission pass unvalidated. → [server](docs/fragile-areas-server.md)
 - **An undo group must open and close inside one `evalScript` call.** After Effects discards one that spans two, and nothing raises. → [AE](docs/fragile-areas-ae.md)
