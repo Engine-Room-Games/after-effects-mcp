@@ -34,6 +34,7 @@ Numbered recipes referenced below are in [verification-recipes.md](verification-
 | `packages/mcp-server/src/server.ts` | Tool registry, vision/async-envelope branching, error mapping. `toolInputSchema()` is the whole of what a client sees as a tool's contract: zod → draft-07 → `toDraft2020()` → the cross-field constraints put back. Exported so a test can validate the exact document that ships. |
 | `packages/mcp-server/src/tools/descriptions.ts` | All tool descriptions in one file — including the verbatim screenshot guidance. |
 | `packages/mcp-server/src/tools/runJsxSource.ts` | `run_jsx`'s `scriptPath` and `libraries`. The **server** reads those files, never the panel — same reasoning as `init_project`. `OPS.run_jsx` throws if a `scriptPath` still reaches it, and likewise for a library with a path and no `text`: that means the call came through `run_batch` (whose steps are never validated) or a direct `/op`, and running the empty script — or skipping the library — would report success for a file nobody read. `MAX_TOTAL_BYTES` caps the script and its libraries together, because since they are inlined every byte travels on every call. It resolves those two fields and **spreads everything else through untouched** — see "The only op whose input is rewritten" below. |
+| `packages/mcp-server/src/tools/policy.ts` | Read-only mode and the `run_jsx` switch (`AE_MCP_READ_ONLY`, `AE_MCP_DISABLE_RUN_JSX`). Which ops are offered, the refusal for one that is not, the batch-step check, and the runtime notice prepended to the guidance. See "Tool switches" below. |
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. `discovery.ts` holds the candidate ports (`AE_MCP_PORT` alone if pinned; otherwise 7777 *then* the port file) and `isPanelHealth`, the test that decides whether something on a port is the panel — mirrored by `isOurHealth` in the panel's `main.js`; keep the two in step. `httpClient.ts` re-runs discovery when a call is **refused** (never on a timeout) and re-sends once if a different port answers as the panel; `wsClient.ts` follows the client's port through `onPortChange` instead of keeping a copy. `discovery.ts` also owns `panelToken`/`authHeaders`, read from disk on **every** call rather than cached — a panel that rebinds mints a new token, and a cached one would outlive it (issue #106). |
 | `packages/mcp-server/src/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` — the lease that outlives its own call so a long `run_batch` keeps the lock while the panel drives it. Classification comes from `OpMutation` in `schemas.ts`. |
 | `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool, and the progress emitters `await_job` binds for exactly the span of its own call — `bindProgressEmitter` hands back the unbind, and the caller must use it. See "Long batch" under "Special return shapes" and the #82 entry in [fragile-areas-server.md](fragile-areas-server.md). |
@@ -265,3 +266,87 @@ is a shared resource with no lock of its own. And the queue is bounded
 600s) rather than unbounded, because an agent looping writes at a stuck bridge
 would otherwise grow it without limit.
 
+
+## Tool switches: read-only mode and `run_jsx` (issue #135)
+
+Two environment variables decide, once at startup, which tools a server
+offers. `AE_MCP_READ_ONLY` offers only the tools that look;
+`AE_MCP_DISABLE_RUN_JSX` offers everything but `run_jsx`. Both default off, and
+with both off every carrier — `tools/list`, `instructions`, guides, prompts — is
+byte-identical to a server without the feature. The `.mcpb` exposes them as two
+checkboxes (`user_config` in `scripts/build-mcpb.mjs`). All of it is in
+`tools/policy.ts`; `server.ts` only asks it.
+
+**A switched-off tool is not registered.** A tool that is listed and refuses
+is one the model plans around, calls, and then explains away; a tool that is
+absent is one it never reaches for. The call handler refuses one anyway —
+a client may hold a list from before a restart, and a model may try a name it
+read in a guide — with a sentence that says nothing ran and that this is the
+user's configuration, not a failure. That refusal is deliberately not
+annotated from the issue journal, for the same reason `Unknown tool` is not.
+
+**What read-only takes away is decided per op, not inherited.** The
+`OpMutation` table answers "does this op queue behind a write", which is close
+to the read-only question and not the same one. Every `"write"` goes, because
+every one changes the project. `"server"` covers a guide lookup and a panel
+installer alike, so each server op has its own entry in
+`READ_ONLY_SERVER_OPS`, typed so the compiler refuses a new server op until
+someone decides it — the same no-default rule as `OpMutation`, for the same
+reason. As decided:
+
+- **Kept:** `ae_guide`, `check_setup` (it only probes), `list_known_issues`.
+- **Gone because they write files:** `setup_panel` (installs the panel, can
+  flip Adobe's debug preference), `init_project`, and the three journal writers
+  `log_issue`, `mark_issue_reported`, `archive_issue`.
+- **Gone because nothing can start a job:** `await_job`, `get_job`,
+  `cancel_job`. Only `run_batch` creates a job, and it is a write; offering
+  three tools that can only answer "no such job" is noise in every
+  `tools/list`.
+
+The promise read-only mode makes, then, is *nothing you call here changes the
+After Effects project or writes a file a person would look for*. Two things sit
+just inside that line and are deliberate. A screenshot borrows the comp's
+resolution factor and restores it, which can leave one net-nil undo step
+(#116), and writes its PNG to the temp directory. And a failed call still
+stamps `lastSeen`/`lastVersion` on a matching journal entry
+(`annotateFailure`) — bookkeeping the model does not control and cannot aim.
+
+**A `run_batch` step is a tool call by another route.** Batch steps are never
+validated by the server; `batch.jsx` looks each `op` up in the ExtendScript
+`OPS` table and calls it, so `{op: "run_jsx", args: {code}}` inside a batch
+runs the script exactly as `run_jsx` would. With any switch on, `server.ts`
+checks every step against the disabled set before forwarding and refuses the
+whole batch, naming each offending step by index — refusing whole, because a
+batch that ran its first half and then stopped is the half-built result this
+repo refuses elsewhere. In read-only mode `run_batch` itself is gone, so this
+only ever fires for the `run_jsx` switch, but it checks the full disabled set
+so a third switch would not need to remember it.
+
+**The guidance names every tool and cannot know which were registered.** The
+guides are generated once, at build time. So when a switch is on,
+`policyNotice()` is prepended at runtime to `instructions`, every `ae_guide`
+answer, every guide resource and every prompt: a short paragraph saying which
+tools are absent and that the model should tell the user rather than route
+around it. The Claude Code skill is the one carrier the server cannot touch at
+runtime, so the core guide (`after-effects.md`) and `extendscript-gotchas.md`
+also carry one static sentence each saying the same. The notice takes
+`instructions` past the 1,500-character ceiling in
+[guidance-system.md](guidance-system.md) — accepted, because it is paid only by
+a user who switched something off, and it is the one thing that session most
+needs to know.
+
+**Parsing fails closed, with one exception.** `parseSwitch` reads the usual
+on/off spellings; anything unrecognised is *on*, with a stderr warning,
+because these are safety switches and `AE_MCP_READ_ONLY=enabled` meant it. The
+exception is an unexpanded `${…}` placeholder, which is *off*: the `.mcpb`
+maps each switch to `${user_config.…}`, and a client that ever passed that
+through literally would otherwise put every Claude Desktop install into
+read-only mode with nobody having asked.
+
+**What the switches are not.** They restrict what *the model* can do through
+this server. They do not restrict the panel: its HTTP bridge still accepts
+every op from anything holding the per-port token (#106), and a second MCP
+server started without the switch has every tool. They are a scope on an
+agent, not a sandbox around After Effects. `tests/unit/tool-policy.mjs` holds
+the lists, the refusals, the batch check and the notice through the real
+server against a stub bridge.

@@ -222,6 +222,53 @@ If you forget the second step, nothing breaks silently: the next thing you ask f
 
 ---
 
+## 🔒 Security and privacy
+
+**Only your own computer can talk to After Effects.** The panel inside After Effects listens on `127.0.0.1` — your machine only, never your network. On top of that, every request has to carry a secret key the panel makes up fresh each time After Effects starts and keeps in your own user folder. A request without it is turned away and nothing runs. The one exception is a quick "are you there?" check, which can't change or read anything in your project.
+
+**What your assistant sees is what the tools hand back.** Layer names, text, keyframes, effect settings, your house style, file paths in your project — and **screenshots**, which are real images of your comps. All of it goes to the AI model you're using, the same way anything you type does. If a project is confidential, treat a session with it the way you'd treat pasting it into a chat.
+
+**Two switches let you limit what it can do.** Both are off unless you turn them on.
+
+| Switch | What it does |
+|---|---|
+| **Read-only mode** | Your assistant can look at your project — list comps and layers, read keyframes, take screenshots — but every tool that changes something is removed. It can explain and review your work, not touch it. |
+| **Turn off running scripts** | Removes `run_jsx`, the tool that lets your assistant write and run its own After Effects scripts. Everything else still works; a few things no other tool covers (like the render queue) become impossible. |
+
+A switched-off tool isn't hidden behind a "no" — it simply isn't there, so your assistant won't try to use it, and will tell you when a request needs it.
+
+<details>
+<summary><b>How to turn them on</b></summary>
+
+<br>
+
+**Claude Desktop:** open Settings → Extensions → After Effects, and tick *Read-only mode* or *Turn off running scripts (run_jsx)*.
+
+**Everywhere else:** add an `env` block to the configuration from step 1, then restart your client:
+
+```json
+{
+  "mcpServers": {
+    "after-effects": {
+      "command": "npx",
+      "args": ["-y", "@engine-room/after-effects-mcp"],
+      "env": {
+        "AE_MCP_READ_ONLY": "1",
+        "AE_MCP_DISABLE_RUN_JSX": "1"
+      }
+    }
+  }
+}
+```
+
+Use either line on its own. Read-only mode already includes the second one.
+
+These switches limit what your assistant can do through this connection. They don't lock After Effects itself, and another assistant connected without them still has every tool.
+
+</details>
+
+---
+
 <details>
 <summary><b>🧰 All 76 tools</b></summary>
 

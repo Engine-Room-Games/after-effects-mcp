@@ -1,0 +1,257 @@
+// Read-only mode and the run_jsx switch (issue #135).
+//
+// Every property here fails silently when it breaks. A write op that slips
+// into the read-only list is a tool the user turned off and the model can
+// still call; a switch that is listed-off but callable is a refusal that never
+// happens; a `run_jsx` step inside `run_batch` is `run_jsx` by another door.
+// None of it needs After Effects — it is all server-side TypeScript, driven
+// through the real MCP server against a stub bridge.
+//
+//   node tests/unit/tool-policy.mjs
+
+import assert from "node:assert/strict";
+import http from "node:http";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { WebSocketServer } from "ws";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
+const sharedDist = (...p) => pathToFileURL(path.join(root, "packages", "shared", "dist", ...p)).href;
+
+const policyMod = await import(dist("tools", "policy.js"));
+const {
+  DEFAULT_POLICY, READ_ONLY_SERVER_OPS, parseSwitch, policyFromEnv, disabledOps, enabledOps,
+  refusedBatchSteps, policyNotice,
+} = policyMod;
+const { OpSchemas, OpMutation } = await import(sharedDist("schemas.js"));
+const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { SERVER_INSTRUCTIONS } = await import(dist("generated", "content.js"));
+
+let passed = 0;
+async function check(name, fn) {
+  try {
+    await fn();
+  } catch (e) {
+    e.message = `${name}: ${e.message}`;
+    throw e;
+  }
+  passed++;
+}
+
+const ALL = Object.keys(OpSchemas);
+const READ_ONLY = { readOnly: true, runJsx: true };
+const NO_JSX = { readOnly: false, runJsx: false };
+const BOTH = { readOnly: true, runJsx: false };
+
+// ---------------------------------------------------------------------------
+// The switches as the environment spells them.
+// ---------------------------------------------------------------------------
+
+await check("off spellings are off, on spellings are on", () => {
+  for (const v of [undefined, "", "0", "false", "FALSE", "no", "off", " 0 "]) {
+    assert.equal(parseSwitch("X", v), false, JSON.stringify(v));
+  }
+  for (const v of ["1", "true", "True", "yes", "on"]) {
+    assert.equal(parseSwitch("X", v), true, JSON.stringify(v));
+  }
+});
+
+await check("an unrecognised value fails closed — it is a safety switch", () => {
+  assert.equal(parseSwitch("X", "enabled"), true);
+});
+
+await check("an unexpanded ${user_config…} placeholder is off, not on", () => {
+  // Failing closed here would put every Claude Desktop install into read-only
+  // mode the day a client stopped substituting.
+  assert.equal(parseSwitch("X", "${user_config.read_only}"), false);
+});
+
+await check("policyFromEnv reads both variables", () => {
+  assert.deepEqual(policyFromEnv({}), DEFAULT_POLICY);
+  assert.deepEqual(policyFromEnv({ AE_MCP_READ_ONLY: "1" }), READ_ONLY);
+  assert.deepEqual(policyFromEnv({ AE_MCP_DISABLE_RUN_JSX: "true" }), NO_JSX);
+  assert.deepEqual(policyFromEnv({ AE_MCP_READ_ONLY: "true", AE_MCP_DISABLE_RUN_JSX: "true" }), BOTH);
+  assert.deepEqual(
+    policyFromEnv({ AE_MCP_READ_ONLY: "false", AE_MCP_DISABLE_RUN_JSX: "false" }),
+    DEFAULT_POLICY,
+    "what the .mcpb passes when both boxes are unticked"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The filtered lists, computed.
+// ---------------------------------------------------------------------------
+
+await check("the default policy offers every op and switches nothing off", () => {
+  assert.deepEqual(enabledOps(DEFAULT_POLICY), ALL);
+  assert.equal(disabledOps(DEFAULT_POLICY).size, 0);
+  assert.equal(policyNotice(DEFAULT_POLICY), null);
+});
+
+await check("read-only offers no op classified write", () => {
+  const on = enabledOps(READ_ONLY);
+  const writes = on.filter((n) => OpMutation[n] === "write");
+  assert.deepEqual(writes, [], `write ops offered in read-only mode: ${writes.join(", ")}`);
+  // …and every read is still there: read-only must not cost a single look.
+  const reads = ALL.filter((n) => OpMutation[n] === "read");
+  for (const r of reads) assert.ok(on.includes(r), `${r} is a read and was switched off`);
+});
+
+await check("read-only keeps exactly the server ops decided `keep`", () => {
+  const on = new Set(enabledOps(READ_ONLY));
+  const serverOps = ALL.filter((n) => OpMutation[n] === "server");
+  const kept = serverOps.filter((n) => on.has(n)).sort();
+  assert.deepEqual(kept, ["ae_guide", "check_setup", "list_known_issues"]);
+  for (const gone of ["setup_panel", "init_project", "log_issue", "mark_issue_reported", "archive_issue", "await_job", "get_job", "cancel_job"]) {
+    assert.ok(!on.has(gone), `${gone} writes or starts something and is still offered`);
+  }
+});
+
+await check("every server op has a read-only decision, and nothing else does", () => {
+  const serverOps = ALL.filter((n) => OpMutation[n] === "server").sort();
+  assert.deepEqual(Object.keys(READ_ONLY_SERVER_OPS).sort(), serverOps);
+});
+
+await check("the specific reads a read-only session is for are all present", () => {
+  const on = new Set(enabledOps(READ_ONLY));
+  for (const op of ["get_project_summary", "list_comps", "list_layers", "get_layer_full", "find_layers",
+    "get_keyframes", "get_expression", "list_effects", "screenshot_frame", "screenshot_layer",
+    "snapshot_comp", "diff_comp", "get_house_style"]) {
+    assert.ok(on.has(op), op);
+  }
+});
+
+await check("disabling run_jsx removes run_jsx and nothing else", () => {
+  assert.deepEqual(enabledOps(NO_JSX), ALL.filter((n) => n !== "run_jsx"));
+  assert.ok(policyNotice(NO_JSX).includes("run_jsx"));
+});
+
+await check("both switches together are read-only (run_jsx is already a write)", () => {
+  assert.deepEqual(enabledOps(BOTH), enabledOps(READ_ONLY));
+});
+
+await check("a batch step naming a switched-off op is caught, with its index", () => {
+  const steps = [{ op: "set_layer" }, { op: "run_jsx" }, { op: "add_keyframe" }, { op: "run_jsx" }];
+  assert.deepEqual(refusedBatchSteps(steps, DEFAULT_POLICY), []);
+  assert.deepEqual(refusedBatchSteps(steps, NO_JSX).map((r) => `${r.op}@${r.index}`), ["run_jsx@1", "run_jsx@3"]);
+});
+
+// ---------------------------------------------------------------------------
+// The same lists through tools/list and tools/call on the real server.
+// ---------------------------------------------------------------------------
+
+const seen = [];
+const bridge = http.createServer((req, res) => {
+  if (req.url === "/health") {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash() }));
+    return;
+  }
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    const { op } = JSON.parse(body || "{}");
+    seen.push(op);
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ ok: true, result: { ok: true, op } }));
+  });
+});
+const wss = new WebSocketServer({ server: bridge, path: "/events" });
+await new Promise((r) => bridge.listen(0, "127.0.0.1", r));
+const port = bridge.address().port;
+assert.notEqual(port, 7777, "must not bind the panel's port");
+process.env.AE_MCP_PORT = String(port);
+
+const { createServer } = await import(dist("server.js"));
+const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+
+async function connect(policy) {
+  const server = createServer(policy ? { policy } : {});
+  const client = new Client({ name: "tool-policy-test", version: "0" }, { capabilities: {} });
+  const [c, s] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(s), client.connect(c)]);
+  return client;
+}
+
+const clients = {
+  default: await connect(undefined),
+  readOnly: await connect(READ_ONLY),
+  noJsx: await connect(NO_JSX),
+};
+const listed = async (client) => (await client.listTools()).tools.map((t) => t.name);
+
+await check("tools/list: default lists all 76 ops", async () => {
+  assert.deepEqual(await listed(clients.default), ALL);
+  assert.equal(ALL.length, 76, "the op count moved — update this and the README's tool count together");
+});
+
+await check("tools/list: read-only lists exactly enabledOps, and no write", async () => {
+  const names = await listed(clients.readOnly);
+  assert.deepEqual(names, enabledOps(READ_ONLY));
+  assert.ok(names.every((n) => OpMutation[n] !== "write"));
+  assert.equal(names.length, ALL.filter((n) => OpMutation[n] === "read").length + 3);
+});
+
+await check("tools/list: run_jsx off lists 75, without run_jsx", async () => {
+  const names = await listed(clients.noJsx);
+  assert.equal(names.length, ALL.length - 1);
+  assert.ok(!names.includes("run_jsx"));
+});
+
+await check("instructions are untouched by default and carry the notice otherwise", async () => {
+  assert.equal(clients.default.getInstructions(), SERVER_INSTRUCTIONS);
+  assert.ok(clients.readOnly.getInstructions().startsWith("**This server is in read-only mode.**"));
+  assert.ok(clients.readOnly.getInstructions().endsWith(SERVER_INSTRUCTIONS));
+  assert.ok(clients.noJsx.getInstructions().startsWith("**`run_jsx` is switched off"));
+});
+
+await check("ae_guide carries the notice when a switch is on, and only then", async () => {
+  const text = async (c) => (await c.callTool({ name: "ae_guide", arguments: { topic: "extendscript-gotchas" } })).content[0].text;
+  assert.ok(!(await text(clients.default)).includes("switched off on this server"));
+  assert.ok((await text(clients.noJsx)).startsWith("**`run_jsx` is switched off"));
+});
+
+await check("calling a switched-off tool is refused before the bridge", async () => {
+  seen.length = 0;
+  const res = await clients.readOnly.callTool({ name: "set_layer", arguments: { compId: 1, layerId: 1, name: "x" } });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /set_layer is not available: the server is in read-only mode/);
+  assert.match(res.content[0].text, /Nothing was run/);
+  const jsx = await clients.noJsx.callTool({ name: "run_jsx", arguments: { code: "return 1" } });
+  assert.equal(jsx.isError, true);
+  assert.match(jsx.content[0].text, /AE_MCP_DISABLE_RUN_JSX/);
+  const setup = await clients.readOnly.callTool({ name: "setup_panel", arguments: {} });
+  assert.equal(setup.isError, true, "setup_panel installs files; read-only must refuse it");
+  assert.deepEqual(seen, [], "a switched-off tool reached the bridge");
+});
+
+await check("run_batch refuses a run_jsx step whole, naming it, and sends nothing", async () => {
+  seen.length = 0;
+  const res = await clients.noJsx.callTool({
+    name: "run_batch",
+    arguments: { ops: [{ op: "set_layer", args: {} }, { op: "run_jsx", args: { code: "return 1" } }] },
+  });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /ops\[1\] \(run_jsx\)/);
+  assert.match(res.content[0].text, /Nothing in the batch was run/);
+  assert.deepEqual(seen, []);
+});
+
+await check("what is still offered still works", async () => {
+  seen.length = 0;
+  const ro = await clients.readOnly.callTool({ name: "list_comps", arguments: {} });
+  assert.equal(ro.isError, undefined);
+  const batch = await clients.noJsx.callTool({ name: "run_batch", arguments: { ops: [{ op: "set_layer", args: {} }] } });
+  assert.equal(batch.isError, undefined);
+  assert.deepEqual(seen, ["list_comps", "run_batch"]);
+});
+
+console.log(`tool-policy: ${passed} checks passed`);
+wss.close();
+bridge.close();
+// Settle before exiting: `process.exit()` straight after a `fetch` crashes
+// Node 24 on Windows (nodejs/node#56645; the note in issue-journal.mjs).
+await new Promise((r) => setTimeout(r, 200));
+process.exit(0);
