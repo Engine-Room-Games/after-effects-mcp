@@ -141,6 +141,96 @@ function isFile(p: string): boolean {
   }
 }
 
+/**
+ * Evidence beyond "a fresh file exists" that the render actually happened.
+ *
+ * - **No frame lines, no render.** A live run (26.5, 1 in 8) reported a
+ *   missing-footage render as completed: a 1 MiB file, `frames: 0`, and none
+ *   of aerender's lines past "Launching After Effects". Zero frames counted —
+ *   or a comp span whose frame count is unknown — is therefore never
+ *   completed. The cost: an After Effects in another language, whose
+ *   PROGRESS lines this server cannot read, fails every render until the
+ *   parser knows its wording (recipe 53). A loud false failure over a quiet
+ *   false success.
+ * - **Image sequences: at least as many fresh frame files as frames reported.**
+ * - **QuickTime/MP4: the file must be a complete ISO media file** — its
+ *   top-level boxes walk exactly to the end of the file and include `moov`,
+ *   the index a player needs. A render that stopped early leaves `mdat`
+ *   (the media) without `moov`: the corrupt live file had no readable
+ *   duration. Other containers (AVI, MXF, WAV …) get no structural check.
+ */
+export function renderEvidenceProblems(item: RenderItemPlan, framesCounted: number, verified: VerifiedOutput[]): string[] {
+  const problems: string[] = [];
+  if (!(item.frames > 0)) {
+    problems.push("the comp span's frame count is unknown, so the render cannot be checked against it");
+  }
+  if (framesCounted === 0) {
+    problems.push(
+      "aerender printed no frame line this server recognises, so nothing shows a frame was rendered " +
+        "(an After Effects running in a language other than English words these lines differently — see recipe 53)"
+    );
+  }
+  for (const v of verified) {
+    if (v.files !== undefined) {
+      if (framesCounted > 0 && v.files < framesCounted) {
+        problems.push(`aerender reported ${framesCounted} frames but only ${v.files} frame files of ${v.path} were written`);
+      }
+      continue;
+    }
+    if (/\.(?:mov|mp4|m4v|3gp)$/i.test(v.path)) {
+      const why = isoMediaProblem(v.path);
+      if (why) problems.push(`${v.path} ${why}`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Null when `file` is a structurally complete ISO base media file (QuickTime,
+ * MP4): the top-level boxes tile the file exactly and one of them is `moov`.
+ * Otherwise a phrase saying what is wrong. Reads box headers only.
+ */
+export function isoMediaProblem(file: string): string | null {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, "r");
+  } catch (e) {
+    return `cannot be read (${(e as Error).message})`;
+  }
+  try {
+    const size = fs.fstatSync(fd).size;
+    const head = Buffer.alloc(16);
+    let off = 0;
+    let moov = false;
+    let boxes = 0;
+    while (off < size) {
+      if (size - off < 8) return "ends in a partial box header";
+      fs.readSync(fd, head, 0, 16, off);
+      let len = head.readUInt32BE(0);
+      const type = head.toString("latin1", 4, 8);
+      if (len === 1) {
+        if (size - off < 16) return "ends in a partial box header";
+        const big = head.readBigUInt64BE(8);
+        if (big > BigInt(Number.MAX_SAFE_INTEGER)) return "has a box too large to be real";
+        len = Number(big);
+      } else if (len === 0) {
+        len = size - off; // runs to the end of the file
+      }
+      if (len < 8) return `has a malformed '${type}' box`;
+      if (off + len > size) return `is truncated: its '${type}' box runs past the end of the file`;
+      if (type === "moov") moov = true;
+      off += len;
+      if (++boxes > 100000) return "has an implausible number of boxes";
+    }
+    if (!moov) return "has no 'moov' index — the movie was never finished, and players will read no duration";
+    return null;
+  } catch (e) {
+    return `could not be checked (${(e as Error).message})`;
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
+}
+
 /** Files older than this before the render began are a previous render's, not this one's. */
 const MTIME_SLACK_MS = 2000;
 
@@ -235,13 +325,8 @@ export interface RenderedItem {
    * render again, and why not when it was not. Absent when no hook was given.
    */
   unqueued?: { marked: boolean; reason?: string };
-  /**
-   * Set when aerender rendered the item but printed no line this server reads
-   * as a frame — so progress sat at 0% throughout. The likeliest cause is an
-   * After Effects running in another language, whose PROGRESS lines are worded
-   * differently. Said out loud so a stuck-looking progress bar is explained.
-   */
-  progressWarning?: string;
+  /** Set when the frames aerender reported differ from the comp span's count. */
+  framesNote?: string;
 }
 
 export interface CancelReport {
@@ -496,7 +581,7 @@ export function occupiedOutputs(plan: RenderPlan): string[] {
 }
 
 const DEFAULT_GRACE_MS = 5000;
-/** How long after aerender exits its pipes may take to drain. */
+/** After aerender exits and no render process for the job is left, how long the pipe may stay open. */
 const CLOSE_WAIT_MS = 2000;
 const TAIL_LINES = 12;
 
@@ -666,14 +751,16 @@ export class RenderRunner {
           );
           return;
         }
-        const { verified, problems } = verifyOutputs(item.outputs, itemStart);
+        const checked = verifyOutputs(item.outputs, itemStart);
+        const verified = checked.verified;
+        const problems = [...checked.problems, ...renderEvidenceProblems(item, r.itemFrames, verified)];
         if (problems.length) {
           status = "failed";
           r.settled = true;
           await this.unqueue(r);
           this.jobs.fail(
             r.jobId,
-            `aerender reported success on ${label} but the output is not there: ${problems.join("; ")}. ` +
+            `aerender reported success on ${label} but the output cannot be verified: ${problems.join("; ")}. ` +
               `Nothing is claimed rendered for that item.` +
               (outcome.errors.length ? ` aerender's error lines: ${outcome.errors.join(" | ")}.` : "") +
               ` Last output: ${outcome.tail.join(" | ")}` +
@@ -689,13 +776,10 @@ export class RenderRunner {
           frames: r.itemFrames,
           elapsedMs: Date.now() - itemStart,
         };
-        if (r.itemFrames === 0 && item.frames > 0) {
-          done.progressWarning =
-            `aerender wrote the output but printed no frame line this server recognises (last lines: ${outcome.tail
-              .slice(-3)
-              .join(" | ")}), so progress for this item was never reported. If After Effects runs in a language ` +
-            "other than English, that is the likely cause; the render itself is verified on disk.";
-          logger.warn(`render ${r.jobId}: ${done.progressWarning}`);
+        if (item.frames > 0 && r.itemFrames !== item.frames) {
+          done.framesNote =
+            `aerender reported ${r.itemFrames} frames where the comp's span at its own frame rate is ${item.frames} — ` +
+            "expected when the render settings override the frame rate or skip frames; otherwise worth a look.";
         }
         r.rendered.push(done);
         r.framesBefore += Math.max(item.frames, r.itemFrames);
@@ -819,19 +903,37 @@ export class RenderRunner {
           resolve({ code, signal, spawnError, errors, tail, missing });
         };
         child.on("error", (e) => finish(null, null, e));
-        // `exit` can fire before the last of stdout has been read — the live
-        // run reported 299 of 300 frames — so wait for `close`, which comes
-        // after the pipes drain. Bounded, because a render engine that
-        // inherited the pipe can hold it open after aerender itself is gone.
+        // Settle on `close`, which comes only once stdout and stderr have both
+        // drained — never on `exit`, which can come first. Two live runs on
+        // 26.5 showed why: one counted 299 of 300 frames, and one (1 in 8)
+        // reported a missing-footage render as completed because the WARNING
+        // line, printed last, had not been read when the item was decided.
+        //
+        // `close` can be held off by a render engine that inherited the pipe
+        // and outlives aerender. Waiting for it is right while that engine is
+        // alive — it may still write the line that matters — so after `exit`
+        // the wait only gives up once no render process for this job is left
+        // and the pipe has stayed open for CLOSE_WAIT_MS more.
         let closed = false;
         child.on("close", (code, signal) => {
           closed = true;
           finish(code, signal);
         });
         child.on("exit", (code, signal) => {
-          setTimeout(() => {
-            if (!closed) finish(code, signal);
-          }, CLOSE_WAIT_MS).unref?.();
+          let quietSince = 0;
+          const poll = async () => {
+            if (closed || settled) return;
+            const engines = await this.findEngines(r.snapshot).catch(() => []);
+            if (engines.length) quietSince = 0;
+            else if (!quietSince) quietSince = Date.now();
+            if (quietSince && Date.now() - quietSince >= CLOSE_WAIT_MS) {
+              logger.warn(`render ${r.jobId}: aerender exited but its output pipe stayed open with no render process left; deciding on what was read`);
+              finish(code, signal);
+              return;
+            }
+            setTimeout(() => void poll(), 250).unref?.();
+          };
+          setTimeout(() => void poll(), 250).unref?.();
         });
       });
       const onLine = (line: string) => {

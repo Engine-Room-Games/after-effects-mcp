@@ -28,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem } =
   await import(dist("render", "aerender.js"));
 const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
@@ -299,6 +299,29 @@ await check("names and paths that merely contain the words do not fail a good re
     assert.equal(isMissingFootageLine(l), false, l);
   }
 });
+await check("a QuickTime/MP4 file must be complete: boxes tile the file and include moov", () => {
+  const box = (type, body) => {
+    const b = Buffer.alloc(8 + body.length);
+    b.writeUInt32BE(8 + body.length, 0);
+    b.write(type, 4, "latin1");
+    body.copy(b, 8);
+    return b;
+  };
+  const ftyp = box("ftyp", Buffer.from("qt  "));
+  const mdat = box("mdat", Buffer.alloc(32));
+  const moov = box("moov", Buffer.alloc(8));
+  const f = (name, buf) => { const p = path.join(tmp, name); fs.writeFileSync(p, buf); return p; };
+  assert.equal(isoMediaProblem(f("good.mov", Buffer.concat([ftyp, mdat, moov]))), null);
+  assert.match(isoMediaProblem(f("nomoov.mov", Buffer.concat([ftyp, mdat]))), /no 'moov'/);
+  const cut = Buffer.concat([ftyp, mdat, moov]).subarray(0, 40);
+  assert.match(isoMediaProblem(f("cut.mov", cut)), /truncated|partial/);
+  assert.match(isoMediaProblem(f("junk.mov", Buffer.from("not a movie at all, just bytes"))), /malformed|truncated|no 'moov'/);
+  // The live corrupt file: 1 MiB of preallocated media and nothing else.
+  const pre = Buffer.alloc(1048576);
+  pre.writeUInt32BE(8, 0); pre.write("wide", 4, "latin1");
+  pre.writeUInt32BE(0, 8); pre.write("mdat", 12, "latin1");
+  assert.match(isoMediaProblem(f("prealloc.mov", pre)), /no 'moov'/);
+});
 await check("a missing-footage failure says how to fix it, other failures do not", () => {
   assert.match(missingFootageHint(["aerender ERROR: Footage file missing: /x/clip.mov"]), /save the project/);
   assert.equal(missingFootageHint(["aerender ERROR: Out of memory"]), "");
@@ -320,6 +343,41 @@ const mode = process.env.FAKE_MODE;
 const out = process.env.FAKE_OUT;
 const args = process.argv.slice(2);
 fs.writeFileSync(process.env.FAKE_ARGS, JSON.stringify(args));
+// A minimal complete ISO media file: ftyp, mdat, moov — what a finished
+// QuickTime/MP4 render looks like to the structural check.
+function box(type, body) {
+  const b = Buffer.alloc(8 + body.length);
+  b.writeUInt32BE(8 + body.length, 0);
+  b.write(type, 4, "latin1");
+  body.copy(b, 8);
+  return b;
+}
+function writeMovie(p) {
+  fs.writeFileSync(p, Buffer.concat([box("ftyp", Buffer.from("qt  ")), box("mdat", Buffer.alloc(64)), box("moov", Buffer.alloc(16))]));
+}
+if (mode === "silent") {
+  // Exit 0, a complete-looking file, and not one line of output.
+  writeMovie(out);
+  process.exit(0);
+}
+if (mode === "warnlast") {
+  // Frames, then the measured warning written as the very last thing before exit.
+  let text = "";
+  for (let n = 0; n < 4; n++) text += "PROGRESS:  0:00:00:0" + n + " (" + (n + 1) + "): 0 Seconds\\n";
+  writeMovie(out);
+  process.stdout.write(text + process.env.FAKE_LINE + "\\n");
+  process.exit(0);
+}
+if (mode === "lateengine") {
+  // aerender exits at once; its engine, which inherited stdout, prints the
+  // warning 400ms later — the shape of the 1-in-8 live failure.
+  const project = args[args.indexOf("-project") + 1];
+  const g = spawn(process.env.FAKE_ENGINE, ["-e", "setTimeout(() => { console.log(process.env.FAKE_LINE); process.exit(0); }, 400)", "--", "-noui", "-project", project], { stdio: ["ignore", "inherit", "inherit"] });
+  g.unref();
+  for (let n = 0; n < 4; n++) console.log("PROGRESS:  0:00:00:0" + n + " (" + (n + 1) + "): 0 Seconds");
+  writeMovie(out);
+  process.exit(0);
+}
 console.log("PROGRESS:  10/29/2026 10:00:00 AM: Starting composition “Comp”.");
 console.log("PROGRESS:  Duration: 0:00:00:04");
 if (mode === "fail") { console.log("aerender ERROR: Unable to find comp"); process.exit(3); }
@@ -337,7 +395,7 @@ if (mode === "burst") {
   let text = "";
   for (let n = 0; n < 300; n++) text += "PROGRESS:  0:00:00:00 (" + (n + 1) + "): 0 Seconds\\n";
   process.stdout.write(text);
-  fs.writeFileSync(out, "rendered movie");
+  writeMovie(out);
   process.exit(0);
 }
 if (mode === "engine") {
@@ -382,7 +440,7 @@ const t = setInterval(() => {
   i++;
   if (i === 4) {
     clearInterval(t);
-    if (mode !== "liar") fs.writeFileSync(out, "rendered movie");
+    if (mode !== "liar") writeMovie(out);
     console.log("PROGRESS:  Total Time Elapsed: 1 Seconds");
     process.exit(0);
   }
@@ -444,7 +502,7 @@ if (process.platform !== "win32") {
     const st = await jobs.waitFor(jobId, 10_000);
     assert.equal(st.status, "completed");
     assert.equal(st.result.rendered[0].outputs[0].path, out);
-    assert.equal(st.result.rendered[0].outputs[0].bytes, "rendered movie".length);
+    assert.equal(st.result.rendered[0].outputs[0].bytes, fs.statSync(out).size);
     assert.equal(st.result.rendered[0].frames, 4);
     // Rendered from a private copy beside the project, never the live .aep,
     // and the copy is gone afterwards.
@@ -462,16 +520,42 @@ if (process.platform !== "win32") {
     assert.equal(runner.activeJobId, null);
   });
 
-  await check("progress lines it cannot read are reported, not silently left at 0%", async () => {
+  await check("progress lines it cannot read mean NOT verified, never completed", async () => {
     const jobs = new JobManager();
     const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "quiet.mov");
     env("quiet", out);
     const { jobId } = runner.start(plan(out), fake);
-    const st = await jobs.waitFor(jobId, 10_000);
-    assert.equal(st.status, "completed");
-    assert.match(st.result.rendered[0].progressWarning, /no frame line this server recognises/);
-    assert.match(st.result.rendered[0].progressWarning, /FORTSCHRITT/);
+    await assert.rejects(jobs.waitFor(jobId, 10_000), (e) => /no frame line this server recognises/.test(e.message) && /FORTSCHRITT/.test(e.message));
+  });
+
+  await check("an aerender that prints nothing and exits 0 is not a render", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const out = path.join(tmp, "silent.mov");
+    env("silent", out);
+    const { jobId } = runner.start(plan(out), fake);
+    await assert.rejects(jobs.waitFor(jobId, 10_000), /no frame line this server recognises/);
+  });
+
+  await check("a warning written just before exit is read before the item is decided", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const out = path.join(tmp, "warnlast.mov");
+    env("warnlast", out);
+    process.env.FAKE_LINE = REAL_MISSING_FOOTAGE_LINE;
+    const { jobId } = runner.start(plan(out), fake);
+    await assert.rejects(jobs.waitFor(jobId, 10_000), /missing footage/);
+  });
+
+  await check("a warning the engine prints after aerender has exited is still read", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const out = path.join(tmp, "lateengine.mov");
+    env("lateengine", out);
+    process.env.FAKE_LINE = REAL_MISSING_FOOTAGE_LINE;
+    const { jobId } = runner.start(plan(out), fake);
+    await assert.rejects(jobs.waitFor(jobId, 10_000), /missing footage/);
   });
 
   await check("the measured missing-footage output fails the job although aerender exits 0", async () => {
@@ -551,7 +635,7 @@ if (process.platform !== "win32") {
     const out = path.join(tmp, "liar.mov");
     env("liar", out);
     const { jobId } = runner.start(plan(out), fake);
-    await assert.rejects(jobs.waitFor(jobId, 10_000), (e) => /output is not there/.test(e.message) && /does not exist/.test(e.message));
+    await assert.rejects(jobs.waitFor(jobId, 10_000), (e) => /output cannot be verified/.test(e.message) && /does not exist/.test(e.message));
     assert.equal(jobs.get(jobId).status, "failed");
   });
 
