@@ -12,6 +12,21 @@ function __setOrKeyAtTime(prop, value, time, keyframe) {
   }
 }
 
+// Each field's property, by match name. Display names change with the UI
+// language and the layer type: a 2D layer's "Rotation" is a 3D layer's
+// "Z Rotation", and both are ADBE Rotate Z.
+var __TRANSFORM_FIELDS = [
+  ["position", "ADBE Position"],
+  ["scale", "ADBE Scale"],
+  ["rotation", "ADBE Rotate Z"],
+  ["anchorPoint", "ADBE Anchor Point"],
+  ["opacity", "ADBE Opacity"],
+  ["orientation", "ADBE Orientation"],
+  ["xRotation", "ADBE Rotate X"],
+  ["yRotation", "ADBE Rotate Y"],
+  ["zRotation", "ADBE Rotate Z"]
+];
+
 OPS.set_transform = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
@@ -20,14 +35,25 @@ OPS.set_transform = function (args) {
   __requireKeyTime(kf, t, "set_transform");
   var tr = l.property("Transform");
   var p = args.properties || {};
-  // Orientation and X/Y Rotation exist only on a 3D layer. They used to be
-  // skipped on a 2D one behind an {ok:true} (issue #152), so refuse before
-  // writing anything — a partial transform is worse than none. Z Rotation is
-  // the 2D layer's Rotation (the same property, ADBE Rotate Z), so it lands there.
-  if (!l.threeDLayer) {
+  var i;
+  // Every refusal below comes before the first write, so a refused call leaves
+  // the layer untouched. A partial transform is worse than none.
+  if (p.rotation !== undefined && p.zRotation !== undefined) {
+    throw new Error(
+      "set_transform: `rotation` and `zRotation` are the same property (ADBE Rotate Z) and both were passed. " +
+      "Nothing was changed. Pass only one of them."
+    );
+  }
+  // Orientation and X/Y Rotation exist only in 3D. On a 2D layer they used to be
+  // skipped behind an {ok:true} (issue #152). Cameras and lights are always 3D
+  // but do not report threeDLayer, so they are named rather than judged by that
+  // flag (the same exclusion __ptChain makes in layers.jsx).
+  var isCamOrLight = (typeof CameraLayer !== "undefined" && l instanceof CameraLayer) ||
+    (typeof LightLayer !== "undefined" && l instanceof LightLayer);
+  if (!l.threeDLayer && !isCamOrLight) {
     var only3D = ["orientation", "xRotation", "yRotation"];
     var refused = [];
-    for (var i = 0; i < only3D.length; i++) {
+    for (i = 0; i < only3D.length; i++) {
       if (p[only3D[i]] !== undefined) refused.push(only3D[i]);
     }
     if (refused.length) {
@@ -39,19 +65,25 @@ OPS.set_transform = function (args) {
       );
     }
   }
-  if (p.position !== undefined) __setOrKeyAtTime(tr.property("Position"), p.position, t, kf);
-  if (p.scale !== undefined) __setOrKeyAtTime(tr.property("Scale"), p.scale, t, kf);
-  if (p.rotation !== undefined) {
-    var rotProp = l.threeDLayer ? tr.property("Z Rotation") : tr.property("Rotation");
-    __setOrKeyAtTime(rotProp, p.rotation, t, kf);
+  // Resolve every property first. A camera or light has no Scale, Opacity or
+  // Anchor Point, so a field it lacks is refused by name, not skipped.
+  var plan = [];
+  var missing = [];
+  for (i = 0; i < __TRANSFORM_FIELDS.length; i++) {
+    var field = __TRANSFORM_FIELDS[i][0];
+    if (p[field] === undefined) continue;
+    var prop = null;
+    try { prop = tr.property(__TRANSFORM_FIELDS[i][1]); } catch (e) { prop = null; }
+    if (!prop) missing.push(field);
+    else plan.push([prop, p[field]]);
   }
-  if (p.anchorPoint !== undefined) __setOrKeyAtTime(tr.property("Anchor Point"), p.anchorPoint, t, kf);
-  if (p.opacity !== undefined) __setOrKeyAtTime(tr.property("Opacity"), p.opacity, t, kf);
-  if (p.orientation !== undefined) __setOrKeyAtTime(tr.property("Orientation"), p.orientation, t, kf);
-  if (p.xRotation !== undefined) __setOrKeyAtTime(tr.property("X Rotation"), p.xRotation, t, kf);
-  if (p.yRotation !== undefined) __setOrKeyAtTime(tr.property("Y Rotation"), p.yRotation, t, kf);
-  if (p.zRotation !== undefined) {
-    __setOrKeyAtTime(l.threeDLayer ? tr.property("Z Rotation") : tr.property("Rotation"), p.zRotation, t, kf);
+  if (missing.length) {
+    throw new Error(
+      "set_transform: layer '" + l.name + "'" + (isCamOrLight ? " (a camera or light)" : "") +
+      " has no " + missing.join(", ") + " property. Nothing was changed. Drop " + missing.join(", ") +
+      "; get_layer_full lists the transform properties this layer has."
+    );
   }
+  for (i = 0; i < plan.length; i++) __setOrKeyAtTime(plan[i][0], plan[i][1], t, kf);
   return { ok: true };
 };

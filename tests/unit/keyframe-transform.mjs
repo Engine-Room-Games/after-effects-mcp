@@ -81,12 +81,30 @@ MockProp.prototype.setValueAtTime = function (t, x) { this.writes.push(["key", t
 MockProp.prototype.valueAtTime = function () { return this.v; };
 Object.defineProperty(MockProp.prototype, "numKeys", { get: function () { return this.keys.length; } });
 Object.defineProperty(MockProp.prototype, "value", { get: function () { return this.v; } });
-function makeLayer(threeD) {
-  var names = ["Position", "Scale", "Rotation", "Z Rotation", "X Rotation", "Y Rotation", "Orientation", "Anchor Point", "Opacity"];
+function CameraLayer() {}
+function LightLayer() {}
+// Transform properties are looked up by match name, so the mock answers only those.
+var MATCH = {
+  "ADBE Position": "Position", "ADBE Scale": "Scale", "ADBE Rotate Z": "Z Rotation",
+  "ADBE Rotate X": "X Rotation", "ADBE Rotate Y": "Y Rotation", "ADBE Orientation": "Orientation",
+  "ADBE Anchor Point": "Anchor Point", "ADBE Opacity": "Opacity", "ADBE Point of Interest": "Point of Interest"
+};
+// kind: "2d" | "3d" | "camera" | "light". A 2D layer keeps its hidden 3D
+// properties, as AE's does. A camera or light has no Scale/Opacity/Anchor
+// Point; this mock's light has no Z Rotation either, to exercise the refusal.
+function makeLayer(kind) {
+  var names = kind === "camera" ? ["Point of Interest", "Position", "Orientation", "X Rotation", "Y Rotation", "Z Rotation"]
+    : kind === "light" ? ["Point of Interest", "Position", "Orientation", "X Rotation", "Y Rotation"]
+    : ["Position", "Scale", "Z Rotation", "X Rotation", "Y Rotation", "Orientation", "Anchor Point", "Opacity"];
   var props = {};
   for (var i = 0; i < names.length; i++) props[names[i]] = new MockProp(names[i], 0);
-  var tr = { property: function (n) { return props[n]; } };
-  return { name: "Card", threeDLayer: threeD, props: props, property: function (n) { return n === "Transform" ? tr : null; } };
+  var tr = { property: function (n) { return props[MATCH[n]] || null; } };
+  var l = kind === "camera" ? new CameraLayer() : kind === "light" ? new LightLayer() : {};
+  l.name = "Card";
+  l.threeDLayer = kind === "3d"; // cameras and lights report false in AE
+  l.props = props;
+  l.property = function (n) { return n === "Transform" ? tr : null; };
+  return l;
 }
 var LAYER = null;
 var PROP = null;
@@ -116,7 +134,7 @@ const plain = (a) => JSON.parse(JSON.stringify(a));
 
 check("set_transform: keyframe:true without time throws and writes nothing", () => {
   const ctx = makeCtx();
-  run(ctx, "LAYER = makeLayer(false);");
+  run(ctx, 'LAYER = makeLayer("2d");');
   assert.throws(
     () => run(ctx, "OPS.set_transform({compId:1, layerId:2, keyframe:true, properties:{opacity:50}})"),
     /keyframe:true needs `time`/
@@ -126,7 +144,7 @@ check("set_transform: keyframe:true without time throws and writes nothing", () 
 
 check("set_transform: keyframe:true with time writes a keyframe, not a static value", () => {
   const ctx = makeCtx();
-  run(ctx, "LAYER = makeLayer(false);");
+  run(ctx, 'LAYER = makeLayer("2d");');
   run(ctx, "OPS.set_transform({compId:1, layerId:2, keyframe:true, time:1.5, properties:{opacity:50}})");
   assert.deepEqual(plain(run(ctx, "LAYER.props['Opacity'].writes")), [["key", 1.5, 50]]);
 });
@@ -155,7 +173,7 @@ check("set_shape_property: keyframe:true without time throws and writes nothing"
 
 check("set_transform on a 2D layer refuses orientation/xRotation/yRotation, names them, writes nothing", () => {
   const ctx = makeCtx();
-  run(ctx, "LAYER = makeLayer(false);");
+  run(ctx, 'LAYER = makeLayer("2d");');
   let err;
   try {
     run(ctx, "OPS.set_transform({compId:1, layerId:2, properties:{position:[1,2], xRotation:10, orientation:[0,0,90]}})");
@@ -170,17 +188,54 @@ check("set_transform on a 2D layer refuses orientation/xRotation/yRotation, name
   assert.deepEqual(plain(run(ctx, "allWrites()")), [], "position must not land when the call is refused");
 });
 
-check("set_transform on a 2D layer puts zRotation on Rotation", () => {
+check("set_transform on a 2D layer puts zRotation on its Rotation (ADBE Rotate Z)", () => {
   const ctx = makeCtx();
-  run(ctx, "LAYER = makeLayer(false);");
+  run(ctx, 'LAYER = makeLayer("2d");');
   run(ctx, "OPS.set_transform({compId:1, layerId:2, properties:{zRotation:45}})");
-  assert.deepEqual(plain(run(ctx, "allWrites()")), ["Rotation"]);
-  assert.equal(run(ctx, "LAYER.props['Rotation'].v"), 45);
+  assert.deepEqual(plain(run(ctx, "allWrites()")), ["Z Rotation"]);
+  assert.equal(run(ctx, "LAYER.props['Z Rotation'].v"), 45);
+});
+
+check("rotation and zRotation together are refused as one property passed twice", () => {
+  const ctx = makeCtx();
+  run(ctx, 'LAYER = makeLayer("3d");');
+  assert.throws(
+    () => run(ctx, "OPS.set_transform({compId:1, layerId:2, properties:{position:[1,2,3], rotation:10, zRotation:20}})"),
+    /`rotation` and `zRotation` are the same property/
+  );
+  assert.deepEqual(plain(run(ctx, "allWrites()")), []);
+});
+
+check("a camera takes orientation and X/Y/Z rotation although threeDLayer is false", () => {
+  const ctx = makeCtx();
+  run(ctx, 'LAYER = makeLayer("camera");');
+  run(ctx, "OPS.set_transform({compId:1, layerId:2, properties:{orientation:[0,90,0], xRotation:5, yRotation:6, zRotation:7}})");
+  assert.deepEqual(plain(run(ctx, "allWrites()")).sort(), ["Orientation", "X Rotation", "Y Rotation", "Z Rotation"]);
+});
+
+check("a light takes orientation, and a property it lacks is refused before any write", () => {
+  const ctx = makeCtx();
+  run(ctx, 'LAYER = makeLayer("light");');
+  run(ctx, "OPS.set_transform({compId:1, layerId:2, properties:{orientation:[0,90,0], xRotation:5}})");
+  assert.deepEqual(plain(run(ctx, "allWrites()")).sort(), ["Orientation", "X Rotation"]);
+
+  const ctx2 = makeCtx();
+  run(ctx2, 'LAYER = makeLayer("light");');
+  let err;
+  try {
+    run(ctx2, "OPS.set_transform({compId:1, layerId:2, properties:{position:[1,2,3], zRotation:7, opacity:50}})");
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err, "a missing property must be refused, not skipped");
+  assert.match(err.message, /camera or light/);
+  assert.match(err.message, /opacity, zRotation/);
+  assert.deepEqual(plain(run(ctx2, "allWrites()")), [], "position must not land when the call is refused");
 });
 
 check("set_transform on a 3D layer writes orientation and per-axis rotation", () => {
   const ctx = makeCtx();
-  run(ctx, "LAYER = makeLayer(true);");
+  run(ctx, 'LAYER = makeLayer("3d");');
   run(ctx, "OPS.set_transform({compId:1, layerId:2, properties:{orientation:[0,0,90], xRotation:10, yRotation:20, zRotation:30}})");
   assert.deepEqual(plain(run(ctx, "allWrites()")).sort(), ["Orientation", "X Rotation", "Y Rotation", "Z Rotation"]);
 });
