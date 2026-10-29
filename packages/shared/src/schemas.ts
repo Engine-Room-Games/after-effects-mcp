@@ -1143,7 +1143,7 @@ export const RenderQueue = crossField(
       overwrite: z.boolean().optional().meta({ default: false })
         .describe("Required when an output file (or any frame of an output sequence) already exists; the render replaces it."),
       saveProject: z.boolean().optional().meta({ default: false })
-        .describe("Required when the project has unsaved changes: the render reads the saved file, so it saves first. Tell the user before passing it. Ignored when the project is already saved."),
+        .describe("Required when the project has unsaved changes: the render reads the saved file, so it saves first. Tell the user before passing it. Also required, and saves a project with no unsaved changes, when the saved file records footage at paths it has since moved from (the refusal says so). Otherwise ignored for a saved project."),
     })
     .strict(),
   // Rendering items the agent never added is a choice the caller has to make

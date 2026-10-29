@@ -171,6 +171,13 @@ jobs:
       - name: Render queue jobs are honest about progress, output and cancel
         run: node tests/unit/render-queue.mjs
 
+      # Issues #144 and #145: missing footage is refused only when the render
+      # reads it, and footage the temp copy could not find — moved since the
+      # last save, or deleted while open — is refused before anything renders,
+      # read from the saved .aep rather than from aerender's English output.
+      - name: Render queue refuses exactly the footage a render would miss
+        run: node tests/unit/render-footage.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.

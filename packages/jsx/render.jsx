@@ -330,13 +330,18 @@ OPS._render_prepare = noUndo(function (args) {
       problems.push("item " + s.index + " (" + s.compName + ") has an output module with no file");
       continue;
     }
-    var gone = __rqMissingFootage(rq.item(s.index).comp);
-    if (gone.length) {
-      problems.push("item " + s.index + " (" + s.compName + ") uses footage After Effects cannot find: " +
-        gone.join(", ") + " — relink it (File > Dependencies > Find Missing Footage), or the render would " +
+    var use = __rqFootageUse(rq.item(s.index));
+    if (use.missing.length) {
+      problems.push("item " + s.index + " (" + s.compName + ") renders footage After Effects cannot find: " +
+        use.missing.join(", ") + " — relink it (File > Dependencies > Find Missing Footage), or the render would " +
         "carry the missing-footage placeholder");
       continue;
     }
+    // Every file the render reads, so the server can check each is still on
+    // disk and recorded in the saved project at that path (issue #145).
+    s.footage = use.files;
+    if (use.warnings.length) s.footageWarnings = use.warnings;
+    if (use.skipped.length) s.footageSkipped = use.skipped;
     items.push(s);
   }
   if (problems.length) {
@@ -357,44 +362,362 @@ OPS._render_prepare = noUndo(function (args) {
 });
 
 /**
- * Names of the footage a comp renders that After Effects reports missing,
- * following nested comps (each comp once). Asked of the project itself, so it
- * holds in any language — aerender's own wording is only the second layer
- * (the 26.5 live run: aerender exits 0 with footage missing, and its warning
- * once never reached the server). A layer AE will not describe is skipped,
- * not guessed at; at most 20 names come back.
+ * What footage a render queue item actually reads, decided before anything
+ * renders and asked of the project itself, so it holds in any language —
+ * aerender's own wording is only the second layer (the 26.5 live run: aerender
+ * exits 0 with footage missing, and its warning once never reached the server).
+ *
+ * Returns
+ *   missing  — names of missing footage the render WILL read. Any one refuses.
+ *   warnings — missing footage the render probably does not read, but might:
+ *              reported in the result, never refused (issue #144).
+ *   skipped  — missing footage it provably does not read, with why.
+ *   files    — {name, path} of every file-backed footage item it reads, for
+ *              the server's on-disk and saved-path checks (issue #145).
+ *
+ * The walk follows nested comps with the time span mapped into each one. A
+ * layer's footage is READ when the layer is switched on (video, or audio with
+ * audio to give) and its in/out overlaps the span, padded by a frame for motion
+ * blur and frame blending. It is read regardless of both when the layer is a
+ * track matte, or when another layer in its comp points at it through a
+ * layer-valued property (Displacement Map, Set Matte, Compound Blur, a Layer
+ * Control, a light's source — anything whose value is a layer): those pull
+ * pixels from layers that are switched off, which is how they are normally
+ * used. A parent is NOT a read: parenting takes the parent's transform, never
+ * its pixels, and a missing file keeps its dimensions.
+ *
+ * What cannot be proved either way is a warning, not a refusal and not a skip:
+ * an expression calling sampleImage() can read any layer's pixels by name, and
+ * names in code are not something to guess at — so when one exists anywhere in
+ * the walked comps, every "provably unread" verdict is demoted to a warning.
+ * A layer-valued property whose value AE will not give, or one driven by an
+ * expression, makes every layer in that comp count as read. A nested comp is
+ * given the whole of its own time (no span limit) when the layer holding it
+ * has time remapping, any effect (Echo, Time Displacement, Posterize Time…
+ * read other times), or a stretch AE will not report.
+ *
+ * Any property AE will not describe counts as read: the only cost of reading
+ * too much is the refusal #144 is about, while reading too little renders the
+ * missing-footage placeholder and calls it done.
  */
-function __rqMissingFootage(comp) {
-  var names = [];
-  var seen = {};
-  function walk(c, depth) {
-    if (!c || depth > 32) return;
-    var id = null;
-    try { id = c.id; } catch (e0) {}
-    if (id !== null) {
-      if (seen[id]) return;
-      seen[id] = true;
-    }
+function __rqFootageUse(item) {
+  var NAMES_CAP = 20;
+  var missing = [];
+  var warnings = [];
+  var skipped = [];
+  var files = [];
+  var usedIds = {};       // footage id -> true once read
+  var skipWhy = {};       // footage id -> reason, for missing footage not (yet) read
+  var skipOrder = [];     // footage ids in the order first skipped
+  var skipFiles = {};     // footage id -> {name, path}, file-backed and not missing
+  var compState = {};
+  var refsMemo = {};
+  var visited = [];
+
+  function idOf(x) { try { return x.id; } catch (e) { return null; } }
+  function nameOf(x) { try { return String(x.name); } catch (e) { return "?"; } }
+  function fileOf(src) {
+    try { return src.file ? src.file.fsName : null; } catch (e) { return null; }
+  }
+  function isMissing(src) {
+    try { return src.footageMissing === true; } catch (e) { return false; }
+  }
+  function fps(c) {
+    var f = 0;
+    try { f = c.frameRate; } catch (e) { f = 0; }
+    return f > 0 ? f : 0;
+  }
+
+  // Switched on: the video switch, or the audio switch on a layer with audio.
+  function layerOn(L) {
+    var v = true;
+    try { v = L.enabled !== false; } catch (e) { v = true; }
+    if (v) return true;
+    try { return L.audioEnabled === true && L.hasAudio !== false; } catch (e2) { return true; }
+  }
+  function layerSpan(L) {
+    try {
+      var a = L.inPoint, b = L.outPoint;
+      if (typeof a !== "number" || typeof b !== "number") return null;
+      return { a: Math.min(a, b), b: Math.max(a, b) };
+    } catch (e) { return null; }
+  }
+  function overlaps(L, iv, c) {
+    if (!iv) return true;
+    var s = layerSpan(L);
+    if (!s) return true;
+    var f = fps(c);
+    var pad = f ? 1 / f : 0;
+    return s.a - pad < iv.b && s.b + pad > iv.a;
+  }
+  function isMatte(L) {
+    try { return L.isTrackMatte === true; } catch (e) { return true; }
+  }
+
+  // Layers in comp c that some layer reaches through a track matte or a
+  // layer-valued property. {idx: {index: true}, all: bool}.
+  function scanLayerProps(group, out, depth) {
+    if (!group || depth > 6) return;
     var n = 0;
-    try { n = c.numLayers || 0; } catch (e1) { n = 0; }
-    for (var i = 1; i <= n && names.length < 20; i++) {
-      var src = null;
-      try { src = c.layer(i).source; } catch (e2) { src = null; }
-      if (!src) continue;
-      if (src instanceof CompItem) {
-        walk(src, depth + 1);
-      } else if (src instanceof FootageItem) {
-        var miss = false;
-        try { miss = src.footageMissing === true; } catch (e3) { miss = false; }
-        if (miss && !seen["f" + src.id]) {
-          seen["f" + src.id] = true;
-          names.push("\"" + src.name + "\"");
-        }
+    try { n = group.numProperties || 0; } catch (e) { out.all = true; return; }
+    for (var j = 1; j <= n; j++) {
+      var p = null;
+      try { p = group.property(j); } catch (e1) { out.all = true; continue; }
+      if (!p) continue;
+      var kind = null;
+      try { kind = p.propertyType; } catch (e2) { out.all = true; continue; }
+      if (kind === PropertyType.PROPERTY) {
+        var vt = null;
+        try { vt = p.propertyValueType; } catch (e3) { out.all = true; continue; }
+        if (vt !== PropertyValueType.LAYER_INDEX) continue;
+        try {
+          if (p.expressionEnabled === true) { out.all = true; continue; }
+          var v = p.value;
+          if (typeof v === "number" && v > 0) out.idx[v] = true;
+          else if (v && typeof v === "object" && typeof v.index === "number") out.idx[v.index] = true;
+        } catch (e4) { out.all = true; }
+      } else {
+        scanLayerProps(p, out, depth + 1);
       }
     }
   }
-  walk(comp, 0);
-  return names;
+  function refsOf(c) {
+    var key = String(idOf(c));
+    if (refsMemo[key]) return refsMemo[key];
+    var out = { idx: {}, all: false };
+    if (typeof PropertyType === "undefined" || typeof PropertyValueType === "undefined") out.all = true;
+    var n = 0;
+    try { n = c.numLayers || 0; } catch (e) { n = 0; out.all = true; }
+    for (var i = 1; i <= n && !out.all; i++) {
+      var X = null;
+      try { X = c.layer(i); } catch (e1) { out.all = true; break; }
+      // The matte a layer names (AE 23+), and the layer above it (the older
+      // rule, where the matte is always the layer directly above).
+      try { var m = X.trackMatteLayer; if (m) out.idx[m.index] = true; } catch (e2) {}
+      try {
+        if (typeof TrackMatteType !== "undefined" && X.trackMatteType !== undefined &&
+            X.trackMatteType !== TrackMatteType.NO_TRACK_MATTE && X.index > 1) out.idx[X.index - 1] = true;
+      } catch (e3) {}
+      var groups = ["ADBE Effect Parade", "ADBE Light Options Group"];
+      for (var g = 0; g < groups.length && !out.all; g++) {
+        var grp = null;
+        try { grp = X.property ? X.property(groups[g]) : null; } catch (e4) { grp = null; }
+        if (grp) scanLayerProps(grp, out, 0);
+      }
+    }
+    refsMemo[key] = out;
+    return out;
+  }
+
+  // The span a nested comp is read over, in its own time; null = all of it.
+  function childSpan(L, iv, child) {
+    if (!iv) return null;
+    try {
+      if (L.timeRemapEnabled === true) return null;
+      var fx = L.property ? L.property("ADBE Effect Parade") : null;
+      if (fx && fx.numProperties > 0) return null;
+      var st = L.startTime;
+      var str = L.stretch;
+      if (typeof st !== "number" || typeof str !== "number" || !str) return null;
+      var s = layerSpan(L);
+      var a = iv.a, b = iv.b;
+      if (s) { a = Math.max(a, s.a); b = Math.min(b, s.b); }
+      var x1 = (a - st) * 100 / str;
+      var x2 = (b - st) * 100 / str;
+      var f = fps(child);
+      var pad = f ? 1 / f : 0;
+      return { a: Math.min(x1, x2) - pad, b: Math.max(x1, x2) + pad };
+    } catch (e) { return null; }
+  }
+
+  // Effects that read a layer's input at OTHER times — Echo, Posterize Time,
+  // Timewarp and their kin. On an adjustment layer they read the composite of
+  // every layer below at earlier frames, so a layer that ends before the span
+  // still reaches the render. A comp where any switched-on layer carries one
+  // is read over all of its time. Matched loosely on match name and display
+  // name on purpose: a false match costs only a skip.
+  //
+  // A name list cannot know third-party effects (Twixtor, RSMB, …), and on an
+  // adjustment layer an unknown one is exactly the risk. So on an ADJUSTMENT
+  // layer the rule is inverted: every effect counts as reading other times
+  // unless its match name is on NON_TIME_EFFECTS, a short list of stock
+  // effects that work on the current frame alone. The cost of the inversion
+  // is an occasional refusal (out-of-span missing footage in a comp with an
+  // unlisted adjustment effect), never a placeholder. On any other layer an
+  // effect reads only that layer's own source, whose in/out the walk already
+  // judges, so the name list is enough there.
+  var NON_TIME_EFFECTS = {
+    "ADBE Lumetri": 1, "ADBE CurvesCustom": 1, "ADBE Easy Levels2": 1, "ADBE Pro Levels2": 1,
+    "ADBE HUE SATURATION": 1, "ADBE Brightness & Contrast 2": 1, "ADBE Exposure2": 1, "ADBE Tint": 1,
+    "ADBE Tritone": 1, "ADBE Color Balance 2": 1, "ADBE Black&White": 1, "ADBE Vibrance": 1,
+    "ADBE Gaussian Blur 2": 1, "ADBE Fast Blur": 1, "ADBE Box Blur2": 1, "ADBE Sharpen": 1,
+    "ADBE Unsharp Mask2": 1, "ADBE Noise2": 1, "ADBE Glo2": 1, "ADBE Invert": 1, "ADBE Fill": 1,
+    "ADBE Ramp": 1, "ADBE Vignette": 1, "ADBE Photo Filter": 1, "ADBE Change Color": 1
+  };
+  var TIME_EFFECT = /echo|posterize\s*time|time\s*warp|time\s*displacement|time\s*difference|time\s*blend|wide\s*time|motion\s*blur|frame\s*blend|pixel\s*motion|time\s*remap|freeze|optical\s*flow|\btime\b/i;
+  var timeFxMemo = {};
+  function readsOtherTimes(c) {
+    var key = String(idOf(c));
+    if (timeFxMemo.hasOwnProperty(key)) return timeFxMemo[key];
+    var found = false;
+    var n = 0;
+    try { n = c.numLayers || 0; } catch (e) { found = true; }
+    for (var i = 1; i <= n && !found; i++) {
+      try {
+        var L = c.layer(i);
+        if (L.enabled === false) continue;
+        var adjust = L.adjustmentLayer === true;
+        var fx = L.property ? L.property("ADBE Effect Parade") : null;
+        var m = fx ? (fx.numProperties || 0) : 0;
+        for (var j = 1; j <= m && !found; j++) {
+          var ef = fx.property(j);
+          var mn = String(ef.matchName);
+          if (TIME_EFFECT.test(mn) || TIME_EFFECT.test(String(ef.name))) found = true;
+          else if (adjust && NON_TIME_EFFECTS[mn] !== 1) found = true;
+        }
+      } catch (e2) { found = true; }
+    }
+    timeFxMemo[key] = found;
+    return found;
+  }
+
+  function walk(c, iv, live, why, depth) {
+    if (!c || depth > 32) return;
+    if (live && iv && readsOtherTimes(c)) iv = null;
+    var key = String(idOf(c));
+    var st = compState[key];
+    if (!st) { st = compState[key] = { live: false, all: false, hull: null, skip: false }; visited.push(c); }
+    if (live) {
+      // A comp reached twice is walked again only for time it has not covered.
+      if (st.live && (st.all || (iv && st.hull && iv.a >= st.hull.a && iv.b <= st.hull.b))) return;
+      if (!iv) st.all = true;
+      else st.hull = st.hull ? { a: Math.min(st.hull.a, iv.a), b: Math.max(st.hull.b, iv.b) } : { a: iv.a, b: iv.b };
+      st.live = true;
+      iv = st.all ? null : st.hull;
+    } else {
+      if (st.skip) return;
+      st.skip = true;
+    }
+    var n = 0;
+    try { n = c.numLayers || 0; } catch (e1) { n = 0; }
+    for (var i = 1; i <= n; i++) {
+      var L = null, src = null;
+      try { L = c.layer(i); src = L.source; } catch (e2) { src = null; }
+      if (!src) continue;
+      var isComp = src instanceof CompItem;
+      var isFootage = !isComp && src instanceof FootageItem;
+      if (!isComp && !isFootage) continue;
+
+      var read = false, reason = why;
+      var drawn = false;
+      if (live) {
+        var on = layerOn(L);
+        drawn = on && overlaps(L, iv, c);
+        read = drawn || isMatte(L);
+        if (!read) {
+          var refs = refsOf(c);
+          read = refs.all || refs.idx[i] === true;
+        }
+        if (!read) {
+          reason = "its layer \"" + nameOf(L) + "\" in \"" + nameOf(c) + "\" is " +
+            (on ? "outside the rendered time span" : "switched off");
+        }
+      }
+      if (isComp) {
+        if (read) walk(src, drawn ? childSpan(L, iv, src) : null, true, null, depth + 1);
+        else walk(src, null, false, reason, depth + 1);
+        continue;
+      }
+      var fid = String(idOf(src));
+      var gone = isMissing(src);
+      if (read) {
+        if (usedIds[fid]) continue;
+        usedIds[fid] = true;
+        if (gone) {
+          if (missing.length < NAMES_CAP) missing.push("\"" + nameOf(src) + "\"");
+        } else {
+          var p = fileOf(src);
+          if (p) files.push({ name: nameOf(src), path: p });
+        }
+      } else if (gone) {
+        if (!skipWhy[fid]) { skipWhy[fid] = { name: nameOf(src), why: reason }; skipOrder.push(fid); }
+      } else {
+        var sp = fileOf(src);
+        if (sp && !skipFiles[fid]) skipFiles[fid] = { name: nameOf(src), path: sp };
+      }
+    }
+  }
+
+  // An expression in the render that samples pixels can read any layer.
+  function hasSampleImage(group, depth) {
+    if (depth > 12) return true;
+    var n = 0;
+    try { n = group.numProperties || 0; } catch (e) { return true; }
+    for (var j = 1; j <= n; j++) {
+      var p = null;
+      try { p = group.property(j); } catch (e1) { return true; }
+      if (!p) continue;
+      try {
+        if (p.propertyType === PropertyType.PROPERTY) {
+          if (p.canSetExpression === true && p.expressionEnabled === true && /sampleImage/.test(String(p.expression))) return true;
+        } else if (hasSampleImage(p, depth + 1)) {
+          return true;
+        }
+      } catch (e2) { return true; }
+    }
+    return false;
+  }
+  function anySampleImage() {
+    if (typeof PropertyType === "undefined") return true;
+    for (var k = 0; k < visited.length; k++) {
+      var n = 0;
+      try { n = visited[k].numLayers || 0; } catch (e) { return true; }
+      for (var i = 1; i <= n; i++) {
+        var L = null;
+        try { L = visited[k].layer(i); } catch (e1) { return true; }
+        if (hasSampleImage(L, 0)) return true;
+      }
+    }
+    return false;
+  }
+
+  var span = null;
+  try {
+    var t0 = item.timeSpanStart, d = item.timeSpanDuration;
+    if (typeof t0 === "number" && typeof d === "number" && d > 0) span = { a: t0, b: t0 + d };
+  } catch (e) { span = null; }
+  var comp = null;
+  try { comp = item.comp; } catch (e3) { comp = null; }
+  walk(comp, span, true, null, 0);
+
+  // Missing footage read anywhere is read; a skip elsewhere does not undo it.
+  var pending = [];
+  for (var s = 0; s < skipOrder.length; s++) {
+    if (!usedIds[skipOrder[s]]) pending.push(skipWhy[skipOrder[s]]);
+  }
+  var unreadFiles = [];
+  for (var fk in skipFiles) {
+    if (skipFiles.hasOwnProperty(fk) && !usedIds[fk]) unreadFiles.push(skipFiles[fk]);
+  }
+  // Whenever anything was left unread, missing or not: a skipped layer with
+  // its footage present must still be checked on disk (#145) when an
+  // expression may sample it. When nothing was skipped the scan could change
+  // nothing, so that is the one case it is not run.
+  var sampled = (pending.length || unreadFiles.length) ? anySampleImage() : false;
+  for (var q = 0; q < pending.length && q < NAMES_CAP; q++) {
+    var line = "\"" + pending[q].name + "\": " + pending[q].why;
+    if (sampled) {
+      warnings.push(line + ", so it should not be rendered — but an expression in this render calls sampleImage(), " +
+        "which can read a switched-off layer's pixels. If it reads this one, those frames show the missing-footage " +
+        "placeholder. Relink it to be sure.");
+    } else {
+      skipped.push(line);
+    }
+  }
+  // Present footage that is probably unread still has to be findable when an
+  // expression may sample it.
+  if (sampled) for (var u = 0; u < unreadFiles.length; u++) files.push(unreadFiles[u]);
+  return { missing: missing, warnings: warnings, skipped: skipped, files: files };
 }
 
 /** True when the .aep on disk cannot be written. Null when the host will not say. */
@@ -405,8 +728,8 @@ function __rqProjectReadOnly() {
 /**
  * Save the project so the separate render process sees what the user sees.
  *
- * Only ever called when the project has unsaved changes and the caller passed
- * saveProject:true. Dialogs are suppressed for the save, as export_mogrt does:
+ * Only ever called when the caller passed saveProject:true, and the project
+ * has unsaved changes or (with `force`) records footage paths that went stale. Dialogs are suppressed for the save, as export_mogrt does:
  * a read-only file, a project converted from an older version (which AE will
  * only Save As) or a locked one would otherwise raise a modal that freezes this
  * connection while the write lease is held. Under suppression such a save just
@@ -428,7 +751,12 @@ OPS._render_save = noUndo(function (args) {
       "Nothing was rendered. Ask the user to make it writable or Save As somewhere else, then call render_queue again."
     );
   }
-  if (app.project.dirty !== true) {
+  // `force` saves a clean project too: the server asks for that when the saved
+  // file records footage at paths that no longer hold it (issue #145) — a save
+  // makes After Effects write the paths it resolves now. A clean project's
+  // dirty flag cannot show whether that save happened, so the server re-reads
+  // the saved file afterwards instead.
+  if (app.project.dirty !== true && args.force !== true) {
     return { projectPath: app.project.file.fsName, saved: false, reason: "no unsaved changes" };
   }
   var file = app.project.file;

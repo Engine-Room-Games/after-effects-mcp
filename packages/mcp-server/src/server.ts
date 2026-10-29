@@ -15,7 +15,14 @@ import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
 import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge/writeQueue.js";
 import { JobManager } from "./jobs/manager.js";
-import { RenderRunner, logRenderStart, occupiedOutputs, resolveAerender, type RenderPlan } from "./render/aerender.js";
+import {
+  RenderRunner,
+  saveAndCheckFootage,
+  logRenderStart,
+  occupiedOutputs,
+  resolveAerender,
+  type RenderPlan,
+} from "./render/aerender.js";
 import { aerenderCandidates, afterEffectsInstallRoots } from "./setup/platform.js";
 import { SnapshotStore } from "./snapshots/store.js";
 import type { CompFingerprint } from "./snapshots/store.js";
@@ -760,23 +767,24 @@ async function runRender(
       );
     }
   }
-  if (plan.dirty && !args.saveProject) {
-    throw new Error(
-      "The project has unsaved changes, and the render reads the saved file, so it would not contain them. " +
-        "Nothing was saved or rendered. Tell the user the project will be saved, then call render_queue again " +
-        "with saveProject:true — or ask them to save it themselves."
-    );
-  }
-  if (plan.dirty && plan.readOnly === true) {
-    throw new Error(
-      `The project file ${plan.projectPath} is read-only and has unsaved changes, so it cannot be saved for the ` +
-        "render. Nothing was rendered. Ask the user to make it writable or Save As somewhere else."
-    );
-  }
-  const aerender = resolveAerender(aerenderCandidates(plan.appPackage, { installRoots: afterEffectsInstallRoots() }));
-  const save = plan.dirty
-    ? ((await bridge.runOp("_render_save", {})) as { saved: boolean })
-    : { saved: false };
+  // Every file the items read must be on disk, and recorded in the saved
+  // project at a path that leads to it — the render reads a copy in the temp
+  // folder, which cannot follow a path relative to the project (issue #145).
+  // Checked in Node, so it holds in any language; on a dirty project only
+  // after the save, since the old file does not hold footage imported since.
+  let aerender = "";
+  const { saved, savedForFootage, pathsWarning } = await saveAndCheckFootage({
+    plan,
+    saveProject: args.saveProject === true,
+    readOnly: plan.readOnly,
+    beforeSave: () => {
+      aerender = resolveAerender(aerenderCandidates(plan.appPackage, { installRoots: afterEffectsInstallRoots() }));
+    },
+    save: async (force) => (await bridge.runOp("_render_save", { force })) as { saved: boolean },
+  });
+  const save = { saved };
+  const footageWarnings = plan.items.flatMap((i) => (i.footageWarnings ?? []).map((w) => `item ${i.index}: ${w}`));
+  const footageSkipped = plan.items.flatMap((i) => (i.footageSkipped ?? []).map((w) => `item ${i.index}: ${w}`));
   let started: { jobId: string; totalFrames: number };
   try {
     started = renders.start(plan, aerender);
@@ -797,6 +805,27 @@ async function runRender(
     })),
     projectPath: plan.projectPath,
     projectSaved: save.saved,
+    ...(savedForFootage
+      ? {
+          projectSavedBecause:
+            "the saved project recorded footage at paths it had moved from; the save made After Effects record where it is now",
+        }
+      : {}),
+    ...(footageWarnings.length
+      ? {
+          footageWarnings,
+          footageWarningsNote:
+            "Missing footage this render should not read, but might — tell the user, and check those frames in the file.",
+        }
+      : {}),
+    ...(pathsWarning ? { footagePathsUnchecked: pathsWarning } : {}),
+    ...(footageSkipped.length
+      ? {
+          missingFootageNotRendered: footageSkipped,
+          missingFootageNote:
+            "This footage is missing, but only on layers the render does not draw, so it was not a reason to refuse. Mention it to the user.",
+        }
+      : {}),
     aerender,
     note:
       "Rendering in the background in a separate aerender process, from a private copy of the project as saved now — " +
