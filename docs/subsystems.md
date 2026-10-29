@@ -326,7 +326,11 @@ How the restore is ordered, and why:
   belong to something else. `revert_comp` accepts a `compId` that differs from
   the record when that comp has the recorded name — the same comp under a new
   id — and rewrites the record to it (`checkpointRebound`); a differently named
-  comp is still refused. Track mattes (2023+ `setTrackMatte`) and locks are re-applied the
+  comp is still refused. The name is evidence only while the recorded comp
+  cannot be the answer: AE allows two comps called "Main", so a namesake is
+  refused while the recorded comp still exists under its recorded name. And
+  the record is rewritten only after a revert that verified clean; one that
+  did not is no evidence it was the right comp. Track mattes (2023+ `setTrackMatte`) and locks are re-applied the
   same way, explicitly, and a matte that cannot be re-pointed lands in
   `notRestored` rather than failing the call.
 - **The undo group is tried, then given up per layer.** `copyToComp` refuses a

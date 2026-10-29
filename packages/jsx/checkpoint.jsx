@@ -700,6 +700,16 @@ OPS.revert_comp = function (args) {
         "different compId is accepted for that same comp under a new id (after importing its project), recognised by " +
         "its name. If comp " + args.compId + " is that comp, set_comp it to \"" + meta.compName + "\" first. Nothing was changed.");
     }
+    // A name match is evidence only when the recorded comp cannot be the
+    // answer. AE allows two comps called "Main"; while the recorded one still
+    // exists under its recorded name, another "Main" is a different comp, and
+    // reverting it would overwrite unrelated work.
+    var recorded = __findItem(meta.compId);
+    if (recorded && recorded instanceof CompItem && !__cpIsCheckpoint(recorded) && recorded.name === meta.compName) {
+      throw new Error("Checkpoint " + cpId + " belongs to comp " + meta.compId + " (\"" + meta.compName + "\"), which " +
+        "still exists. Comp " + args.compId + " only shares its name. Omit compId (or pass " + meta.compId + ") to " +
+        "revert the comp the checkpoint was taken of. Nothing was changed.");
+    }
   }
   if (!target || !(target instanceof CompItem) || __cpIsCheckpoint(target)) {
     throw new Error("Checkpoint " + cpId + " was taken of comp " + targetId + " (\"" + meta.compName + "\"), which no " +
@@ -888,14 +898,20 @@ OPS.revert_comp = function (args) {
     for (i = 0; i < n; i++) layerIdMap[String(meta.layerIds[i])] = copies[i];
   }
 
-  if (rebind) {
+  // Re-tie the checkpoint to the new id only after a clean revert: a revert
+  // that did not verify is no evidence the comp is the one it was taken of.
+  var clean = mismatches.length === 0 && notRestored.length === 0;
+  if (rebind && clean) {
     try {
-      meta.compId = targetId;
-      cpComp.comment = __CP_TAG + JSON.stringify(meta);
+      var rmeta = __cpMeta(cpComp);
+      rmeta.compId = targetId;
+      cpComp.comment = __CP_TAG + JSON.stringify(rmeta);
       out.checkpointRebound = true;
     } catch (erb) {
       notRestored.push({ what: "re-binding the checkpoint to comp " + targetId, reason: String(erb.message || erb) });
     }
+  } else if (rebind) {
+    out.checkpointRebound = false;
   }
 
   var made = __findItem(targetId);
@@ -925,6 +941,10 @@ OPS.revert_comp = function (args) {
       "fields compared and " + notRestored.length + " item(s) could not be restored - see mismatches/notRestored.");
   } else {
     notes.push("verified:true covers the fields listed in `checked`, not keyframe or effect values.");
+  }
+  if (out.checkpointRebound === false) {
+    notes.push("The checkpoint still records comp " + meta.compId + ": it is re-tied to comp " + targetId +
+      " only after a clean revert.");
   }
   if (out.checkpointRebound) {
     notes.push("The checkpoint now belongs to comp " + targetId + " (it recorded another id, as a checkpoint " +

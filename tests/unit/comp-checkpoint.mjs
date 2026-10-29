@@ -551,6 +551,45 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   eq(mustOk(call("revert_comp", { checkpointId: cp.checkpointId })).verified, true, "and later reverts need no compId");
 }
 
+// ---------- two comps called "Main": a name match is not enough ----------
+{
+  const { get, run, call } = load();
+  const mainId = get("main.id");
+  run(`var main2 = mkComp("Main"); main2.add("Other work");`);
+  const otherId = get("main2.id");
+  const cp = mustOk(call("checkpoint_comp", { compId: mainId }));
+  const before = get("ids(main2)");
+
+  const r = call("revert_comp", { checkpointId: cp.checkpointId, compId: otherId });
+  eq(r.ok, false, "a namesake is refused while the recorded comp still exists under its name");
+  ok(/still exists/.test(r.error) && /only shares its name/.test(r.error) && /Nothing was changed/.test(r.error));
+  eq(get("ids(main2)"), before, "the other Main is untouched");
+  eq(get(`__cpMeta(find(${cp.checkpointId})).compId`), mainId, "and the checkpoint is not re-tied to it");
+
+  // Once the recorded comp is gone, the namesake is the imported-copy case and is accepted.
+  run(`main.remove();`);
+  const ok2 = mustOk(call("revert_comp", { checkpointId: cp.checkpointId, compId: otherId }));
+  eq(ok2.checkpointRebound, true);
+  eq(get("names(main2)"), ["CTRL", "Title", "Matte", "Fill", "BG", "Picker", "Red Solid 1"]);
+}
+
+// ---------- a revert that did not verify does not re-tie the checkpoint ----------
+{
+  const { get, run, call } = load();
+  const mainId = get("main.id");
+  const cp = mustOk(call("checkpoint_comp", { compId: mainId }));
+  run(`(function () {
+    var c = find(${cp.checkpointId});
+    var m = __cpMeta(c); m.compId = 99999;
+    c.comment = "ae-mcp-checkpoint:v1 " + JSON.stringify(m);
+  })(); COPY_FORCES_ENABLED = true;`);
+  const r = mustOk(call("revert_comp", { checkpointId: cp.checkpointId, compId: mainId }));
+  eq(r.verified, false);
+  eq(r.checkpointRebound, false, "not re-tied after a revert that did not verify");
+  eq(get(`__cpMeta(find(${cp.checkpointId})).compId`), 99999, "the record is unchanged");
+  ok(/only after a clean revert/.test(r.note));
+}
+
 // ---------- deleting ----------
 {
   const { get, call } = load();
