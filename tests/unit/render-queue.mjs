@@ -353,6 +353,11 @@ const { spawn } = require("child_process");
 const mode = process.env.FAKE_MODE;
 const out = process.env.FAKE_OUT;
 const args = process.argv.slice(2);
+// On Windows, libuv puts a non-detached child in a job object that is closed,
+// killing the child, when its parent exits. The real engine outlives aerender,
+// so an engine that must outlive the fake is detached there (it still inherits
+// the stdout pipe). On POSIX a plain child already outlives its parent.
+const survive = process.platform === "win32";
 fs.writeFileSync(process.env.FAKE_ARGS, JSON.stringify(args));
 // A minimal complete ISO media file: ftyp, mdat, moov — what a finished
 // QuickTime/MP4 render looks like to the structural check.
@@ -399,7 +404,7 @@ if (mode === "quietseq") {
 if (mode === "stuckengine") {
   // aerender exits; its engine keeps the pipe open and never goes, deaf to SIGTERM.
   const project = args[args.indexOf("-project") + 1];
-  const g = spawn(process.env.FAKE_ENGINE, ["-e", "process.on('SIGTERM',()=>{}); require('fs').writeFileSync(process.env.FAKE_GRANDCHILD, String(process.pid)); setInterval(()=>{}, 1000)", "--", "-noui", "-project", project], { stdio: ["ignore", "inherit", "inherit"] });
+  const g = spawn(process.env.FAKE_ENGINE, ["-e", "process.on('SIGTERM',()=>{}); require('fs').writeFileSync(process.env.FAKE_GRANDCHILD, String(process.pid)); setInterval(()=>{}, 1000)", "--", "-noui", "-project", project], { stdio: ["ignore", "inherit", "inherit"], detached: survive });
   g.unref();
   for (let n = 0; n < 4; n++) console.log("PROGRESS:  0:00:00:0" + n + " (" + (n + 1) + "): 0 Seconds");
   writeMovie(out);
@@ -418,7 +423,7 @@ if (mode === "lateengine") {
   // aerender exits at once; its engine, which inherited stdout, prints the
   // warning 400ms later — the shape of the 1-in-8 live failure.
   const project = args[args.indexOf("-project") + 1];
-  const g = spawn(process.env.FAKE_ENGINE, ["-e", "setTimeout(() => { console.log(process.env.FAKE_LINE); process.exit(0); }, 400)", "--", "-noui", "-project", project], { stdio: ["ignore", "inherit", "inherit"] });
+  const g = spawn(process.env.FAKE_ENGINE, ["-e", "setTimeout(() => { console.log(process.env.FAKE_LINE); process.exit(0); }, 400)", "--", "-noui", "-project", project], { stdio: ["ignore", "inherit", "inherit"], detached: survive });
   g.unref();
   for (let n = 0; n < 4; n++) console.log("PROGRESS:  0:00:00:0" + n + " (" + (n + 1) + "): 0 Seconds");
   writeMovie(out);
