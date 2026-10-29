@@ -595,16 +595,18 @@
   // only a pacing knob any more: it decides how many undo steps a long batch
   // costs the user. It comes off the job envelope so the JSX side owns the
   // number and the two cannot drift.
-  function driveJob(jobId, progressToken, chunkSize) {
-    var totalGuess = null;
+  function driveJob(jobId, progressToken, chunkSize, total) {
+    var totalGuess = (typeof total === "number") ? total : null;
     var size = chunkSize || 25;
-    var applied = 0;
+    // The cursor: ops attempted, not ops that succeeded — a continue-on-error
+    // batch moves past a failed op too.
+    var attempted = 0;
     var stepsTaken = 0;
     function step() {
       return runOp("_continue_job", { jobId: jobId, chunkSize: size }).then(function (res) {
         if (res.total) totalGuess = res.total;
         if (!res.done) {
-          if (typeof res.progress === "number") applied = res.progress;
+          if (typeof res.progress === "number") attempted = res.progress;
           if (typeof res.undoSteps === "number") stepsTaken = res.undoSteps;
           broadcast({ type: "progress", jobId: jobId, progress: res.progress, total: res.total, message: "running" });
           // Yield to UI so AE stays responsive.
@@ -643,20 +645,30 @@
           note: res.note, diff: res.diff,
         };
       }, function (e) {
+        // Any failure of a continuation leaves the chunks before it in the
+        // project, and a bare error — "No job: j_…" after a bundle reload, or
+        // the heal's own "Nothing ran", which is true of that one call and
+        // false of the batch — would invite a re-run that applies them twice.
+        // So every failure path of an in-flight job says what had landed.
+        //
         // The job table lives in the bundle's closure, so a bundle reload —
         // the automatic heal after another script removed __AEMCP (issue #185),
-        // or /reload-jsx — loses every job in flight. Bare "No job: j_…" would
-        // hide that the chunks before it were applied, and invite a re-run that
-        // applies them twice.
-        if (String(e && e.message).indexOf("No job: ") !== 0) throw e;
-        var lost = new Error(
-          "Batch " + jobId + " was lost mid-run: the AE MCP bundle was reloaded in After Effects " +
-          "(another script removed it from the shared script engine, or /reload-jsx ran), which discards " +
-          "running jobs. " + applied + " of " + (totalGuess === null ? "?" : totalGuess) + " ops were already " +
-          "applied, in " + stepsTaken + " undo step(s), and stay applied. Do NOT re-run the batch as it was: " +
-          "read the comp back and send only the ops that are missing.");
-        log("error", lost.message);
-        throw lost;
+        // or /reload-jsx — loses every job in flight; that is the "No job" case.
+        var msg = String(e && e.message ? e.message : e);
+        var cause = msg.indexOf("No job: ") === 0
+          ? "the AE MCP bundle was reloaded in After Effects (another script removed it from the shared " +
+            "script engine, or /reload-jsx ran), which discards running jobs."
+          : msg.split("Nothing ran.").join("The next chunk did not run.");
+        var landed = (attempted === 0 && stepsTaken === 0)
+          ? "No op of the batch had run yet."
+          : attempted + " of " + (totalGuess === null ? "?" : totalGuess) + " ops had already been attempted, " +
+            "in " + stepsTaken + " undo step(s); whatever they changed stays applied (an op that failed under " +
+            "continue-on-error may not have changed anything, and its error is lost with the job). " +
+            "Do NOT re-run the batch as it was: read the comp back and send only the ops that are missing.";
+        var stopped = new Error("Batch " + jobId + " stopped mid-run: " + cause + " " + landed);
+        stopped.code = e && e.code;
+        log("error", stopped.message);
+        throw stopped;
       });
     }
     return step();
@@ -988,7 +1000,7 @@
     if (op === "run_batch") {
       return runOp(op, args).then(function (res) {
         if (res && res.async && res.jobId) {
-          driveJob(res.jobId, progressToken, res.chunkSize).catch(function (e) {
+          driveJob(res.jobId, progressToken, res.chunkSize, res.total).catch(function (e) {
             broadcast({ type: "error", jobId: res.jobId, error: e.message });
           });
           // The undo fields ride out with the envelope so the agent is told the

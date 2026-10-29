@@ -218,6 +218,16 @@ function statusMatches(dom, re, timeoutMs = 8000) {
   });
 }
 
+/** Resolve with the whole log once a line matches, or reject at the deadline. */
+async function logLine(dom, re, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!re.test(logText(dom))) {
+    if (Date.now() > deadline) throw new Error(`log never matched ${re}\n${logText(dom)}`);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return logText(dom);
+}
+
 function logText(dom) {
   return dom.nodes.log.childNodes.map((n) => n.textContent).join("\n");
 }
@@ -305,15 +315,50 @@ await check("a batch lost to a bundle reload fails saying what was already appli
       body: JSON.stringify({ op: "run_batch", args: { ops: [] } }),
     }).then((r) => r.json());
     assert.equal(res.result.jobId, "j_1_1");
-    const deadline = Date.now() + 5000;
-    while (!/Batch j_1_1 was lost/.test(logText(booted.dom)) && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    const text = logText(booted.dom);
-    assert.match(text, /Batch j_1_1 was lost mid-run/);
-    assert.match(text, /25 of 100 ops were already applied, in 1 undo step/);
+    const text = await logLine(booted.dom, /Batch j_1_1 stopped mid-run/);
+    assert.match(text, /bundle was reloaded/);
+    assert.match(text, /25 of 100 ops had already been attempted, in 1 undo step/);
     assert.match(text, /Do NOT re-run the batch/);
   } finally { booted.host.answer = null; }
+});
+
+await check("a batch whose heal is refused mid-run says what landed, never that nothing ran", async () => {
+  const port = Number(booted.dom.nodes.port.textContent);
+  const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
+  const bundleFile = path.join(dir, "jsx", "bundle.jsx");
+  const original = fs.readFileSync(bundleFile);
+  let turns = 0;
+  booted.host.answer = (op) => {
+    if (op === "run_batch") return { async: true, jobId: "j_2_1", total: 90, chunkSize: 30 };
+    if (op === "_continue_job") {
+      turns += 1;
+      if (turns === 2) {
+        // After this chunk lands, another script removes __AEMCP and a newer
+        // setup_panel install sits on disk, so the heal must refuse.
+        booted.host.namespaceGone = true;
+        fs.writeFileSync(bundleFile, Buffer.concat([original, Buffer.from("\n// newer install\n")]));
+      }
+      return { done: false, jobId: "j_2_1", progress: 30 * turns, total: 90, undoSteps: turns };
+    }
+    return {};
+  };
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/op`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-ae-mcp-token": token },
+      body: JSON.stringify({ op: "run_batch", args: { ops: [] } }),
+    }).then((r) => r.json());
+    assert.equal(res.result.jobId, "j_2_1");
+    const line = (await logLine(booted.dom, /Batch j_2_1 stopped mid-run/))
+      .split("\n").filter((l) => /Batch j_2_1/.test(l)).join("\n");
+    assert.match(line, /newer version than this running panel/);
+    assert.match(line, /60 of 90 ops had already been attempted, in 2 undo step/);
+    assert.doesNotMatch(line, /Nothing ran/, "chunks had landed; 'Nothing ran' is false of the batch");
+  } finally {
+    booted.host.answer = null;
+    booted.host.namespaceGone = false;
+    fs.writeFileSync(bundleFile, original);
+  }
 });
 
 await check("the heal will not load a newer installed bundle into a running panel: the gate keeps saying restart", async () => {
