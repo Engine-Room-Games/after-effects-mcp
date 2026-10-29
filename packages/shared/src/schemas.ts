@@ -1212,7 +1212,7 @@ export const AeGuide = z
       .regex(/^v?\d+\.\d+\.\d+$/, "must be a version like 0.4.0")
       .optional()
       .describe(
-        "whats-new only: return just the releases newer than this version — the version named is the one already absorbed and is excluded — behind the guide's preamble, or one line saying nothing is newer. Use the version a project's docs record as last absorbed. The answer opens with the server's own version. Rejected on any other topic, since there is nothing there to filter."
+        "whats-new only: return just the releases newer than this version — the version named is the one already absorbed and is excluded — behind the guide's preamble, or one line saying nothing is newer. Use the version a project's docs record as last absorbed, or 0.0.0 for the whole history; omitted, only the two newest releases are returned and the older ones are named. The answer opens with the server's own version. Rejected on any other topic, since there is nothing there to filter."
       ),
   })
   .strict();

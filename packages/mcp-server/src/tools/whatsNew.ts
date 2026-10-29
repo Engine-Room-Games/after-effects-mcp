@@ -112,7 +112,20 @@ export interface WhatsNewRender {
   versions: string[];
   /** The newest release the guide describes, or null for a guide with no release sections. */
   newest: string | null;
+  /** Versions the answer left out, newest first — named in the header line too. */
+  omitted: string[];
 }
+
+/**
+ * How many releases an unfiltered read returns. The whole history is ~9k tokens
+ * and growing by a section per release (issue #169); a session that did not say
+ * which version it knows wants what is current, and the header names the rest
+ * and the call that fetches it.
+ */
+export const RECENT_RELEASES = 2;
+
+/** The version every release is newer than — `since` with it is the whole history. */
+export const WHOLE_HISTORY_SINCE = "0.0.0";
 
 /**
  * What `ae_guide({topic: "whats-new"})` answers.
@@ -124,6 +137,10 @@ export interface WhatsNewRender {
  * the first line names the server's own version, which is what the absorb flow
  * writes back into the project's docs; the guide cannot carry that itself, since
  * a build between releases is ahead of its newest section.
+ *
+ * Without `since`, only the {@link RECENT_RELEASES} newest sections behind the
+ * preamble, and the header names every release it left out and the `since` call
+ * that returns them — a bounded read must say what it did not return.
  */
 export function renderWhatsNew(body: string, opts: { since?: string; serverVersion: string }): WhatsNewRender {
   const { preamble, sections } = splitReleases(body);
@@ -131,11 +148,22 @@ export function renderWhatsNew(body: string, opts: { since?: string; serverVersi
   const server = `This server is after-effects-mcp ${opts.serverVersion}.`;
 
   if (opts.since === undefined) {
-    return {
-      text: `${server} Pass \`since\` to see only the releases after a version.\n\n${body.trim()}`,
-      versions: sections.map((s) => s.version),
-      newest,
-    };
+    if (sections.length === 0) {
+      return { text: `${server} This guide describes no releases.\n\n${body.trim()}`, versions: [], newest, omitted: [] };
+    }
+    const shown = sections.slice(0, RECENT_RELEASES);
+    const left = sections.slice(RECENT_RELEASES);
+    const versions = shown.map((s) => s.version);
+    const omitted = left.map((s) => s.version);
+    const scope =
+      omitted.length === 0
+        ? `Showing every release described here: ${versions.join(", ")}.`
+        : `Showing the ${shown.length} newest releases: ${versions.join(", ")}. ` +
+          `Left out ${omitted.length} older release${omitted.length === 1 ? "" : "s"}: ${omitted.join(", ")}. ` +
+          `Pass \`since\` to get every release after a version — the one a project last absorbed, or ` +
+          `\`since: "${WHOLE_HISTORY_SINCE}"\` for the whole history.`;
+    const parts = [`${server} ${scope}`, preamble, ...shown.map((s) => s.text)].filter((p) => p.length > 0);
+    return { text: parts.join("\n\n"), versions, newest, omitted };
   }
 
   const since = opts.since.replace(/^v/, "");
@@ -146,11 +174,12 @@ export function renderWhatsNew(body: string, opts: { since?: string; serverVersi
       text: `${server} Nothing newer than ${since}: ${described}.`,
       versions: [],
       newest,
+      omitted: [],
     };
   }
 
   const versions = newer.map((s) => s.version);
   const header = `${server} Showing releases after ${since}: ${versions.join(", ")}.`;
   const parts = [header, preamble, ...newer.map((s) => s.text)].filter((p) => p.length > 0);
-  return { text: parts.join("\n\n"), versions, newest };
+  return { text: parts.join("\n\n"), versions, newest, omitted: [] };
 }
