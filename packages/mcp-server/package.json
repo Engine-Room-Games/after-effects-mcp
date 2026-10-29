@@ -11,6 +11,7 @@
     "url": "git+https://github.com/Engine-Room-Games/after-effects-mcp.git",
     "directory": "packages/mcp-server"
   },
+  "funding": "https://github.com/sponsors/migus88",
   "bugs": {
     "url": "https://github.com/Engine-Room-Games/after-effects-mcp/issues"
   },
