@@ -272,7 +272,7 @@ These switches limit what your assistant can do through this connection. They do
 ---
 
 <details>
-<summary><b>🧰 All 80 tools</b></summary>
+<summary><b>🧰 All 84 tools</b></summary>
 
 <br>
 
@@ -293,6 +293,7 @@ These switches limit what your assistant can do through this connection. They do
 | Footage (3) | `import_footage`, `create_footage_layer`, `purge_unused_footage` — remove the solids (or any footage) no comp uses, with a dry run |
 | Audio (1) | `place_audio_cues` — a whole cue list placed as one undo step |
 | Motion Graphics (1) | `export_mogrt` — export a comp as a `.mogrt` template for Premiere |
+| Render queue (4) | `add_to_render_queue`, `list_render_queue`, `remove_render_item`, `render_queue` — render in the background, with progress and cancel |
 | Explore (2) | `get_project_summary`, `find_layers` |
 | Raw (1) | `run_jsx` |
 | House style (2) | `get_house_style`, `set_house_style` |
@@ -307,6 +308,7 @@ A few behave differently from the rest:
 - **`run_batch`** runs many operations in a single pass. Up to 500 of them that is one undo step; past that it runs in the background, streams progress, and lands as one undo step per chunk — After Effects will not keep a single undo group across a long job, so the result tells the assistant exactly how many steps the work took. Ask for a single undo step at any size with `singleUndo`, at the cost of freezing After Effects until it finishes.
 - **`screenshot_frame`** and **`screenshot_layer`** are for occasional checks, not for reviewing motion frame by frame. To judge movement, `screenshot_frame` takes several times at once and returns them as one labelled contact sheet — one image instead of several. On large comps it renders at reduced resolution unless you ask otherwise.
 - **`import_footage`** checks what After Effects actually produced. An SVG whose `viewBox` asks for one shape and imports at another is a known After Effects bug that renders as nothing at all, with no error — so the import is refused and explained rather than left to fail silently later.
+- **`render_queue`** renders comps to movies or image sequences in the background, in a separate copy of After Effects, so the one you are working in stays usable. Formats come from your output-module templates; the result lists every file it checked on disk, and a cancel really stops the render. The background copy renders the saved file, so if there are unsaved changes your assistant has to ask to save first.
 - **`export_mogrt`** writes a Motion Graphics template for Premiere. It suppresses the modal dialogs that would otherwise sit there waiting for a click, and can set the thumbnail from any frame you choose, rather than the first one — which is usually black if the comp fades up.
 - **`snapshot_comp`** and **`diff_comp`** answer "what did that change actually do" without reading the whole comp back — the assistant fingerprints it before the change and asks afterwards what moved.
 - **`run_jsx`** runs arbitrary ExtendScript for anything the other tools don't cover. Long scripts can be run from a file so they never fill up the conversation.
@@ -374,7 +376,7 @@ macOS is the more exercised of the two; [issue reports](https://github.com/Engin
 - The After Effects panel is unsigned, so loading it requires Adobe's `PlayerDebugMode`, which the setup step enables. This is Adobe's documented path for unsigned extensions.
 - `saveFrameToPng` is community-known rather than officially documented. It works, but alpha edges can be imperfect on some comps.
 - A long synchronous loop in `run_jsx` will freeze the After Effects UI. Use `run_batch` for bulk work.
-- Not covered: the render queue, replacing or relinking footage (importing it is covered), and application preferences.
+- Not covered: replacing or relinking footage (importing it is covered), and application preferences.
 
 </details>
 

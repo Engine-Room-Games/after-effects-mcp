@@ -51,11 +51,11 @@ export const READ_ONLY_SERVER_OPS: Record<ServerOp, "keep" | string> = {
   log_issue: "it writes to the issue journal on disk",
   mark_issue_reported: "it rewrites an issue journal entry on disk",
   archive_issue: "it rewrites an issue journal entry on disk",
-  // Only `run_batch` starts a job, and it is a write. With nothing able to
+  // Only `run_batch` and `render_queue` start a job, and both are writes. With nothing able to
   // start one, these are three tools that can only ever answer "no such job".
-  await_job: "only run_batch starts a job, and run_batch is not available",
-  get_job: "only run_batch starts a job, and run_batch is not available",
-  cancel_job: "only run_batch starts a job, and run_batch is not available",
+  await_job: "only run_batch and render_queue start a job, and neither is available",
+  get_job: "only run_batch and render_queue start a job, and neither is available",
+  cancel_job: "only run_batch and render_queue start a job, and neither is available",
 };
 
 /**

@@ -237,9 +237,9 @@ const clients = {
 };
 const listed = async (client) => (await client.listTools()).tools.map((t) => t.name);
 
-await check("tools/list: default lists all 80 ops", async () => {
+await check("tools/list: default lists all 84 ops", async () => {
   assert.deepEqual(await listed(clients.default), ALL);
-  assert.equal(ALL.length, 80, "the op count moved — update this and the README's tool count together");
+  assert.equal(ALL.length, 84, "the op count moved — update this and the README's tool count together");
 });
 
 await check("tools/list: read-only lists exactly enabledOps, and no write", async () => {
@@ -261,7 +261,7 @@ await check("read-only keeps list_checkpoints and drops the three checkpoint wri
   }
 });
 
-await check("tools/list: run_jsx off lists 79, without run_jsx", async () => {
+await check("tools/list: run_jsx off lists 83, without run_jsx", async () => {
   const names = await listed(clients.noJsx);
   assert.equal(names.length, ALL.length - 1);
   assert.ok(!names.includes("run_jsx"));

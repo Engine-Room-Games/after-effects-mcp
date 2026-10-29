@@ -87,10 +87,15 @@ export class JobManager {
     this.flush(jobId);
   }
 
-  cancel(jobId: string): void {
+  /**
+   * `result`, when given, is what `await_job` returns for the cancelled job —
+   * a cancelled render says what it left on disk, which is not nothing.
+   */
+  cancel(jobId: string, result?: unknown): void {
     const s = this.jobs.get(jobId);
     if (!s) return;
     s.status = "cancelled";
+    if (result !== undefined) s.result = result;
     s.finishedAt = Date.now();
     this.flush(jobId);
   }

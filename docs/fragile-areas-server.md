@@ -20,7 +20,7 @@ Back to [CLAUDE.md](../CLAUDE.md). Siblings: [After Effects and ExtendScript](fr
   whitelist to stay inside — the emitted document has to be a valid schema in
   that dialect, and composition keywords are fine. This server already ships 16
   `anyOf` sites and 56 `prefixItems`. **Validate, do not guess:**
-  `tests/unit/schema-constraints.mjs` checks all 80 emitted schemas against the
+  `tests/unit/schema-constraints.mjs` checks all 84 emitted schemas against the
   real 2020-12 metaschema and compiles each one with `ajv/dist/2020`, and CI
   runs it. A schema the API refuses takes down *every* tool in the session, not
   the one it belongs to, so nothing goes into that emission pass unvalidated.

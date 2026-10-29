@@ -17,7 +17,7 @@ session is a tax on every request the user ever makes.
 | [`docs/fragile-areas-ae.md`](docs/fragile-areas-ae.md) | Measured After Effects and ExtendScript behaviour: undo, shapes, text, audio, mogrt, expressions, `run_jsx`. |
 | [`docs/fragile-areas-bridge.md`](docs/fragile-areas-bridge.md) | The bridge, ports, CEP, the panel, and the screenshot pipeline. |
 | [`docs/fragile-areas-server.md`](docs/fragile-areas-server.md) | Tool schemas and the MCP protocol, the journal's caches, packaging and binaries. |
-| [`docs/verification-recipes.md`](docs/verification-recipes.md) | The 56 recipes run by hand against a live AE 2026. |
+| [`docs/verification-recipes.md`](docs/verification-recipes.md) | The 68 recipes run by hand against a live AE 2026. |
 
 **Nothing in `docs/` is generated** — hand-written, like this file. The generated
 prose is elsewhere and is called out below.
@@ -33,7 +33,7 @@ table is how that one went stale once already.
 
 ## What this project is
 
-An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, footage import, audio cue placement, comp snapshots and diffs, Motion Graphics template export, one-off screenshots and contact sheets, bulk batches, comp checkpoints with revert. 80 tools. macOS and Windows — the only two platforms AE runs on.
+An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, footage import, audio cue placement, comp snapshots and diffs, Motion Graphics template export, rendering through the render queue, one-off screenshots and contact sheets, bulk batches, comp checkpoints with revert. 84 tools. macOS and Windows — the only two platforms AE runs on.
 
 It ships five ways, and the ordering below is deliberate — it goes from least to most that the user has to already have installed:
 
@@ -86,6 +86,8 @@ One line each. The annotated version — why each file is the way it is — is i
 | `packages/jsx/footage.jsx` | Import, footage layers, the SVG viewBox check, the shared solid/`usedIn` helpers. |
 | `packages/jsx/audio.jsx` | `place_audio_cues` — plan, import, build, roll back. Statement order is load-bearing. |
 | `packages/jsx/mogrt.jsx` | `export_mogrt` — preconditions first, dialogs suppressed, everything re-fetched afterwards. |
+| `packages/jsx/render.jsx` | The render queue: add/list/remove, and `_render_prepare`/`_render_save` — the halves of `render_queue` that need AE. The render itself is not here. |
+| `…/render/aerender.ts` | `render_queue`'s job: one `aerender` process per item, progress off stdout, outputs verified on disk, cancel kills the tree. |
 | `packages/jsx/raw.jsx` | `run_jsx` — the result serializer, library inlining, failure attribution. |
 | `packages/jsx/values.jsx` | `__setValue` — every op's `setValue`; drops AE's false `invalid numeric result` throw only when the value read back landed (#129). |
 | `packages/jsx/helpers.jsx` | The helper scope a `run_jsx` script runs in. Listed by signature in the tool description — change both together. |
@@ -201,7 +203,7 @@ That sync is **opt-in on purpose**. The installed bundle is one half of the pane
 
 Linux is impossible, not merely unimplemented — Adobe has never shipped AE for it.
 
-All `packages/jsx/*.jsx` is AE's own scripting API and is platform-neutral; never add platform branching there. Host differences are confined to `setup/platform.ts` (PlayerDebugMode via `defaults` vs `reg`, AE process via `pgrep` vs `tasklist`) and `cepExtensionsDir()` in `setup/paths.ts` (`~/Library/Application Support/...` vs `%APPDATA%\...`).
+All `packages/jsx/*.jsx` is AE's own scripting API and is platform-neutral; never add platform branching there. Host differences are confined to `setup/platform.ts` (PlayerDebugMode via `defaults` vs `reg`, AE process via `pgrep` vs `tasklist`, where `aerender` lives and how a render's process tree is stopped — process group vs `taskkill /T`) and `cepExtensionsDir()` in `setup/paths.ts` (`~/Library/Application Support/...` vs `%APPDATA%\...`).
 
 CI (`.github/workflows/ci.yml`) builds and smoke-tests on macos-latest and windows-latest: server starts, ≥70 tools, every emitted tool schema is valid draft 2020-12 and hides no cross-field constraint, `instructions`/prompts/resources are served and `$ARGUMENTS` substitutes, `check_setup` resolves paths, and both scaffold entry points write files and refuse to clobber. It cannot exercise the CEP install — no AE on a runner — so the Windows install path is the least-proven part of the project. macOS is the daily-driven platform.
 
@@ -217,7 +219,8 @@ The Developer ID certificate stays on one machine and is never read by anything 
 
 ## Out of scope (v1)
 
-- Render queue (queue + render + progress + cancel).
+The render queue was on this list until issue #137. It landed as `render_queue` rendering through `aerender`, never `renderQueue.render()` and never Media Encoder — the reasoning is in [`docs/fragile-areas-ae.md`](docs/fragile-areas-ae.md#the-render-queue).
+
 - Footage *replace* / relink. Import landed in 0.3.0 (`import_footage`) because issue #33's SVG check has nowhere else to live — the detection needs the file path and the imported item in the same call. Replace and relink are still out.
 - AE preferences / settings changes (excluded by design — animation only).
 - Code-signing the Windows binary (needs a separate certificate; SmartScreen warns on first run until then).
