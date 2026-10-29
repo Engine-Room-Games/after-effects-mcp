@@ -1,0 +1,118 @@
+{
+  "recipe": 8,
+  "title": "run_jsx answers: a value, nothing, falsy values, and an error with its line",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "set_active_comp",
+      "args": {
+        "compId": "${comp.id}"
+      }
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "return app.project.activeItem.name;"
+      },
+      "expect": [
+        {
+          "equals": "t"
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var x = 1;"
+      },
+      "expect": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "returned",
+          "equals": null
+        },
+        {
+          "path": "undoGroup",
+          "equals": "AE MCP: run_jsx"
+        },
+        {
+          "path": "note",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "return null;"
+      },
+      "expect": [
+        {
+          "path": "returned",
+          "equals": null
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var x = 1;",
+        "undoGroup": false
+      },
+      "expect": [
+        {
+          "path": "undoGroup",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "return 0;"
+      },
+      "expect": [
+        {
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "return false;"
+      },
+      "expect": [
+        {
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var a = 1;\nnope.boom();"
+      },
+      "expectError": "line 2\\b"
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "recipe": 29,
+  "title": "diff:true on run_jsx, including a script that throws half-way",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "set_active_comp",
+      "args": {
+        "compId": "${comp.id}"
+      }
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c = app.project.activeItem; c.layers.addNull(); c.layers.addNull(); c.layers.addNull(); return c.numLayers;",
+        "diff": true,
+        "diffCompId": "${comp.id}"
+      },
+      "expect": [
+        {
+          "path": "returned",
+          "equals": 3
+        },
+        {
+          "path": "diff",
+          "exists": true
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c = app.project.activeItem;\nc.layers.addNull();\nnope.boom();",
+        "diff": true,
+        "diffCompId": "${comp.id}"
+      },
+      "expectError": "Changed before it stopped"
+    }
+  ]
+}

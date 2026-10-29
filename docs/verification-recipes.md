@@ -6,6 +6,23 @@ rendered frame, the audio on a RAM preview, CEP's own log. Where a recipe says
 **record what you see**, the measurement is the deliverable: write it back into
 the matching entry under `docs/fragile-areas-*.md`.
 
+**Scripted half.** The JSON-answerable part of 27 of these recipes (1–10, 15,
+20–23, 25, 26, 28–30, 33, 36, 37, 39, 47, 57, 58) is scripted as fixtures in
+`tests/live/recipes/`, run by `tests/live/run.mjs` against a fresh server from
+the checkout over stdio — never this session's own `after-effects` tools. One
+pass, with After Effects quit to start: `node tests/live/run.mjs prefs backup
+--live`, launch AE on an empty project, `node tests/live/run.mjs run --live`
+(or `run 7 21` for some), quit AE, `node tests/live/run.mjs prefs restore
+--live`. It refuses without `--live`/`AE_MCP_LIVE=1`, without the prefs
+backup, or with any project but an empty untitled one open; it saves only
+inside its own temp folder, deletes only that, and never quits AE. Fixtures
+may call only allowlisted tools; file-writing ones only with every path inside
+the temp folder. Its ExtendScript ban list guards against a fixture author's
+mistake, not malice — it is not a sandbox, and fixtures are reviewed code. Each
+fixture's `manual` line — printed after the run — is the half only a person
+can see. `node tests/live/run.mjs validate` checks the fixtures against the op
+schemas with no AE; CI does the same in `tests/unit/live-driver.mjs`.
+
 Back to [CLAUDE.md](../CLAUDE.md).
 
 

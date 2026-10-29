@@ -1,0 +1,21 @@
+{
+  "recipe": 58,
+  "title": "Folder.appPackage, the folder aerender is looked for beside",
+  "manual": "Confirm aerender sits beside the reported .app (macOS) or inside Support Files (Windows).",
+  "steps": [
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "return Folder.appPackage.fsName;"
+      },
+      "expect": [
+        {
+          "type": "string"
+        },
+        {
+          "matches": "After Effects"
+        }
+      ]
+    }
+  ]
+}

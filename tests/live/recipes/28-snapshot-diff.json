@@ -1,0 +1,161 @@
+{
+  "recipe": 28,
+  "title": "snapshot_comp then diff_comp names exactly what changed",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "a",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "b",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "snapshot_comp",
+      "args": {
+        "compId": "${comp.id}"
+      },
+      "save": "snap",
+      "expect": [
+        {
+          "path": "snapshotId",
+          "type": "string"
+        },
+        {
+          "path": "fingerprint",
+          "exists": false
+        },
+        {
+          "path": "layers",
+          "equals": 2
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "added",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ],
+      "save": "layer"
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Opacity"
+        ],
+        "time": 0,
+        "value": 0
+      }
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Opacity"
+        ],
+        "time": 1,
+        "value": 100
+      }
+    },
+    {
+      "call": "diff_comp",
+      "args": {
+        "since": "${snap.snapshotId}"
+      },
+      "save": "d1",
+      "expect": [
+        {
+          "path": "$text",
+          "matches": "added"
+        },
+        {
+          "path": "changeCount",
+          "gte": 1
+        }
+      ]
+    },
+    {
+      "call": "diff_comp",
+      "args": {
+        "since": "${d1.snapshotId}"
+      },
+      "expect": [
+        {
+          "path": "changeCount",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "call": "diff_comp",
+      "args": {
+        "since": "snap_999"
+      },
+      "expectError": "snap_"
+    }
+  ]
+}

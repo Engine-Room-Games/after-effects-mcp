@@ -195,6 +195,13 @@ jobs:
       - name: Tool arguments are closed, in a batch as well as direct
         run: node tests/unit/strict-args.mjs
 
+      # Issue #172: the live After Effects driver (tests/live/) minus After
+      # Effects — its stdio framing, its safety guards, and every recipe
+      # fixture checked against the real op schemas, so a fixture that would
+      # only fail on the next live pass fails here instead.
+      - name: Live driver guards and recipe fixtures hold without After Effects
+        run: node tests/unit/live-driver.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.

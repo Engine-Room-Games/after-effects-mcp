@@ -1,0 +1,112 @@
+{
+  "recipe": 3,
+  "title": "a text layer moved by two keyframes; a contact sheet of three frames",
+  "manual": "Open the saved contact sheet: the text sits left at 0s, between at 1s, right at 2s.",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_text_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "text": "hi"
+      },
+      "save": "text",
+      "expect": [
+        {
+          "path": "sourceType",
+          "equals": "text"
+        }
+      ]
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${text.id}",
+        "propertyPath": [
+          "Transform",
+          "Position"
+        ],
+        "time": 0,
+        "value": [
+          300,
+          540
+        ]
+      }
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${text.id}",
+        "propertyPath": [
+          "Transform",
+          "Position"
+        ],
+        "time": 2,
+        "value": [
+          1600,
+          540
+        ]
+      }
+    },
+    {
+      "call": "get_keyframes",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${text.id}",
+        "propertyPath": [
+          "Transform",
+          "Position"
+        ]
+      },
+      "expect": [
+        {
+          "path": "$text",
+          "matches": "1600"
+        }
+      ]
+    },
+    {
+      "call": "screenshot_frame",
+      "args": {
+        "compId": "${comp.id}",
+        "times": [
+          0,
+          1,
+          2
+        ]
+      },
+      "expect": [
+        {
+          "path": "$images",
+          "equals": 1
+        },
+        {
+          "path": "cols",
+          "equals": 3
+        },
+        {
+          "path": "tiles",
+          "length": 3
+        }
+      ]
+    }
+  ]
+}
