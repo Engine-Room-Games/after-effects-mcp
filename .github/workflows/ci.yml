@@ -272,6 +272,13 @@ jobs:
       - name: The bundle survives a hostile neighbour in the shared engine
         run: node tests/unit/bundle-namespace.mjs
 
+      # Issue #164: Node runs the .jsx happily on syntax ExtendScript rejects,
+      # and AE then refuses the whole bundle. build:jsx refuses to write such a
+      # bundle; this holds the checker itself (ES5 parse, ES3 reserved words,
+      # missing ES5 built-ins).
+      - name: bundle.jsx contains nothing ExtendScript cannot run
+        run: node tests/unit/extendscript-syntax.mjs
+
       # Issue #129: a setValue that throws for a write that landed must not
       # make an op report failure, or roll back, for work that happened.
       - name: A write that landed is never reported as failed

@@ -11,19 +11,19 @@
 var JSON = __aemcpJSON(typeof JSON !== "undefined" ? JSON :
   ((typeof $ !== "undefined" && $ && $.global) ? $.global.JSON : undefined));
 
-function __aemcpJSON(native) {
+function __aemcpJSON(engineJSON) {
   try {
-    var st = native.stringify;
-    var pa = native.parse;
+    var st = engineJSON.stringify;
+    var pa = engineJSON.parse;
     if (typeof st === "function" && typeof pa === "function" &&
-        st.call(native, { a: [1, "x"] }) === '{"a":[1,"x"]}' &&
-        pa.call(native, '{"a":[1]}').a[0] === 1) {
+        st.call(engineJSON, { a: [1, "x"] }) === '{"a":[1,"x"]}' &&
+        pa.call(engineJSON, '{"a":[1]}').a[0] === 1) {
       return {
         stringify: function (v, r, sp) {
-          return arguments.length > 1 ? st.call(native, v, r, sp) : st.call(native, v);
+          return arguments.length > 1 ? st.call(engineJSON, v, r, sp) : st.call(engineJSON, v);
         },
         parse: function (t, r) {
-          return arguments.length > 1 ? pa.call(native, t, r) : pa.call(native, t);
+          return arguments.length > 1 ? pa.call(engineJSON, t, r) : pa.call(engineJSON, t);
         }
       };
     }

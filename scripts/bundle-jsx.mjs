@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { extendScriptProblems } from "./lib/extendscript-syntax.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -91,8 +92,33 @@ parts.push(
 );
 parts.push("})();");
 
+const bundleText = parts.join("\n");
+
+// Refuse to write a bundle After Effects cannot load (issue #164). Node runs
+// every unit test happily on syntax ExtendScript rejects, and AE rejects the
+// whole bundle for one such line, so this is the only gate there is. Each
+// problem is reported against the source file it came from.
+const problems = extendScriptProblems(bundleText);
+if (problems.length) {
+  const bundleLines = bundleText.split("\n");
+  for (const p of problems) {
+    let file = "bundle.jsx";
+    let markerLine = 0;
+    for (let i = p.line - 1; i >= 0; i--) {
+      const m = /^\/\/ ===== (.+) =====$/.exec(bundleLines[i]);
+      if (m) { file = m[1]; markerLine = i + 1; break; }
+    }
+    // The source starts two lines below its marker ("\n// ===== f =====\n", then a join newline).
+    const srcLine = markerLine ? p.line - markerLine - 1 : p.line;
+    const where = file.endsWith(".jsx") ? `packages/jsx/${file}:${srcLine}:${p.column}` : `bundle.jsx:${p.line}:${p.column}`;
+    console.error(`${where}: ${p.message}\n    ${(bundleLines[p.line - 1] ?? "").trim()}`);
+  }
+  console.error(`\n${problems.length} problem(s): ExtendScript cannot run this, so bundle.jsx was not written.`);
+  process.exit(1);
+}
+
 fs.mkdirSync(path.dirname(outFile), { recursive: true });
-fs.writeFileSync(outFile, parts.join("\n"), "utf8");
+fs.writeFileSync(outFile, bundleText, "utf8");
 console.log(`Wrote ${outFile} (${order.length} modules concatenated)`);
 
 // Sync the bundle into the installed panel (mac copy installs only — symlink
