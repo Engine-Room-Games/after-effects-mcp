@@ -38,6 +38,10 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const nodeRequire = createRequire(import.meta.url);
 const panelSrc = path.join(root, "packages", "ae-panel");
+// Used only to build and read back the #130 fixtures below; what is under test
+// there is the panel's wiring, not the codec, which png-codec.mjs checks against
+// an independent implementation.
+const { decodePng8, encodePng8 } = nodeRequire(path.join(panelSrc, "client", "pngcodec.js"));
 
 let passed = 0;
 async function check(name, fn) {
@@ -434,6 +438,40 @@ await check("a sheet where nothing rendered is refused rather than sent as colou
   assert.match(body.error, /No tile of the contact sheet rendered/);
   assert.match(body.error, /7s: failed/);
   assert.match(body.error, /A sheet of coloured blocks is not a screenshot/);
+});
+
+// ---------------------------------------------------------------------------
+// #130: After Effects writes premultiplied colour; what leaves the panel is
+// straight alpha, converted exactly once on both the single-frame and the
+// contact-sheet path.
+// ---------------------------------------------------------------------------
+/** A flat half-transparent frame whose colour is premultiplied, as AE writes it. */
+function premultPng([r, g, b]) {
+  const px = Buffer.alloc(TILE_W * TILE_H * 4);
+  for (let i = 0; i < TILE_W * TILE_H; i++) px.set([r, g, b, 128], i * 4);
+  return encodePng8(TILE_W, TILE_H, 6, px);
+}
+const pixelAt = (pngBuf, x, y) => {
+  const d = decodePng8(pngBuf);
+  const o = (y * d.width + x) * d.channels;
+  return [...d.pixels.subarray(o, o + 4)];
+};
+
+await check("a single screenshot of a soft edge comes back straight alpha", async () => {
+  plan.queue = [premultPng([10, 20, 30])];
+  const body = await op({ compId: COMP.id, time: 20 });
+  assert.deepEqual(pixelAt(Buffer.from(body.result.base64, "base64"), 30, 20), [20, 40, 60, 128]);
+});
+
+await check("contact-sheet tiles are un-premultiplied once, not twice", async () => {
+  plan.queue = [premultPng([11, 21, 31]), premultPng([12, 22, 32])];
+  const body = await op({ compId: COMP.id, times: [30, 31] });
+  const sheet = Buffer.from(body.result.base64, "base64");
+  const [a, b] = body.result.tiles;
+  // Well inside each cell, clear of the border and the label chip.
+  // Once: 11*255/128 -> 22. Twice would be 44; not at all, 11.
+  assert.deepEqual(pixelAt(sheet, a.x + 40, a.y + 30), [22, 42, 62, 128]);
+  assert.deepEqual(pixelAt(sheet, b.x + 40, b.y + 30), [24, 44, 64, 128]);
 });
 
 await check("every temp frame was cleaned up, whatever the verdict", () => {

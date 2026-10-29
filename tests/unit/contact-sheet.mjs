@@ -369,4 +369,35 @@ check("a sheet costs no more pixels than the single frame it replaces", () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Straight alpha, exactly once (#130). normalizePng un-premultiplies a frame and
+// hands the straight samples back as `pixels`; the sheet must tile those as
+// they are, or a soft edge is divided by its alpha twice and blows out.
+// ---------------------------------------------------------------------------
+check("a tile's partly transparent pixels reach the sheet unconverted", () => {
+  const px = frame(64, 64, [20, 40, 60]);
+  for (let i = 0; i < 64 * 64; i++) px[i * 4 + 3] = 128;
+  const sheet = composeContactSheet(
+    [{ time: 0, status: "ok", pixels: px, width: 64, height: 64, channels: 4 },
+     okTile(1, 64, 64, [0, 0, 0])],
+    { cellWidth: 64, cellHeight: 64, gutter: 0, labelScale: 1 },
+  );
+  // (50, 50) is inside the first cell, clear of its border and label chip.
+  assert.deepEqual(readPng(sheet.buffer).at(50, 50), [20, 40, 60, 128]);
+});
+
+check("a premultiplied frame through normalizePng and into a sheet is converted once", () => {
+  const { normalizePng, encodePng8 } = require(path.join(client, "pngcodec.js"));
+  const premult = Buffer.alloc(64 * 64 * 4);
+  for (let i = 0; i < 64 * 64; i++) premult.set([10, 20, 30, 128], i * 4);
+  const norm = normalizePng(encodePng8(64, 64, 6, premult));
+  const sheet = composeContactSheet(
+    [{ time: 0, status: "ok", pixels: norm.pixels, width: 64, height: 64, channels: norm.channels },
+     okTile(1, 64, 64, [0, 0, 0])],
+    { cellWidth: 64, cellHeight: 64, gutter: 0, labelScale: 1 },
+  );
+  // Once: 10*255/128 -> 20. Not at all: 10. Twice: 40.
+  assert.deepEqual(readPng(sheet.buffer).at(50, 50), [20, 40, 60, 128]);
+});
+
 console.log(`contact-sheet: ${passed} checks passed`);
