@@ -15,7 +15,7 @@ import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
 import { createPanelGate } from "./bridge/panelGate.js";
 import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge/writeQueue.js";
-import { JobManager } from "./jobs/manager.js";
+import { JobManager, isTerminal, unknownJobMessage } from "./jobs/manager.js";
 import {
   RenderRunner,
   saveAndCheckFootage,
@@ -125,7 +125,20 @@ export interface CreateServerOptions {
    * `AE_MCP_DISABLE_RUN_JSX`. Lets a test build each mode in one process.
    */
   policy?: ToolPolicy;
+  /**
+   * How long `cancel_job` watches a batch, once the panel has accepted the
+   * cancel, for the stop to be reported. A test shortens it.
+   */
+  cancelSettleMs?: number;
 }
+
+/**
+ * The panel answers a cancel only after the chunk ahead of it has run (the two
+ * share one evalScript chain), and the next `_continue_job` returns at once on
+ * a cancelled job, so the stop normally lands within milliseconds of the
+ * answer. This is the ceiling, not the expectation.
+ */
+const CANCEL_SETTLE_MS = 15_000;
 
 export function createServer(opts: CreateServerOptions = {}) {
   // Decided once, here: a tool list that changed mid-session would need a
@@ -188,6 +201,105 @@ export function createServer(opts: CreateServerOptions = {}) {
   // issues/failures.ts. The cache is per process, like `SnapshotStore`.
   const journalCache = new JournalCache();
   const fail = (tool: string, message: string) => errorResult(annotateFailure(journalCache, tool, message));
+
+  /**
+   * `cancel_job` for a chunked run_batch (issue #158). `ok:true` is said only
+   * once the batch is seen to have stopped; the stop's own report — the ops
+   * that ran before it — is what the job settles with, so await_job and
+   * get_job return the partial result rather than nothing.
+   */
+  const cancelBatchJob = async (jobId: string) => {
+    const name = "cancel_job";
+    const st = jobs.get(jobId);
+    if (!st) return fail(name, unknownJobMessage(jobId, "Nothing was cancelled."));
+    if (isTerminal(st.status)) {
+      return fail(
+        name,
+        `Job ${jobId} is already over — it had ${st.status === "completed" ? "completed" : st.status === "failed" ? "failed" : "been cancelled"} ` +
+          "before this cancel_job, so nothing is running under this id and nothing was cancelled now. " +
+          `await_job({jobId: "${jobId}"}) returns its result.`
+      );
+    }
+    let answer: { known: boolean; error?: string };
+    try {
+      answer = await bridge.cancel(jobId);
+    } catch (e) {
+      return fail(
+        name,
+        `The cancel was NOT confirmed by the panel, so batch ${jobId} may still be running — do not report it as ` +
+          `stopped. get_job({jobId: "${jobId}"}) shows whether it is still progressing.\n\n${(e as Error).message}`
+      );
+    }
+    if (!answer.known) {
+      // The panel holds JOBS in ExtendScript memory, and it holds none for this
+      // id: After Effects or the panel restarted since the batch started. The
+      // batch is not running, and no completion event will ever arrive, so the
+      // job is settled here rather than left for await_job to wait out.
+      const lost =
+        `The panel has no record of batch ${jobId} (${answer.error ?? "unknown job"}): After Effects or the ` +
+        "panel restarted after the batch started, so it is no longer running and its result is lost. Nothing was " +
+        "cancelled. Ops that ran before the restart may be applied — read the comp back rather than re-sending the batch.";
+      jobs.fail(jobId, lost);
+      return fail(name, lost);
+    }
+    jobs.markCancelling(jobId);
+    const after = await jobs.settle(jobId, opts.cancelSettleMs ?? CANCEL_SETTLE_MS);
+    const status = after?.status ?? "cancelling";
+    if (status === "cancelled") {
+      const r = (after?.result ?? {}) as { results?: unknown[]; errors?: unknown[]; total?: number; undoSteps?: number; note?: string };
+      return textResult({
+        ok: true,
+        jobId,
+        status,
+        stopped: true,
+        // A non-transactional batch records a failed op in `errors` and not in
+        // `results`, so the ops that ran are the two together.
+        opsRun:
+          Array.isArray(r.results) || Array.isArray(r.errors)
+            ? (r.results?.length ?? 0) + (r.errors?.length ?? 0)
+            : undefined,
+        opsSucceeded: Array.isArray(r.results) ? r.results.length : undefined,
+        opsFailed: Array.isArray(r.errors) ? r.errors.length : undefined,
+        total: r.total ?? after?.total,
+        undoSteps: r.undoSteps,
+        note:
+          "The batch stopped at a chunk boundary. The ops that ran before it are applied and stay applied" +
+          (r.note ? ` (${r.note})` : "") +
+          `. await_job({jobId: "${jobId}"}) returns the partial result.`,
+      });
+    }
+    if (status === "completed") {
+      return textResult({
+        ok: false,
+        jobId,
+        status,
+        stopped: false,
+        note: "The batch had already run to the end before the cancel took effect: every op in it was applied. " +
+          `await_job({jobId: "${jobId}"}) returns its result.`,
+      });
+    }
+    if (status === "failed") {
+      return textResult({
+        ok: false,
+        jobId,
+        status,
+        stopped: false,
+        error: after?.error,
+        note: "The batch failed before the cancel took effect; `error` says how. Ops before the failure stay applied.",
+      });
+    }
+    return textResult({
+      ok: false,
+      jobId,
+      status: "cancelling",
+      stopped: false,
+      progress: after?.progress,
+      total: after?.total,
+      note:
+        "The panel accepted the cancel, but the batch has not yet reported stopping. Do not tell the user it has " +
+        `stopped yet: call await_job({jobId: "${jobId}"}), which returns once it does, with the ops that ran before it.`,
+    });
+  };
 
     // Best-effort health probe; non-fatal. A refusal here is the cheapest moment
   // to notice the port file was stale (issue #92): the search costs a couple
@@ -297,7 +409,9 @@ export function createServer(opts: CreateServerOptions = {}) {
           // runs — see forwardJobProgress for why run_batch cannot be.
           const forward = progressToken !== undefined ? forwardJobProgress(jobs, a.jobId, progressToken, extra) : null;
           try {
-            const st = await jobs.waitFor(a.jobId, a.timeoutMs ?? 600_000);
+            // The request's own signal, so a client that cancels this call
+            // releases the wait rather than leaving it parked (issue #159).
+            const st = await jobs.waitFor(a.jobId, a.timeoutMs ?? 600_000, extra?.signal);
             return textResult(st);
           } catch (e) {
             // The job failed (or the wait timed out). Answered here rather
@@ -327,9 +441,7 @@ export function createServer(opts: CreateServerOptions = {}) {
             if (report.wasRunning && !report.stopped) return fail(name, report.note);
             return textResult({ ok: report.stopped, ...report });
           }
-          await bridge.cancel(a.jobId);
-          jobs.cancel(a.jobId);
-          return textResult({ ok: true });
+          return await cancelBatchJob(a.jobId);
         }
         // check_setup is told which port ops are going to, so it can say when
         // that disagrees with the port that answers — the state issue #92

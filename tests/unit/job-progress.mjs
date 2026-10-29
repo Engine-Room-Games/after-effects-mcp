@@ -312,7 +312,7 @@ await check("an await_job that times out unbinds: nothing follows its error resp
 
   const res = await done;
   assert.equal(res.isError, true, "the call should have timed out");
-  assert.match(res.content[0].text, /timed out after 120ms/);
+  assert.match(res.content[0].text, /stopped waiting after 120ms; the job is STILL RUNNING/);
   assert.equal(received.length, 1, "the one event before the timeout should have been delivered");
 
   const responseAt = responseIndex(awaitId);
