@@ -240,11 +240,6 @@ export function journals(): JournalRef[] {
   return [project, user];
 }
 
-/** The project journal's entries folder. Kept as the default `log_issue` target. */
-export function journalDir(): string {
-  return issuesDir(journalRoot());
-}
-
 /** A journal's entries folder. Exported for the failure cache, which stats the files itself. */
 export function issuesDir(journal: JournalRef): string {
   return path.join(journal.dir, "issues");

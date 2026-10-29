@@ -552,7 +552,7 @@ function __rqFootageUse(item) {
     "ADBE Tritone": 1, "ADBE Color Balance 2": 1, "ADBE Black&White": 1, "ADBE Vibrance": 1,
     "ADBE Gaussian Blur 2": 1, "ADBE Fast Blur": 1, "ADBE Box Blur2": 1, "ADBE Sharpen": 1,
     "ADBE Unsharp Mask2": 1, "ADBE Noise2": 1, "ADBE Glo2": 1, "ADBE Invert": 1, "ADBE Fill": 1,
-    "ADBE Ramp": 1, "ADBE Vignette": 1, "ADBE Photo Filter": 1, "ADBE Change Color": 1
+    "ADBE Ramp": 1, "ADBE Photo Filter": 1, "ADBE Change Color": 1
   };
   var TIME_EFFECT = /echo|posterize\s*time|time\s*warp|time\s*displacement|time\s*difference|time\s*blend|wide\s*time|motion\s*blur|frame\s*blend|pixel\s*motion|time\s*remap|freeze|optical\s*flow|\btime\b/i;
   var timeFxMemo = {};

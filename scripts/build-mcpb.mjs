@@ -24,10 +24,14 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { loadPackagingCopy } from "./lib/setup.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serverPkg = path.join(root, "packages", "mcp-server");
 const panelSrc = path.join(root, "packages", "ae-panel");
+// The panel carries a dev node_modules; the only dependency that ships is the
+// `ws` copy staged explicitly below.
+const copy = await loadPackagingCopy();
 
 const outIdx = process.argv.indexOf("--out");
 const outDir = outIdx >= 0 ? path.resolve(process.argv[outIdx + 1]) : path.join(root, "dist-release");
@@ -223,17 +227,3 @@ fs.rmSync(staging, { recursive: true, force: true });
 
 const mb = (fs.statSync(bundleFile).size / 1024 / 1024).toFixed(1);
 console.log(`Built ${path.relative(root, bundleFile)} (${mb} MB, ${manifest.tools.length} tools)`);
-
-function copy(src, dst) {
-  const base = path.basename(src);
-  // The panel carries a dev node_modules; the only dependency that ships is the
-  // `ws` copy staged explicitly above.
-  if (base === "node_modules" || base === ".DS_Store") return;
-  const stat = fs.lstatSync(src);
-  if (stat.isDirectory()) {
-    fs.mkdirSync(dst, { recursive: true });
-    for (const entry of fs.readdirSync(src)) copy(path.join(src, entry), path.join(dst, entry));
-  } else {
-    fs.copyFileSync(src, dst);
-  }
-}

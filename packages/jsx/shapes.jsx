@@ -245,8 +245,6 @@ OPS.set_shape_property = function (args) {
   var pp = node.property(args.property);
   if (!pp) throw new Error("No property: " + args.property);
   __requireKeyTime(!!args.keyframe, args.time, "set_shape_property");
-  if (args.keyframe && args.time !== undefined) pp.setValueAtTime(args.time, args.value);
-  else if (args.time !== undefined && pp.numKeys > 0) pp.setValueAtTime(args.time, args.value);
-  else __setValue(pp, args.value);
+  __setOrKeyAtTime(pp, args.value, args.time, !!args.keyframe, "set_shape_property");
   return { ok: true };
 };

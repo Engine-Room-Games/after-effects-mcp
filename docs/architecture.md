@@ -11,7 +11,6 @@ Numbered recipes referenced below are in [verification-recipes.md](verification-
 | Path | Purpose |
 |---|---|
 | `packages/shared/src/schemas.ts` | **Source of truth for op contracts.** Adding an op = adding a zod schema here. Also holds `OpMutation` (write/read/server) and the `crossField()` vocabulary for rules `zod-to-json-schema` cannot express — see "Cross-field rules". |
-| `packages/shared/src/ipc.ts` | HTTP envelope + WS event types. |
 | `packages/jsx/*.jsx` | ExtendScript handlers. Each module attaches functions to the `OPS` table — top-level code in the source, a closure local in the bundle (issue #185). ES3-ish — no `let`/`const`/arrow/templates. |
 | `packages/jsx/core.jsx` | JSON polyfill, `dispatch(payloadJson)` router, `withUndo()` wrapper, `JOBS` table for chunked async. |
 | `packages/jsx/explore.jsx` | `get_layer_full` — the deep one-shot dump. The whole reason this MCP exists. Spend disproportionate care here. |

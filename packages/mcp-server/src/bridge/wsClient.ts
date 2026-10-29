@@ -1,9 +1,15 @@
 import WebSocket from "ws";
-import type { WsEvent } from "@engineroom/shared";
 import { logger } from "../util/logger.js";
 import { authHeaders } from "./discovery.js";
 import type { JobManager } from "../jobs/manager.js";
 import type { HttpClient } from "./httpClient.js";
+
+/** What the panel broadcasts on /events (`broadcast` in packages/ae-panel/client/main.js). */
+type WsEvent =
+  | { type: "progress"; jobId: string; progress: number; total?: number; message?: string }
+  | { type: "complete"; jobId: string; result: unknown }
+  | { type: "error"; jobId: string; error: string; stack?: string }
+  | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string };
 
 /**
  * The /events socket a long `run_batch` reports progress and completion on.
