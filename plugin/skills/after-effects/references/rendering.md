@@ -43,6 +43,8 @@ ProRes 4444 with alpha is an **output module template** that already says so.
   project will be saved before you pass it. A clean project is never saved. A
   project never saved, read-only, or converted from an older After Effects
   (which only *Save As* will write) is refused; the user fixes that by hand.
+- **Missing footage is refused before rendering**, with the missing items
+  named — relink them first (File > Dependencies > Find Missing Footage).
 - **Existing files are refused** unless `overwrite: true` — that includes an
   item the user queued by hand that points at last week's render.
 - **Edits made while it renders are not in the render.** The render reads a

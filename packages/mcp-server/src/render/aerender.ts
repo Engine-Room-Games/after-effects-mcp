@@ -51,6 +51,8 @@ export interface RenderItemPlan {
   compName: string | null;
   status: string;
   frames: number;
+  /** Seconds of comp time this item renders, as After Effects reports it. */
+  timeSpanDuration?: number;
   outputs: RenderOutputPlan[];
 }
 
@@ -144,88 +146,165 @@ function isFile(p: string): boolean {
 /**
  * Evidence beyond "a fresh file exists" that the render actually happened.
  *
- * - **No frame lines, no render.** A live run (26.5, 1 in 8) reported a
- *   missing-footage render as completed: a 1 MiB file, `frames: 0`, and none
- *   of aerender's lines past "Launching After Effects". Zero frames counted —
- *   or a comp span whose frame count is unknown — is therefore never
- *   completed. The cost: an After Effects in another language, whose
- *   PROGRESS lines this server cannot read, fails every render until the
- *   parser knows its wording (recipe 53). A loud false failure over a quiet
- *   false success.
- * - **Image sequences: at least as many fresh frame files as frames reported.**
- * - **QuickTime/MP4: the file must be a complete ISO media file** — its
- *   top-level boxes walk exactly to the end of the file and include `moov`,
- *   the index a player needs. A render that stopped early leaves `mdat`
- *   (the media) without `moov`: the corrupt live file had no readable
- *   duration. Other containers (AVI, MXF, WAV …) get no structural check.
+ * A live run (26.5, 1 in 8) reported a missing-footage render as completed: a
+ * 1 MiB file, `frames: 0`, and none of aerender's lines past "Launching After
+ * Effects". So the file is judged, and how depends on whether aerender's
+ * frame lines could be read:
+ *
+ * - **Frame lines counted** (an English AE): a sequence needs at least that
+ *   many fresh frame files; a QuickTime/MP4 must be a complete ISO media file
+ *   with a `moov` index, and its duration must match the item's span within
+ *   one frame when the span is known.
+ * - **No frame line parsed** — an AE in another language words them
+ *   differently (recipe 53), or aerender's output never arrived: the file has
+ *   to stand on its own. A sequence needs at least as many fresh frame files
+ *   as the span has frames; a QuickTime/MP4 needs `moov` AND a duration within
+ *   one frame of the span. Any other format (AVI, MXF, WAV …) cannot be judged
+ *   from its bytes here, so it fails, saying exactly that.
+ *
+ * A render that stopped early leaves `mdat` (the media) without `moov`: the
+ * corrupt live file had no readable duration.
  */
-export function renderEvidenceProblems(item: RenderItemPlan, framesCounted: number, verified: VerifiedOutput[]): string[] {
+export function renderEvidenceProblems(
+  item: RenderItemPlan,
+  framesCounted: number,
+  verified: VerifiedOutput[]
+): string[] {
   const problems: string[] = [];
-  if (!(item.frames > 0)) {
-    problems.push("the comp span's frame count is unknown, so the render cannot be checked against it");
-  }
-  if (framesCounted === 0) {
+  const span = item.timeSpanDuration && item.timeSpanDuration > 0 ? item.timeSpanDuration : null;
+  const fps = span && item.frames > 0 ? item.frames / span : null;
+  const noLines = framesCounted === 0;
+  if (noLines && !(item.frames > 0)) {
     problems.push(
-      "aerender printed no frame line this server recognises, so nothing shows a frame was rendered " +
-        "(an After Effects running in a language other than English words these lines differently — see recipe 53)"
+      "aerender printed no frame line this server recognises and the item's frame count is unknown, so " +
+        "nothing shows a frame was rendered"
     );
+    return problems;
   }
   for (const v of verified) {
     if (v.files !== undefined) {
-      if (framesCounted > 0 && v.files < framesCounted) {
-        problems.push(`aerender reported ${framesCounted} frames but only ${v.files} frame files of ${v.path} were written`);
+      const need = noLines ? item.frames : framesCounted;
+      if (v.files < need) {
+        problems.push(
+          `${v.files} fresh frame files of ${v.path} were written where ${need} were ` +
+            (noLines ? "expected from the comp's span" : "reported by aerender")
+        );
       }
       continue;
     }
     if (/\.(?:mov|mp4|m4v|3gp)$/i.test(v.path)) {
-      const why = isoMediaProblem(v.path);
-      if (why) problems.push(`${v.path} ${why}`);
+      const info = isoMediaInfo(v.path);
+      if (info.problem) {
+        problems.push(`${v.path} ${info.problem}`);
+        continue;
+      }
+      if (span && fps) {
+        if (info.durationSec === undefined) {
+          problems.push(`${v.path} has no readable movie duration (no 'mvhd' in its index)`);
+        } else if (Math.abs(info.durationSec - span) > 1 / fps + 1e-6) {
+          problems.push(
+            `${v.path} lasts ${info.durationSec.toFixed(3)}s where the render span is ${span.toFixed(3)}s — ` +
+              "more than a frame apart, so it is not the whole render"
+          );
+        }
+      } else if (noLines) {
+        problems.push(`${v.path} cannot be checked against the render span, which After Effects did not report`);
+      }
+      continue;
+    }
+    if (noLines) {
+      problems.push(
+        `aerender printed no frame line this server recognises (an After Effects in a language other than ` +
+          `English words them differently — recipe 53), and ${v.path} is a format whose contents this server ` +
+          "cannot check, so the render cannot be verified. QuickTime/MP4 and image-sequence output can be checked " +
+          "without those lines."
+      );
     }
   }
   return problems;
 }
 
-/**
- * Null when `file` is a structurally complete ISO base media file (QuickTime,
- * MP4): the top-level boxes tile the file exactly and one of them is `moov`.
- * Otherwise a phrase saying what is wrong. Reads box headers only.
- */
+/** Back-compat: just the structural problem, or null. */
 export function isoMediaProblem(file: string): string | null {
+  return isoMediaInfo(file).problem;
+}
+
+/**
+ * Whether `file` is a structurally complete ISO base media file (QuickTime,
+ * MP4) — the top-level boxes tile the file exactly and one of them is `moov`
+ * — and its duration, from `moov`'s `mvhd`, when present.
+ */
+export function isoMediaInfo(file: string): { problem: string | null; durationSec?: number } {
   let fd: number;
   try {
     fd = fs.openSync(file, "r");
   } catch (e) {
-    return `cannot be read (${(e as Error).message})`;
+    return { problem: `cannot be read (${(e as Error).message})` };
   }
   try {
     const size = fs.fstatSync(fd).size;
     const head = Buffer.alloc(16);
     let off = 0;
-    let moov = false;
+    let moovAt = -1;
+    let moovLen = 0;
+    let moovHeader = 8;
     let boxes = 0;
     while (off < size) {
-      if (size - off < 8) return "ends in a partial box header";
+      if (size - off < 8) return { problem: "ends in a partial box header" };
       fs.readSync(fd, head, 0, 16, off);
       let len = head.readUInt32BE(0);
+      let hdr = 8;
       const type = head.toString("latin1", 4, 8);
       if (len === 1) {
-        if (size - off < 16) return "ends in a partial box header";
+        if (size - off < 16) return { problem: "ends in a partial box header" };
         const big = head.readBigUInt64BE(8);
-        if (big > BigInt(Number.MAX_SAFE_INTEGER)) return "has a box too large to be real";
+        if (big > BigInt(Number.MAX_SAFE_INTEGER)) return { problem: "has a box too large to be real" };
         len = Number(big);
+        hdr = 16;
       } else if (len === 0) {
-        len = size - off; // runs to the end of the file
+        len = size - off;
       }
-      if (len < 8) return `has a malformed '${type}' box`;
-      if (off + len > size) return `is truncated: its '${type}' box runs past the end of the file`;
-      if (type === "moov") moov = true;
+      if (len < hdr) return { problem: `has a malformed '${type}' box` };
+      if (off + len > size) return { problem: `is truncated: its '${type}' box runs past the end of the file` };
+      if (type === "moov") {
+        moovAt = off;
+        moovLen = len;
+        moovHeader = hdr;
+      }
       off += len;
-      if (++boxes > 100000) return "has an implausible number of boxes";
+      if (++boxes > 100000) return { problem: "has an implausible number of boxes" };
     }
-    if (!moov) return "has no 'moov' index — the movie was never finished, and players will read no duration";
-    return null;
+    if (moovAt < 0) {
+      return { problem: "has no 'moov' index — the movie was never finished, and players will read no duration" };
+    }
+    // mvhd is a direct child of moov, normally first. Read at most 1 MiB.
+    const want = Math.min(moovLen - moovHeader, 1 << 20);
+    const body = Buffer.alloc(want);
+    fs.readSync(fd, body, 0, want, moovAt + moovHeader);
+    let p = 0;
+    while (p + 8 <= body.length) {
+      const len = body.readUInt32BE(p);
+      const type = body.toString("latin1", p + 4, p + 8);
+      if (len < 8) break;
+      if (type === "mvhd" && p + len <= body.length) {
+        const version = body.readUInt8(p + 8);
+        let timescale: number;
+        let duration: number;
+        if (version === 1) {
+          timescale = body.readUInt32BE(p + 8 + 4 + 16);
+          duration = Number(body.readBigUInt64BE(p + 8 + 4 + 20));
+        } else {
+          timescale = body.readUInt32BE(p + 8 + 4 + 8);
+          duration = body.readUInt32BE(p + 8 + 4 + 12);
+        }
+        if (timescale > 0) return { problem: null, durationSec: duration / timescale };
+        return { problem: null };
+      }
+      p += len;
+    }
+    return { problem: null };
   } catch (e) {
-    return `could not be checked (${(e as Error).message})`;
+    return { problem: `could not be checked (${(e as Error).message})` };
   } finally {
     try { fs.closeSync(fd); } catch {}
   }
@@ -384,6 +463,8 @@ export interface RenderRunnerOptions {
   tmpRoot?: string;
   /** How a process tree is stopped. The platform's, unless a test needs one that fails. */
   stop?: (pid: number, force: boolean) => Promise<void>;
+  /** The longest the output may stay open after aerender exits before its engine is killed. */
+  drainCapMs?: number;
   /**
    * This job's render processes — executable aerender/aerendercore AND the
    * job's snapshot path in the arguments. The platform's
@@ -583,6 +664,8 @@ export function occupiedOutputs(plan: RenderPlan): string[] {
 const DEFAULT_GRACE_MS = 5000;
 /** After aerender exits and no render process for the job is left, how long the pipe may stay open. */
 const CLOSE_WAIT_MS = 2000;
+/** The cap on that whole wait while an engine for the job is still alive. */
+const DRAIN_CAP_MS = 60_000;
 const TAIL_LINES = 12;
 
 let seq = 0;
@@ -604,6 +687,7 @@ export class RenderRunner {
   private readonly tmpRoot: string;
   private readonly stop: (pid: number, force: boolean) => Promise<void>;
   private readonly findEngines: (snapshotPath: string) => Promise<number[]>;
+  private readonly drainCapMs: number;
   private readonly confirmEngine: (pid: number, snapshotPath: string) => Promise<boolean>;
   private disarm: (() => void) | null = null;
 
@@ -614,6 +698,7 @@ export class RenderRunner {
     this.stop = opts.stop ?? ((pid, force) => stopProcessTree(pid, force));
     this.findEngines = opts.findEngines ?? ((snap) => findRenderProcesses(snap));
     this.confirmEngine = opts.confirmEngine ?? ((pid, snap) => isStillRenderProcess(pid, snap));
+    this.drainCapMs = opts.drainCapMs ?? DRAIN_CAP_MS;
   }
 
   /**
@@ -776,7 +861,12 @@ export class RenderRunner {
           frames: r.itemFrames,
           elapsedMs: Date.now() - itemStart,
         };
-        if (item.frames > 0 && r.itemFrames !== item.frames) {
+        if (r.itemFrames === 0) {
+          done.framesNote =
+            "aerender printed no frame line this server can read (an After Effects in another language words " +
+            "them differently), so this item was verified from the file alone: its frame files, or its movie " +
+            "index and duration against the render span.";
+        } else if (item.frames > 0 && r.itemFrames !== item.frames) {
           done.framesNote =
             `aerender reported ${r.itemFrames} frames where the comp's span at its own frame rate is ${item.frames} — ` +
             "expected when the render settings override the frame rate or skip frames; otherwise worth a look.";
@@ -921,8 +1011,20 @@ export class RenderRunner {
         });
         child.on("exit", (code, signal) => {
           let quietSince = 0;
+          const exitedAt = Date.now();
           const poll = async () => {
             if (closed || settled) return;
+            // Never for ever: an engine stuck after aerender has gone would
+            // hold this wait, and the job, open indefinitely. Past the cap it
+            // is killed (the same name-and-path matcher cancel uses) and the
+            // item is decided on what was read — which the file checks then
+            // judge on their own.
+            if (Date.now() - exitedAt >= this.drainCapMs) {
+              const n = await this.signalEngines(r, true).catch(() => 0);
+              logger.warn(`render ${r.jobId}: output still open ${Math.round(this.drainCapMs / 1000)}s after aerender exited; killed ${n} render engine process(es) and deciding on what was read`);
+              finish(code, signal);
+              return;
+            }
             const engines = await this.findEngines(r.snapshot).catch(() => []);
             if (engines.length) quietSince = 0;
             else if (!quietSince) quietSince = Date.now();

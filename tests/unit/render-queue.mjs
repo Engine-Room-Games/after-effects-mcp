@@ -28,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo } =
   await import(dist("render", "aerender.js"));
 const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
@@ -312,6 +312,10 @@ await check("a QuickTime/MP4 file must be complete: boxes tile the file and incl
   const moov = box("moov", Buffer.alloc(8));
   const f = (name, buf) => { const p = path.join(tmp, name); fs.writeFileSync(p, buf); return p; };
   assert.equal(isoMediaProblem(f("good.mov", Buffer.concat([ftyp, mdat, moov]))), null);
+  const mv0 = Buffer.alloc(100); mv0.writeUInt32BE(600, 12); mv0.writeUInt32BE(300, 16);
+  assert.equal(isoMediaInfo(f("d0.mov", Buffer.concat([ftyp, mdat, box("moov", box("mvhd", mv0))]))).durationSec, 0.5);
+  const mv1 = Buffer.alloc(112); mv1.writeUInt8(1, 0); mv1.writeUInt32BE(1000, 20); mv1.writeBigUInt64BE(2500n, 24);
+  assert.equal(isoMediaInfo(f("d1.mp4", Buffer.concat([ftyp, mdat, box("moov", box("mvhd", mv1))]))).durationSec, 2.5);
   assert.match(isoMediaProblem(f("nomoov.mov", Buffer.concat([ftyp, mdat]))), /no 'moov'/);
   const cut = Buffer.concat([ftyp, mdat, moov]).subarray(0, 40);
   assert.match(isoMediaProblem(f("cut.mov", cut)), /truncated|partial/);
@@ -352,13 +356,42 @@ function box(type, body) {
   body.copy(b, 8);
   return b;
 }
+// mvhd v0 with timescale 600 and the duration in FAKE_DUR seconds (default:
+// the 4 frames at 30fps every plan() asks for).
+function mvhd(seconds) {
+  const b = Buffer.alloc(100);
+  b.writeUInt32BE(600, 12);
+  b.writeUInt32BE(Math.round(seconds * 600), 16);
+  return box("mvhd", b);
+}
 function writeMovie(p) {
-  fs.writeFileSync(p, Buffer.concat([box("ftyp", Buffer.from("qt  ")), box("mdat", Buffer.alloc(64)), box("moov", Buffer.alloc(16))]));
+  const dur = Number(process.env.FAKE_DUR || 4 / 30);
+  fs.writeFileSync(p, Buffer.concat([box("ftyp", Buffer.from("qt  ")), box("mdat", Buffer.alloc(64)), box("moov", mvhd(dur))]));
 }
 if (mode === "silent") {
-  // Exit 0, a complete-looking file, and not one line of output.
-  writeMovie(out);
+  // Exit 0, not one line of output, and the measured corrupt file: media, no index.
+  const pre = Buffer.alloc(4096);
+  pre.writeUInt32BE(8, 0); pre.write("wide", 4, "latin1");
+  pre.writeUInt32BE(0, 8); pre.write("mdat", 12, "latin1");
+  fs.writeFileSync(out, pre);
   process.exit(0);
+}
+if (mode === "quietseq") {
+  // Another language: no line this server can read, but the frames are on disk.
+  const n = Number(process.env.FAKE_SEQ_N);
+  for (let i = 0; i < n; i++) fs.writeFileSync(out.replace("[####]", String(i).padStart(4, "0")), "png");
+  console.log("FORTSCHRITT:  fertig");
+  process.exit(0);
+}
+if (mode === "stuckengine") {
+  // aerender exits; its engine keeps the pipe open and never goes, deaf to SIGTERM.
+  const project = args[args.indexOf("-project") + 1];
+  const g = spawn(process.env.FAKE_ENGINE, ["-e", "process.on('SIGTERM',()=>{}); require('fs').writeFileSync(process.env.FAKE_GRANDCHILD, String(process.pid)); setInterval(()=>{}, 1000)", "--", "-noui", "-project", project], { stdio: ["ignore", "inherit", "inherit"] });
+  g.unref();
+  for (let n = 0; n < 4; n++) console.log("PROGRESS:  0:00:00:0" + n + " (" + (n + 1) + "): 0 Seconds");
+  writeMovie(out);
+  setTimeout(() => process.exit(0), 200);
+  return;
 }
 if (mode === "warnlast") {
   // Frames, then the measured warning written as the very last thing before exit.
@@ -459,14 +492,15 @@ const projectFile = path.join(tmp, "show.aep");
 const runTmp = path.join(tmp, "runTmp");
 fs.writeFileSync(projectFile, "aep bytes");
 
-function plan(out, frames = 4) {
+function plan(out, frames = 4, timeSpanDuration = frames / 30) {
   return {
     projectPath: projectFile,
     appPackage: null,
-    items: [{ index: 2, compId: 7, compName: "Comp", status: "QUEUED", frames, outputs: [{ index: 1, path: out }] }],
+    items: [{ index: 2, compId: 7, compName: "Comp", status: "QUEUED", frames, timeSpanDuration, outputs: [{ index: 1, path: out }] }],
   };
 }
 function env(mode, out) {
+  delete process.env.FAKE_DUR;
   process.env.FAKE_MODE = mode;
   process.env.FAKE_OUT = out;
   process.env.FAKE_ARGS = path.join(tmp, `args-${mode}.json`);
@@ -520,13 +554,66 @@ if (process.platform !== "win32") {
     assert.equal(runner.activeJobId, null);
   });
 
-  await check("progress lines it cannot read mean NOT verified, never completed", async () => {
+  await check("no readable frame lines: a movie with the right duration is judged rendered", async () => {
     const jobs = new JobManager();
     const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "quiet.mov");
     env("quiet", out);
     const { jobId } = runner.start(plan(out), fake);
-    await assert.rejects(jobs.waitFor(jobId, 10_000), (e) => /no frame line this server recognises/.test(e.message) && /FORTSCHRITT/.test(e.message));
+    const st = await jobs.waitFor(jobId, 10_000);
+    assert.equal(st.status, "completed");
+    assert.equal(st.result.rendered[0].frames, 0);
+    assert.match(st.result.rendered[0].framesNote, /verified from the file/);
+  });
+
+  await check("no readable frame lines: a movie of the wrong length is not a render", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const out = path.join(tmp, "quietshort.mov");
+    env("quiet", out);
+    process.env.FAKE_DUR = String(2 / 30); // two frames short of four
+    const { jobId } = runner.start(plan(out), fake);
+    await assert.rejects(jobs.waitFor(jobId, 10_000), /more than a frame apart/);
+  });
+
+  await check("no readable frame lines: a format that cannot be checked fails, saying why", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const out = path.join(tmp, "quiet.avi");
+    env("quiet", out);
+    const { jobId } = runner.start(plan(out), fake);
+    await assert.rejects(jobs.waitFor(jobId, 10_000), /format whose contents this server\s+cannot check|cannot check/);
+  });
+
+  await check("no readable frame lines: a sequence is judged by its frame files", async () => {
+    const seqDir = path.join(tmp, "quietseq");
+    fs.mkdirSync(seqDir, { recursive: true });
+    const out = path.join(seqDir, "shot_[####].png");
+    for (const [n, ok] of [[4, true], [3, false]]) {
+      for (const f of fs.readdirSync(seqDir)) fs.rmSync(path.join(seqDir, f));
+      const jobs = new JobManager();
+      const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+      env("quietseq", out);
+      process.env.FAKE_SEQ_N = String(n);
+      const { jobId } = runner.start(plan(out), fake);
+      if (ok) assert.equal((await jobs.waitFor(jobId, 10_000)).status, "completed");
+      else await assert.rejects(jobs.waitFor(jobId, 10_000), /3 fresh frame files .* where 4 were expected/);
+    }
+  });
+
+  await check("a stuck engine cannot hold the job open: killed at the cap, then decided", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, drainCapMs: 1200 });
+    const out = path.join(tmp, "stuck.mov");
+    env("stuckengine", out);
+    const t0 = Date.now();
+    const { jobId } = runner.start(plan(out), fake);
+    const st = await jobs.waitFor(jobId, 15_000);
+    assert.equal(st.status, "completed");
+    assert.ok(Date.now() - t0 < 10_000);
+    const engine = Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8"));
+    for (let i = 0; i < 50 && alive(engine); i++) await sleep(20);
+    assert.ok(!alive(engine), "the stuck engine is killed at the cap");
   });
 
   await check("an aerender that prints nothing and exits 0 is not a render", async () => {
@@ -535,7 +622,7 @@ if (process.platform !== "win32") {
     const out = path.join(tmp, "silent.mov");
     env("silent", out);
     const { jobId } = runner.start(plan(out), fake);
-    await assert.rejects(jobs.waitFor(jobId, 10_000), /no frame line this server recognises/);
+    await assert.rejects(jobs.waitFor(jobId, 10_000), /no 'moov' index/);
   });
 
   await check("a warning written just before exit is read before the item is decided", async () => {
@@ -576,6 +663,7 @@ if (process.platform !== "win32") {
     const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "burst.mov");
     env("burst", out);
+    process.env.FAKE_DUR = "10";
     const { jobId } = runner.start(plan(out, 300), fake);
     const st = await jobs.waitFor(jobId, 10_000);
     assert.equal(st.result.rendered[0].frames, 300);
@@ -782,7 +870,18 @@ function makeAe(opts = {}) {
     get exists() { return files.has(this.fsName); }
     get parent() { return new MockFolder(this.fsName.substring(0, this.fsName.lastIndexOf("/")) || "/"); }
   }
-  const comp = { id: 7, name: "Lower Third", frameRate: 30 };
+  class CompItem {}
+  class FootageItem {}
+  const comp = Object.assign(new CompItem(), { id: 7, name: "Lower Third", frameRate: 30, numLayers: 0 });
+  if (opts.missingFootage) {
+    // comp -> [ok footage, nested comp -> [missing footage], the same nested comp again]
+    const ok = Object.assign(new FootageItem(), { id: 20, name: "bg.png", footageMissing: false });
+    const gone = Object.assign(new FootageItem(), { id: 21, name: "pic.png", footageMissing: true });
+    const nested = Object.assign(new CompItem(), { id: 30, name: "Inner", numLayers: 1, layer: () => ({ source: gone }) });
+    const layers = [{ source: ok }, { source: nested }, { source: nested }, { source: null }];
+    comp.numLayers = layers.length;
+    comp.layer = (i) => layers[i - 1];
+  }
   const items = [];
   function makeItem(c, status) {
     const om = {
@@ -837,6 +936,8 @@ function makeAe(opts = {}) {
     File: MockFile,
     Folder: Object.assign(MockFolder, { appPackage: new MockFolder("/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app") }),
     RQItemStatus,
+    CompItem,
+    FootageItem,
     GetSettingsFormat: { STRING: 1 },
     app: {
       project,
@@ -915,6 +1016,14 @@ await check("_render_prepare with no indices picks every QUEUED item, and change
   assert.deepEqual(Array.from(plan.items, (i) => i.index), [1, 3]);
   assert.equal(plan.projectPath, "/proj/show.aep");
   assert.match(plan.appPackage, /\.app$/);
+  assert.deepEqual(log, []);
+});
+await check("_render_prepare refuses missing footage, found through nested comps, before anything renders", () => {
+  const { ctx, log } = makeAe({ existing: ["QUEUED"], missingFootage: true });
+  const msg = throwsMsg(() => ctx.OPS._render_prepare({ indices: [1] }));
+  assert.match(msg, /cannot find: "pic\.png"/);
+  assert.doesNotMatch(msg, /bg\.png/);
+  assert.equal((msg.match(/pic\.png/g) || []).length, 1, "a footage item used twice is named once");
   assert.deepEqual(log, []);
 });
 await check("_render_prepare with nothing queued refuses", () => {

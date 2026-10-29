@@ -330,6 +330,13 @@ OPS._render_prepare = noUndo(function (args) {
       problems.push("item " + s.index + " (" + s.compName + ") has an output module with no file");
       continue;
     }
+    var gone = __rqMissingFootage(rq.item(s.index).comp);
+    if (gone.length) {
+      problems.push("item " + s.index + " (" + s.compName + ") uses footage After Effects cannot find: " +
+        gone.join(", ") + " — relink it (File > Dependencies > Find Missing Footage), or the render would " +
+        "carry the missing-footage placeholder");
+      continue;
+    }
     items.push(s);
   }
   if (problems.length) {
@@ -348,6 +355,47 @@ OPS._render_prepare = noUndo(function (args) {
     items: items,
   };
 });
+
+/**
+ * Names of the footage a comp renders that After Effects reports missing,
+ * following nested comps (each comp once). Asked of the project itself, so it
+ * holds in any language — aerender's own wording is only the second layer
+ * (the 26.5 live run: aerender exits 0 with footage missing, and its warning
+ * once never reached the server). A layer AE will not describe is skipped,
+ * not guessed at; at most 20 names come back.
+ */
+function __rqMissingFootage(comp) {
+  var names = [];
+  var seen = {};
+  function walk(c, depth) {
+    if (!c || depth > 32) return;
+    var id = null;
+    try { id = c.id; } catch (e0) {}
+    if (id !== null) {
+      if (seen[id]) return;
+      seen[id] = true;
+    }
+    var n = 0;
+    try { n = c.numLayers || 0; } catch (e1) { n = 0; }
+    for (var i = 1; i <= n && names.length < 20; i++) {
+      var src = null;
+      try { src = c.layer(i).source; } catch (e2) { src = null; }
+      if (!src) continue;
+      if (src instanceof CompItem) {
+        walk(src, depth + 1);
+      } else if (src instanceof FootageItem) {
+        var miss = false;
+        try { miss = src.footageMissing === true; } catch (e3) { miss = false; }
+        if (miss && !seen["f" + src.id]) {
+          seen["f" + src.id] = true;
+          names.push("\"" + src.name + "\"");
+        }
+      }
+    }
+  }
+  walk(comp, 0);
+  return names;
+}
 
 /** True when the .aep on disk cannot be written. Null when the host will not say. */
 function __rqProjectReadOnly() {
