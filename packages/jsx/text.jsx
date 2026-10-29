@@ -121,14 +121,18 @@ OPS.add_text_animator = function (args) {
   }
   var anims = l.property("Text").property("Animators");
   var anim = anims.addProperty("ADBE Text Animator");
-  // Kept so the rollback can re-fetch the animator: adding a property can leave
-  // earlier references into the same layer invalid.
-  var animIndex = anim.propertyIndex;
-  var animName = anim.name;
+  // Kept so the rollback can re-fetch the animator, and so the result does not
+  // read through `anim` again: adding a property can leave earlier references
+  // into the same layer invalid. Read inside the try, so a failure here still
+  // rolls back.
+  var animIndex = null;
+  var animName = "the new animator";
 
   var failed = [];
   var added = null;
   try {
+    animIndex = anim.propertyIndex;
+    animName = anim.name;
     var propsGroup = anim.property("ADBE Text Animator Properties");
     try {
       added = propsGroup.addProperty(match);
@@ -174,7 +178,7 @@ OPS.add_text_animator = function (args) {
         : "The animator could not be removed and is still on the layer as '" + animName + "'; delete it before retrying.")
     );
   }
-  return { ok: true, animatorName: anim.name, property: match };
+  return { ok: true, animatorName: animName, property: match };
 };
 
 // Removes the animator add_text_animator just created. Re-fetches it by index
@@ -182,7 +186,7 @@ OPS.add_text_animator = function (args) {
 // reference held. Returns whether something was removed.
 function __removeTextAnimator(layer, anim, animIndex) {
   try {
-    var fresh = layer.property("Text").property("Animators").property(animIndex);
+    var fresh = animIndex ? layer.property("Text").property("Animators").property(animIndex) : null;
     if (fresh && fresh.matchName === "ADBE Text Animator") { fresh.remove(); return true; }
   } catch (e) {}
   try { anim.remove(); return true; } catch (e2) {}
