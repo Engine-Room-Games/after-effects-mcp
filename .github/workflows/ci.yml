@@ -334,6 +334,11 @@ jobs:
           node tests/unit/batch-undo.mjs
           node tests/unit/mogrt-preconditions.mjs
 
+      # add_essential_property (#177): the panel is read back, never the add's
+      # boolean, and a property AE cannot take is refused before anything moves.
+      - name: Essential Graphics properties are added honestly
+        run: node tests/unit/essential-property.mjs
+
       # 0.5.0: delete_comp's purgeUnusedSolids and purge_unused_footage (#83).
       # A solid's footage item outlives its layer, so both ops decide by
       # `usedIn`, on footage only, and a dry run must not be an undo step.

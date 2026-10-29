@@ -490,7 +490,7 @@ export const ALLOWED_TOOLS = new Set([
   "list_available_effects", "set_text", "add_text_animator", "set_shape_path", "add_shape_content",
   "set_shape_property", "add_mask", "set_mask", "remove_mask", "add_marker", "remove_marker",
   "screenshot_frame", "screenshot_layer", "run_batch", "get_project_summary", "find_layers", "get_selection",
-  "import_footage", "create_footage_layer", "purge_unused_footage", "place_audio_cues",
+  "import_footage", "create_footage_layer", "purge_unused_footage", "place_audio_cues", "add_essential_property",
   "list_render_queue", "remove_render_item", "run_jsx", "get_house_style", "await_job", "get_job",
   "cancel_job", "check_setup", "ae_guide", "log_issue", "list_known_issues", "mark_issue_reported",
   "archive_issue",

@@ -1193,6 +1193,17 @@ export const ExportMogrt = z
   })
   .strict();
 
+// Issue #177: the controller export_mogrt needs, added from the tools.
+export const AddEssentialProperty = z
+  .object({
+    compId: z.number().describe("The comp the layer is in. Its Essential Graphics panel is the one the property goes into, and the comp export_mogrt then exports."),
+    layerId: z.number(),
+    propertyPath: PropertyPath.describe("Path to one leaf property on that layer, e.g. ['Source Text'] or ['Effects', 'Fill', 'Color']. A group is refused."),
+    name: z.string().min(1).optional()
+      .describe("The controller's label in the Essential Graphics panel and in Premiere. Omit for After Effects' default, the property's own name."),
+  })
+  .strict();
+
 // ---------- render queue (issue #137) ----------
 export const AddToRenderQueue = z
   .object({
@@ -1479,6 +1490,7 @@ export const OpSchemas = {
   place_audio_cues: PlaceAudioCues,
   // motion graphics templates
   export_mogrt: ExportMogrt,
+  add_essential_property: AddEssentialProperty,
   // render queue
   add_to_render_queue: AddToRenderQueue,
   list_render_queue: ListRenderQueue,
@@ -1632,6 +1644,8 @@ export const OpMutation = {
   place_audio_cues: "write",
   // motion graphics templates — saves the project before exporting.
   export_mogrt: "write",
+  // Adds a controller to the comp's Essential Graphics panel.
+  add_essential_property: "write",
   // render queue. Adding and removing items edits the project's queue.
   add_to_render_queue: "write",
   list_render_queue: "read",

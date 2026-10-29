@@ -23,7 +23,7 @@ skill, the file beside this one:
 | shots placed into a master comp, markers, retiming a shot | `assembly` | `references/assembly.md` |
 | any raw ExtendScript for `run_jsx` — read it **before** writing the script | `extendscript-gotchas` | `references/extendscript-gotchas.md` |
 | sound effects and beds | `sound` | `references/sound.md` |
-| a `.mogrt` export, importing footage, or the solids a deleted comp leaves behind | `mogrt-and-footage` | `references/mogrt-and-footage.md` |
+| a `.mogrt` export or filling its Essential Graphics panel, importing footage, or the solids a deleted comp leaves behind | `mogrt-and-footage` | `references/mogrt-and-footage.md` |
 | rendering a comp to a movie or image sequence, or the render queue | `rendering` | `references/rendering.md` |
 | a tool that fought back, and what to do with what you learned | `issue-journal` | `references/issue-journal.md` |
 | a call that behaves differently from what you remember | `whats-new` | `references/whats-new.md` |
