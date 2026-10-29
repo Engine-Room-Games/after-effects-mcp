@@ -140,6 +140,23 @@ function load() {
       var l = new (ctor || AVLayer)();
       l.id = ++NEXT_ID;
       l.name = name;
+      l.parent = null;
+      l.trackMatteLayer = null;
+      // AE: removing a layer unparents its children and clears mattes on it.
+      l.remove = function () {
+        for (var i = 0; i < ITEMS.length; i++) {
+          var h = ITEMS[i];
+          if (!(h instanceof CompItem)) continue;
+          var at = -1;
+          for (var j = 0; j < h._layers.length; j++) {
+            var o = h._layers[j];
+            if (o === l) at = j;
+            if (o.parent === l) o.parent = null;
+            if (o.trackMatteLayer === l) o.trackMatteLayer = null;
+          }
+          if (at >= 0) { h._layers.splice(at, 1); h.numLayers = h._layers.length; }
+        }
+      };
       l.source = source || null;
       return l;
     }
@@ -190,7 +207,7 @@ function load() {
   // core.jsx for dispatch/noUndoWhen, comps.jsx for delete_comp and __folderArg,
   // footage.jsx for the purge and the helpers both share, explore.jsx for
   // __itemKind. In the shipped bundle all of them share one scope.
-  for (const f of ["core.jsx", "ids.jsx", "comps.jsx", "footage.jsx", "explore.jsx"]) {
+  for (const f of ["core.jsx", "ids.jsx", "comps.jsx", "footage.jsx", "explore.jsx", "layers.jsx"]) {
     vm.runInContext(read(f), ctx, { filename: f });
   }
   const get = (expr) => vm.runInContext(expr, ctx);
@@ -280,6 +297,26 @@ check("delete_comp on a comp nothing nests carries no removedFromComps (#160)", 
   fixture(ctx);
   const res = success(call("delete_comp", { compId: get("LOOSE.id") }));
   eq(res.removedFromComps, undefined);
+});
+
+check("delete_layer reports unparented children, lost mattes and an orphaned solid (#160)", () => {
+  const { ctx, get, data, call, success } = load();
+  fixture(ctx);
+  vm.runInContext("B._layers[1].parent = B._layers[0]; B._layers[1].trackMatteLayer = B._layers[0]; " +
+    "var own = B._layers[1]; var shared = B._layers[0];", ctx);
+  const ids = data("({ B: B.id, own: own.id, shared: shared.id, S3: S3.id })");
+  // "shared" (S2) is still used by A, so no solid is reported; "own" loses its parent and matte.
+  const res = success(call("delete_layer", { compId: ids.B, layerId: ids.shared }));
+  eq(res.name, "shared");
+  eq(res.unparentedChildren, [{ id: ids.own, name: "own" }], "the child is named");
+  eq(res.lostTrackMatte, [{ id: ids.own, name: "own" }], "and so is the matte user");
+  eq(res.unusedSolidLeft, undefined, "S2 is still A's");
+  // "own" is B's only use of S3: deleting it orphans the solid.
+  const res2 = success(call("delete_layer", { compId: ids.B, layerId: ids.own }));
+  eq(res2.unusedSolidLeft, { id: ids.S3, name: "B Only Solid" }, "the orphaned solid is reported");
+  ok(/purge_unused_footage/.test(res2.note), "with the way to clean it up");
+  eq(res2.unparentedChildren, undefined, "empty fallout is omitted");
+  eq(get("B.numLayers"), 0);
 });
 
 check("delete_comp with no unused solids reports zero and no note", () => {

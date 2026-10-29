@@ -44,7 +44,7 @@ export const descriptions: Record<string, string> = {
   create_camera_layer: "Camera. 3D layers below view through it.",
   create_light_layer: "Light (parallel|spot|point|ambient).",
   duplicate_layer: "Duplicate a layer N times; each has a fresh id.",
-  delete_layer: "Remove a layer.",
+  delete_layer: "Remove a layer. The result reports the fallout After Effects does not announce: `unparentedChildren` (layers that were parented to it), `lostTrackMatte` (layers that used it as their track matte) and `unusedSolidLeft` (a solid's footage item now used by nothing, left in the project — purge_unused_footage removes it). Each key appears only when non-empty.",
   set_layer: "Update layer metadata (name/enabled/locked/shy/solo/3D/blend/label/in-out/stretch/trackMatte). Undefined fields unchanged.",
   parent_layer:
     "Set/clear a layer's parent (parentLayerId=null to unparent). The layer stays visually put: AE's own compensation double-counts when the parent was itself re-parented in the same call, so this recomputes the world transform and corrects position/scale/rotation, reporting any correction in `correction`. Read `correction.notes` — 3D layers, cameras and lights are not corrected, and with a keyframed ancestor the fix is only exact at the comp's current time. Pass preserveTransform:false to let the layer jump instead.",
