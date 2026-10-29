@@ -1,0 +1,270 @@
+{
+  "id": 2,
+  "index": 2,
+  "name": "Card",
+  "enabled": true,
+  "solo": false,
+  "locked": false,
+  "shy": false,
+  "threeDLayer": false,
+  "label": 4,
+  "inPoint": 0,
+  "outPoint": 10,
+  "startTime": 0,
+  "stretch": 100,
+  "blendingMode": "5212",
+  "preserveTransparency": false,
+  "parent": {
+    "layerId": 1,
+    "name": "CTRL"
+  },
+  "sourceType": "solid",
+  "transform": {
+    "Anchor Point": {
+      "name": "Anchor Point",
+      "matchName": "ADBE Anchor Point",
+      "propertyType": "6812",
+      "isTimeVarying": false,
+      "canSetExpression": true,
+      "value": [
+        0,
+        0
+      ]
+    },
+    "Position": {
+      "name": "Position",
+      "matchName": "ADBE Position",
+      "propertyType": "6812",
+      "isTimeVarying": true,
+      "canSetExpression": true,
+      "value": [
+        100,
+        100
+      ],
+      "keyframes": [
+        {
+          "index": 1,
+          "time": 0,
+          "value": [
+            100,
+            100
+          ],
+          "in": "6612",
+          "out": "6612",
+          "easeIn": {
+            "influence": 16.666667,
+            "speed": 0
+          },
+          "easeOut": {
+            "influence": 16.666667,
+            "speed": 0
+          },
+          "inTangent": [
+            0,
+            0
+          ],
+          "outTangent": [
+            0,
+            0
+          ]
+        },
+        {
+          "index": 2,
+          "time": 1,
+          "value": [
+            200,
+            150
+          ],
+          "in": "6612",
+          "out": "6612",
+          "easeIn": {
+            "influence": 16.666667,
+            "speed": 0
+          },
+          "easeOut": {
+            "influence": 16.666667,
+            "speed": 0
+          },
+          "inTangent": [
+            0,
+            0
+          ],
+          "outTangent": [
+            0,
+            0
+          ]
+        },
+        {
+          "index": 3,
+          "time": 2,
+          "value": [
+            300,
+            300
+          ],
+          "in": "6614",
+          "out": "6614",
+          "easeIn": {
+            "influence": 16.666667,
+            "speed": 0
+          },
+          "easeOut": {
+            "influence": 16.666667,
+            "speed": 0
+          },
+          "inTangent": [
+            0,
+            0
+          ],
+          "outTangent": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    "Scale": {
+      "name": "Scale",
+      "matchName": "ADBE Scale",
+      "propertyType": "6812",
+      "isTimeVarying": false,
+      "canSetExpression": true,
+      "value": [
+        100,
+        100,
+        100
+      ]
+    },
+    "Rotation": {
+      "name": "Rotation",
+      "matchName": "ADBE Rotate Z",
+      "propertyType": "6812",
+      "isTimeVarying": false,
+      "canSetExpression": true,
+      "value": 0
+    },
+    "Opacity": {
+      "name": "Opacity",
+      "matchName": "ADBE Opacity",
+      "propertyType": "6812",
+      "isTimeVarying": true,
+      "canSetExpression": true,
+      "value": 100,
+      "expression": "wiggle(2, 10)"
+    }
+  },
+  "effects": [
+    {
+      "name": "Gaussian Blur",
+      "matchName": "ADBE Gaussian Blur 2",
+      "enabled": true,
+      "index": 1,
+      "paramCount": 2,
+      "params": [
+        {
+          "name": "Blurriness",
+          "matchName": "ADBE Gaussian Blur 2-0001",
+          "propertyType": "6812",
+          "value": 12
+        },
+        {
+          "name": "Blur Dimensions",
+          "matchName": "ADBE Gaussian Blur 2-0002",
+          "propertyType": "6812",
+          "value": 1
+        }
+      ]
+    }
+  ],
+  "masks": [
+    {
+      "index": 1,
+      "name": "Mask 1",
+      "mode": "6813",
+      "inverted": false,
+      "shape": {
+        "name": "Mask Path",
+        "matchName": "ADBE Mask Shape",
+        "propertyType": "6812",
+        "isTimeVarying": false,
+        "canSetExpression": true,
+        "value": {
+          "vertices": [
+            [
+              0,
+              0
+            ],
+            [
+              100,
+              0
+            ],
+            [
+              100,
+              100
+            ],
+            [
+              0,
+              100
+            ]
+          ],
+          "inTangents": [],
+          "outTangents": [],
+          "closed": true
+        }
+      },
+      "opacity": {
+        "name": "Mask Opacity",
+        "matchName": "ADBE Mask Opacity",
+        "propertyType": "6812",
+        "isTimeVarying": false,
+        "canSetExpression": true,
+        "value": 100
+      },
+      "expansion": {
+        "name": "Mask Expansion",
+        "matchName": "ADBE Mask Offset",
+        "propertyType": "6812",
+        "isTimeVarying": false,
+        "canSetExpression": true,
+        "value": 0
+      },
+      "feather": {
+        "name": "Mask Feather",
+        "matchName": "ADBE Mask Feather",
+        "propertyType": "6812",
+        "isTimeVarying": false,
+        "canSetExpression": true,
+        "value": [
+          0,
+          0
+        ]
+      }
+    }
+  ],
+  "markers": [
+    {
+      "index": 1,
+      "time": 0.5,
+      "comment": "hit",
+      "duration": 0,
+      "label": 2,
+      "chapter": "",
+      "url": "",
+      "frameTarget": ""
+    }
+  ],
+  "sourceRect": {
+    "left": -50,
+    "top": -25,
+    "width": 100,
+    "height": 50,
+    "time": 0
+  },
+  "footage": {
+    "itemId": 50,
+    "name": "Red Solid",
+    "hasAlpha": false,
+    "duration": 0,
+    "width": 1920,
+    "height": 1080
+  }
+}
