@@ -76,6 +76,7 @@ class MockLayer {
         self.masks.push(m);
         return m;
       },
+      get numProperties() { return self.masks.length; },
       property(i) { return self.masks[i - 1]; },
     };
   }

@@ -100,7 +100,11 @@ function scene({ localized = false } = {}) {
   const layer = {
     id: 7,
     property: (n) => {
-      if (n === "Masks") return { numProperties: 1, property: (i) => (i === 1 ? m : null) };
+      if (n === "Masks") return {
+        numProperties: 1,
+        // As AE does: an index past the end throws, it does not return null.
+        property: (i) => { if (i !== 1) throw new Error(`Unable to call "property" because of parameter 1. Value ${i} out of range 1 to 1.`); return m; },
+      };
       if (n === "Contents" || n === "ADBE Root Vectors Group") return contents;
       return null;
     },

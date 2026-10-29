@@ -32,10 +32,13 @@ OPS.set_mask = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
   var masks = l.property("Masks");
-  var m = masks ? masks.property(args.maskIndex) : null;
+  // Checked against the count first: AE throws "Value 9 out of range 1 to 2"
+  // for an index past the end rather than returning null (measured, AE 26.5).
+  var count = masks ? masks.numProperties : 0;
+  var m = args.maskIndex >= 1 && args.maskIndex <= count ? masks.property(args.maskIndex) : null;
   if (!m) {
     throw new Error("set_mask: layer " + args.layerId + " has no mask " + args.maskIndex +
-      " (it has " + (masks ? masks.numProperties : 0) + "). Nothing was changed.");
+      " (it has " + count + "). Nothing was changed.");
   }
   var mode = args.mode ? __maskMode("set_mask", args.mode) : undefined;
   // Issue #207: closed and the tangents used to be read only inside
