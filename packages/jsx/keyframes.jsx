@@ -222,7 +222,7 @@ function __applyTemporalEase(prop, keyIndex, easeIn, easeOut, resolved) {
 }
 
 /** Returns the ease arity that was used, or null when no ease was requested. */
-function __applyInterpolationToKey(prop, keyIndex, interp, resolved) {
+function __applyInterpolationToKey(prop, keyIndex, interp, resolved, written) {
   if (!interp) return null;
   // Read the side to keep before the interpolation is touched, so a refusal
   // leaves the interpolation as it was and the kept ease is the key's own.
@@ -232,6 +232,9 @@ function __applyInterpolationToKey(prop, keyIndex, interp, resolved) {
   var inT = interp["in"] && __INTERP_MAP[interp["in"]] ? __INTERP_MAP[interp["in"]] : prop.keyInInterpolationType(keyIndex);
   var outT = interp["out"] && __INTERP_MAP[interp["out"]] ? __INTERP_MAP[interp["out"]] : prop.keyOutInterpolationType(keyIndex);
   prop.setInterpolationTypeAtKey(keyIndex, inT, outT);
+  // Only a type the caller asked for counts as written: the others are the
+  // key's own, set back unchanged.
+  if (written && (interp["in"] || interp["out"])) written.interpolation = true;
   if (resolved) {
     return __applyTemporalEase(prop, keyIndex, interp.easeIn, interp.easeOut, resolved);
   }
@@ -255,14 +258,17 @@ OPS.add_keyframe = function (args) {
   if (interp) {
     var idx = __findKeyIndexAtTime(prop, args.time);
     if (idx > 0) {
+      var written = { interpolation: false };
       try {
-        easeDimensions = __applyInterpolationToKey(prop, idx, interp, resolved);
+        easeDimensions = __applyInterpolationToKey(prop, idx, interp, resolved, written);
       } catch (eInterp) {
         // The value is already on the key by now; say so rather than let a
         // message about the ease read as though the whole call did nothing.
         throw new Error(
-          "The keyframe value at time " + args.time + " was set (key " + idx + "), but its interpolation/ease " +
-          "was not: " + ((eInterp && eInterp.message) ? eInterp.message : String(eInterp))
+          "The keyframe value at time " + args.time + " was set (key " + idx + ")" +
+          (written.interpolation
+            ? ", and so was its interpolation, but its ease was not: "
+            : ", but its interpolation and ease were not: ") + ((eInterp && eInterp.message) ? eInterp.message : String(eInterp))
         );
       }
     }

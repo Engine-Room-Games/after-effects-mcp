@@ -438,9 +438,23 @@ check("add_keyframe that fails after the value is set says the value was set", (
       compId: 1, layerId: 2, propertyPath: ["Opacity"], time: 0, value: 50,
       interpolation: { easeIn: EASE_IN },
     }),
-    (e) => /value at time 0 was set \(key 1\), but its interpolation\/ease was not/.test(e.message)
+    (e) => /value at time 0 was set \(key 1\), but its interpolation and ease were not/.test(e.message)
       && /parameter 2/.test(e.message),
   );
+});
+
+check("add_keyframe that fails after the interpolation is set says that too", () => {
+  const prop = makeProp({ name: "Opacity", valueType: VALUE_TYPES.OneD, value: 100, accepts: [],
+    current: { in: [{ influence: 5, speed: 0 }], out: [{ influence: 5, speed: 0 }] } });
+  const ctx = withProp(prop);
+  assert.throws(
+    () => ctx.OPS.add_keyframe({
+      compId: 1, layerId: 2, propertyPath: ["Opacity"], time: 0, value: 50,
+      interpolation: { in: "linear", easeIn: EASE_IN },
+    }),
+    (e) => /value at time 0 was set \(key 1\), and so was its interpolation, but its ease was not/.test(e.message),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(prop.writes)), [["value", 0], ["interpolation", 1]]);
 });
 
 check("add_keyframe without an ease says nothing about ease dimensions", () => {
