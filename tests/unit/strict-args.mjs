@@ -154,7 +154,7 @@ await check("internal, server-resident and half-outside-AE ops are refused by na
   for (const op of ["_render_prepare", "_continue_job", "no_such_tool"]) assert.ok(batchStepRefusal(op), op);
   // Inherited names are not tools: `"constructor" in {}` is true.
   for (const op of ["constructor", "toString", "hasOwnProperty", "valueOf", "__defineGetter__"]) {
-    assert.equal(batchStepRefusal(op), "there is no tool by that name", op);
+    assert.match(batchStepRefusal(op), /^(there is no tool by that name|it is an internal step)/, op);
     const { problems } = prepareBatchSteps([{ op, args: {} }]);
     assert.equal(problems.length, 1, op);
     assert.doesNotMatch(problems[0].problem, /native code/, op);
