@@ -123,6 +123,11 @@ jobs:
       - name: Panel version mismatches are diagnosed correctly
         run: node tests/unit/panel-version.mjs
 
+      # Issue #156: a stale verdict was cached forever, and AE restarts on the
+      # same port, so "restart After Effects" outlived the restart.
+      - name: A stale panel verdict is re-checked after a restart
+        run: node tests/unit/panel-gate.mjs
+
       # No AE on a runner means nothing else here loads the panel's client code,
       # and the Windows form of this bug reads as a missing bundle.jsx.
       - name: Panel resolves the extension path CEP hands it

@@ -17,11 +17,21 @@ export class WsClient {
   private ws?: WebSocket;
   private reconnectTimer?: NodeJS.Timeout;
   private stopped = false;
+  private opened = false;
+  private reopenListeners: (() => void)[] = [];
 
   constructor(private bridge: HttpClient, private jobs: JobManager) {
     // Awaited by `switchPort`, bounded there, so a retried op does not go out
     // before the socket that will carry its completion has (usually) opened.
     bridge.onPortChange(() => this.reconnect());
+  }
+
+  /**
+   * Called whenever the socket opens after having been open before — a panel
+   * restart, a rebind, a port move. The first open is not a reopen.
+   */
+  onReopen(listener: () => void): void {
+    this.reopenListeners.push(listener);
   }
 
   start(): void {
@@ -60,7 +70,16 @@ export class WsClient {
     const ws = new WebSocket(url, { headers: authHeaders(this.bridge.port) });
     this.ws = ws;
     return new Promise<void>((resolve) => {
-      ws.on("open", () => { logger.debug("WS connected", url); resolve(); });
+      ws.on("open", () => {
+        logger.debug("WS connected", url);
+        if (this.opened) {
+          for (const l of this.reopenListeners) {
+            try { l(); } catch (e) { logger.warn(`ws reopen listener failed: ${(e as Error).message}`); }
+          }
+        }
+        this.opened = true;
+        resolve();
+      });
       ws.on("message", (data) => {
         let evt: WsEvent;
         try { evt = JSON.parse(data.toString()) as WsEvent; }
