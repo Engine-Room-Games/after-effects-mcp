@@ -305,6 +305,52 @@ await check("run_batch refuses run_jsx hidden in a nested batch, and sends nothi
   assert.deepEqual(seen, [], "a nested run_jsx reached the bridge");
 });
 
+// A `__proto__` key is an own key in JSON and on this side of the bridge, but
+// may become a prototype once ExtendScript parses the payload — and then an
+// `ops` hidden behind it is invisible to a walk that reads own keys. Built with
+// JSON.parse on purpose: written as an object literal here, `__proto__` would
+// set this test's own prototype and the key would never reach the wire.
+const protoPayload = (key) =>
+  JSON.parse(
+    `{"ops":[{"op":"run_batch","args":{"${key}":{"ops":[{"op":"run_jsx","args":{"code":"return 1"}}]}}}]}`
+  );
+
+await check("run_batch with run_jsx behind a __proto__ key is refused before the bridge", async () => {
+  seen.length = 0;
+  const args = protoPayload("__proto__");
+  assert.ok(Object.keys(args.ops[0].args).includes("__proto__"), "the fixture must carry an own __proto__ key");
+  const res = await clients.noJsx.callTool({ name: "run_batch", arguments: args });
+  assert.equal(res.isError, true, "a __proto__-hidden run_jsx step was accepted");
+  assert.match(res.content[0].text, /ops\[0\]\.args\.__proto__ — the key "__proto__" is not allowed/);
+  assert.deepEqual(seen, [], "a __proto__ payload reached the bridge");
+});
+
+await check("__proto__, constructor and prototype are refused in every op's args, in every mode", async () => {
+  seen.length = 0;
+  for (const key of ["__proto__", "constructor", "prototype"]) {
+    const res = await clients.default.callTool({ name: "run_batch", arguments: protoPayload(key) });
+    assert.equal(res.isError, true, `${key} was forwarded`);
+    // Not only run_batch: a declared free-form field on any op is the same
+    // door. `shapes` is a z.record, so zod passes the key straight through.
+    const shape = await clients.default.callTool({
+      name: "create_shape_layer",
+      arguments: JSON.parse(`{"compId":1,"shapes":[{"type":"rect","${key}":{"x":1}}]}`),
+    });
+    assert.equal(shape.isError, true, `${key} in create_shape_layer.shapes was forwarded`);
+  }
+  assert.deepEqual(seen, []);
+});
+
+await check("ordinary keys that merely contain those words still pass", async () => {
+  seen.length = 0;
+  const res = await clients.default.callTool({
+    name: "create_shape_layer",
+    arguments: { compId: 1, shapes: [{ type: "rect", constructorName: "a", note: "__proto__ in a value is fine" }] },
+  });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(seen, ["create_shape_layer"]);
+});
+
 await check("what is still offered still works", async () => {
   seen.length = 0;
   const ro = await clients.readOnly.callTool({ name: "list_comps", arguments: {} });

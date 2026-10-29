@@ -322,6 +322,30 @@ repo refuses elsewhere. In read-only mode `run_batch` itself is gone, so this
 only ever fires for the `run_jsx` switch, but it checks the full disabled set
 so a third switch would not need to remember it.
 
+**No tool argument may carry a `__proto__`, `constructor` or `prototype`
+key, at any depth, for any op** (`util/argsSafety.ts`, checked on the raw args
+before anything else reads them). In JSON, and to every check on this side of
+the bridge, `__proto__` is an ordinary own key. ExtendScript parses the
+payload again, with its native `JSON.parse` or `core.jsx`'s
+`eval("(" + text + ")")` polyfill, and in an object literal that key sets the
+prototype. So `run_batch{ops:[{op:"run_batch",args:{"__proto__":{ops:[{op:"run_jsx"}]}}}]}`
+showed the batch walk an inner batch with no `ops`, and may have shown
+`batch.jsx` one that inherited a `run_jsx` step. Which parser AE 2026 uses, and
+what it does with the key, is unmeasured, so the key never reaches either. The
+scope is every op rather than `run_batch` alone. zod strips unknown keys from a
+declared object, but `z.unknown()` and `z.record()` fields (batch steps,
+`create_shape_layer.shapes`) pass anything through, and a changed prototype
+misleads any handler that reads a field. No schema uses these names. The walk
+is one pass over a payload already in memory, bounded at 64 levels.
+
+How the panel embeds the args was checked too, and needs no change.
+`runOp` in `main.js` passes `JSON.stringify(JSON.stringify({op, args}))`: the
+payload is a JS *string* literal handed to `dispatch()`, which parses it. A
+value cannot close that literal, because quotes, backslashes and control
+characters are all escaped. The one character that slips through is U+2028/9,
+which ES3 treats as a line break inside a string literal. That fails the
+`evalScript` with a syntax error rather than running anything.
+
 **The walk descends into nested batches, because `batch.jsx` runs them.** A
 `run_batch` step is an op like any other, so
 `{op:"run_batch", args:{ops:[{op:"run_jsx", …}]}}` put the script one level

@@ -29,6 +29,7 @@ import {
   withPolicyNotice,
   type ToolPolicy,
 } from "./tools/policy.js";
+import { findUnsafeArgKeys, unsafeArgsMessage } from "./util/argsSafety.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
@@ -249,6 +250,11 @@ export function createServer(opts: CreateServerOptions = {}) {
     // configuration answering, and no entry about a past failure applies.
     const off = disabled.get(name);
     if (off !== undefined) return errorResult(disabledToolMessage(name, off));
+    // Before anything else reads them, for every op: a `__proto__` key can
+    // become a prototype on the ExtendScript side and hide a value from every
+    // check made here. See util/argsSafety.ts for why the scope is all ops.
+    const unsafe = findUnsafeArgKeys(rawArgs);
+    if (unsafe.length > 0) return errorResult(unsafeArgsMessage(name, unsafe));
 
     // Server-resident ops
     if (SERVER_OPS.has(name)) {
