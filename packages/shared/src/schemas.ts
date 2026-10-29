@@ -1095,12 +1095,27 @@ export const RemoveRenderItem = z
     compId: z.number().describe("The comp that item renders. Checked against the item, because indices shift when an earlier item is removed."),
   })
   .strict();
-export const RenderQueue = z
-  .object({
-    indices: z.array(z.number().int().positive()).min(1).optional()
-      .describe("Which render queue items to render, 1-based. Omit to render every QUEUED item."),
-  })
-  .strict();
+export const RenderQueue = crossField(
+  z
+    .object({
+      indices: z.array(z.number().int().positive()).min(1).optional()
+        .describe("Which render queue items to render, 1-based, as add_to_render_queue or list_render_queue reported them. The normal way to call this."),
+      all: z.literal(true).optional()
+        .describe("Render EVERY QUEUED item — including ones the user queued by hand, not just yours. Only when the user asked for the whole queue."),
+      overwrite: z.boolean().optional().meta({ default: false })
+        .describe("Required when an output file (or any frame of an output sequence) already exists; the render replaces it."),
+      saveProject: z.boolean().optional().meta({ default: false })
+        .describe("Required when the project has unsaved changes: the render reads the saved file, so it saves first. Tell the user before passing it. Ignored when the project is already saved."),
+    })
+    .strict(),
+  // Rendering items the agent never added is a choice the caller has to make
+  // out loud, never the default of an omitted field.
+  {
+    kind: "exactlyOne",
+    fields: ["indices", "all"],
+    then: "Prefer `indices` with the items you added; `all:true` also renders whatever the user queued by hand.",
+  }
+);
 
 // ---------- house style (a markdown file beside the .aep, read over the bridge) ----------
 export const GetHouseStyle = z

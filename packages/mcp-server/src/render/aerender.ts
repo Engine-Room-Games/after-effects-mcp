@@ -20,9 +20,11 @@ import { stopProcessTree, stopProcessTreeSync, treeSpawnOptions } from "../setup
  * exactly as configured, reports every frame on stdout, and is a process this
  * server can kill.
  *
- * The cost is that aerender renders the project **file**, so the project is
- * saved just before the render starts, and edits made while it runs are not in
- * the output. Every message an agent sees says so.
+ * The cost is that aerender renders the project **file**: the project has to be
+ * saved (with the caller's explicit saveProject:true when it has unsaved
+ * changes), the render reads a private copy taken at its start
+ * (`snapshotProject`), and edits made while it runs are not in the output.
+ * Every message an agent sees says so.
  */
 
 export interface RenderOutputPlan {
@@ -216,6 +218,18 @@ export interface RenderedItem {
   outputs: VerifiedOutput[];
   frames: number;
   elapsedMs: number;
+  /**
+   * Whether the live queue item was switched off afterwards so it does not
+   * render again, and why not when it was not. Absent when no hook was given.
+   */
+  unqueued?: { marked: boolean; reason?: string };
+  /**
+   * Set when aerender rendered the item but printed no line this server reads
+   * as a frame — so progress sat at 0% throughout. The likeliest cause is an
+   * After Effects running in another language, whose PROGRESS lines are worded
+   * differently. Said out loud so a stuck-looking progress bar is explained.
+   */
+  progressWarning?: string;
 }
 
 export interface CancelReport {
@@ -241,13 +255,66 @@ interface Running {
   child: ChildProcess | null;
   exited: Promise<void> | null;
   cancelled: boolean;
+  /** True once the JobManager entry has been settled, by whichever path got there first. */
+  settled: boolean;
+  /** cancel() could not see the exit and reported stopped:false; a late exit settles the job. */
+  cancelGaveUp: boolean;
   rendered: RenderedItem[];
   startedAt: number;
+  /** The private copy of the saved .aep every item renders from. */
+  snapshot: string;
 }
 
 export interface RenderRunnerOptions {
   /** How long a polite stop gets before the tree is killed outright, and again before giving up. */
   graceMs?: number;
+  /**
+   * Called after each item's outputs are verified — the server switches the
+   * live queue item off there, so the next render_queue does not render it
+   * again. Its failure is reported on the item, never thrown.
+   */
+  onItemRendered?: (item: RenderItemPlan) => Promise<{ marked: boolean; reason?: string }>;
+  /** How a process tree is stopped. The platform's, unless a test needs one that fails. */
+  stop?: (pid: number, force: boolean) => Promise<void>;
+}
+
+/**
+ * Copy the saved project beside itself, for this job alone.
+ *
+ * aerender opens the project once per item. Rendering the live .aep would let
+ * anything that saves it mid-job — the user's Cmd-S, export_mogrt — change
+ * what the later items render, and move the `-rqindex` the plan was made
+ * against onto a different item. A copy taken while the write lease is still
+ * held is a project nothing else can touch. It sits in the SAME folder so a
+ * footage path After Effects stored relative to the project resolves exactly
+ * as it does for the original.
+ */
+export function snapshotProject(projectPath: string, jobId: string): string {
+  const dir = path.dirname(projectPath);
+  const ext = path.extname(projectPath) || ".aep";
+  const base = path.basename(projectPath, ext);
+  const snap = path.join(dir, `.${base}.ae-mcp-render-${jobId}${ext}`);
+  try {
+    fs.copyFileSync(projectPath, snap);
+  } catch (e) {
+    throw new Error(
+      `Could not copy the project to ${snap} for the render (${(e as Error).message}), so nothing was rendered. ` +
+        "The render works from a private copy beside the .aep; the project folder has to be writable."
+    );
+  }
+  return snap;
+}
+
+/**
+ * Output paths that already hold something: a file, or any frame of a sequence.
+ * render_queue refuses these unless `overwrite:true`, the same guard
+ * add_to_render_queue applies — an item the user queued by hand never went
+ * through that one.
+ */
+export function occupiedOutputs(plan: RenderPlan): string[] {
+  const out: string[] = [];
+  for (const item of plan.items) out.push(...existingOutputs(item.outputs));
+  return out;
 }
 
 const DEFAULT_GRACE_MS = 5000;
@@ -268,11 +335,54 @@ export class RenderRunner {
   private finished = new Map<string, string>();
   private readonly graceMs: number;
 
+  private readonly onItemRendered?: RenderRunnerOptions["onItemRendered"];
+  private readonly stop: (pid: number, force: boolean) => Promise<void>;
+  private disarm: (() => void) | null = null;
+
   constructor(private jobs: JobManager, opts: RenderRunnerOptions = {}) {
     this.graceMs = opts.graceMs ?? DEFAULT_GRACE_MS;
-    // A render nobody is left to report to is still writing files and eating a
-    // machine's worth of memory. The server going away takes it with it.
-    process.on("exit", () => this.killSync());
+    this.onItemRendered = opts.onItemRendered;
+    this.stop = opts.stop ?? ((pid, force) => stopProcessTree(pid, force));
+  }
+
+  /**
+   * While a render runs, the server going away takes it with it: a render
+   * nobody is left to report to is still writing files and holding a whole
+   * headless After Effects. aerender runs in its own process group (so cancel
+   * can stop the tree), which also means a signal to the server no longer
+   * reaches it by itself.
+   *
+   * Armed only for the length of a render, so the server's shutdown is exactly
+   * what it always was the rest of the time. On a signal the tree is killed and
+   * the signal is re-raised once this handler is gone, so when nothing else
+   * listens the default action — terminate — still happens. stdin closing is
+   * how an MCP client says it has gone; that stops the render and nothing else.
+   * Nothing here writes to stdout.
+   */
+  private arm(): void {
+    if (this.disarm) return;
+    const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"];
+    const onExit = () => this.killSync();
+    const onSignal = (sig: NodeJS.Signals) => {
+      this.killSync();
+      this.disarm?.();
+      if (process.listenerCount(sig) === 0) process.kill(process.pid, sig);
+    };
+    const onStdinGone = () => {
+      logger.warn("MCP client went away during a render; stopping aerender.");
+      this.killSync();
+    };
+    process.on("exit", onExit);
+    for (const sig of signals) process.on(sig, onSignal);
+    process.stdin.on("close", onStdinGone);
+    process.stdin.on("end", onStdinGone);
+    this.disarm = () => {
+      process.off("exit", onExit);
+      for (const sig of signals) process.off(sig, onSignal);
+      process.stdin.off("close", onStdinGone);
+      process.stdin.off("end", onStdinGone);
+      this.disarm = null;
+    };
   }
 
   get activeJobId(): string | null {
@@ -286,6 +396,7 @@ export class RenderRunner {
   start(plan: RenderPlan, aerender: string): { jobId: string; totalFrames: number } {
     if (this.current) throw new Error(`A render is already running (job ${this.current.jobId}).`);
     const jobId = `r_${Date.now()}_${++seq}`;
+    const snapshot = snapshotProject(plan.projectPath, jobId);
     const totalFrames = Math.max(1, plan.items.reduce((n, i) => n + Math.max(0, i.frames || 0), 0));
     const r: Running = {
       jobId,
@@ -298,10 +409,14 @@ export class RenderRunner {
       child: null,
       exited: null,
       cancelled: false,
+      settled: false,
+      cancelGaveUp: false,
       rendered: [],
       startedAt: Date.now(),
+      snapshot,
     };
     this.current = r;
+    this.arm();
     this.jobs.register(jobId, totalFrames);
     void this.run(r);
     return { jobId, totalFrames };
@@ -328,12 +443,14 @@ export class RenderRunner {
         if (r.cancelled) break;
         if (outcome.spawnError || outcome.code !== 0) {
           status = "failed";
+          r.settled = true;
           this.jobs.fail(r.jobId, this.failureText(r, item, outcome));
           return;
         }
         const { verified, problems } = verifyOutputs(item.outputs, itemStart);
         if (problems.length) {
           status = "failed";
+          r.settled = true;
           this.jobs.fail(
             r.jobId,
             `aerender reported success on ${label} but the output is not there: ${problems.join("; ")}. ` +
@@ -344,36 +461,72 @@ export class RenderRunner {
           );
           return;
         }
-        r.rendered.push({
+        const done: RenderedItem = {
           index: item.index,
           compName: item.compName,
           outputs: verified,
           frames: r.itemFrames,
           elapsedMs: Date.now() - itemStart,
-        });
+        };
+        if (r.itemFrames === 0 && item.frames > 0) {
+          done.progressWarning =
+            `aerender wrote the output but printed no frame line this server recognises (last lines: ${outcome.tail
+              .slice(-3)
+              .join(" | ")}), so progress for this item was never reported. If After Effects runs in a language ` +
+            "other than English, that is the likely cause; the render itself is verified on disk.";
+          logger.warn(`render ${r.jobId}: ${done.progressWarning}`);
+        }
+        if (this.onItemRendered) {
+          done.unqueued = await this.onItemRendered(item).catch((e) => ({
+            marked: false,
+            reason: (e as Error).message,
+          }));
+        }
+        r.rendered.push(done);
         r.framesBefore += Math.max(item.frames, r.itemFrames);
       }
       if (r.cancelled) {
         status = "cancelled";
-        return; // cancel() settles the job, with its own report.
+        // Normally cancel() has settled the job with its own report. When it
+        // could not see the process exit it reported stopped:false and left the
+        // job open — and this is that exit, arriving late. Settle it here, or
+        // await_job waits for ever on a render that is over.
+        if (!r.settled && r.cancelGaveUp) {
+          r.settled = true;
+          this.jobs.cancel(r.jobId, {
+            jobId: r.jobId,
+            stopped: true,
+            wasRunning: true,
+            rendered: r.rendered,
+            partialFiles: existingOutputs(r.plan.items[r.itemPos]?.outputs ?? []),
+            note:
+              "aerender exited after cancel_job had reported it still running; the render is stopped now. " +
+              "The interrupted item's output, if any, is incomplete.",
+          });
+        }
+        return;
       }
       this.jobs.reportProgress(r.jobId, r.totalFrames, r.totalFrames, "done");
+      r.settled = true;
       this.jobs.complete(r.jobId, {
         rendered: r.rendered,
         projectPath: r.plan.projectPath,
         elapsedMs: Date.now() - r.startedAt,
         note:
           "Every file listed was checked on disk after the render: it exists, is not empty, and was written " +
-          "by this render. After Effects' Render Queue panel still shows these items as Queued — they were " +
-          "rendered by a separate aerender process from the saved project, not by the queue itself. Remove " +
-          "them with remove_render_item if they should not render again.",
+          "by this render, which rendered a private copy of the project saved at its start. Each rendered " +
+          "item was switched off in After Effects' Render Queue (its Render box unticked, status Unqueued) so " +
+          "it does not render again; `unqueued.marked:false` on an item says why that one was not.",
       });
     } catch (e) {
       status = "failed";
+      r.settled = true;
       this.jobs.fail(r.jobId, `The render stopped unexpectedly: ${(e as Error).message}${this.renderedSoFar(r)}`);
     } finally {
       this.finished.set(r.jobId, status);
       if (this.current === r) this.current = null;
+      try { fs.rmSync(r.snapshot, { force: true }); } catch {}
+      this.disarm?.();
     }
   }
 
@@ -387,7 +540,7 @@ export class RenderRunner {
       const tail: string[] = [];
       let child: ChildProcess;
       try {
-        child = spawn(r.aerender, aerenderArgs(r.plan.projectPath, item.index), {
+        child = spawn(r.aerender, aerenderArgs(r.snapshot, item.index), {
           ...treeSpawnOptions(),
           stdio: ["ignore", "pipe", "pipe"],
         });
@@ -486,11 +639,18 @@ export class RenderRunner {
     const exited = r.exited;
     let stopped = true;
     if (child && child.pid !== undefined && exited) {
-      await stopProcessTree(child.pid, false);
+      await this.stop(child.pid, false);
       stopped = await within(exited, this.graceMs);
       if (!stopped) {
-        await stopProcessTree(child.pid, true);
+        await this.stop(child.pid, true);
         stopped = await within(exited, this.graceMs);
+      }
+      if (!stopped) {
+        // From here on the late exit, if it ever comes, is run()'s to settle.
+        // It may already have come in the instant since the last check, in
+        // which case run() has finished and this report can say so honestly.
+        r.cancelGaveUp = true;
+        if (this.current !== r) stopped = true;
       }
     }
     const partialFiles = item ? existingOutputs(item.outputs) : [];
@@ -513,13 +673,20 @@ export class RenderRunner {
           "rendering. Ask the user to check for an aerender or After Effects render process in Activity " +
           "Monitor / Task Manager and end it.",
     };
-    if (stopped) this.jobs.cancel(jobId, report);
+    if (stopped && !r.settled) {
+      r.settled = true;
+      this.jobs.cancel(jobId, report);
+    }
     return report;
   }
 
   private killSync(): void {
-    const pid = this.current?.child?.pid;
+    const r = this.current;
+    const pid = r?.child?.pid;
     if (pid !== undefined) stopProcessTreeSync(pid);
+    if (r) {
+      try { fs.rmSync(r.snapshot, { force: true }); } catch {}
+    }
   }
 }
 

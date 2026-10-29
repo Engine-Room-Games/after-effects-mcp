@@ -15,7 +15,7 @@ import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
 import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge/writeQueue.js";
 import { JobManager } from "./jobs/manager.js";
-import { RenderRunner, logRenderStart, resolveAerender, type RenderPlan } from "./render/aerender.js";
+import { RenderRunner, logRenderStart, occupiedOutputs, resolveAerender, type RenderPlan } from "./render/aerender.js";
 import { aerenderCandidates, afterEffectsInstallRoots } from "./setup/platform.js";
 import { SnapshotStore } from "./snapshots/store.js";
 import type { CompFingerprint } from "./snapshots/store.js";
@@ -118,11 +118,27 @@ export function createServer(opts: CreateServerOptions = {}) {
 
   const bridge = opts.bridge ?? new HttpClient();
   const jobs = new JobManager();
-  // render_queue's jobs run in an aerender process this server owns; see render/aerender.ts.
-  const renders = new RenderRunner(jobs);
   // One writer at a time. See bridge/writeQueue.ts for why the panel's own
   // evalScript mutex is not enough.
   const writes = new WriteQueue();
+  // render_queue's jobs run in an aerender process this server owns; see
+  // render/aerender.ts. After each verified item the live queue item is
+  // switched off so it does not render twice — a write to the project, so it
+  // queues behind any other write like one.
+  const renders = new RenderRunner(jobs, {
+    onItemRendered: async (item) => {
+      const lease = await writes.acquire("render_queue");
+      try {
+        return (await bridge.runOp("_render_mark_done", {
+          index: item.index,
+          compId: item.compId,
+          outputPath: item.outputs[0]?.path ?? null,
+        })) as { marked: boolean; reason?: string };
+      } finally {
+        lease.release();
+      }
+    },
+  });
   const snapshots = new SnapshotStore();
   // Follows the bridge's port rather than copying it: see wsClient.ts.
   const ws = new WsClient(bridge, jobs);
@@ -428,7 +444,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       // The render runs outside After Effects; only the prepare and the save
       // cross the bridge. The lease is released when this returns, on purpose
       // — see runRender.
-      if (name === "render_queue") return textResult(await runRender(args as { indices?: number[] }, bridge, renders), wait);
+      if (name === "render_queue") return textResult(await runRender(args as RenderQueueArgs, bridge, renders), wait);
 
       // The request's progressToken is deliberately not forwarded. The panel
       // does nothing with it — its WS `progress` events carry a jobId and no
@@ -632,14 +648,17 @@ function forwardJobProgress(
 }
 
 /**
- * `render_queue`: check, find aerender, save, then start the render in the
- * background and answer with a job envelope.
+ * `render_queue`: check, find aerender, save if asked, snapshot, then start the
+ * render in the background and answer with a job envelope.
  *
  * The order is the point. Everything that can refuse — a project never saved,
- * nothing queued, an item in the wrong state, no aerender on this machine —
- * refuses before the save, so a refusal costs the user nothing. The save is the
- * last thing before the spawn because aerender renders the file, not the
- * session.
+ * nothing queued, an item in the wrong state, an output that already exists,
+ * unsaved changes without saveProject:true, a read-only file, no aerender on
+ * this machine — refuses before the save, so a refusal costs the user nothing.
+ * The save is never a surprise: a clean project is not saved at all, and a
+ * dirty one only with the caller's explicit saveProject:true. The snapshot
+ * (`snapshotProject`) is taken inside the lease, so nothing that saves the
+ * .aep later can change what this job renders.
  *
  * The write lease covers the prepare and the save and is released when this
  * returns, unlike `run_batch`'s, which is held until its job ends. A batch's
@@ -649,8 +668,15 @@ function forwardJobProgress(
  * a twenty-minute render would freeze every edit for twenty minutes to protect
  * nothing.
  */
+interface RenderQueueArgs {
+  indices?: number[];
+  all?: true;
+  overwrite?: boolean;
+  saveProject?: boolean;
+}
+
 async function runRender(
-  args: { indices?: number[] },
+  args: RenderQueueArgs,
   bridge: HttpClient,
   renders: RenderRunner
 ): Promise<Record<string, unknown>> {
@@ -662,10 +688,43 @@ async function runRender(
         `each render is a whole background copy of After Effects, so they are run one at a time.`
     );
   }
-  const plan = (await bridge.runOp("_render_prepare", args)) as RenderPlan;
+  const plan = (await bridge.runOp("_render_prepare", { indices: args.indices, all: args.all })) as RenderPlan & {
+    readOnly?: boolean | null;
+  };
+  // Items the user queued by hand never passed add_to_render_queue's guard.
+  if (!args.overwrite) {
+    const occupied = occupiedOutputs(plan);
+    if (occupied.length) {
+      throw new Error(
+        `Nothing was saved or rendered: these outputs already exist and the render would replace them: ` +
+          `${occupied.join(", ")}. Pass overwrite:true if that is intended, or point the items elsewhere.`
+      );
+    }
+  }
+  if (plan.dirty && !args.saveProject) {
+    throw new Error(
+      "The project has unsaved changes, and the render reads the saved file, so it would not contain them. " +
+        "Nothing was saved or rendered. Tell the user the project will be saved, then call render_queue again " +
+        "with saveProject:true — or ask them to save it themselves."
+    );
+  }
+  if (plan.dirty && plan.readOnly === true) {
+    throw new Error(
+      `The project file ${plan.projectPath} is read-only and has unsaved changes, so it cannot be saved for the ` +
+        "render. Nothing was rendered. Ask the user to make it writable or Save As somewhere else."
+    );
+  }
   const aerender = resolveAerender(aerenderCandidates(plan.appPackage, { installRoots: afterEffectsInstallRoots() }));
-  await bridge.runOp("_render_save", {});
-  const { jobId, totalFrames } = renders.start(plan, aerender);
+  const save = plan.dirty
+    ? ((await bridge.runOp("_render_save", {})) as { saved: boolean })
+    : { saved: false };
+  let started: { jobId: string; totalFrames: number };
+  try {
+    started = renders.start(plan, aerender);
+  } catch (e) {
+    throw new Error((save.saved ? "The project WAS saved, but the render did not start. " : "") + (e as Error).message);
+  }
+  const { jobId, totalFrames } = started;
   logRenderStart(jobId, aerender, plan);
   return {
     jobId,
@@ -677,10 +736,11 @@ async function runRender(
       frames: i.frames,
       outputs: i.outputs.map((o) => o.path),
     })),
-    projectSaved: plan.projectPath,
+    projectPath: plan.projectPath,
+    projectSaved: save.saved,
     aerender,
     note:
-      "Rendering in the background in a separate aerender process, from the project as it was just saved — " +
+      "Rendering in the background in a separate aerender process, from a private copy of the project as saved now — " +
       "After Effects stays usable, and edits made from now on are NOT in this render. " +
       `Follow it with await_job({jobId: "${jobId}"}), which blocks until the render ends and lists every file ` +
       "it checked on disk; send it with a progressToken for per-frame progress. Pass a timeoutMs above the " +

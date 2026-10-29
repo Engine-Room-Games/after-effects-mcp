@@ -299,16 +299,21 @@ OPS._render_prepare = noUndo(function (args) {
       }
       picked.push(idx);
     }
-  } else {
+  } else if (args.all === true) {
     for (i = 1; i <= rq.numItems; i++) {
       if (__rqStatusName(rq.item(i).status) === "QUEUED") picked.push(i);
     }
     if (!picked.length) {
       throw new Error(
         "Nothing in the render queue is QUEUED (" + rq.numItems + " item(s) in total). Add one with " +
-        "add_to_render_queue — an item that already rendered stays DONE and cannot be re-queued."
+        "add_to_render_queue — an item render_queue already rendered is switched off (UNQUEUED) so it " +
+        "does not render twice."
       );
     }
+  } else {
+    // The server's schema makes this unreachable; a direct /op call must not
+    // fall back to rendering items nobody named.
+    throw new Error("render_queue needs `indices`, or `all:true` to render every QUEUED item.");
   }
 
   var items = [];
@@ -331,20 +336,92 @@ OPS._render_prepare = noUndo(function (args) {
     throw new Error("render_queue refused before saving or rendering anything: " + problems.join("; ") + ".");
   }
 
+
   var appPackage = null;
   try { appPackage = Folder.appPackage.fsName; } catch (e) {}
   return {
     projectPath: app.project.file.fsName,
     dirty: app.project.dirty === true,
+    readOnly: __rqProjectReadOnly(),
     appPackage: appPackage,
     version: app.version,
     items: items,
   };
 });
 
-/** Save the project so the separate render process sees what the user sees. */
+/** True when the .aep on disk cannot be written. Null when the host will not say. */
+function __rqProjectReadOnly() {
+  try { return app.project.file.readonly === true; } catch (e) { return null; }
+}
+
+function __rqModified(f) {
+  try { return f.modified ? f.modified.getTime() : null; } catch (e) { return null; }
+}
+
+/**
+ * Save the project so the separate render process sees what the user sees.
+ *
+ * Only ever called when the project has unsaved changes and the caller passed
+ * saveProject:true. Dialogs are suppressed for the save, as export_mogrt does:
+ * a read-only file, a project converted from an older version (which AE will
+ * only Save As) or a locked one would otherwise raise a modal that freezes this
+ * connection while the write lease is held. Under suppression such a save just
+ * does not happen, so it is checked afterwards rather than trusted.
+ */
 OPS._render_save = noUndo(function (args) {
-  if (!app.project.file) throw new Error("This project has never been saved.");
-  app.project.save();
-  return { projectPath: app.project.file.fsName, saved: true };
+  if (!app.project.file) {
+    throw new Error("This project has never been saved. Ask the user to save it once, then call render_queue again.");
+  }
+  if (__rqProjectReadOnly() === true) {
+    throw new Error(
+      "The project file " + app.project.file.fsName + " is read-only, so it cannot be saved for the render. " +
+      "Nothing was rendered. Ask the user to make it writable or Save As somewhere else, then call render_queue again."
+    );
+  }
+  if (app.project.dirty !== true) {
+    return { projectPath: app.project.file.fsName, saved: false, reason: "no unsaved changes" };
+  }
+  var file = app.project.file;
+  var before = __rqModified(file);
+  var threw = null;
+  app.beginSuppressDialogs();
+  try {
+    app.project.save();
+  } catch (e) {
+    threw = e;
+  } finally {
+    app.endSuppressDialogs(false);
+  }
+  var after = __rqModified(new File(file.fsName));
+  var stillDirty = app.project.dirty === true;
+  var unchanged = before !== null && after !== null && after === before;
+  if (threw || stillDirty || unchanged) {
+    throw new Error(
+      "After Effects did not save the project (" + file.fsName + ")" +
+      (threw ? ": " + threw.message : "") + ". Nothing was rendered. The usual causes are a file that is " +
+      "locked or read-only, or a project converted from an older version of After Effects, which only " +
+      "File > Save As will write. Ask the user to save it by hand, then call render_queue again."
+    );
+  }
+  return { projectPath: file.fsName, saved: true };
+});
+
+/**
+ * After a verified render, take the item out of the queue's QUEUED set so a
+ * later render_queue does not render it again (aerender rendered a copy of the
+ * file, so the live queue never learned it was done). Matched by comp AND
+ * output path, because indices shift: an item that no longer matches is left
+ * alone and reported, never guessed at.
+ */
+OPS._render_mark_done = noUndo(function (args) {
+  var rq = app.project.renderQueue;
+  var idx = args.index;
+  if (!(idx >= 1 && idx <= rq.numItems)) return { marked: false, reason: "item " + idx + " no longer exists" };
+  var s = __rqItemSummary(rq, idx, false);
+  var firstPath = s.outputs.length ? s.outputs[0].path : null;
+  if (s.compId !== args.compId || firstPath !== args.outputPath) {
+    return { marked: false, reason: "item " + idx + " now renders something else (the queue changed during the render)" };
+  }
+  rq.item(idx).render = false;
+  return { marked: true, status: __rqStatusName(rq.item(idx).status) };
 });

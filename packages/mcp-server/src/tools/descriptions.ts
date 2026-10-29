@@ -151,9 +151,9 @@ export const descriptions: Record<string, string> = {
   remove_render_item:
     "Remove one render queue item by its current `index`, checked against `compId` so a shifted index is refused instead of deleting the wrong item.",
   render_queue:
-    "Render QUEUED render queue items (all of them, or `indices`) to their output files. Returns a jobId at once; the render runs in a separate background `aerender` process, so After Effects stays responsive and nothing else waits on it. " +
-    "**It saves the project first** — aerender renders the saved file — so tell the user, and know that edits made while it runs are not in the output. Needs the project saved once by hand. " +
-    "Then call await_job (with a generous `timeoutMs` for long renders; send a progressToken for per-frame progress). The finished result lists each output file with its size, checked on disk — a render whose file is missing or older than the render is reported as a failure, never as done. cancel_job stops it by killing the process and names any incomplete file it left. One render at a time. AE's own Render Queue panel keeps showing the items as Queued afterwards.",
+    "Render render-queue items to their output files. Pass exactly one of `indices` (the items you added — the normal call) or `all:true`, which renders EVERY QUEUED item including ones the user queued by hand; use it only when the user asked for the whole queue. Returns a jobId at once; the render runs in a separate background `aerender` process from a private copy of the saved project, so After Effects stays responsive, nothing else waits on it, and edits or saves made meanwhile do not change this render. " +
+    "aerender reads the saved file, so a project with unsaved changes is refused unless you pass `saveProject:true` — tell the user it will be saved first. A clean project is never saved. Never-saved, read-only, or converted-from-an-older-version projects are refused with what to do. Existing output files are refused unless `overwrite:true`. " +
+    "Then call await_job (with a generous `timeoutMs` for long renders; send a progressToken for per-frame progress). The finished result lists each output file with its size, checked on disk — a render whose file is missing or older than the render is reported as a failure, never as done. Each rendered item is then switched off in the queue (Unqueued) so it does not render twice. cancel_job stops it by killing the process and names any incomplete file it left. One render at a time.",
 
   // ---------- house style ----------
   get_house_style:

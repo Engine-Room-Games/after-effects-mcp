@@ -27,7 +27,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject } =
   await import(dist("render", "aerender.js"));
 const { aerenderCandidates } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
@@ -170,6 +170,30 @@ await check("a fresh file and a fresh sequence are verified", () => {
   assert.equal(verified[1].files, 3);
 });
 
+await check("existing outputs are found, files and sequence frames alike", () => {
+  const taken = path.join(tmp, "taken.mov");
+  fs.writeFileSync(taken, "old");
+  const occupied = occupiedOutputs({
+    projectPath: "/p.aep",
+    appPackage: null,
+    items: [
+      { index: 1, compId: 1, compName: "a", status: "QUEUED", frames: 1, outputs: [{ index: 1, path: taken }] },
+      { index: 2, compId: 1, compName: "b", status: "QUEUED", frames: 1, outputs: [{ index: 1, path: path.join(tmp, "seq", "shot_[#####].png") }] },
+      { index: 3, compId: 1, compName: "c", status: "QUEUED", frames: 1, outputs: [{ index: 1, path: path.join(tmp, "free.mov") }] },
+    ],
+  });
+  assert.deepEqual(occupied, [taken, path.join(tmp, "seq", "shot_[#####].png")]);
+});
+await check("the snapshot sits beside the project, so relative footage resolves the same", () => {
+  const proj = path.join(tmp, "snap-src.aep");
+  fs.writeFileSync(proj, "aep");
+  const snap = snapshotProject(proj, "r_1_1");
+  assert.equal(path.dirname(snap), tmp);
+  assert.equal(fs.readFileSync(snap, "utf8"), "aep");
+  fs.rmSync(snap);
+  assert.throws(() => snapshotProject(path.join(tmp, "nope", "x.aep"), "r_1_2"), /nothing was rendered/);
+});
+
 // ---------------------------------------------------------------------------
 // The runner, against a fake aerender. POSIX only: the fake is a script with a
 // shebang, which Windows will not execute without a shell. The pure parts
@@ -190,6 +214,7 @@ console.log("PROGRESS:  10/29/2026 10:00:00 AM: Starting composition “Comp”.
 console.log("PROGRESS:  Duration: 0:00:00:04");
 if (mode === "fail") { console.log("aerender ERROR: Unable to find comp"); process.exit(3); }
 if (mode === "hang") {
+  fs.writeFileSync(process.env.FAKE_SELF, String(process.pid));
   // Stands in for the render engine aerender starts: a grandchild that keeps
   // running unless the whole group is stopped.
   const g = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { stdio: "ignore" });
@@ -201,7 +226,9 @@ if (mode === "hang") {
 }
 let i = 0;
 const t = setInterval(() => {
-  console.log("PROGRESS:  0:00:00:0" + i + " (" + (i + 1) + "): 0 Seconds");
+  // "quiet" stands in for an AE in another language: frames are rendered, but
+  // the lines are worded differently.
+  console.log(mode === "quiet" ? "FORTSCHRITT:  Bild " + (i + 1) + " fertig" : "PROGRESS:  0:00:00:0" + i + " (" + (i + 1) + "): 0 Seconds");
   i++;
   if (i === 4) {
     clearInterval(t);
@@ -214,9 +241,12 @@ const t = setInterval(() => {
 );
 fs.chmodSync(fake, 0o755);
 
+const projectFile = path.join(tmp, "show.aep");
+fs.writeFileSync(projectFile, "aep bytes");
+
 function plan(out, frames = 4) {
   return {
-    projectPath: "/proj/show.aep",
+    projectPath: projectFile,
     appPackage: null,
     items: [{ index: 2, compId: 7, compName: "Comp", status: "QUEUED", frames, outputs: [{ index: 1, path: out }] }],
   };
@@ -226,6 +256,9 @@ function env(mode, out) {
   process.env.FAKE_OUT = out;
   process.env.FAKE_ARGS = path.join(tmp, `args-${mode}.json`);
   process.env.FAKE_GRANDCHILD = path.join(tmp, `grandchild-${mode}`);
+  process.env.FAKE_SELF = path.join(tmp, `self-${mode}`);
+  fs.rmSync(process.env.FAKE_SELF, { force: true });
+  fs.rmSync(process.env.FAKE_GRANDCHILD, { force: true });
 }
 function alive(pid) {
   try {
@@ -239,7 +272,10 @@ function alive(pid) {
 if (process.platform !== "win32") {
   await check("a render reports per-frame progress and completes with the verified file", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs);
+    const hooked = [];
+    const runner = new RenderRunner(jobs, {
+      onItemRendered: async (item) => { hooked.push(item.index); return { marked: true }; },
+    });
     const out = path.join(tmp, "ok.mov");
     env("ok", out);
     const seen = [];
@@ -252,10 +288,31 @@ if (process.platform !== "win32") {
     assert.equal(st.result.rendered[0].outputs[0].path, out);
     assert.equal(st.result.rendered[0].outputs[0].bytes, "rendered movie".length);
     assert.equal(st.result.rendered[0].frames, 4);
-    assert.deepEqual(JSON.parse(fs.readFileSync(process.env.FAKE_ARGS, "utf8")), aerenderArgs("/proj/show.aep", 2));
+    // Rendered from a private copy beside the project, never the live .aep,
+    // and the copy is gone afterwards.
+    const args = JSON.parse(fs.readFileSync(process.env.FAKE_ARGS, "utf8"));
+    assert.equal(args[0], "-project");
+    assert.equal(path.dirname(args[1]), tmp);
+    assert.match(path.basename(args[1]), /^\.show\.ae-mcp-render-r_.*\.aep$/);
+    assert.deepEqual(args.slice(2), aerenderArgs("x", 2).slice(2));
+    assert.ok(!fs.existsSync(args[1]), "the snapshot must be removed when the job ends");
+    assert.deepEqual(hooked, [2]);
+    assert.deepEqual(st.result.rendered[0].unqueued, { marked: true });
     const frames = seen.filter((s) => /frame \d+ of 4/.test(s.message ?? "")).map((s) => s.progress);
     assert.deepEqual(frames, [1, 2, 3, 4]);
     assert.equal(runner.activeJobId, null);
+  });
+
+  await check("progress lines it cannot read are reported, not silently left at 0%", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs);
+    const out = path.join(tmp, "quiet.mov");
+    env("quiet", out);
+    const { jobId } = runner.start(plan(out), fake);
+    const st = await jobs.waitFor(jobId, 10_000);
+    assert.equal(st.status, "completed");
+    assert.match(st.result.rendered[0].progressWarning, /no frame line this server recognises/);
+    assert.match(st.result.rendered[0].progressWarning, /FORTSCHRITT/);
   });
 
   await check("exit 0 with no file written is a failure, not a render", async () => {
@@ -307,6 +364,29 @@ if (process.platform !== "win32") {
     assert.ok(!alive(grandchild), "cancel must stop the render engine too, not only aerender");
     await sleep(50);
     assert.equal(runner.activeJobId, null);
+  });
+
+  await check("a cancel that could not see the exit still settles the job when the exit comes", async () => {
+    const jobs = new JobManager();
+    // A stop that does nothing: the process outlives the cancel, as an engine
+    // started outside aerender's group would.
+    const runner = new RenderRunner(jobs, { graceMs: 100, stop: async () => {} });
+    const out = path.join(tmp, "stubborn.mov");
+    env("hang", out);
+    const { jobId } = runner.start(plan(out, 100), fake);
+    for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
+    const pid = Number(fs.readFileSync(process.env.FAKE_SELF, "utf8"));
+    const grandchild = Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8"));
+    const report = await runner.cancel(jobId);
+    assert.equal(report.stopped, false);
+    assert.equal(jobs.get(jobId).status, "running");
+    const waiting = jobs.waitFor(jobId, 5000);
+    process.kill(-pid, "SIGKILL");
+    const st = await waiting;
+    assert.equal(st.status, "cancelled");
+    assert.equal(st.result.stopped, true);
+    assert.match(st.result.note, /after cancel_job had reported it still running/);
+    try { process.kill(grandchild, "SIGKILL"); } catch {}
   });
 
   await check("cancelling a finished render says there was nothing to cancel", async () => {
@@ -380,8 +460,11 @@ function makeAe(opts = {}) {
     constructor(p) { this.fsName = p; }
     get exists() { return dirs.has(this.fsName); }
   }
+  let mtime = 1000;
   class MockFile {
     constructor(p) { this.fsName = String(p); }
+    get readonly() { return opts.readOnly === true && this.fsName === "/proj/show.aep"; }
+    get modified() { return { getTime: () => mtime }; }
     get exists() { return files.has(this.fsName); }
     get parent() { return new MockFolder(this.fsName.substring(0, this.fsName.lastIndexOf("/")) || "/"); }
   }
@@ -419,8 +502,13 @@ function makeAe(opts = {}) {
   }
   const project = {
     file: opts.unsaved ? null : new MockFile("/proj/show.aep"),
-    dirty: true,
-    save() { log.push("save"); },
+    dirty: opts.dirty !== false,
+    save() {
+      log.push("save");
+      if (opts.saveNoop) return; // a converted or locked project, under suppressed dialogs
+      mtime += 1000;
+      this.dirty = false;
+    },
     itemByID: (id) => (id === 7 ? comp : null),
     renderQueue: {
       get numItems() { return items.length; },
@@ -436,7 +524,12 @@ function makeAe(opts = {}) {
     Folder: Object.assign(MockFolder, { appPackage: new MockFolder("/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app") }),
     RQItemStatus,
     GetSettingsFormat: { STRING: 1 },
-    app: { project, version: "26.3" },
+    app: {
+      project,
+      version: "26.3",
+      beginSuppressDialogs() { log.push("suppress"); },
+      endSuppressDialogs() { log.push("unsuppress"); },
+    },
   };
   vm.createContext(ctx);
   vm.runInContext(source, ctx, { filename: "render.jsx" });
@@ -499,7 +592,7 @@ await check("_render_prepare refuses a DONE item and says to add a fresh one", (
 });
 await check("_render_prepare with no indices picks every QUEUED item, and changes nothing", () => {
   const { ctx, log } = makeAe({ existing: ["QUEUED", "DONE", "QUEUED"] });
-  const plan = ctx.OPS._render_prepare({});
+  const plan = ctx.OPS._render_prepare({ all: true });
   assert.deepEqual(Array.from(plan.items, (i) => i.index), [1, 3]);
   assert.equal(plan.projectPath, "/proj/show.aep");
   assert.match(plan.appPackage, /\.app$/);
@@ -507,7 +600,37 @@ await check("_render_prepare with no indices picks every QUEUED item, and change
 });
 await check("_render_prepare with nothing queued refuses", () => {
   const { ctx } = makeAe({ existing: ["DONE"] });
-  assert.match(throwsMsg(() => ctx.OPS._render_prepare({})), /Nothing in the render queue is QUEUED/);
+  assert.match(throwsMsg(() => ctx.OPS._render_prepare({ all: true })), /Nothing in the render queue is QUEUED/);
+});
+await check("_render_prepare never falls back to rendering items nobody named", () => {
+  const { ctx } = makeAe({ existing: ["QUEUED"] });
+  assert.match(throwsMsg(() => ctx.OPS._render_prepare({})), /indices.*all:true/);
+});
+await check("_render_save skips a clean project and suppresses dialogs for a dirty one", () => {
+  const clean = makeAe({ dirty: false });
+  assert.equal(clean.ctx.OPS._render_save({}).saved, false);
+  assert.deepEqual(clean.log, []);
+  const dirty = makeAe({});
+  assert.equal(dirty.ctx.OPS._render_save({}).saved, true);
+  assert.deepEqual(dirty.log, ["suppress", "save", "unsuppress"]);
+});
+await check("_render_save refuses a read-only project before trying", () => {
+  const { ctx, log } = makeAe({ readOnly: true });
+  assert.match(throwsMsg(() => ctx.OPS._render_save({})), /read-only/);
+  assert.deepEqual(log, []);
+});
+await check("a save that silently did not happen is reported, not trusted", () => {
+  const { ctx, log } = makeAe({ saveNoop: true });
+  assert.match(throwsMsg(() => ctx.OPS._render_save({})), /did not save the project.*Save As/);
+  assert.deepEqual(log, ["suppress", "save", "unsuppress"]);
+});
+await check("_render_mark_done switches off only the item that still matches", () => {
+  const { ctx, items } = makeAe({ existing: ["QUEUED"] });
+  assert.equal(ctx.OPS._render_mark_done({ index: 1, compId: 7, outputPath: "/renders/other.mov" }).marked, false);
+  assert.equal(items[0].render, true);
+  assert.equal(ctx.OPS._render_mark_done({ index: 1, compId: 7, outputPath: "/renders/existing.mov" }).marked, true);
+  assert.equal(items[0].render, false);
+  assert.equal(ctx.OPS._render_mark_done({ index: 5, compId: 7, outputPath: "x" }).marked, false);
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

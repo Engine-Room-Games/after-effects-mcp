@@ -10,8 +10,11 @@ Rendering is two steps: **queue**, then **render**.
 
 1. `add_to_render_queue({compId, outputPath, outputModuleTemplate?, renderSettingsTemplate?})`
    puts one item in After Effects' Render Queue. It renders nothing.
-2. `render_queue({indices?})` renders every QUEUED item (or the ones named)
-   and answers at once with a `jobId`. Then `await_job({jobId, timeoutMs})`.
+2. `render_queue({indices: [the index add_to_render_queue returned]})` renders
+   those items and answers at once with a `jobId`. Then
+   `await_job({jobId, timeoutMs})`. `all: true` instead of `indices` renders
+   every QUEUED item — including ones the user queued by hand for their own
+   reasons. Use it only when the user asked for the whole queue.
 
 ## Formats are templates, chosen by name
 
@@ -34,19 +37,24 @@ ProRes 4444 with alpha is an **output module template** that already says so.
 
 ## What render_queue does, and what to tell the user
 
-- **It saves the project.** The render runs in a separate background copy of
-  After Effects (`aerender`) that reads the saved `.aep`, so it saves first.
-  Say so before calling it. A project that has never been saved is refused —
-  the user saves it once by hand.
-- **Edits made while it renders are not in the render.** After Effects stays
-  fully usable and your other tools keep working; the render cannot see them.
+- **It renders the saved file.** The render runs in a separate background copy
+  of After Effects (`aerender`) that reads the `.aep` on disk. With unsaved
+  changes it refuses unless you pass `saveProject: true` — tell the user the
+  project will be saved before you pass it. A clean project is never saved. A
+  project never saved, read-only, or converted from an older After Effects
+  (which only *Save As* will write) is refused; the user fixes that by hand.
+- **Existing files are refused** unless `overwrite: true` — that includes an
+  item the user queued by hand that points at last week's render.
+- **Edits made while it renders are not in the render.** The render reads a
+  private copy taken at its start, so neither your later edits nor a save by
+  the user mid-render change it. After Effects stays fully usable.
 - **It is slow to start.** The background copy takes several seconds to launch,
   and progress sits at 0 until the first frame.
 - **One render at a time.** A second `render_queue` is refused while one runs.
-- **The Render Queue panel will not change.** The items still read *Queued*
-  afterwards, because they were rendered from the file, not by the panel.
-  Calling `render_queue` again renders them again. `remove_render_item` takes
-  them out.
+- **Rendered items are switched off.** After a verified render the item's
+  Render box is unticked (status *Unqueued*), so the next `render_queue` does
+  not render it again. `unqueued.marked: false` on an item means the queue
+  changed during the render and that item was left alone — say so.
 
 ## Waiting, and the result
 
