@@ -547,7 +547,7 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
   if (!aeRunning) {
     // Installing before AE is open is the cheaper order: the panel is simply
     // there when it launches, with no restart to ask for.
-    steps.push(needsInstall ? "Open After Effects 2026 — the panel loads with it." : "Open After Effects 2026.");
+    steps.push(needsInstall ? "Open After Effects — the panel loads with it." : "Open After Effects.");
   } else if (needsInstall || by("panelRunningCurrent")?.ok === false) {
     steps.push(brokenInstall ? "Reopen After Effects." : "Quit and reopen After Effects so it picks up the panel.");
   }

@@ -11,7 +11,7 @@ Describe the animation you want — a lower third, a logo reveal, an animated co
 [![npm](https://img.shields.io/npm/v/@engine-room/after-effects-mcp?logo=npm&color=cb3837)](https://www.npmjs.com/package/@engine-room/after-effects-mcp)
 [![CI](https://github.com/Engine-Room-Games/after-effects-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Engine-Room-Games/after-effects-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/Engine-Room-Games/after-effects-mcp/blob/main/LICENSE)
-[![After Effects 2026](https://img.shields.io/badge/After%20Effects-2026-9999ff?logo=adobeaftereffects&logoColor=white)](https://www.adobe.com/products/aftereffects.html)
+[![After Effects 2026 tested](https://img.shields.io/badge/After%20Effects-tested%20on%202026-9999ff?logo=adobeaftereffects&logoColor=white)](https://www.adobe.com/products/aftereffects.html)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 [![MCP](https://img.shields.io/badge/MCP-server-000000)](https://modelcontextprotocol.io)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/migus88)
@@ -65,7 +65,7 @@ Six scenes from one quarterly-report sequence, each in a different visual style.
 
 Three steps, and you only do the first two once.
 
-**You'll need:** After Effects 2026, on macOS or Windows.
+**You'll need:** After Effects on macOS or Windows. It has been tested on After Effects 2026. The scripting it relies on has been in After Effects since 2022, and the panel is set to accept 2022 or later, but those older versions haven't been tested yet.
 
 ### 1️⃣ Install
 
@@ -160,6 +160,8 @@ This repository doubles as a plugin marketplace:
 > Set up After Effects.
 
 It installs a small panel into After Effects, which is how the tools talk to it. Open After Effects when it's finished and you're ready to go. 🎉
+
+You never have to open the panel yourself: it starts on its own whenever After Effects launches. One thing to know: while a dialog box is open in After Effects, nothing else can happen there, so the tools wait and eventually report that the panel did not answer in time. Close the dialog and the work finishes on its own. Don't ask for it again, or it gets done twice, and there's no need to restart.
 
 <sub>Prefer to leave After Effects open? That works too — you'll just be asked to restart it at the end.</sub>
 
@@ -275,7 +277,7 @@ Start here: **ask your assistant to check the After Effects setup.** It reports 
 | Symptom | Cause and fix |
 |---|---|
 | "Cannot reach the After Effects panel" | After Effects isn't running, or the panel isn't installed. Ask it to set up After Effects; if AE was closed, just open it afterwards. |
-| "The panel did not answer within 120 seconds" | Not the same thing. After Effects is busy — usually a long script, or a dialog waiting for a click behind another window. Wait a minute and check again before restarting anything; it normally comes back on its own. |
+| "The panel did not answer within …s" | Not the same thing. After Effects is busy — usually a long script, or a dialog waiting for a click behind another window. Close any dialog, wait a minute and check again before restarting anything; the work normally finishes on its own, so don't ask for it again. |
 | "The After Effects panel is out of date" | The tools were updated but the panel wasn't. Ask it to update the panel, then restart AE. |
 | "…updated on disk, but After Effects is still running the previous version" | The update landed; AE just hasn't restarted. Quit and reopen it. Updating again won't help. |
 | Panel never loads, but setup looks correct | On macOS, reboot once. Some builds cache the Adobe setting until a restart. |
@@ -325,7 +327,7 @@ macOS is the more exercised of the two; [issue reports](https://github.com/Engin
 - The After Effects panel is unsigned, so loading it requires Adobe's `PlayerDebugMode`, which the setup step enables. This is Adobe's documented path for unsigned extensions.
 - `saveFrameToPng` is community-known rather than officially documented. It works, but alpha edges can be imperfect on some comps.
 - A long synchronous loop in `run_jsx` will freeze the After Effects UI. Use `run_batch` for bulk work.
-- Not covered: the render queue, footage import and replacement, and application preferences.
+- Not covered: the render queue, replacing or relinking footage (importing it is covered), and application preferences.
 
 </details>
 
@@ -353,7 +355,7 @@ npm run doctor
 | `make release` | Bump the patch version, build and sign every artifact, tag, and publish |
 | `make release 1.1.0` | The same with an explicit version |
 
-Adding a tool takes three edits: a zod schema in `packages/shared/src/schemas.ts`, a handler in the matching `packages/jsx/*.jsx` module, and a description in `packages/mcp-server/src/tools/descriptions.ts`. Registration is automatic.
+Adding a tool takes four edits: a zod schema in `packages/shared/src/schemas.ts`, its read/write classification in the `OpMutation` table in the same file, a handler in the matching `packages/jsx/*.jsx` module, and a description in `packages/mcp-server/src/tools/descriptions.ts`. Registration is automatic.
 
 Guidance prose is written once in `packages/mcp-server/src/{guides,prompts}/*.md` and generated into the MCP resources, the `ae_guide` tool, the server's `instructions`, and the Claude Code skills and commands. Never edit the generated copies.
 

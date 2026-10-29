@@ -91,8 +91,11 @@ array does not have 1 elements"` — not `Keyframe bug`.
 <what got past it>
 
 **Environment**
-after-effects-mcp <serverVersion> · <platform> · After Effects 2026
+after-effects-mcp <serverVersion> · <platform> · After Effects <version>
 ```
+
+The After Effects version is not something the tools report. If you do not know
+it, ask the user — it is under Help > About After Effects.
 
 Include the failing call and error text verbatim — that is the part that makes it
 fixable. Leave out the user's own content: comp and layer names from their

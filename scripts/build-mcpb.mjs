@@ -114,7 +114,7 @@ const manifest = {
   long_description:
     "Describe the animation you want — a lower third, a logo reveal, an animated counter — and it gets built " +
     "in your open After Effects project: layers, keyframes, easing, effects, expressions and text, all editable " +
-    "afterwards like anything you would make by hand. Requires After Effects 2026. A small panel is installed " +
+    "afterwards like anything you would make by hand. Requires After Effects (tested on 2026). A small panel is installed " +
     "into After Effects the first time you use it; just ask it to set up After Effects.",
   author: { name: "Engine Room", url: "https://github.com/Engine-Room-Games" },
   homepage: manifestJson.homepage,
