@@ -321,6 +321,12 @@ jobs:
           node tests/unit/write-queue.mjs
           node tests/unit/write-queue-server.mjs
 
+      # Read-only mode and the run_jsx switch (#135): no write is listed or
+      # callable in read-only mode, every server op has a deliberate decision,
+      # and a run_jsx step cannot ride in through run_batch.
+      - name: The tool switches offer and refuse what they say
+        run: node tests/unit/tool-policy.mjs
+
       # Where a long batch's progress goes. A notification sent after its
       # request's response is on the wire and seen by no client — that is how
       # #82 shipped, verified by reading the stream. This drives the real SDK

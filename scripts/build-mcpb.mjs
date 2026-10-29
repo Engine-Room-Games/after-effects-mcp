@@ -114,7 +114,7 @@ const manifest = {
   long_description:
     "Describe the animation you want — a lower third, a logo reveal, an animated counter — and it gets built " +
     "in your open After Effects project: layers, keyframes, easing, effects, expressions and text, all editable " +
-    "afterwards like anything you would make by hand. Requires After Effects 2026. A small panel is installed " +
+    "afterwards like anything you would make by hand. Requires After Effects (tested on 2026). A small panel is installed " +
     "into After Effects the first time you use it; just ask it to set up After Effects.",
   author: { name: "Engine Room", url: "https://github.com/Engine-Room-Games" },
   homepage: manifestJson.homepage,
@@ -128,8 +128,39 @@ const manifest = {
     mcp_config: {
       command: "node",
       args: ["${__dirname}/server/index.js"],
+      // The two switches from issue #135, as checkboxes in Claude Desktop's
+      // extension settings. A boolean expands to "true"/"false", which
+      // `parseSwitch` (tools/policy.ts) reads; an unexpanded `${…}` is read as
+      // off, so a client that did not substitute cannot lock anyone out.
+      env: {
+        AE_MCP_READ_ONLY: "${user_config.read_only}",
+        AE_MCP_DISABLE_RUN_JSX: "${user_config.disable_run_jsx}",
+      },
     },
   },
+  user_config: {
+    read_only: {
+      type: "boolean",
+      title: "Read-only mode",
+      description:
+        "Only offer the tools that look at your project — listing comps and layers, reading keyframes, " +
+        "screenshots. Claude can inspect and explain your work but cannot change it.",
+      default: false,
+      required: false,
+    },
+    disable_run_jsx: {
+      type: "boolean",
+      title: "Turn off running scripts (run_jsx)",
+      description:
+        "Remove the tool that runs scripts Claude writes inside After Effects. Everything else keeps working; " +
+        "a few jobs no other tool covers, like the render queue, become impossible.",
+      default: false,
+      required: false,
+    },
+  },
+  // Static, so it lists every tool whatever `user_config` says: the manifest is
+  // written at build time and the switches only reach the server's
+  // environment. The running server's tools/list is what follows them.
   tools: Object.keys(OpSchemas).map((name) => ({
     name,
     description: (descriptions[name] ?? `AE op: ${name}`).split(". ")[0] + ".",
