@@ -156,7 +156,7 @@ function isFile(p: string): boolean {
  *   with a `moov` index, and its duration must match the item's span within
  *   one frame when the span is known.
  * - **No frame line parsed** — an AE in another language words them
- *   differently (recipe 53), or aerender's output never arrived: the file has
+ *   differently (recipe 63), or aerender's output never arrived: the file has
  *   to stand on its own. A sequence needs at least as many fresh frame files
  *   as the span has frames; a QuickTime/MP4 needs `moov` AND a duration within
  *   one frame of the span. Any other format (AVI, MXF, WAV …) cannot be judged
@@ -215,13 +215,34 @@ export function renderEvidenceProblems(
     if (noLines) {
       problems.push(
         `aerender printed no frame line this server recognises (an After Effects in a language other than ` +
-          `English words them differently — recipe 53), and ${v.path} is a format whose contents this server ` +
+          `English words them differently — recipe 63), and ${v.path} is a format whose contents this server ` +
           "cannot check, so the render cannot be verified. QuickTime/MP4 and image-sequence output can be checked " +
           "without those lines."
       );
     }
   }
   return problems;
+}
+
+/**
+ * How many frames the verified output proves, or null when no output says.
+ * The largest across an item's outputs — each output module renders the same
+ * frames. Only called once `renderEvidenceProblems` has passed the outputs.
+ */
+export function verifiedFrameCount(item: RenderItemPlan, verified: VerifiedOutput[]): number | null {
+  const span = item.timeSpanDuration && item.timeSpanDuration > 0 ? item.timeSpanDuration : null;
+  const fps = span && item.frames > 0 ? item.frames / span : null;
+  let best: number | null = null;
+  for (const v of verified) {
+    let n: number | null = null;
+    if (v.files !== undefined) n = v.files;
+    else if (fps && /\.(?:mov|mp4|m4v|3gp)$/i.test(v.path)) {
+      const d = isoMediaInfo(v.path).durationSec;
+      if (d !== undefined) n = Math.round(d * fps);
+    }
+    if (n !== null && (best === null || n > best)) best = n;
+  }
+  return best;
 }
 
 /** Back-compat: just the structural problem, or null. */
@@ -404,7 +425,13 @@ export interface RenderedItem {
    * render again, and why not when it was not. Absent when no hook was given.
    */
   unqueued?: { marked: boolean; reason?: string };
-  /** Set when the frames aerender reported differ from the comp span's count. */
+  /**
+   * Frames the output on disk proves: fresh frame files for a sequence, the
+   * movie's duration × the span's frame rate for QuickTime/MP4. Absent for a
+   * format that cannot be read. `frames` is never lower than this.
+   */
+  framesVerified?: number;
+  /** Set when the frame count differs from the comp span's, or could only be read from the file. */
   framesNote?: string;
 }
 
@@ -854,11 +881,17 @@ export class RenderRunner {
           );
           return;
         }
+        // The count reported is never lower than what the file proves: the
+        // live run (26.5) read 26–29 of 30 progress lines on 6 of 14 good
+        // renders — late or coalesced lines — while the files were complete.
+        const onDisk = verifiedFrameCount(item, verified);
+        const frames = Math.max(r.itemFrames, onDisk ?? 0);
         const done: RenderedItem = {
           index: item.index,
           compName: item.compName,
           outputs: verified,
-          frames: r.itemFrames,
+          frames,
+          ...(onDisk !== null ? { framesVerified: onDisk } : {}),
           elapsedMs: Date.now() - itemStart,
         };
         if (r.itemFrames === 0) {
@@ -866,9 +899,9 @@ export class RenderRunner {
             "aerender printed no frame line this server can read (an After Effects in another language words " +
             "them differently), so this item was verified from the file alone: its frame files, or its movie " +
             "index and duration against the render span.";
-        } else if (item.frames > 0 && r.itemFrames !== item.frames) {
+        } else if (item.frames > 0 && frames !== item.frames) {
           done.framesNote =
-            `aerender reported ${r.itemFrames} frames where the comp's span at its own frame rate is ${item.frames} — ` +
+            `${frames} frames where the comp's span at its own frame rate is ${item.frames} — ` +
             "expected when the render settings override the frame rate or skip frames; otherwise worth a look.";
         }
         r.rendered.push(done);
@@ -1109,7 +1142,7 @@ export class RenderRunner {
    * stopped, and a cancel that reports success while the engine keeps writing
    * frames is the lie this exists to avoid. On Windows, `taskkill /T /F` takes
    * aerender's tree and the same command-line lookup covers an engine that is
-   * not in it — UNVERIFIED there (recipe 50).
+   * not in it — UNVERIFIED there (recipe 60).
    */
   async cancel(jobId: string): Promise<CancelReport | null> {
     const r = this.current;

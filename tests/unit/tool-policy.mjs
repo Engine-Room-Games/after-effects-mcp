@@ -237,9 +237,9 @@ const clients = {
 };
 const listed = async (client) => (await client.listTools()).tools.map((t) => t.name);
 
-await check("tools/list: default lists all 80 ops", async () => {
+await check("tools/list: default lists all 84 ops", async () => {
   assert.deepEqual(await listed(clients.default), ALL);
-  assert.equal(ALL.length, 80, "the op count moved — update this and the README's tool count together");
+  assert.equal(ALL.length, 84, "the op count moved — update this and the README's tool count together");
 });
 
 await check("tools/list: read-only lists exactly enabledOps, and no write", async () => {
@@ -249,7 +249,19 @@ await check("tools/list: read-only lists exactly enabledOps, and no write", asyn
   assert.equal(names.length, ALL.filter((n) => OpMutation[n] === "read").length + 3);
 });
 
-await check("tools/list: run_jsx off lists 79, without run_jsx", async () => {
+// Checkpoints (#136): taking, reverting and deleting one changes the project,
+// so read-only mode must drop them; listing them only reads item comments.
+await check("read-only keeps list_checkpoints and drops the three checkpoint writes", async () => {
+  const names = await listed(clients.readOnly);
+  assert.ok(names.includes("list_checkpoints"));
+  for (const op of ["checkpoint_comp", "revert_comp", "delete_checkpoints"]) {
+    assert.equal(OpMutation[op], "write", op);
+    assert.ok(!names.includes(op), `${op} is offered in read-only mode`);
+    assert.ok(disabledOps(READ_ONLY).has(op), `${op} is not refused in read-only mode`);
+  }
+});
+
+await check("tools/list: run_jsx off lists 83, without run_jsx", async () => {
   const names = await listed(clients.noJsx);
   assert.equal(names.length, ALL.length - 1);
   assert.ok(!names.includes("run_jsx"));

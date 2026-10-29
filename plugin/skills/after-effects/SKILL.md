@@ -143,6 +143,17 @@ failure the `diff: true` result rides on the error, which is the cheapest way �
 and never re-send the same call to see whether it fails again: the half that
 worked is applied a second time.
 
+**Before a risky or many-call change, take a checkpoint.** Undo is not a way
+back you can count on across calls. `checkpoint_comp({compId, label})` saves a
+copy of the comp; `revert_comp({checkpointId})` puts it back **into the same
+comp** — the comp id does not change, but every layer id does, so switch to
+the ids in `layerIdMap` and drop any layer id you read since. Read `verified`:
+`false` means it is not a clean revert, and the `mismatches` say where; `true`
+covers structure, timing, switches, parenting, mattes and layer picks, not
+keyframe or effect values (`checked` lists it). A
+checkpoint is shallow — edits inside a nested precomp are not undone. Each one
+is a full comp in the user's project: `delete_checkpoints` when you are done.
+
 ## Screenshots are a diagnostic, not a feedback loop
 
 `screenshot_frame` and `screenshot_layer` are **one-off checks**. Do not

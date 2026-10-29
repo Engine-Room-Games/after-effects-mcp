@@ -153,6 +153,15 @@ that does it.
   was not at identity, it renders offset in the destination. Check the first
   frame against the source; fix it with an intermediate null carrying the
   inverse offset, re-parenting while the new parent is at identity.
+  Copied into a comp that already holds a layer of the parent's *name*, it is
+  worse (measured, AE 26.5): the copy is parented to that namesake **and** its
+  Position keys are converted to comp space, so the parent's transform is
+  applied twice. Unparent the source with `setParentWithJump(null)` before the
+  copy, copy, re-parent it with `setParentWithJump(parent)`, and parent the
+  copy the same way — the jump form never touches the values.
+- **`copyToComp` renames on a name collision.** A layer with an explicit name
+  arrives as `<name> 2` when the destination already holds that name; one named
+  after its source keeps its name. Set `name` back afterwards if it matters.
 - **Set the parent first, the transform second.** Raw `layer.parent = x` does
   not reliably preserve where a layer sits two levels deep, so after scripted
   parenting audit scale and rotation as well as position. *The tool already

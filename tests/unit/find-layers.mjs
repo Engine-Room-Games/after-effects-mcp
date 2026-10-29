@@ -37,6 +37,7 @@ const read = (f) => fs.readFileSync(path.join(jsxDir, f), "utf8");
 const sources = [
   ["comps.jsx", read("comps.jsx")],
   ["layers.jsx", read("layers.jsx")],
+  ["checkpoint.jsx", read("checkpoint.jsx")],
   ["explore.jsx", read("explore.jsx")],
 ];
 
@@ -60,7 +61,7 @@ const same = (actual, expected, msg) => assert.deepEqual(plain(actual), plain(ex
 // The mock project: classes live in the VM realm so instanceof works there
 // ---------------------------------------------------------------------------
 
-function loadOps() {
+function loadOps(extra = "") {
   const ctx = { OPS: {}, noUndo: (fn) => fn, Math, isFinite, Error, RegExp, String };
   vm.createContext(ctx);
   vm.runInContext(
@@ -115,17 +116,21 @@ function loadOps() {
 
     var FOLDER = { id: 300, name: "Assets" };
 
+    var ITEMS = [INTRO, FOLDER, OUTRO];
     var app = { project: {
-      numItems: 3,
-      item: function (i) { return [INTRO, FOLDER, OUTRO][i - 1]; },
-      itemByID: function (id) { return id === 100 ? INTRO : (id === 200 ? OUTRO : null); }
+      get numItems() { return ITEMS.length; },
+      item: function (i) { return ITEMS[i - 1]; },
+      itemByID: function (id) {
+        for (var i = 0; i < ITEMS.length; i++) if (ITEMS[i].id === id) return ITEMS[i];
+        return null;
+      }
     } };
     function getCompById(id) {
       var it = app.project.itemByID(id);
       if (!it) throw new Error("No comp with id " + id);
       return it;
     }
-    `,
+    ` + extra,
     ctx,
     { filename: "mock-project.jsx" },
   );
@@ -325,6 +330,37 @@ check("the tool description names include, the sections and the bounded default"
   assert.match(d, /unlike list_layers/);
   assert.match(d, /included/);
   for (const name of LAYER_SUMMARY_SECTIONS) assert.ok(d.includes(name), `tool description omits ${name}`);
+});
+
+// ---------------------------------------------------------------------------
+// Checkpoints (issue #136) are copies of real comps: a project-wide search
+// skips them and says how many it skipped
+// ---------------------------------------------------------------------------
+
+const WITH_CHECKPOINT = `
+  var CP = mkComp(400, "Intro [checkpoint #1]", [mkLayer("text", 41, "Hero Title", [])]);
+  CP.comment = 'ae-mcp-checkpoint:v1 {"compId":100,"compName":"Intro","label":"#1","seq":1,"layerIds":[11]}';
+  ITEMS.push(CP);
+`;
+
+check("a project-wide search skips checkpoint comps and counts them", () => {
+  const ops = loadOps(WITH_CHECKPOINT);
+  const res = ops.find_layers({ namePattern: "Hero Title" });
+  assert.equal(res.count, 1, "the checkpoint's copy of Hero Title must not be a match");
+  assert.equal(res.matches[0].compId, 100);
+  assert.equal(res.compsSearched, 2);
+  assert.equal(res.checkpointsSkipped, 1, "the skip is counted, never silent");
+});
+
+check("a checkpoint can still be searched by naming it", () => {
+  const ops = loadOps(WITH_CHECKPOINT);
+  const res = ops.find_layers({ compId: 400 });
+  assert.equal(res.count, 1);
+  assert.equal(res.checkpointsSkipped, undefined);
+});
+
+check("with no checkpoints the field is absent", () => {
+  assert.equal(loadOps().find_layers({}).checkpointsSkipped, undefined);
 });
 
 console.log(`find-layers: ${passed} checks passed`);

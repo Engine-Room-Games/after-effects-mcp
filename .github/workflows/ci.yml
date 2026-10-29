@@ -260,6 +260,7 @@ jobs:
         run: |
           node tests/unit/comp-snapshot.mjs
           node tests/unit/duplicate-comp.mjs
+          node tests/unit/comp-checkpoint.mjs
           node tests/unit/audio-cues.mjs
           node tests/unit/shape-spawn.mjs
           node tests/unit/reorder-layer.mjs

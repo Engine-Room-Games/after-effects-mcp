@@ -368,6 +368,12 @@ function writeMovie(p) {
   const dur = Number(process.env.FAKE_DUR || 4 / 30);
   fs.writeFileSync(p, Buffer.concat([box("ftyp", Buffer.from("qt  ")), box("mdat", Buffer.alloc(64)), box("moov", mvhd(dur))]));
 }
+if (mode === "shortlines") {
+  console.log("PROGRESS:  0:00:00:00 (1): 0 Seconds");
+  console.log("PROGRESS:  0:00:00:01 (2): 0 Seconds");
+  writeMovie(out);
+  process.exit(0);
+}
 if (mode === "silent") {
   // Exit 0, not one line of output, and the measured corrupt file: media, no index.
   const pre = Buffer.alloc(4096);
@@ -562,7 +568,7 @@ if (process.platform !== "win32") {
     const { jobId } = runner.start(plan(out), fake);
     const st = await jobs.waitFor(jobId, 10_000);
     assert.equal(st.status, "completed");
-    assert.equal(st.result.rendered[0].frames, 0);
+    assert.equal(st.result.rendered[0].frames, 4, "counted from the movie, since no line was readable");
     assert.match(st.result.rendered[0].framesNote, /verified from the file/);
   });
 
@@ -656,6 +662,21 @@ if (process.platform !== "win32") {
       jobs.waitFor(jobId, 10_000),
       (e) => /missing footage/.test(e.message) && /NOT reported as rendered/.test(e.message) && /File Not Found/.test(e.message)
     );
+  });
+
+  await check("the reported frame count is never lower than the file proves", async () => {
+    // Progress lines short of the truth (late or coalesced, as measured on
+    // 26.5): two lines read for a movie that holds all four frames.
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const out = path.join(tmp, "short.mov");
+    env("shortlines", out);
+    const { jobId } = runner.start(plan(out), fake);
+    const st = await jobs.waitFor(jobId, 10_000);
+    assert.equal(st.status, "completed");
+    assert.equal(st.result.rendered[0].frames, 4);
+    assert.equal(st.result.rendered[0].framesVerified, 4);
+    assert.equal(st.result.rendered[0].framesNote, undefined);
   });
 
   await check("frames printed just before exit are all counted", async () => {
