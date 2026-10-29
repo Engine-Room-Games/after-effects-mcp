@@ -397,7 +397,7 @@ function __cpCopyLayer(src, target) {
  * that holds a layer of its parent's name leaves the copy parented there with
  * its Position keys converted to comp space — the transform applied twice, a
  * visible jump that no fingerprint sees. Detaching the parent first with
- * setParentWithJump() leaves the layer's own values untouched (they are only
+ * setParentWithJump(null) leaves the layer's own values untouched (they are only
  * read in a different space), so the copy carries exactly the checkpoint's
  * local values, and the restored layer is re-parented the same way, also
  * without compensation. The checkpoint's parent is put back in every case;
@@ -408,7 +408,7 @@ function __cpCopyDetached(src, target) {
   if (!parent) return __cpCopyLayer(src, target);
   var wasLocked = !!src.locked;
   if (wasLocked) src.locked = false;
-  src.setParentWithJump();
+  src.setParentWithJump(null);
   var split = false;
   var failure = null;
   try {
@@ -797,7 +797,7 @@ OPS.revert_comp = function (args) {
       // checkpoint had, and plain `parent =` would compensate them away.
       if (curParentId !== wantParentId) {
         if (wantParent) dst.setParentWithJump(wantParent);
-        else dst.setParentWithJump();
+        else dst.setParentWithJump(null);
       }
     }
   } catch (e) {

@@ -156,7 +156,7 @@ that does it.
   Copied into a comp that already holds a layer of the parent's *name*, it is
   worse (measured, AE 26.5): the copy is parented to that namesake **and** its
   Position keys are converted to comp space, so the parent's transform is
-  applied twice. Unparent the source with `setParentWithJump()` before the
+  applied twice. Unparent the source with `setParentWithJump(null)` before the
   copy, copy, re-parent it with `setParentWithJump(parent)`, and parent the
   copy the same way — the jump form never touches the values.
 - **`copyToComp` renames on a name collision.** A layer with an explicit name

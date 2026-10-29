@@ -183,6 +183,8 @@ function mkLayer(comp, name, opts) {
     }
   };
   l.setParentWithJump = function (p) {
+    // Measured on 26.5: the argument is required; unparenting is (null).
+    if (arguments.length === 0) throw new Error("After Effects error: Function setParentWithJump requires 1 parameter.");
     if (l.locked) throw new Error("layer is locked");
     l.parent = p || null;
     l.jumped = true;

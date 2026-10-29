@@ -304,7 +304,7 @@ How the restore is ordered, and why:
   name parents the copy to that namesake and converts its Position keys to comp
   space — the transform applied twice, a visible jump that no fingerprint
   sees, because it does not compare keyframe values. So each parented
-  checkpoint layer is unparented with `setParentWithJump()` (its own values
+  checkpoint layer is unparented with `setParentWithJump(null)` (its own values
   untouched), copied, and re-parented the same way, always — a checkpoint left
   unparented would be a damaged restore point, so that failure is an error.
   The restored layer is then parented with `setParentWithJump` too: plain
