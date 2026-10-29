@@ -215,8 +215,9 @@ export function createServer(opts: CreateServerOptions = {}) {
     if (isTerminal(st.status)) {
       return fail(
         name,
-        `Job ${jobId} had already ${st.status === "completed" ? "completed" : st.status === "failed" ? "failed" : "been cancelled"} ` +
-          `before this cancel_job; nothing was cancelled now. await_job({jobId: "${jobId}"}) returns its result.`
+        `Job ${jobId} is already over — it had ${st.status === "completed" ? "completed" : st.status === "failed" ? "failed" : "been cancelled"} ` +
+          "before this cancel_job, so nothing is running under this id and nothing was cancelled now. " +
+          `await_job({jobId: "${jobId}"}) returns its result.`
       );
     }
     let answer: { known: boolean; error?: string };
@@ -251,8 +252,14 @@ export function createServer(opts: CreateServerOptions = {}) {
         jobId,
         status,
         stopped: true,
-        opsRun: Array.isArray(r.results) ? r.results.length : undefined,
-        errorCount: Array.isArray(r.errors) ? r.errors.length : undefined,
+        // A non-transactional batch records a failed op in `errors` and not in
+        // `results`, so the ops that ran are the two together.
+        opsRun:
+          Array.isArray(r.results) || Array.isArray(r.errors)
+            ? (r.results?.length ?? 0) + (r.errors?.length ?? 0)
+            : undefined,
+        opsSucceeded: Array.isArray(r.results) ? r.results.length : undefined,
+        opsFailed: Array.isArray(r.errors) ? r.errors.length : undefined,
         total: r.total ?? after?.total,
         undoSteps: r.undoSteps,
         note:

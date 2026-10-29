@@ -87,7 +87,9 @@ export class JobManager {
     if (s) {
       s.progress = progress;
       if (total !== undefined) s.total = total;
-      if (message !== undefined) s.message = message;
+      // While cancelling, the message is the cancel's; a chunk's "running"
+      // arriving after the cancel was accepted must not hide that.
+      if (message !== undefined && s.status !== "cancelling") s.message = message;
     }
     const emitters = this.progressEmitters.get(jobId) ?? [];
     for (const e of emitters) {

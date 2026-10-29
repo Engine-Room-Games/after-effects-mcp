@@ -213,13 +213,33 @@ async function finish(jobId) {
   cancelReply = [200, { ok: true, result: { ok: true } }];
   const pending = call("cancel_job", { jobId: "j_stops" });
   await sleep(30);
-  emit({ type: "complete", jobId: "j_stops", result: { results: [1, 2, 3], errors: [], total: 600, cancelled: true, undoSteps: 1 } });
+  // A chunk's progress landing after the cancel was accepted must not hide
+  // the cancel's message.
+  emit({ type: "progress", jobId: "j_stops", progress: 50, total: 600, message: "running" });
+  await sleep(30);
+  const mid = payload(await call("get_job", { jobId: "j_stops" }));
+  assert.equal(mid.status, "cancelling");
+  assert.match(mid.message, /cancel accepted/, "late progress overwrote the cancelling message");
+  // A non-transactional batch keeps a failed op in `errors`, not `results`.
+  emit({
+    type: "complete",
+    jobId: "j_stops",
+    result: { results: [1, 2, 3], errors: [{ index: 3, op: "x", error: "boom" }], total: 600, cancelled: true, undoSteps: 1 },
+  });
   const res = await pending;
   assert.ok(!res.isError, text(res));
   const p = payload(res);
   assert.equal(p.ok, true);
   assert.equal(p.status, "cancelled");
-  assert.equal(p.opsRun, 3);
+  assert.equal(p.opsRun, 4, "opsRun must count failed ops too");
+  assert.equal(p.opsSucceeded, 3);
+  assert.equal(p.opsFailed, 1);
+
+  // A second cancel: an error that says the job is over, not that it may be running.
+  const again = await call("cancel_job", { jobId: "j_stops" });
+  assert.equal(again.isError, true);
+  assert.match(text(again), /already over — it had been cancelled[\s\S]*nothing is running/);
+  assert.doesNotMatch(text(again), /may still be running|NOT confirmed/);
 
   const awaited = payload(await call("await_job", { jobId: "j_stops" }));
   assert.equal(awaited.status, "cancelled");
@@ -268,7 +288,8 @@ async function finish(jobId) {
   const before = cancelsSeen;
   const res = await call("cancel_job", { jobId: "j_done" });
   assert.equal(res.isError, true);
-  assert.match(text(res), /already completed/);
+  assert.match(text(res), /already over — it had completed[\s\S]*nothing is running/);
+  assert.doesNotMatch(text(res), /may still be running|NOT confirmed/);
   assert.equal(cancelsSeen, before);
   passed++;
 }
