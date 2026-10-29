@@ -272,13 +272,13 @@ These switches limit what your assistant can do through this connection. They do
 ---
 
 <details>
-<summary><b>🧰 All 76 tools</b></summary>
+<summary><b>🧰 All 80 tools</b></summary>
 
 <br>
 
 | Group | Tools |
 |---|---|
-| Comps (10) | `list_comps`, `get_comp`, `get_comp_tree`, `create_comp`, `set_comp`, `delete_comp`, `set_active_comp`, `duplicate_comp`, `snapshot_comp`, `diff_comp` |
+| Comps (14) | `list_comps`, `get_comp`, `get_comp_tree`, `create_comp`, `set_comp`, `delete_comp`, `set_active_comp`, `duplicate_comp`, `snapshot_comp`, `diff_comp`, `checkpoint_comp`, `list_checkpoints`, `revert_comp`, `delete_checkpoints` |
 | Layers (15) | `list_layers`, `get_layer_full`, `create_{text,shape,solid,null,adjustment,precomp,camera,light}_layer`, `duplicate_layer`, `delete_layer`, `set_layer`, `parent_layer`, `reorder_layer` |
 | Transforms (1) | `set_transform` — position, scale, rotation, anchor, opacity; 2D and 3D; optionally keyframed |
 | Keyframes (6) | `add_keyframe`, `remove_keyframe`, `get_keyframes`, `set_interpolation`, `set_temporal_ease`, `set_spatial_tangents` |

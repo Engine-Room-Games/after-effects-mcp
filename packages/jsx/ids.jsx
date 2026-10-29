@@ -1,8 +1,16 @@
 // ids.jsx — stable ID lookup helpers. (compId, layerId) is the canonical pair.
 
+// The project item with this id, or null. Measured on AE 26.5: itemByID of an
+// id that no longer exists THROWS "internal verification failure, sorry!
+// {Item Not Found}" rather than returning null, so every "is it still there"
+// check has to go through here or it surfaces as that internal error.
+function __findItem(id) {
+  try { return app.project.itemByID(id) || null; } catch (e) { return null; }
+}
+
 function getCompById(id) {
   if (id === null || id === undefined) throw new Error("compId required");
-  var item = app.project.itemByID(id);
+  var item = __findItem(id);
   if (!item) throw new Error("No comp with id " + id);
   if (!(item instanceof CompItem)) throw new Error("Item " + id + " is not a CompItem");
   return item;
@@ -10,7 +18,7 @@ function getCompById(id) {
 
 function getItemById(id) {
   if (id === null || id === undefined) throw new Error("itemId required");
-  var item = app.project.itemByID(id);
+  var item = __findItem(id);
   if (!item) throw new Error("No item with id " + id);
   return item;
 }

@@ -16,6 +16,7 @@ Numbered recipes referenced below are in [verification-recipes.md](verification-
 | `packages/jsx/core.jsx` | JSON polyfill, `dispatch(payloadJson)` router, `withUndo()` wrapper, `JOBS` table for chunked async. |
 | `packages/jsx/explore.jsx` | `get_layer_full` — the deep one-shot dump. The whole reason this MCP exists. Spend disproportionate care here. |
 | `packages/jsx/snapshot.jsx` | The comp fingerprint and the diff of two of them. Backs `snapshot_comp` / `diff_comp` and the `diff:true` flag on `run_jsx` / `run_batch`. The diff is pure — two objects in, one out — which is what lets it be tested with no AE. |
+| `packages/jsx/checkpoint.jsx` | `checkpoint_comp`, `list_checkpoints`, `revert_comp`, `delete_checkpoints` (issue #136). A checkpoint is a tagged `CompItem.duplicate()`; a revert copies its layers back *into the original comp* so the comp id never changes, then verifies the result with `snapshot.jsx`'s fingerprint. Why it is not a swap is in [subsystems.md](subsystems.md), "Comp checkpoints". |
 | `packages/jsx/batch.jsx` | `run_batch` for ≤500 ops inline in one undo group; otherwise registers a job and yields chunks via `_continue_job`, one undo group per chunk. `singleUndo:true` forces the inline path at any size up to 2000. |
 | `packages/jsx/vision.jsx` | `saveFrameToPng` wrapper. Returns a temp path; the panel base64-encodes. |
 | `packages/jsx/footage.jsx` | `import_footage` / `create_footage_layer` / `purge_unused_footage`. The SVG viewBox check lives here because import is the only place that has the file path and the resulting item together. Also holds `__importFile()` and `__itemPathMap()` — the one import in the codebase and the one project-by-path scan, both shared with `audio.jsx` — and the solid/`usedIn`/remove helpers that `delete_comp`'s `purgeUnusedSolids` (in `comps.jsx`) shares with the sweep. |
@@ -391,7 +392,7 @@ saying why; the cost the other way is a switch silently not applied.
 **The `.mcpb` manifest's tool list cannot follow the switches.** Its `tools`
 array is static metadata, written at build time and shown by Claude Desktop
 before the server ever runs; `user_config` values are substituted into the
-server's environment, not into the manifest. So it lists all 76 whatever is
+server's environment, not into the manifest. So it lists all 80 whatever is
 ticked. What the model actually gets is `tools/list` from the running server,
 which does follow them.
 

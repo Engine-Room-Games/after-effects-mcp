@@ -250,6 +250,176 @@ index below it, which would report twenty changed layers for one addition.
 Relative order is compared separately, so a real reorder is reported and an
 insertion is not.
 
+## Comp checkpoints, and why a revert is not a swap
+
+`snapshot_comp` / `diff_comp` say what changed; nothing said how to get back.
+After Effects' undo is not a way back an agent can rely on across many calls —
+a group does not survive an `evalScript` boundary, a chunked batch is many
+steps, and the user's own edits interleave with ours (issue #69, and the undo
+notes in [fragile-areas-ae.md](fragile-areas-ae.md)). Issue #136 weighed three
+designs:
+
+- **A project-level checkpoint** — save a copy of the .aep, reopen to revert.
+  Complete, but it reloads the project under the user, and every id in the
+  session is meaningless afterwards. Rejected.
+- **A snapshot-driven rebuild** — extend the fingerprint until it can recreate
+  the comp. That means serializing every property value, effect, mask, shape
+  and expression: `get_layer_full` for every layer, then a writer for all of
+  it. The most work and the most fragile. Rejected.
+- **A comp-level checkpoint**: `CompItem.duplicate()` into a folder. Chosen,
+  and the question that decided its shape was what a *revert* does to ids.
+
+**The obvious revert is a swap, and a swap breaks the agent.** Swapping the
+checkpoint in for the original (rename it, `replaceSource` every usage,
+remove the original) gives the comp a new id. The comp id is the agent's
+long-lived handle — it is in the conversation, in the project's own notes, in
+the next call — so a revert that silently changes it breaks every call after
+it, and one that returns the new id loudly still leaves stale ids in context.
+It also has to re-link everything that points at the item: precomp layers in
+other comps (`usedIn` + `replaceSource`, doable), and the render queue and
+Essential Graphics, which cannot be re-pointed from script at all.
+
+**So `revert_comp` restores *into* the original comp.** The item never moves:
+its id, its name, every precomp usage, every `comp("Name")` expression and
+every render-queue entry are untouched by construction, and there is nothing
+to re-link. What does change is every **layer** id — the restored layers are
+copies — and the result says so and maps them: `layerIdMap` takes the ids the
+comp had when the checkpoint was taken (recorded in the checkpoint's tag,
+position by position, because `duplicate()` preserves order) to the restored
+ones. A layer id read *after* the checkpoint has no counterpart and is not in
+the map, which is correct: that layer no longer exists.
+
+How the restore is ordered, and why:
+
+- **Copy first, then remove.** Every checkpoint layer is copied in with
+  `copyToComp` before any current layer is touched. A copy that fails removes
+  the copies already made and throws saying the comp is as it was. Only when
+  all of them have landed, been put in order (`moveToBeginning`, last to
+  first, since copies land in an order of their own — see the gotchas guide)
+  and been re-parented are the old layers removed. A failure there names the
+  layers still present and says a second revert is safe, because a revert
+  never modifies the checkpoint.
+- **Copied with the parent detached, re-parented with the jump.** Measured on
+  26.5: copying a parented layer into a comp that holds a layer of its parent's
+  name parents the copy to that namesake and converts its Position keys to comp
+  space — the transform applied twice, a visible jump that no fingerprint
+  sees, because it does not compare keyframe values. So each parented
+  checkpoint layer is unparented with `setParentWithJump(null)` (its own values
+  untouched), copied, and re-parented the same way, always — a checkpoint left
+  unparented would be a damaged restore point, so that failure is an error.
+  The restored layer is then parented with `setParentWithJump` too: plain
+  `parent =` would compensate the values. The jump form is exactly "attach
+  without touching the values".
+- **Names are put back.** `copyToComp` appends " 2" to an explicitly named
+  layer when the destination already holds that name (measured, 26.5), and the
+  old layers are all still there during the copy, so every unchanged rig layer
+  came back renamed. Once the old layers are gone each restored layer whose
+  name differs from the checkpoint's is renamed; a layer named after its source
+  already matches and is left unnamed.
+- **A missing item is `null`, never an exception.** On 26.5 `itemByID` of a
+  deleted id throws "internal verification failure {Item Not Found}", so a
+  checkpoint whose comp was deleted made `list_checkpoints` fail for the whole
+  project. Every lookup goes through `__findItem` (`ids.jsx`), which
+  `getCompById`/`getItemById` and `delete_comp`/`duplicate_comp` now use too.
+- **An explicit `compId` can re-bind an imported checkpoint.** Importing a
+  project renumbers every item, so its checkpoints name ids that are gone or
+  belong to something else. `revert_comp` accepts a `compId` that differs from
+  the record when that comp has the recorded name — the same comp under a new
+  id — and rewrites the record to it (`checkpointRebound`); a differently named
+  comp is still refused. The name is evidence only while the recorded comp
+  cannot be the answer: AE allows two comps called "Main", so a namesake is
+  refused while the recorded comp still exists under its recorded name. And
+  the record is rewritten only after a revert that verified clean; one that
+  did not is no evidence it was the right comp. Track mattes (2023+ `setTrackMatte`) and locks are re-applied the
+  same way, explicitly, and a matte that cannot be re-pointed lands in
+  `notRestored` rather than failing the call.
+- **The undo group is tried, then given up per layer.** `copyToComp` refuses a
+  parented or expression-linked layer while a group is open (issue #30). Each
+  copy is attempted inside the dispatcher's group and only on that refusal
+  retried through `withoutUndoGroup`. An unrigged comp reverts as one step; a
+  rigged one reports `undoSplits` and tells the agent not to Cmd-Z it.
+- **Verified, and the verdict names its scope.** Both comps are fingerprinted
+  with `snapshot.jsx`'s walk, parent ids are rewritten as parent indices, and
+  the layers are compared position by position with the diff's own
+  `__diffLayer` — plus what the fingerprint does not record but a revert must
+  get right: locks, shy/solo/3D/adjustment/motion-blur switches, blend mode,
+  quality, label, stretch, track matte and type, every layer/mask pick, and
+  every restored comp setting including background colour and pixel aspect.
+  It does **not** compare keyframe values or other effect parameter values;
+  the result carries `checked`, the exact list, beside `verified`, and the
+  note says so on a clean result too. Any difference is `verified: false`
+  with `mismatches`, said first. `keepCheckpoint:false` is not honoured on a
+  revert that did not verify.
+- **The comp name is not reverted.** Other comps' expressions find this one by
+  name; restoring an old name would break them. A changed name is reported as
+  `nameAtCheckpoint`.
+- **But a changed name stops a revert that was not confirmed.** The record
+  holds an item id, and ids are unique only within one project: a checkpoint
+  that came in with an imported .aep can name an id that here belongs to an
+  unrelated comp. So when the target's name differs from the recorded one,
+  `revert_comp` refuses unless the caller passes `compId` to confirm.
+- **Comp settings go first.** Size, rate, duration and the rest are written
+  before any layer is copied in, so nothing is copied against the wrong
+  timeline; a failed copy puts the previous settings back with the copies.
+- **Effect layer picks are re-pointed after the removal.** Layer Control,
+  Displacement Map, Set Matte and the like pick a layer by index, and a text
+  path picks a mask the same way. While the copies land the old layers still
+  exist, so a copied pick points at an old layer, or at nothing once those
+  go. After the removal the restored layers sit at exactly the checkpoint's
+  indices, so every `LAYER_INDEX` / `MASK_INDEX` property under Effects and
+  Text is set from the checkpoint's value, keyframes included
+  (`layerReferencesRepointed` counts them).
+- **Lookups go through a mirror of the layer order.** A layer reference is
+  index-bound, so every layer is re-resolved by id after anything that moves
+  one; scanning the comp per lookup made a revert O(n²) DOM reads. The mirror
+  keeps the id order in plain JS, updated on every move, insert and removal
+  the op makes, and confirms each lookup with one read — rescanning only on a
+  mismatch, so it can be stale but never wrong.
+
+What a checkpoint is, in the project:
+
+- A comp named `<name> [checkpoint <label>]`, in one folder,
+  `AE MCP Checkpoints`. The suffix keeps it from ever answering
+  `comp("<name>")`; the folder keeps it out of the user's own bins and is
+  removed by `delete_checkpoints` once empty.
+- **Identified by its comment, not its name.** The item comment carries
+  `ae-mcp-checkpoint:v1 ` and a JSON record (comp id and name, label,
+  sequence, time, layer ids). A user may rename the item; the tag survives.
+  `duplicate_comp` clears the tag on a copy of a checkpoint, because that copy
+  is the documented way to recover a checkpoint whose comp was deleted and it
+  must not show up as a second checkpoint.
+- **Shallow, and it says so.** It is a copy of one comp: nested precomps are
+  shared, not copied, so an edit inside one survives a revert. `covers`
+  travels with every checkpoint and revert result for the same reason it does
+  with a diff. A deep checkpoint is possible (`duplicate_comp`'s `deep` walk)
+  but a deep *revert* would have to restore every nested comp in place too;
+  that is a follow-up if anyone needs it.
+- **Kept out of searches, flagged in the map.** `find_layers` across the
+  project skips checkpoint comps and counts them in `checkpointsSkipped` —
+  otherwise every match comes back twice, and an agent editing the copy has
+  edited the restore point, not the scene. `list_comps` and
+  `get_project_summary` list them with `checkpoint: true`: hiding comps from
+  the map an agent orients with would be the bigger lie.
+- **Layer picks are not keyframed or expression-driven on 26.5.** A Layer
+  Control's pick has `canVaryOverTime` false and refuses an expression
+  (measured), so the re-point sets a static value and names a keyframed pick
+  in `notRestored` rather than carrying code for a case that cannot occur.
+- **The write ops do not refuse a checkpoint comp.** It was considered. The
+  only central place for that guard is `getCompById`, which every read and
+  `duplicate_comp` (the recovery path) also use, so it would need an
+  allow-list across some sixty ops for a mistake the flag, the name and the
+  `find_layers` skip already make hard to make. And an edited checkpoint is
+  still a valid restore point — it restores what it now holds, and the
+  revert's verification compares against that.
+- **They keep their footage alive.** A checkpoint's layers use the same solid
+  and footage items as the original, so `purge_unused_footage` and
+  `delete_comp({purgeUnusedSolids})` correctly treat those items as in use.
+  Deleting checkpoints is what frees them.
+
+`tests/unit/comp-checkpoint.mjs` holds all of the above against a stub whose
+`copyToComp` follows the measured rules; what only AE can answer is in
+recipes 47–50.
+
 ## The issue journal
 
 `log_issue` is how one session hands a hard-won workaround to the next. Until 0.5.0 the hand-over was *pull*: every session was told to read the journal before nontrivial work, so its cost landed on every session and scaled with the size of a journal that only ever grew — one week of one project produced twelve user-scope entries, two of them the same bug under different slugs, with permanent After Effects quirks sitting beside tool bugs a release had already fixed (issue #102). It is now *push*: a failed call names the entries that match it, an entry has exits, and a re-log of the same error lands in the same entry. Eleven properties matter, and all eleven are things it would be easy to get wrong:

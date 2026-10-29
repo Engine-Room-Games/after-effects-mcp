@@ -331,6 +331,44 @@ export const DuplicateComp = z
   })
   .strict();
 
+// ---------- comp checkpoints (issue #136) ----------
+// A way back that does not depend on AE's undo stack. A checkpoint is a copy of
+// the comp kept in the project; revert_comp restores it INTO the original comp,
+// so the comp id never changes. See packages/jsx/checkpoint.jsx.
+export const CheckpointComp = z
+  .object({
+    compId: z.number(),
+    label: z.string().min(1).optional()
+      .describe("A short name for this restore point, e.g. 'before easing pass'. Omit for '#1', '#2', ..."),
+  })
+  .strict();
+export const ListCheckpoints = z
+  .object({
+    compId: z.number().optional()
+      .describe("Only the checkpoints of this comp. Omit to list every checkpoint in the project."),
+  })
+  .strict();
+export const RevertComp = z
+  .object({
+    checkpointId: z.number().describe("The checkpointId from checkpoint_comp or list_checkpoints - not the comp's own id."),
+    compId: z.number().optional()
+      .describe("The comp being reverted. Optional - the checkpoint knows which comp it belongs to. Pass it to confirm a comp that was renamed since the checkpoint, or to name the same comp under a new id after its project was imported (it must then carry the recorded name, and the checkpoint is re-bound to it)."),
+    saveCurrent: z.boolean().optional().meta({ default: false })
+      .describe("Checkpoint the comp's current state first, so the revert itself can be reverted. Its id comes back in savedCheckpoint."),
+    keepCheckpoint: z.boolean().optional().meta({ default: true })
+      .describe("Keep the checkpoint after reverting to it. Pass false to delete it - only done when the revert verified clean."),
+  })
+  .strict();
+export const DeleteCheckpoints = crossField(
+  z.object({
+    checkpointIds: z.array(z.number()).min(1).optional()
+      .describe("The checkpoints to delete. Every id is checked first; one that is not a checkpoint deletes nothing."),
+    compId: z.number().optional()
+      .describe("Delete every checkpoint of this comp."),
+  }),
+  { kind: "exactlyOne", fields: ["checkpointIds", "compId"] },
+).strict();
+
 // ---------- comp snapshots (half server-resident: the panel gathers, the server remembers) ----------
 export const SnapshotComp = z
   .object({
@@ -1224,6 +1262,10 @@ export const OpSchemas = {
   delete_comp: DeleteComp,
   set_active_comp: SetActiveComp,
   duplicate_comp: DuplicateComp,
+  checkpoint_comp: CheckpointComp,
+  list_checkpoints: ListCheckpoints,
+  revert_comp: RevertComp,
+  delete_checkpoints: DeleteCheckpoints,
   snapshot_comp: SnapshotComp,
   diff_comp: DiffComp,
   // layers
@@ -1352,6 +1394,12 @@ export const OpMutation = {
   delete_comp: "write",
   set_active_comp: "write",
   duplicate_comp: "write",
+  // Checkpoints are comps in the project: taking, reverting and deleting one
+  // all change it. Listing reads item comments and nothing else.
+  checkpoint_comp: "write",
+  list_checkpoints: "read",
+  revert_comp: "write",
+  delete_checkpoints: "write",
   // Fingerprints: they forward a read to the panel and keep the answer in the
   // server. Nothing is written to the project or the undo stack, so they must
   // not queue — the point of a diff is checking on a write that is in flight.
