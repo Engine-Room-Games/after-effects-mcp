@@ -228,6 +228,11 @@ jobs:
           node tests/unit/svg-import.mjs
           node tests/unit/bundle-determinism.mjs
 
+      # Issue #129: a setValue that throws for a write that landed must not
+      # make an op report failure, or roll back, for work that happened.
+      - name: A write that landed is never reported as failed
+        run: node tests/unit/set-value-readback.mjs
+
       # run_jsx is the tool an agent reaches for when nothing else fits, so the
       # thing that matters most is that a failure reads as a failure: the line
       # number points at the line the reader has to open, a library's error

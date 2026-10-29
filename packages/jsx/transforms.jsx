@@ -6,9 +6,9 @@ function __setOrKeyAtTime(prop, value, time, keyframe) {
   } else if (time !== undefined && time !== null && !keyframe) {
     // Set value at time only meaningful if property has keyframes; else set static.
     if (prop.numKeys > 0) prop.setValueAtTime(time, value);
-    else prop.setValue(value);
+    else __setValue(prop, value);
   } else {
-    prop.setValue(value);
+    __setValue(prop, value);
   }
 }
 

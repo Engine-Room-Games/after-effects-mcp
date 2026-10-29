@@ -197,7 +197,7 @@ OPS.create_footage_layer = function (args) {
   var layer = comp.layers.add(item);
   if (typeof args.name === "string" && args.name.length > 0) layer.name = args.name;
   if (args.position !== undefined && args.position !== null) {
-    layer.property("Transform").property("Position").setValue(args.position);
+    __setValue(layer.property("Transform").property("Position"), args.position);
   }
   if (args.startTime !== undefined && args.startTime !== null) layer.startTime = args.startTime;
 

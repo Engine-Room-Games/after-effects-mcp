@@ -1,0 +1,123 @@
+// values.jsx — setValue that does not report a failure for a write that landed.
+//
+// Issue #129. In a comp that is not open in any viewer, Property.setValue() on a
+// shape rectangle's Size can throw
+//
+//     Error: invalid numeric result (divide by zero?)
+//
+// for every rect after the first one written — and the value is applied
+// anyway. Reading the property back shows exactly what was asked for. The
+// reporter's comp read a negative `comp.time` (it was nested further down a
+// parent's timeline), setting `comp.time` did not help, and the same writes in a
+// comp open in the viewer never threw. The best guess is that AE re-evaluates
+// the comp after the write, has no viewer time to evaluate it at, and surfaces
+// that evaluation's error as the setValue exception.
+//
+// What that does to the first-class ops is the mirror of "never report success
+// for work that didn't happen": add_shape_content catches the throw, counts the
+// key as failed, REMOVES THE NODE IT BUILT and tells the agent nothing changed —
+// so the agent retries, and hits the same throw on the same comp. Reporting a
+// failure for work that happened is as wrong as the other way round.
+//
+// So: when setValue throws THIS error, read the property back. If it holds the
+// value that was asked for, the write happened and the throw is dropped.
+// Anything else — a different error, a value that did not land, a value we have
+// no way to compare — rethrows the original error untouched. Nothing here can
+// turn a real failure into a success: success needs the read-back to agree.
+//
+// What it deliberately does not do is call comp.openInViewer(), the other known
+// workaround. That changes which comp the user is looking at, from a call that
+// asked for nothing of the sort.
+
+var __SPURIOUS_SETVALUE = /invalid numeric result/i;
+
+function __isSpuriousSetValueError(e) {
+  var msg = "";
+  try { msg = String(e && e.message !== undefined ? e.message : e); } catch (x) { msg = ""; }
+  return __SPURIOUS_SETVALUE.test(msg);
+}
+
+function __numClose(a, b) {
+  if (typeof a !== "number" || typeof b !== "number") return false;
+  if (a === b) return true;
+  if (isNaN(a) || isNaN(b)) return false;
+  var scale = Math.max(1, Math.abs(a), Math.abs(b));
+  return Math.abs(a - b) <= 1e-4 * scale;
+}
+
+function __numArrayClose(want, got, allowExtra) {
+  if (!(want instanceof Array) || !(got instanceof Array)) return false;
+  if (got.length < want.length) return false;
+  // A 2D layer's Position reads back with a third component of 0 when it was
+  // written with two. Extra components are tolerated only when they are zero —
+  // the value AE fills in — and only where the caller allows it.
+  if (got.length > want.length) {
+    if (!allowExtra) return false;
+    for (var x = want.length; x < got.length; x++) { if (!__numClose(0, got[x])) return false; }
+  }
+  for (var i = 0; i < want.length; i++) { if (!__numClose(want[i], got[i])) return false; }
+  return true;
+}
+
+function __pointListClose(want, got) {
+  if (!want) return !got || got.length === 0 || __allZeroPoints(got);
+  if (!got || want.length !== got.length) return false;
+  for (var i = 0; i < want.length; i++) { if (!__numArrayClose(want[i], got[i], false)) return false; }
+  return true;
+}
+
+function __allZeroPoints(list) {
+  for (var i = 0; i < list.length; i++) {
+    for (var j = 0; j < list[i].length; j++) { if (!__numClose(0, list[i][j])) return false; }
+  }
+  return true;
+}
+
+// Does `got` (what the property reads back) hold `want` (what was written)?
+// Numbers, numeric arrays and Shapes are comparable. Anything else — a
+// TextDocument, a marker — answers false, which means the original error is
+// rethrown: unknown is never read as success.
+function __valueMatches(want, got) {
+  if (typeof want === "number") return __numClose(want, got);
+  if (typeof want === "boolean") return typeof got === "boolean" ? want === got : __numClose(want ? 1 : 0, got);
+  if (want instanceof Array) return __numArrayClose(want, got, true);
+  if (want && typeof want === "object" && want.vertices !== undefined) {
+    if (!got || typeof got !== "object" || got.vertices === undefined) return false;
+    if (!__pointListClose(want.vertices, got.vertices)) return false;
+    if (!__pointListClose(want.inTangents, got.inTangents)) return false;
+    if (!__pointListClose(want.outTangents, got.outTangents)) return false;
+    if (want.closed !== undefined && !!want.closed !== !!got.closed) return false;
+    return true;
+  }
+  return false;
+}
+
+// The property's own value, before any expression. `value` is post-expression,
+// so a property with an expression on it would never compare equal to what was
+// written; valueAtTime(t, true) is the pre-expression value, and for a property
+// with no keyframes it is the same at every t.
+function __readBackForCompare(prop) {
+  var hasExpr = false;
+  try { hasExpr = !!prop.expressionEnabled && String(prop.expression) !== ""; } catch (e) { hasExpr = false; }
+  var keyed = 0;
+  try { keyed = prop.numKeys || 0; } catch (e2) { keyed = 0; }
+  if (hasExpr && keyed === 0) {
+    try { return { ok: true, value: prop.valueAtTime(0, true) }; } catch (e3) {}
+  }
+  try { return { ok: true, value: prop.value }; } catch (e4) { return { ok: false }; }
+}
+
+// setValue, minus the #129 false failure. Returns true when it absorbed that
+// throw — the write landed and AE said otherwise — and false for a clean write.
+// Throws the original error for anything else.
+function __setValue(prop, value) {
+  try {
+    prop.setValue(value);
+    return false;
+  } catch (e) {
+    if (!__isSpuriousSetValueError(e)) throw e;
+    var back = __readBackForCompare(prop);
+    if (back.ok && __valueMatches(value, back.value)) return true;
+    throw e;
+  }
+}

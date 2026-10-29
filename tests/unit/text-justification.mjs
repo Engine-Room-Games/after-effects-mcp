@@ -34,6 +34,7 @@ const read = (f) => fs.readFileSync(path.join(jsxDir, f), "utf8");
 // layers.jsx (create_text_layer) leans on text.jsx's map and verifier, and on
 // comps.jsx's __wantsSection through __layerSummary. One scope, as shipped.
 const sources = [
+  ["values.jsx", read("values.jsx")],
   ["comps.jsx", read("comps.jsx")],
   ["layers.jsx", read("layers.jsx")],
   ["text.jsx", read("text.jsx")],

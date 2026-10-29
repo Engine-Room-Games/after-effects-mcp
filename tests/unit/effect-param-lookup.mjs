@@ -26,6 +26,8 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const src = fs.readFileSync(path.join(root, "packages", "jsx", "effects.jsx"), "utf8");
+// set_effect_param writes through __setValue (#129), which lives in values.jsx.
+const values = fs.readFileSync(path.join(root, "packages", "jsx", "values.jsx"), "utf8");
 
 let passed = 0;
 function check(name, fn) {
@@ -84,6 +86,7 @@ function makeEnv({ lang = "zh_CN", params } = {}) {
     app: lang === undefined ? {} : { isoLanguage: lang },
   };
   vm.createContext(ctx);
+  vm.runInContext(values, ctx, { filename: "values.jsx" });
   vm.runInContext(src, ctx, { filename: "effects.jsx" });
   return { ctx, shadow, parade };
 }

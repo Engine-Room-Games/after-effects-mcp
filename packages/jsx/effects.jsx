@@ -186,7 +186,7 @@ OPS.set_effect_param = function (args) {
   }
   if (args.keyframe && args.time !== undefined) p.setValueAtTime(args.time, args.value);
   else if (args.time !== undefined && p.numKeys > 0) p.setValueAtTime(args.time, args.value);
-  else p.setValue(args.value);
+  else __setValue(p, args.value);
   return { ok: true };
 };
 

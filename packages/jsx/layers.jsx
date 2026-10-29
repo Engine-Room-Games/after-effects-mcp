@@ -102,11 +102,11 @@ OPS.create_text_layer = function (args) {
     }
   }
   if (align !== "none") {
-    l.property("Transform").property("Anchor Point").setValue([0, 0, 0]);
+    __setValue(l.property("Transform").property("Anchor Point"), [0, 0, 0]);
   }
   if (args.position) {
     var p = args.position;
-    l.property("Transform").property("Position").setValue(p.length === 3 ? p : [p[0], p[1]]);
+    __setValue(l.property("Transform").property("Position"), p.length === 3 ? p : [p[0], p[1]]);
   }
   var out = __layerSummary(l);
   if (verified) {
@@ -173,7 +173,7 @@ OPS.create_shape_layer = function (args) {
   var l = c.layers.addShape();
   if (args.name) l.name = args.name;
   try {
-    l.property("Transform").property("Position").setValue(pos);
+    __setValue(l.property("Transform").property("Position"), pos);
   } catch (ePos) {
     // The shape that can still get here is three components on a 2D layer, which
     // AE refuses. Leaving an empty shape layer in the timeline behind a thrown
@@ -201,7 +201,7 @@ OPS.create_precomp_layer = function (args) {
   var l = c.layers.add(src);
   if (args.position) {
     var p = args.position;
-    l.property("Transform").property("Position").setValue(p.length === 3 ? p : [p[0], p[1]]);
+    __setValue(l.property("Transform").property("Position"), p.length === 3 ? p : [p[0], p[1]]);
   }
   return __layerSummary(l);
 };
@@ -417,7 +417,7 @@ function __ptAdjust(prop, fn) {
     for (var i = 1; i <= prop.numKeys; i++) prop.setValueAtKey(i, fn(prop.keyValue(i)));
     return prop.numKeys;
   }
-  prop.setValue(fn(prop.value));
+  __setValue(prop, fn(prop.value));
   return 0;
 }
 
