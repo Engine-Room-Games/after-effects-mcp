@@ -65,22 +65,35 @@ OPS.set_transform = function (args) {
       );
     }
   }
-  // Resolve every property first. A camera or light has no Scale, Opacity or
-  // Anchor Point, so a field it lacks is refused by name, not skipped.
+  // Resolve every property first. A camera or light has no Scale or Opacity,
+  // and some of what it does have is there but unsettable (a one-node camera's
+  // Point of Interest, a point light's Orientation and rotations), so a field
+  // that is absent or cannot take a value is refused by name, not skipped.
+  // On a camera or light, anchorPoint (ADBE Anchor Point) IS the Point of Interest.
   var plan = [];
   var missing = [];
+  var unsettable = [];
   for (i = 0; i < __TRANSFORM_FIELDS.length; i++) {
     var field = __TRANSFORM_FIELDS[i][0];
     if (p[field] === undefined) continue;
     var prop = null;
     try { prop = tr.property(__TRANSFORM_FIELDS[i][1]); } catch (e) { prop = null; }
+    var settable = true;
+    if (prop) {
+      try { settable = prop.canSetValue !== false; } catch (e2) { settable = false; }
+    }
     if (!prop) missing.push(field);
+    else if (!settable) unsettable.push(field);
     else plan.push([prop, p[field]]);
   }
-  if (missing.length) {
+  if (missing.length || unsettable.length) {
+    var what = [];
+    if (missing.length) what.push("has no " + missing.join(", ") + " property");
+    if (unsettable.length) what.push("cannot set " + unsettable.join(", ") + " (After Effects reports it read-only on this layer)");
+    var drop = missing.concat(unsettable);
     throw new Error(
       "set_transform: layer '" + l.name + "'" + (isCamOrLight ? " (a camera or light)" : "") +
-      " has no " + missing.join(", ") + " property. Nothing was changed. Drop " + missing.join(", ") +
+      " " + what.join(" and ") + ". Nothing was changed. Drop " + drop.join(", ") +
       "; get_layer_full lists the transform properties this layer has."
     );
   }

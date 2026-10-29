@@ -87,19 +87,25 @@ function LightLayer() {}
 var MATCH = {
   "ADBE Position": "Position", "ADBE Scale": "Scale", "ADBE Rotate Z": "Z Rotation",
   "ADBE Rotate X": "X Rotation", "ADBE Rotate Y": "Y Rotation", "ADBE Orientation": "Orientation",
-  "ADBE Anchor Point": "Anchor Point", "ADBE Opacity": "Opacity", "ADBE Point of Interest": "Point of Interest"
+  "ADBE Anchor Point": "Anchor Point", "ADBE Opacity": "Opacity"
 };
-// kind: "2d" | "3d" | "camera" | "light". A 2D layer keeps its hidden 3D
-// properties, as AE's does. A camera or light has no Scale/Opacity/Anchor
-// Point; this mock's light has no Z Rotation either, to exercise the refusal.
+// kind: "2d" | "3d" | "camera" | "light" | "pointLight" | "oneNodeCamera".
+// A 2D layer keeps its hidden 3D properties, as AE's does. A camera or light
+// has no Scale/Opacity, and its Point of Interest is ADBE Anchor Point. This
+// mock's light has no Z Rotation either, to exercise the refusal. A point
+// light and a one-node camera carry properties AE reports canSetValue:false.
 function makeLayer(kind) {
-  var names = kind === "camera" ? ["Point of Interest", "Position", "Orientation", "X Rotation", "Y Rotation", "Z Rotation"]
-    : kind === "light" ? ["Point of Interest", "Position", "Orientation", "X Rotation", "Y Rotation"]
+  var cam = kind === "camera" || kind === "oneNodeCamera";
+  var light = kind === "light" || kind === "pointLight";
+  var names = cam ? ["Anchor Point", "Position", "Orientation", "X Rotation", "Y Rotation", "Z Rotation"]
+    : light ? ["Anchor Point", "Position", "Orientation", "X Rotation", "Y Rotation"]
     : ["Position", "Scale", "Z Rotation", "X Rotation", "Y Rotation", "Orientation", "Anchor Point", "Opacity"];
+  var locked = kind === "oneNodeCamera" ? ["Anchor Point"] : kind === "pointLight" ? ["Orientation", "X Rotation", "Y Rotation"] : [];
   var props = {};
   for (var i = 0; i < names.length; i++) props[names[i]] = new MockProp(names[i], 0);
+  for (i = 0; i < locked.length; i++) props[locked[i]].canSetValue = false;
   var tr = { property: function (n) { return props[MATCH[n]] || null; } };
-  var l = kind === "camera" ? new CameraLayer() : kind === "light" ? new LightLayer() : {};
+  var l = cam ? new CameraLayer() : light ? new LightLayer() : {};
   l.name = "Card";
   l.threeDLayer = kind === "3d"; // cameras and lights report false in AE
   l.props = props;
@@ -238,6 +244,25 @@ check("set_transform on a 3D layer writes orientation and per-axis rotation", ()
   run(ctx, 'LAYER = makeLayer("3d");');
   run(ctx, "OPS.set_transform({compId:1, layerId:2, properties:{orientation:[0,0,90], xRotation:10, yRotation:20, zRotation:30}})");
   assert.deepEqual(plain(run(ctx, "allWrites()")).sort(), ["Orientation", "X Rotation", "Y Rotation", "Z Rotation"]);
+});
+
+check("on a camera, anchorPoint sets the Point of Interest", () => {
+  const ctx = makeCtx();
+  run(ctx, 'LAYER = makeLayer("camera");');
+  run(ctx, "OPS.set_transform({compId:1, layerId:2, properties:{anchorPoint:[1,2,3]}})");
+  assert.deepEqual(plain(run(ctx, "LAYER.props['Anchor Point'].v")), [1, 2, 3]);
+});
+
+check("a property that exists but cannot be set is refused before any write", () => {
+  for (const [kind, call, named] of [
+    ["oneNodeCamera", "{position:[1,2,3], anchorPoint:[0,0,0]}", /cannot set anchorPoint/],
+    ["pointLight", "{position:[1,2,3], orientation:[0,90,0], xRotation:5}", /cannot set orientation, xRotation/],
+  ]) {
+    const ctx = makeCtx();
+    run(ctx, `LAYER = makeLayer("${kind}");`);
+    assert.throws(() => run(ctx, `OPS.set_transform({compId:1, layerId:2, properties:${call}})`), named, kind);
+    assert.deepEqual(plain(run(ctx, "allWrites()")), [], `${kind}: position must not land when the call is refused`);
+  }
 });
 
 console.log(`keyframe-transform: ${passed} checks passed`);
