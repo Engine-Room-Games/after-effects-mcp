@@ -19,6 +19,13 @@ tested and reviewed, you are responsible for merges."*
 - Track state in a short list: issue → branch → PR → review → live check → merged.
 - `model: "opus"` for every agent. Launch independent agents in one message so
   they run in parallel.
+- **Keep what you depend on.** Agents may be refused writing report files, and
+  scratch space gets cleaned. Have agents return findings in their reply, and
+  save each findings/verdict file you need yourself, outside agent scratch space.
+- **Every agent that cleans up deletes only what it created.** Brief it to
+  record each file, folder, worktree and project it makes, and delete only
+  those — never a folder because it looks like scratch. One cleanup deleted the
+  reviewers' findings and a shared worktree.
 
 ## 1. Implement — one issue, one branch, one agent
 
@@ -39,7 +46,11 @@ context the agent gets, so make it self-contained:
 
 ## 2. Adversarial review — a fresh agent, never the implementer
 
-Give the reviewer the **PR number only**, not the implementer's report or
+For a fan-out review of `main` (not one PR), create **one** detached worktree
+of `origin/main`, build it once, and point every reviewer at it read-only. Tell
+each agent not to modify or delete it; remove it yourself when all are done.
+
+Give a PR reviewer the **PR number only**, not the implementer's report or
 reasoning: a reviewer handed a conclusion confirms it. Brief it to read
 `CLAUDE.md` and try to break the change, checking at least:
 
@@ -59,24 +70,37 @@ Route blockers and should-fixes to the implementer with `SendMessage` (its
 context is intact) or to a fresh fix agent on the same branch. Then a **new**
 reviewer re-reviews. Repeat until clean.
 
+Budget several rounds for anything that touches After Effects: in every feature
+PR so far, the live run found real bugs after code review approved.
+
 ## 3. Live After Effects check — one agent at a time
 
 After Effects is one shared app on the maintainer's machine. **Serialize:** only
 one agent touches AE at any moment, and ask before using it while the
 maintainer or another session may be mid-project. Brief the agent to:
 
+- **protect the maintainer's AE state first.** While AE is quit and *before
+  the first launch*, back up AE's recent-projects prefs and workspaces; restore
+  them byte-identical after quitting. Scratch projects otherwise push real
+  entries off Open Recent — it happened on a first run. Restore the installed
+  panel byte-identical too;
 - follow the matching recipe in `docs/verification-recipes.md`;
 - read "Panel version gating" in `docs/subsystems.md` and
   `docs/fragile-areas-bridge.md` before touching the panel;
+- **drive the PR-built server, never this session's `after-effects` tools.**
+  Those run a server built from `main` — stale for any PR, and its gate cached
+  the old bundle hash, so it falsely says "panel out of date". Start the PR
+  worktree's own server over stdio, or POST the panel's `/op` with the
+  `x-ae-mcp-token` header (`~/.engineroom-ae-mcp/token-7777`);
 - hot-load without breaking other sessions: back up the installed `bundle.jsx`,
-  `AE_MCP_SYNC_PANEL=1 npm run build`, `POST /reload-jsx` with the
-  `x-ae-mcp-token` header, test through a **fresh** server process (this
-  session's own `after-effects` tools run a server whose gate cached the old
-  hash and will falsely say "panel out of date"), then restore the backup and
-  reload again;
+  `AE_MCP_SYNC_PANEL=1 npm run build`, `POST /reload-jsx` with the token
+  header, test, then restore the backup and reload again;
 - changes under `packages/ae-panel/client/` cannot be hot-loaded — they need
   `npm run install:panel` with AE quit; ask the maintainer before quitting AE;
 - report what was observed, not inferred, and what could not be exercised.
+
+A live run is required before merging any AE-facing change. After a fix, re-run
+only the recipes that failed plus one regression check, not the whole set.
 
 ## 4. Merge — yours alone, one at a time
 
@@ -86,7 +110,8 @@ Merge a PR only when all hold:
 - the latest review is clean;
 - live verification is done, or the maintainer explicitly waived it.
 
-Then `gh pr merge <N> --merge --delete-branch`. Merge sequentially; after each,
+Then `gh pr merge <N> --merge`, and `git push origin --delete <branch>` —
+`--delete-branch` fails when another worktree holds `main`. Merge sequentially; after each,
 send the next PR's agent to rebase on `origin/main`, rebuild, retest and push,
 then wait for CI again. GitHub closes only the **first** issue in a `Closes`
 list — close the rest with `gh issue close N --comment "Fixed in #PR"`.
