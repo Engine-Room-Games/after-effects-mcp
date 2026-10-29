@@ -101,6 +101,7 @@ const ctx = {};
 vm.createContext(ctx);
 vm.runInContext(HOST, ctx, { filename: "host.js" });
 vm.runInContext(src("ids.jsx"), ctx, { filename: "ids.jsx" });
+vm.runInContext(src("values.jsx"), ctx, { filename: "values.jsx" });
 vm.runInContext(src("keyframes.jsx"), ctx, { filename: "keyframes.jsx" });
 vm.runInContext(src("helpers.jsx"), ctx, { filename: "helpers.jsx" });
 

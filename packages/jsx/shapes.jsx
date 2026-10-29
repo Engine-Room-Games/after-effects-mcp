@@ -20,7 +20,7 @@ OPS.set_shape_path = function (args) {
     try { pathProp = pathProp.property("Path"); } catch (e) {}
   }
   var shape = __makeShape(args.vertices, args.inTangents, args.outTangents, args.closed);
-  pathProp.setValue(shape);
+  __setValue(pathProp, shape);
   return { ok: true };
 };
 
@@ -178,7 +178,7 @@ OPS.add_shape_content = function (args) {
       if (!pathProp) {
         failed.push("vertices (no Path property on the created group)");
       } else {
-        pathProp.setValue(__makeShape(verts, content.inTangents, content.outTangents, content.closed));
+        __setValue(pathProp, __makeShape(verts, content.inTangents, content.outTangents, content.closed));
         applied.push("vertices");
       }
     }
@@ -196,7 +196,7 @@ OPS.add_shape_content = function (args) {
       var target = __resolveShapeProp(node, type, k);
       if (!target) { failed.push(k); continue; }
       try {
-        target.setValue(content[k]);
+        __setValue(target, content[k]);
         applied.push(k);
       } catch (e) {
         failed.push(k + " (" + e.message + ")");
@@ -229,6 +229,6 @@ OPS.set_shape_property = function (args) {
   if (!pp) throw new Error("No property: " + args.property);
   if (args.keyframe && args.time !== undefined) pp.setValueAtTime(args.time, args.value);
   else if (args.time !== undefined && pp.numKeys > 0) pp.setValueAtTime(args.time, args.value);
-  else pp.setValue(args.value);
+  else __setValue(pp, args.value);
   return { ok: true };
 };

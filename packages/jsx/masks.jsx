@@ -11,7 +11,7 @@ OPS.add_mask = function (args) {
   if (args.inTangents) shape.inTangents = args.inTangents;
   if (args.outTangents) shape.outTangents = args.outTangents;
   shape.closed = args.closed !== false;
-  maskPath.setValue(shape);
+  __setValue(maskPath, shape);
   if (args.mode) {
     try { m.maskMode = MaskMode[args.mode] || m.maskMode; } catch (e) {}
   }
@@ -29,13 +29,13 @@ OPS.set_mask = function (args) {
     if (args.inTangents) sh.inTangents = args.inTangents;
     if (args.outTangents) sh.outTangents = args.outTangents;
     if (args.closed !== undefined) sh.closed = args.closed;
-    pathProp.setValue(sh);
+    __setValue(pathProp, sh);
   }
   if (args.mode) { try { m.maskMode = MaskMode[args.mode] || m.maskMode; } catch (e) {} }
   if (args.inverted !== undefined) m.inverted = args.inverted;
-  if (args.expansion !== undefined) m.property("ADBE Mask Offset").setValue(args.expansion);
-  if (args.feather !== undefined) m.property("ADBE Mask Feather").setValue(args.feather);
-  if (args.opacity !== undefined) m.property("ADBE Mask Opacity").setValue(args.opacity);
+  if (args.expansion !== undefined) __setValue(m.property("ADBE Mask Offset"), args.expansion);
+  if (args.feather !== undefined) __setValue(m.property("ADBE Mask Feather"), args.feather);
+  if (args.opacity !== undefined) __setValue(m.property("ADBE Mask Opacity"), args.opacity);
   return { ok: true };
 };
 
