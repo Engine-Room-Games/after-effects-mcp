@@ -152,8 +152,8 @@ const manifest = {
       type: "boolean",
       title: "Turn off running scripts (run_jsx)",
       description:
-        "Remove the tool that runs scripts Claude writes inside After Effects. Everything else keeps working; " +
-        "a few jobs no other tool covers, like the render queue, become impossible.",
+        "Remove the tool that runs scripts Claude writes inside After Effects. Everything else keeps working, " +
+        "rendering included; only jobs no other tool covers, like replacing or relinking footage, become impossible.",
       default: false,
       required: false,
     },

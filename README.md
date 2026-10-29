@@ -222,6 +222,38 @@ Reopen After Effects and it's running the new version.
 
 If you forget the second step, nothing breaks silently: the next thing you ask for stops with a plain explanation, and your assistant walks you through it.
 
+**On the Claude Code plugin**, update the plugin itself as well — that is what brings the new skills and slash commands:
+
+```
+/plugin marketplace update engine-room
+/plugin update after-effects@engine-room
+```
+
+Then restart Claude Code, and do step 2 above.
+
+**Then catch your project notes up.** Earlier sessions may have written workarounds into your project folder — in `AGENTS.md` or `CLAUDE.md`, or in the issue notebook — that the new version makes unnecessary. In the project folder, run `/absorb-release` (that's its name in Claude Code; other clients that support MCP prompts list it as `absorb-release` in their own prompt menu): it reads what changed since that folder last caught up, fixes the notes that went stale, and records the version so the same history is never read twice.
+
+---
+
+## 🗑️ Uninstalling
+
+Quit After Effects first, then remove whichever pieces you have.
+
+1. **The tools.** Claude Desktop: remove the After Effects extension in Settings → Extensions. Claude Code plugin: `/plugin uninstall after-effects@engine-room`. Anywhere else: delete the `after-effects` entry from your client's MCP configuration (and the unzipped folder, if you used the standalone download).
+2. **The panel.** Delete the folder `games.engine-room.ae-mcp` from the CEP extensions folder:
+   - macOS: `~/Library/Application Support/Adobe/CEP/extensions/games.engine-room.ae-mcp`
+   - Windows: `%APPDATA%\Adobe\CEP\extensions\games.engine-room.ae-mcp`
+3. **The small files it keeps in your user folder.** `~/.engineroom-ae-mcp` holds the panel's port, its secret key and, if you ever created one, a `config.json` with port settings; `~/.ae-mcp` and `~/.after-effects-mcp` hold issue notes, if any were written there. All three are safe to delete. Notes kept inside a project live in that project's `.ae-mcp` folder.
+4. **Adobe's debug setting** — only if nothing else you use needs it. Setup turned on `PlayerDebugMode` (and CEP logging) for CEP versions 9 to 12. Other unsigned Adobe panels rely on the same setting, so leave it on if you have any. To turn it off:
+   - macOS: `for v in 9 10 11 12; do defaults delete com.adobe.CSXS.$v PlayerDebugMode; done`
+   - Windows (Command Prompt): `for %v in (9 10 11 12) do reg delete HKCU\Software\Adobe\CSXS.%v /v PlayerDebugMode /f`
+
+   Setup only turned CEP logging on where it had never been set, so unless you set a log level yourself, remove that too:
+   - macOS: `for v in 9 10 11 12; do defaults delete com.adobe.CSXS.$v LogLevel; done`
+   - Windows (Command Prompt): `for %v in (9 10 11 12) do reg delete HKCU\Software\Adobe\CSXS.%v /v LogLevel /f`
+
+Your `house-style.md` files and project folders are yours and are never touched.
+
 ---
 
 ## 🔒 Security and privacy
@@ -235,7 +267,7 @@ If you forget the second step, nothing breaks silently: the next thing you ask f
 | Switch | What it does |
 |---|---|
 | **Read-only mode** | Your assistant can look at your project — list comps and layers, read keyframes, take screenshots — but every tool that changes something is removed. It can explain and review your work, not touch it. |
-| **Turn off running scripts** | Removes `run_jsx`, the tool that lets your assistant write and run its own After Effects scripts. Everything else still works; a few things no other tool covers (like the render queue) become impossible. |
+| **Turn off running scripts** | Removes `run_jsx`, the tool that lets your assistant write and run its own After Effects scripts. Everything else still works, rendering included; only jobs no other tool covers (like replacing or relinking footage) become impossible. |
 
 A switched-off tool isn't hidden behind a "no" — it simply isn't there, so your assistant won't try to use it, and will tell you when a request needs it.
 
@@ -328,6 +360,7 @@ Start here: **ask your assistant to check the After Effects setup.** It reports 
 | "Cannot reach the After Effects panel" | After Effects isn't running, or the panel isn't installed. Ask it to set up After Effects; if AE was closed, just open it afterwards. |
 | "The panel did not answer within …s" | Not the same thing. After Effects is busy — usually a long script, or a dialog waiting for a click behind another window. Close any dialog, wait a minute and check again before restarting anything; the work normally finishes on its own, so don't ask for it again. |
 | "The After Effects panel is out of date" | The tools were updated but the panel wasn't. Ask it to update the panel, then restart AE. |
+| "…refused this call: the bridge token did not match" | Not a lost connection — the panel answered and turned the request away, and nothing in your project changed. Usually an old panel from a previous After Effects session is still holding on. Quit After Effects completely and reopen it. If it keeps happening, look for a leftover `CEPHtmlEngine` in Activity Monitor or Task Manager and end it. If the message says no token file was found, your client may be running the tools as a different user or in a sandbox; the panel's log (below) shows where it wrote it. Asking for the same thing again, or reinstalling the panel, won't help. |
 | "…updated on disk, but After Effects is still running the previous version" | The update landed; AE just hasn't restarted. Quit and reopen it. Updating again won't help. |
 | Panel never loads, but setup looks correct | On macOS, reboot once. Some builds cache the Adobe setting until a restart. |
 | A panel answers, but the setup check reports none installed | An older install is still serving. Remove it from the CEP extensions folder, reinstall, restart AE. |
@@ -373,7 +406,7 @@ macOS is the more exercised of the two; [issue reports](https://github.com/Engin
 
 **Limitations.**
 
-- The After Effects panel is unsigned, so loading it requires Adobe's `PlayerDebugMode`, which the setup step enables. This is Adobe's documented path for unsigned extensions.
+- The After Effects panel is unsigned, so loading it requires Adobe's `PlayerDebugMode`, which the setup step enables. This is Adobe's documented path for unsigned extensions. It applies to your whole user account, not just this panel: with it on, Adobe apps load *any* unsigned panel placed in your CEP extensions folder without checking its signature. The Uninstalling section above says how to turn it off.
 - `saveFrameToPng` is community-known rather than officially documented. It works, but alpha edges can be imperfect on some comps.
 - A long synchronous loop in `run_jsx` will freeze the After Effects UI. Use `run_batch` for bulk work.
 - Not covered: replacing or relinking footage (importing it is covered), and application preferences.
