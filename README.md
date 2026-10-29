@@ -304,7 +304,7 @@ These switches limit what your assistant can do through this connection. They do
 ---
 
 <details>
-<summary><b>🧰 All 85 tools</b></summary>
+<summary><b>🧰 All 86 tools</b></summary>
 
 <br>
 
