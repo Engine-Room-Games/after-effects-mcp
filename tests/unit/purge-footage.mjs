@@ -138,6 +138,7 @@ function load() {
     }
     function mkLayer(name, source, ctor) {
       var l = new (ctor || AVLayer)();
+      l.id = ++NEXT_ID;
       l.name = name;
       l.source = source || null;
       return l;
@@ -152,7 +153,20 @@ function load() {
       c._layers = layers || [];
       c.numLayers = c._layers.length;
       c.layer = function (i) { return c._layers[i - 1]; };
-      return addItem(avItem(c), folder);
+      avItem(c);
+      // AE removes every precomp layer nesting a comp along with it (#160).
+      c.remove = function () {
+        removeSelf(c);
+        for (var i = 0; i < ITEMS.length; i++) {
+          var h = ITEMS[i];
+          if (!(h instanceof CompItem)) continue;
+          for (var j = h._layers.length - 1; j >= 0; j--) {
+            if (h._layers[j].source === c) h._layers.splice(j, 1);
+          }
+          h.numLayers = h._layers.length;
+        }
+      };
+      return addItem(c, folder);
     }
 
     var app = {
@@ -237,6 +251,35 @@ check("delete_comp by default leaves the solids and says so", () => {
   eq(res.removedSolids, undefined, "nothing claims to have been removed");
   eq(get("has(S1) && has(S2) && has(U1) && has(U2) && has(F1) && has(N)"), true, "every project item survives");
   eq(undo(), ["begin:AE MCP: delete_comp", "end"], "one undo step");
+});
+
+check("delete_comp refuses a comp another comp nests, naming that comp, and deletes nothing (#160)", () => {
+  const { ctx, get, data, call, failure } = load();
+  fixture(ctx);
+  const ids = data("({ N: N.id, A: A.id })");
+  const msg = failure(call("delete_comp", { compId: ids.N }));
+  ok(/refused/.test(msg) && /Nothing was deleted/.test(msg), "it says it refused and that nothing happened");
+  ok(msg.indexOf('"A" (id ' + ids.A + ", 1 layer(s))") >= 0, "the nesting comp is named by name and id");
+  ok(/force:true/.test(msg), "and the opt-in is named");
+  eq(get("has(N)"), true, "the comp survives");
+  eq(get("A.numLayers"), 6, "and so does the precomp layer nesting it");
+});
+
+check("delete_comp force:true deletes a nested comp and reports the layers that went with it (#160)", () => {
+  const { ctx, get, data, call, success } = load();
+  fixture(ctx);
+  const ids = data("({ N: N.id, A: A.id, nested: A._layers[4].id })");
+  const res = success(call("delete_comp", { compId: ids.N, force: true }));
+  eq(get("has(N)"), false, "the comp is gone");
+  eq(get("A.numLayers"), 5, "AE took the nesting layer with it");
+  eq(res.removedFromComps, [{ id: ids.A, name: "A", layers: [{ id: ids.nested, name: "nested" }] }], "and the result says so, per comp");
+});
+
+check("delete_comp on a comp nothing nests carries no removedFromComps (#160)", () => {
+  const { ctx, get, call, success } = load();
+  fixture(ctx);
+  const res = success(call("delete_comp", { compId: get("LOOSE.id") }));
+  eq(res.removedFromComps, undefined);
 });
 
 check("delete_comp with no unused solids reports zero and no note", () => {

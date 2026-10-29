@@ -313,6 +313,10 @@ export const DeleteComp = z
       .describe(
         "Also remove the solid footage items this comp's own layers used, once nothing else uses them. Off by default because a solid can be shared: one another comp still uses is kept and reported with the comps using it."
       ),
+    force: z.boolean().optional().meta({ default: false })
+      .describe(
+        "Delete the comp even though other comps nest it. After Effects removes every precomp layer that uses this comp along with it; the result lists them in removedFromComps. Without it, a nested comp is refused and the nesting comps are named."
+      ),
   })
   .strict();
 export const SetActiveComp = z.object({ compId: z.number() });
