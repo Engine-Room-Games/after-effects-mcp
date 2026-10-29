@@ -76,7 +76,7 @@ function makeContext() {
  * throws AE's own unhelpful message for everything else. `attempts` records the
  * lengths tried, in order — which is how the fast path is told from the ladder.
  */
-function makeProp({ isSpatial = false, valueType, value, accepts, name = "Some Property", current, numKeys = 3, canVaryOverTime = true }) {
+function makeProp({ isSpatial = false, valueType, value, accepts, name = "Some Property", current, numKeys = 3, canVaryOverTime = true, interp = { in: "bezier", out: "bezier" } }) {
   // `current` is the ease the key already has, as AE returns it from
   // keyIn/keyOutTemporalEase: one KeyframeEase per entry, per side. Absent, the
   // read throws, as it would on a property with no temporal ease to read.
@@ -99,9 +99,12 @@ function makeProp({ isSpatial = false, valueType, value, accepts, name = "Some P
     writes: [],
     applied: null,
     keyTime: () => 0,
-    keyInInterpolationType: () => "bezier",
-    keyOutInterpolationType: () => "bezier",
-    setInterpolationTypeAtKey(k) { prop.writes.push(["interpolation", k]); },
+    // The key's interpolation types, and AE's measured habit of turning both
+    // sides bezier on setTemporalEaseAtKey.
+    interp: { in: interp.in, out: interp.out },
+    keyInInterpolationType: () => prop.interp.in,
+    keyOutInterpolationType: () => prop.interp.out,
+    setInterpolationTypeAtKey(k, i, o) { prop.writes.push(["interpolation", k]); prop.interp = { in: i, out: o }; },
     setValueAtTime(t) { prop.writes.push(["value", t]); },
     setTemporalEaseAtKey(keyIndex, inArr, outArr) {
       prop.attempts.push(inArr.length);
@@ -110,6 +113,7 @@ function makeProp({ isSpatial = false, valueType, value, accepts, name = "Some P
         throw new Error("After Effects error: Unable to execute script at line 1. parameter 2");
       }
       assert.equal(outArr.length, inArr.length, "AE takes the same length on both sides");
+      prop.interp = { in: "bezier", out: "bezier" };
       prop.applied = { keyIndex, inArr, outArr };
     },
   };
@@ -358,6 +362,35 @@ check("a kept side whose entries are all the same ease carries to any count", ()
   assert.deepEqual(pairs(prop.applied.outArr), [[70, 1], [70, 1], [70, 1]]);
 });
 
+check("a kept HOLD or LINEAR side keeps its type; the eased side becomes bezier", () => {
+  for (const kept of ["hold", "linear"]) {
+    const ctx = makeContext();
+    const prop = makeProp({
+      name: "Opacity", valueType: VALUE_TYPES.OneD, value: 100, accepts: [1],
+      interp: { in: "linear", out: kept },
+      current: { in: [{ influence: 16, speed: 0 }], out: [{ influence: 16, speed: 0 }] },
+    });
+    ctx.__applyTemporalEase(prop, 1, EASE_IN, undefined);
+    assert.deepEqual({ ...prop.interp }, { in: "bezier", out: kept }, kept + " kept out side");
+  }
+  const ctx = makeContext();
+  const prop = makeProp({
+    name: "Opacity", valueType: VALUE_TYPES.OneD, value: 100, accepts: [1],
+    interp: { in: "hold", out: "linear" },
+    current: { in: [{ influence: 16, speed: 0 }], out: [{ influence: 16, speed: 0 }] },
+  });
+  ctx.__applyTemporalEase(prop, 1, undefined, EASE_OUT);
+  assert.deepEqual({ ...prop.interp }, { in: "hold", out: "bezier" }, "kept in side");
+});
+
+check("a kept bezier side costs no extra interpolation write", () => {
+  const ctx = makeContext();
+  const prop = makeProp({ name: "Opacity", valueType: VALUE_TYPES.OneD, value: 100, accepts: [1],
+    current: { in: [{ influence: 16, speed: 0 }], out: [{ influence: 16, speed: 0 }] } });
+  ctx.__applyTemporalEase(prop, 1, EASE_IN, undefined);
+  assert.deepEqual(prop.writes, []);
+});
+
 check("both sides given reads nothing back", () => {
   const ctx = makeContext();
   const prop = makeProp({ valueType: VALUE_TYPES.OneD, value: 1, accepts: [1] });
@@ -455,6 +488,30 @@ check("add_keyframe that fails after the interpolation is set says that too", ()
     (e) => /value at time 0 was set \(key 1\), and so was its interpolation, but its ease was not/.test(e.message),
   );
   assert.deepEqual(JSON.parse(JSON.stringify(prop.writes)), [["value", 0], ["interpolation", 1]]);
+});
+
+check("add_keyframe: a kept side keeps the type the caller just gave it", () => {
+  const prop = makeProp({ name: "Opacity", valueType: VALUE_TYPES.OneD, value: 100, accepts: [1],
+    interp: { in: "bezier", out: "bezier" },
+    current: { in: [{ influence: 16, speed: 0 }], out: [{ influence: 16, speed: 0 }] } });
+  const ctx = withProp(prop);
+  ctx.OPS.add_keyframe({
+    compId: 1, layerId: 2, propertyPath: ["Opacity"], time: 0, value: 50,
+    interpolation: { out: "hold", easeIn: EASE_IN },
+  });
+  assert.deepEqual({ ...prop.interp }, { in: "bezier", out: "hold" });
+});
+
+check("add_keyframe: a kept side with no type passed keeps the key's own", () => {
+  const prop = makeProp({ name: "Opacity", valueType: VALUE_TYPES.OneD, value: 100, accepts: [1],
+    interp: { in: "linear", out: "linear" },
+    current: { in: [{ influence: 16, speed: 0 }], out: [{ influence: 16, speed: 0 }] } });
+  const ctx = withProp(prop);
+  ctx.OPS.add_keyframe({
+    compId: 1, layerId: 2, propertyPath: ["Opacity"], time: 0, value: 50,
+    interpolation: { easeOut: EASE_OUT },
+  });
+  assert.deepEqual({ ...prop.interp }, { in: "linear", out: "bezier" });
 });
 
 check("add_keyframe without an ease says nothing about ease dimensions", () => {

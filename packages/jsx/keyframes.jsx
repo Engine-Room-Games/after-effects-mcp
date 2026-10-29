@@ -195,6 +195,13 @@ function __applyTemporalEase(prop, keyIndex, easeIn, easeOut, resolved) {
     }
     candidates = reordered;
   }
+  // setTemporalEaseAtKey turns BOTH sides bezier (measured on AE 26.5), so a
+  // kept side that was hold or linear would keep its numbers and lose its
+  // type. Read the kept side's type now — after any interpolation add_keyframe
+  // just applied, so a type the caller asked for is the one kept — and put it
+  // back once the ease has landed. The eased side becomes bezier, as it must.
+  var keepIn = easeIn ? null : prop.keyInInterpolationType(keyIndex);
+  var keepOut = easeOut ? null : prop.keyOutInterpolationType(keyIndex);
   var lastMessage = "";
   var skipped = [];
   for (var i = 0; i < candidates.length; i++) {
@@ -204,10 +211,12 @@ function __applyTemporalEase(prop, keyIndex, easeIn, easeOut, resolved) {
     if (!inArr || !outArr) { skipped.push(n); continue; }
     try {
       prop.setTemporalEaseAtKey(keyIndex, inArr, outArr);
-      return n;
     } catch (e) {
       lastMessage = (e && e.message) ? String(e.message) : String(e);
+      continue;
     }
+    __restoreKeptInterpolation(prop, keyIndex, keepIn, keepOut, label);
+    return n;
   }
   var detail = "";
   if (skipped.length) {
@@ -219,6 +228,27 @@ function __applyTemporalEase(prop, keyIndex, easeIn, easeOut, resolved) {
     "arrays of " + candidates.join(", ") + " entries; the ease was not changed." + detail +
     (lastMessage ? " Last error from AE: " + lastMessage : "")
   );
+}
+
+/**
+ * Put the kept side's interpolation type back after setTemporalEaseAtKey made
+ * it bezier. `keepIn`/`keepOut` are the types read before the ease, or null for
+ * the side that was eased (which stays as AE left it). A failure here throws
+ * saying the ease landed, since it did.
+ */
+function __restoreKeptInterpolation(prop, keyIndex, keepIn, keepOut, label) {
+  if (keepIn === null && keepOut === null) return;
+  var inT = keepIn !== null ? keepIn : prop.keyInInterpolationType(keyIndex);
+  var outT = keepOut !== null ? keepOut : prop.keyOutInterpolationType(keyIndex);
+  if (inT === prop.keyInInterpolationType(keyIndex) && outT === prop.keyOutInterpolationType(keyIndex)) return;
+  try {
+    prop.setInterpolationTypeAtKey(keyIndex, inT, outT);
+  } catch (e) {
+    throw new Error(
+      "The ease on " + label + " at key " + keyIndex + " was set, but the kept side's interpolation type could " +
+      "not be restored and is now bezier: " + ((e && e.message) ? String(e.message) : String(e))
+    );
+  }
 }
 
 /** Returns the ease arity that was used, or null when no ease was requested. */
