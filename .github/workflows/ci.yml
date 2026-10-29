@@ -183,6 +183,12 @@ jobs:
       - name: Render queue refuses exactly the footage a render would miss
         run: node tests/unit/render-footage.mjs
 
+      # Issues #162 and #168: the release reads Apple's notarization verdict
+      # rather than trusting --wait, and smoke-runs every artifact before the
+      # tag. The decisions are pure; the smoke run starts the built server.
+      - name: Release checks catch a rejected notarization and a dead artifact
+        run: node tests/unit/release-checks.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.
