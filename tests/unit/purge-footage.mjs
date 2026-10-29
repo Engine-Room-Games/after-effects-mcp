@@ -102,7 +102,7 @@ function load() {
       return out;
     }
     function avItem(it) {
-      Object.defineProperty(it, "usedIn", { get: function () { return compsUsing(it); } });
+      Object.defineProperty(it, "usedIn", { configurable: true, get: function () { return compsUsing(it); } });
       it.remove = function () { removeSelf(it); };
       return it;
     }
@@ -290,6 +290,26 @@ check("delete_comp force:true deletes a nested comp and reports the layers that 
   eq(get("has(N)"), false, "the comp is gone");
   eq(get("A.numLayers"), 5, "AE took the nesting layer with it");
   eq(res.removedFromComps, [{ id: ids.A, name: "A", layers: [{ id: ids.nested, name: "nested" }] }], "and the result says so, per comp");
+});
+
+check("delete_comp fails closed when usedIn cannot be read (#160)", () => {
+  const { ctx, get, call, failure, success } = load();
+  fixture(ctx);
+  vm.runInContext('Object.defineProperty(LOOSE, "usedIn", { get: function () { throw new Error("usedIn exploded"); } });', ctx);
+  const msg = failure(call("delete_comp", { compId: get("LOOSE.id") }));
+  ok(/could not read/.test(msg) && /usedIn exploded/.test(msg) && /Nothing was deleted/.test(msg), "refused, naming the reason");
+  eq(get("has(LOOSE)"), true);
+  const res = success(call("delete_comp", { compId: get("LOOSE.id"), force: true }));
+  ok(/could not be read/.test(res.nestingUnknown), "forced, and the unknown fallout is said");
+});
+
+check("delete_comp names a nesting checkpoint copy and points at the checkpoint tools (#160)", () => {
+  const { ctx, get, call, failure } = load();
+  fixture(ctx);
+  vm.runInContext('function __cpIsCheckpoint(it) { return it === A; }', ctx);
+  const msg = failure(call("delete_comp", { compId: get("N.id") }));
+  ok(/1 layer\(s\), checkpoint\)/.test(msg), "the nesting comp is flagged as a checkpoint");
+  ok(/checkpoint copy/.test(msg) && /delete_checkpoints/.test(msg) && !/Re-point/.test(msg), "and the advice is the checkpoint one");
 });
 
 check("delete_comp on a comp nothing nests carries no removedFromComps (#160)", () => {

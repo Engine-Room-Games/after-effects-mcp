@@ -98,11 +98,24 @@ OPS.delete_comp = function (args) {
   var force = (args.force === true);
 
   var nestedIn = __delCompNestingLayers(c);
+  if (nestedIn.unreadable && !force) {
+    throw new Error("delete_comp refused: could not read which comps nest comp \"" + compName + "\" (id " + compId +
+      "): " + nestedIn.unreadable + ". Nothing was deleted. Deleting a comp removes every precomp layer that uses it, " +
+      "so it is not deleted blind; pass force:true to delete it anyway.");
+  }
   if (nestedIn.length > 0 && !force) {
+    var cps = 0;
+    for (var k = 0; k < nestedIn.length; k++) if (nestedIn[k].checkpoint) cps++;
+    var advice = "Re-point or delete those layers first, or pass force:true to delete the comp and those layers together.";
+    if (cps > 0) {
+      advice = cps + " of them " + (cps === 1 ? "is a checkpoint copy" : "are checkpoint copies") +
+        " (marked [checkpoint]): revert_comp or delete_checkpoints to discard the checkpoint, rather than editing it. " +
+        (cps < nestedIn.length ? "For the others, re-point or delete those layers first. " : "") +
+        "Or pass force:true to delete the comp and those layers together.";
+    }
     throw new Error("delete_comp refused: comp \"" + compName + "\" (id " + compId + ") is nested in " +
       nestedIn.length + " other comp(s): " + __delCompNestingText(nestedIn) +
-      ". Deleting it would remove those precomp layers too. Nothing was deleted. " +
-      "Re-point or delete those layers first, or pass force:true to delete the comp and those layers together.");
+      ". Deleting it would remove those precomp layers too. Nothing was deleted. " + advice);
   }
   var rqCount = __delCompRenderQueueCount(compId);
 
@@ -112,6 +125,8 @@ OPS.delete_comp = function (args) {
 
   var out = { ok: true, compId: compId, name: compName };
   if (nestedIn.length > 0) out.removedFromComps = nestedIn;
+  if (nestedIn.unreadable) out.nestingUnknown = "Which comps nested it could not be read (" + nestedIn.unreadable +
+    "); any precomp layers using it were removed unreported.";
   if (rqCount > 0) out.renderQueueItemsRemoved = rqCount;
   var kept = [];
   var toRemove = [];
@@ -123,7 +138,7 @@ OPS.delete_comp = function (args) {
     var item = __findItem(solids[i].id);
     if (!item) { gone.push(solids[i]); continue; }
     var uses = __usedInList(item);
-    if (uses.length > 0) {
+    if (uses.length > 0 || uses.unreadable) {
       kept.push({ id: item.id, name: item.name, usedIn: uses });
       continue;
     }
@@ -167,6 +182,7 @@ OPS.delete_comp = function (args) {
 function __delCompNestingLayers(c) {
   var users = __usedInList(c);
   var out = [];
+  if (users.unreadable) out.unreadable = users.unreadable;
   for (var i = 0; i < users.length; i++) {
     var host = __findItem(users[i].id);
     var layers = [];
@@ -178,7 +194,9 @@ function __delCompNestingLayers(c) {
         if (src && src.id === c.id) layers.push({ id: l.id, name: l.name });
       }
     }
-    out.push({ id: users[i].id, name: users[i].name, layers: layers });
+    var entry = { id: users[i].id, name: users[i].name, layers: layers };
+    try { if (host && typeof __cpIsCheckpoint === "function" && __cpIsCheckpoint(host)) entry.checkpoint = true; } catch (eCp) {}
+    out.push(entry);
   }
   return out;
 }
@@ -187,7 +205,7 @@ function __delCompNestingText(nestedIn) {
   var parts = [];
   for (var i = 0; i < nestedIn.length && i < 20; i++) {
     var n = nestedIn[i];
-    parts.push("\"" + n.name + "\" (id " + n.id + ", " + n.layers.length + " layer(s))");
+    parts.push("\"" + n.name + "\" (id " + n.id + ", " + n.layers.length + " layer(s)" + (n.checkpoint ? ", checkpoint" : "") + ")");
   }
   if (nestedIn.length > 20) parts.push("and " + (nestedIn.length - 20) + " more");
   return parts.join(", ");
