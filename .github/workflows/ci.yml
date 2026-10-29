@@ -359,6 +359,12 @@ jobs:
       - name: Progress reaches the request that is still open
         run: node tests/unit/job-progress.mjs
 
+      # cancel_job said ok for a cancel the panel never received, and a late
+      # complete overwrote "cancelled" (#158); await_job on an unknown id sat
+      # out its full ten minutes (#159).
+      - name: Cancel is confirmed, and an unknown job fails at once
+        run: node tests/unit/job-cancel.mjs
+
       # Two failures at once, and the first one takes the whole server down with
       # it: the Anthropic API rejects a tool schema that is not valid draft
       # 2020-12, and a rejected schema breaks every tool in the session rather

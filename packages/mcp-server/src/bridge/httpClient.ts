@@ -237,15 +237,46 @@ export class HttpClient {
     }
   }
 
-  async cancel(jobId: string): Promise<void> {
+  /**
+   * Ask the panel to stop a batch job, and say whether it agreed.
+   *
+   * Throws on every outcome but a confirmed one (issue #158): this used to
+   * ignore the response and log a fetch error, so `cancel_job` answered ok for
+   * a cancel the panel never received. The panel's `_cancel_job` runs on the
+   * same serialized evalScript chain as the batch's chunks, so the answer can
+   * wait behind a chunk — the timeout is the slow-op one for that reason.
+   *
+   * Resolves `{known: false}` when the panel answered but holds no such job —
+   * After Effects or the panel restarted since the batch started.
+   */
+  async cancel(jobId: string): Promise<{ known: boolean; error?: string }> {
+    const timeoutMs = opTimeoutMs("run_batch");
+    let resp: Response;
     try {
-      await fetch(`${this.base}/cancel`, {
+      resp = await fetch(`${this.base}/cancel`, {
         method: "POST",
         headers: { "content-type": "application/json", ...authHeaders(this.port) },
         body: JSON.stringify({ jobId }),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
-      logger.warn("cancel failed", (e as Error).message);
+      if (isTimeoutError(e)) throw new BridgeTimeoutError(this.port, timeoutMs, { op: "cancel_job" });
+      throw new BridgeUnreachableError(this.port, e as Error);
     }
+    if (resp.status === 401 || resp.status === 403) {
+      throw new BridgeAuthError(this.port, panelToken(this.port) !== null);
+    }
+    let data: { ok?: boolean; error?: string; result?: { ok?: boolean; error?: string } | null };
+    try { data = (await resp.json()) as typeof data; }
+    catch {
+      throw new AeError(`The panel answered the cancel with non-JSON (HTTP ${resp.status}); the cancel is not confirmed.`);
+    }
+    if (!data.ok) {
+      throw new AeError(`The panel could not cancel the job: ${data.error ?? `HTTP ${resp.status}`}`);
+    }
+    if (!data.result || data.result.ok !== true) {
+      return { known: false, error: data.result?.error ?? "no answer from _cancel_job" };
+    }
+    return { known: true };
   }
 }
