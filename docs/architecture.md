@@ -376,7 +376,7 @@ showed the batch walk an inner batch with no `ops`, and may have shown
 what it does with the key, is unmeasured, so the key never reaches either. The
 scope is every op rather than `run_batch` alone. zod strips unknown keys from a
 declared object, but `z.unknown()` and `z.record()` fields (batch steps,
-`create_shape_layer.shapes`) pass anything through, and a changed prototype
+and `create_shape_layer.shapes` until #148 removed it) pass anything through, and a changed prototype
 misleads any handler that reads a field. No schema uses these names. The walk
 is one pass over a payload already in memory, bounded at 64 levels.
 

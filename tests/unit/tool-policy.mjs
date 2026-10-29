@@ -25,6 +25,7 @@ const {
   refusedBatchSteps, policyNotice, MAX_BATCH_DEPTH,
 } = policyMod;
 const { OpSchemas, OpMutation } = await import(sharedDist("schemas.js"));
+const { findUnsafeArgKeys } = await import(dist("util", "argsSafety.js"));
 const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
 const { SERVER_INSTRUCTIONS } = await import(dist("generated", "content.js"));
 
@@ -342,22 +343,25 @@ await check("__proto__, constructor and prototype are refused in every op's args
   for (const key of ["__proto__", "constructor", "prototype"]) {
     const res = await clients.default.callTool({ name: "run_batch", arguments: protoPayload(key) });
     assert.equal(res.isError, true, `${key} was forwarded`);
-    // Not only run_batch: a declared free-form field on any op is the same
-    // door. `shapes` is a z.record, so zod passes the key straight through.
+    // Not only run_batch: the check runs on the raw args of every op, before
+    // the schema sees them, so any free-form field a schema declares later is
+    // covered without a test of its own.
     const shape = await clients.default.callTool({
       name: "create_shape_layer",
-      arguments: JSON.parse(`{"compId":1,"shapes":[{"type":"rect","${key}":{"x":1}}]}`),
+      arguments: JSON.parse(`{"compId":1,"name":"x","nested":[{"type":"rect","${key}":{"x":1}}]}`),
     });
-    assert.equal(shape.isError, true, `${key} in create_shape_layer.shapes was forwarded`);
+    assert.equal(shape.isError, true, `${key} in create_shape_layer args was forwarded`);
+    assert.match(shape.content[0].text, new RegExp(`the key "${key}" is not allowed`));
   }
   assert.deepEqual(seen, []);
 });
 
-await check("ordinary keys that merely contain those words still pass", async () => {
+await check("ordinary keys and values that merely contain those words still pass", async () => {
   seen.length = 0;
+  assert.deepEqual(findUnsafeArgKeys({ shapes: [{ constructorName: "a", prototypes: 1, __proto__x: 2 }] }), []);
   const res = await clients.default.callTool({
     name: "create_shape_layer",
-    arguments: { compId: 1, shapes: [{ type: "rect", constructorName: "a", note: "__proto__ in a value is fine" }] },
+    arguments: { compId: 1, name: "__proto__ in a value is fine" },
   });
   assert.equal(res.isError, undefined);
   assert.deepEqual(seen, ["create_shape_layer"]);

@@ -168,6 +168,22 @@ function __shapeSpawnPosition(comp, position) {
 }
 
 OPS.create_shape_layer = function (args) {
+  // Issue #148: these were once advertised and silently dropped, so a caller
+  // asking for a red rect got an empty layer and a success. The schema no longer
+  // declares them; this refuses them on the way in too, before anything is
+  // created, for any caller that reaches the handler without that parse.
+  var dropped = [];
+  var unsupported = ["shapes", "fill", "stroke", "strokeWidth"];
+  for (var u = 0; u < unsupported.length; u++) {
+    if (args[unsupported[u]] !== undefined) dropped.push(unsupported[u]);
+  }
+  if (dropped.length) {
+    throw new Error(
+      "create_shape_layer does not take " + dropped.join(", ") + ": it only creates the empty layer. " +
+      "Add contents with add_shape_content afterwards — a group, then a rect/ellipse/path, then a " +
+      "{type:\"fill\", color} or {type:\"stroke\", color, width} inside it. Nothing was created."
+    );
+  }
   var c = getCompById(args.compId);
   var pos = __shapeSpawnPosition(c, args.position);
   var l = c.layers.addShape();
@@ -185,7 +201,6 @@ OPS.create_shape_layer = function (args) {
       "The empty layer was removed, so nothing changed."
     );
   }
-  // shapes payload kept loose for v1 — the agent can use add_shape_content for detail
   var out = __layerSummary(l);
   // Read both back rather than echoing what we asked for: together they are the
   // coordinate space every subsequent path on this layer is measured in, and a

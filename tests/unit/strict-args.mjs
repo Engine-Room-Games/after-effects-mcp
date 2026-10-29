@@ -120,8 +120,15 @@ await check("cross-field rules and defaults survive the closing", () => {
   assert.equal(r.success, false);
   assert.match(r.error.issues[0].message, /Pass exactly one of/);
   assert.equal(StrictOpSchemas.create_comp.parse({}).name, "Untitled");
-  // A z.record is free-form by declaration: #148 is its own issue.
-  assert.equal(StrictOpSchemas.create_shape_layer.safeParse({ compId: 1, shapes: [{ type: "rect", x: 1 }] }).success, true);
+  // #148: create_shape_layer declared shapes/fill/stroke/strokeWidth and never
+  // applied them. They are gone, so each is now refused by name, not dropped.
+  for (const key of ["shapes", "fill", "stroke", "strokeWidth"]) {
+    const value = key === "shapes" ? [{ type: "rect" }] : key === "strokeWidth" ? 4 : [1, 0, 0];
+    const res = StrictOpSchemas.create_shape_layer.safeParse({ compId: 1, [key]: value });
+    assert.equal(res.success, false, `create_shape_layer accepted ${key} it would never apply`);
+    assert.deepEqual(res.error.issues[0].keys, [key]);
+  }
+  assert.equal(StrictOpSchemas.create_shape_layer.safeParse({ compId: 1, position: "center" }).success, true);
 });
 
 // ---------------------------------------------------------------------------

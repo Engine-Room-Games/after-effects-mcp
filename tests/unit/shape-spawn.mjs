@@ -212,4 +212,22 @@ check("a refused position creates no layer", () => {
   assert.equal(ctx.comp.numLayers, 0, "nothing should have been created");
 });
 
+check("fill, stroke, strokeWidth and shapes are refused by name, not dropped (#148)", () => {
+  // They used to be accepted and ignored: a request for a red, stroked shape
+  // returned success and an empty layer. The handler refuses them before
+  // addShape(), so the refusal leaves nothing behind either.
+  const ctx = makeContext();
+  assert.throws(
+    () => ctx.OPS.create_shape_layer({ compId: 12, fill: [1, 0, 0], stroke: [0, 0, 0], strokeWidth: 4 }),
+    (e) => /does not take fill, stroke, strokeWidth/.test(e.message) && /add_shape_content/.test(e.message)
+  );
+  assert.throws(
+    () => ctx.OPS.create_shape_layer({ compId: 12, shapes: [{ type: "rect" }] }),
+    /does not take shapes/
+  );
+  assert.equal(ctx.comp.numLayers, 0, "nothing should have been created");
+  // Absent is absent — the plain call still works.
+  assert.equal(ctx.OPS.create_shape_layer({ compId: 12 }).id, 99);
+});
+
 console.log(`shape-spawn: ${passed} checks passed`);

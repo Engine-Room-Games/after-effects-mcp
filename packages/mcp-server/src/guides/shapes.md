@@ -18,6 +18,10 @@ want that back, or any `[x, y]` to place the origin yourself. The result echoes
 the position and anchor it ended up with, so nobody has to render a frame to
 learn the coordinate system.
 
+The layer it makes is empty: `create_shape_layer` takes no `fill`, `stroke`,
+`strokeWidth` or `shapes`, and refuses them by name rather than ignoring them.
+Everything visible goes in with `add_shape_content`.
+
 ## Adding contents
 
 `add_shape_content` builds one node at a time under `Contents` — `rect`,
