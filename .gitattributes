@@ -4,3 +4,7 @@
 # this keeps the working tree honest in the first place.
 *.md text eol=lf
 *.ts text eol=lf
+
+# Golden files are compared byte for byte (tests/unit/fake-ae-ops.mjs, which
+# also normalises CRLF defensively); a Windows checkout must not rewrite them.
+tests/unit/golden/** text eol=lf

@@ -420,6 +420,17 @@ jobs:
       - name: Tool schemas are valid 2020-12 and hide no constraints
         run: node tests/unit/schema-constraints.mjs
 
+      # A field a schema advertises and no handler reads is a call that answers
+      # {ok:true} having done nothing (issue #155) — how create_shape_layer's
+      # fill/stroke and set_layer's trackMatte.layerId shipped. The second file
+      # runs set_layer, set_interpolation, get_keyframes, the mask and marker
+      # ops and a get_layer_full golden through the real dispatch() against a
+      # minimal fake After Effects (issue #167); until it, nothing executed them.
+      - name: Every advertised field is read, and the core layer ops behave
+        run: |
+          node tests/unit/schema-handler-contract.mjs
+          node tests/unit/fake-ae-ops.mjs
+
       - name: check_setup resolves platform paths without throwing
         shell: bash
         run: |
