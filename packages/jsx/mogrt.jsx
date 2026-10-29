@@ -418,22 +418,26 @@ function __controllerNames(comp, count) {
 }
 
 /**
- * The 1-based index in `after` of the one controller that is not in `before`,
- * or null. `after` has exactly one more entry; the new controller is the index
- * whose removal leaves `before` unchanged. Order-agnostic on purpose — see the
- * header — and with duplicate names any matching index names the same label.
+ * Every 1-based index in `after` that could be the one new controller: `after`
+ * has exactly one more entry, and a candidate is an index whose removal leaves
+ * `before` unchanged. Order-agnostic on purpose — see the header. With
+ * duplicate names there can be several (a second "Title" next to an old one),
+ * and then which of them is new cannot be told from names alone; the caller
+ * must not guess, because a rename aimed at a guess can hit a controller the
+ * user already had. null when the lists cannot be compared at all.
  */
-function __newControllerIndex(before, after) {
+function __newControllerCandidates(before, after) {
   if (!before || !after || after.length !== before.length + 1) return null;
+  var found = [];
   for (var i = 0; i < after.length; i++) {
     var same = true;
     for (var j = 0, k = 0; j < before.length; j++, k++) {
       if (k === i) k++;
       if (after[k] !== before[j]) { same = false; break; }
     }
-    if (same) return i + 1;
+    if (same) found.push(i + 1);
   }
-  return null;
+  return found;
 }
 
 function __propertyValueTypeLabel(prop) {
@@ -522,8 +526,22 @@ OPS.add_essential_property = function (args) {
   }
 
   var afterNames = __controllerNames(comp, afterCount);
-  var index = __newControllerIndex(beforeNames, afterNames);
-  var controllerName = index !== null ? afterNames[index - 1] : null;
+  var candidates = __newControllerCandidates(beforeNames, afterNames);
+  var index = (candidates && candidates.length === 1) ? candidates[0] : null;
+  // Several candidates all carry the same name (that is the only way removal of
+  // different indices can leave the same list), so the label is known even
+  // when the position is not.
+  var controllerName = (candidates && candidates.length > 0) ? afterNames[candidates[0] - 1] : null;
+  var ambiguous = !!(candidates && candidates.length > 1);
+
+  if (hasName && ambiguous && controllerName !== args.name) {
+    throw new Error(
+      label + " was added to the Essential Graphics panel, but under the name \"" + controllerName +
+      "\", not \"" + args.name + "\". The panel already had a controller of that name, so which of " +
+      "them is the new one cannot be told, and it was not renamed rather than risk renaming the " +
+      "user's existing one. Undo this step to remove it, or rename it by hand in Window > Essential Graphics."
+    );
+  }
 
   // The name AE gave it is checked, not assumed. One correction attempt via
   // setMotionGraphicsControllerName on the index just found; a label that
@@ -554,7 +572,12 @@ OPS.add_essential_property = function (args) {
     controllerCount: afterCount,
     templateName: templateName
   };
-  if (index === null) {
+  if (ambiguous) {
+    result.note =
+      "The controller was added as \"" + controllerName + "\", but the panel holds more than one " +
+      "controller of that name, so which index is the new one cannot be told (candidates: " +
+      candidates.join(", ") + ").";
+  } else if (index === null) {
     result.note =
       "The controller was added, but After Effects would not list the panel's controller names, so its " +
       "index and label could not be read back" + (hasName ? ", and whether it carries the name asked for " +

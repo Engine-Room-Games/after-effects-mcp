@@ -164,6 +164,33 @@ check("a name that will not take is a throw, not an ok", () => {
   assert.match(msg, /undo this step/);
 });
 
+check("a duplicate name: no index is guessed, and no existing controller is renamed", () => {
+  // AE ignores the requested name and adds "Source Text" next to an existing
+  // "Source Text": either index could be the new one.
+  const { call, log, names } = scene({ order: "newestLast", existing: ["Source Text"], ignoresName: true });
+  const msg = messageOf(() => call({ name: "Headline" }));
+  assert.match(msg, /cannot be told/);
+  assert.ok(!log.some((l) => l.startsWith("rename:")), "no rename may be aimed at a guess");
+  assert.deepEqual(names, ["Source Text", "Source Text"]);
+});
+
+check("a duplicate name with no rename asked for: ok, label known, index null with a note", () => {
+  const { call } = scene({ existing: ["Source Text"] });
+  const r = plain(call());
+  assert.equal(r.ok, true);
+  assert.equal(r.controllerIndex, null);
+  assert.equal(r.controllerName, "Source Text");
+  assert.match(r.note, /more than one controller of that name/);
+});
+
+check("a requested name that duplicates an existing one is already correct — no rename, no throw", () => {
+  const { call, log } = scene({ existing: ["Headline"] });
+  const r = plain(call({ name: "Headline" }));
+  assert.equal(r.controllerName, "Headline");
+  assert.equal(r.controllerIndex, null);
+  assert.ok(!log.some((l) => l.startsWith("rename:")));
+});
+
 // ---------- refusals before anything is added ----------
 
 check("a group is refused before AE is asked", () => {
