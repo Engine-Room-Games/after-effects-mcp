@@ -346,6 +346,12 @@ jobs:
         run: |
           node tests/unit/purge-footage.mjs
 
+      # retime_keyframes and copy_animation (#180): every key attribute
+      # survives the remove-and-rewrite, and a collision is refused, not merged.
+      - name: Retiming and copying animation keeps the eases
+        run: |
+          node tests/unit/retime-animation.mjs
+
       # The guidance carriers, from the other side: that the guide sources
       # cross-reference files that exist, and that a house style is digested to
       # something small enough to be worth returning by default.
