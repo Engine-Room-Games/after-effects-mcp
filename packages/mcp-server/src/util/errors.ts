@@ -130,6 +130,96 @@ export class BridgeTimeoutError extends Error {
 }
 
 /**
+ * The panel accepted the connection and then dropped it before answering —
+ * `ECONNRESET`, or undici's "other side closed" (issue #163).
+ *
+ * Deliberately not a `BridgeUnreachableError`. A refusal means the request never
+ * reached a panel, so `runOp` may look for the panel elsewhere and re-send; a
+ * reset means it did reach one, mid-request, and may have run. Re-sending that
+ * is the duplicated-side-effect bug a timeout already guards against (#43). Nor
+ * is it a timeout: nothing is still running and waiting changes nothing — the
+ * usual cause is the panel or After Effects going away under the call (a quit,
+ * a crash, a `/reload-jsx`, the CEP engine being recycled).
+ */
+export class BridgeResetError extends Error {
+  constructor(public port: number, public op: string | undefined, cause?: Error) {
+    super(BridgeResetError.message(port, op, cause));
+    this.name = "BridgeResetError";
+  }
+  static message(port: number, op?: string, cause?: Error): string {
+    const what = op ? `\`${op}\`` : "the call";
+    return [
+      `The After Effects panel at http://127.0.0.1:${port} dropped the connection in the middle of ${what}.`,
+      cause ? `Underlying error: ${errorChainText(cause)}` : "",
+      "",
+      "The request was delivered before the connection broke, so it may or may not have",
+      "taken effect — no answer came back to say which. This is neither a panel that",
+      "was never there nor one still working on the call.",
+      "",
+      "What to do, in order:",
+      "1. Do not blindly re-send it. A write could land twice.",
+      "2. Confirm the panel is back with check_setup; if it reports a problem, relay",
+      "   what it says to the user.",
+      "3. Once it answers, read the affected comp or layer back (diff_comp against a",
+      "   snapshot, get_layer_full, list_layers) to learn whether this call landed,",
+      "   and only send it again if it did not.",
+    ].filter(Boolean).join("\n");
+  }
+}
+
+/** `TypeError: fetch failed` hides the useful part on `cause`; print the chain. */
+function errorChainText(e: Error): string {
+  const parts: string[] = [];
+  let cur: unknown = e;
+  for (let i = 0; cur && typeof cur === "object" && i < 4; i++) {
+    const m = (cur as { message?: unknown }).message;
+    if (typeof m === "string" && m && !parts.includes(m)) parts.push(m);
+    const next = (cur as { cause?: unknown }).cause;
+    if (next === cur) break;
+    cur = next;
+  }
+  return parts.join(": ");
+}
+
+/**
+ * True when a `fetch` rejection is a connection the panel accepted and then
+ * dropped, rather than one it refused. Node's fetch wraps the socket error on
+ * `cause`; undici reports a peer close as `UND_ERR_SOCKET` ("other side
+ * closed") and the kernel's as `ECONNRESET`. Matched by code, never by text.
+ *
+ * A failure that proves the request was never delivered is NOT a reset, even
+ * when it is wrapped in one — see `isUnsentError`, which is checked first.
+ */
+export function isResetError(e: unknown, depth = 0): boolean {
+  if (!e || typeof e !== "object" || depth > 4) return false;
+  const code = (e as { code?: unknown }).code;
+  if (code === "ECONNRESET" || code === "UND_ERR_SOCKET") return true;
+  const cause = (e as { cause?: unknown }).cause;
+  return cause === e ? false : isResetError(cause, depth + 1);
+}
+
+/**
+ * True when a `fetch` rejection proves the request did not reach a panel
+ * whole, so nothing can have run — the same footing as a refusal, and safe to
+ * classify as unreachable (and so re-sendable).
+ *
+ * `EPIPE` is a failed *write*: the socket was already closed when the request
+ * was being sent — typically a keep-alive socket the panel had dropped while it
+ * sat idle. The panel runs an op only on the request's `end` event, after the
+ * whole body has arrived (`req.on("end")` in client/main.js), so a request
+ * whose write failed cannot have run. `ECONNRESET` and `UND_ERR_SOCKET` prove
+ * no such thing — fetch does not say whether the body had been written, or
+ * whether the socket was a reused one — so they stay resets, may-have-run.
+ */
+export function isUnsentError(e: unknown, depth = 0): boolean {
+  if (!e || typeof e !== "object" || depth > 4) return false;
+  const code = (e as { code?: unknown }).code;
+  if (code === "EPIPE") return true;
+  const cause = (e as { cause?: unknown }).cause;
+  return cause === e ? false : isUnsentError(cause, depth + 1);
+}
+
+/**
  * True when a `fetch` rejection came from an AbortSignal timeout rather than a
  * refused or dropped connection.
  *

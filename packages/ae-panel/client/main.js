@@ -144,9 +144,20 @@
   var NS_READY = "(typeof __AEMCP === 'object' && __AEMCP !== null && " +
     "__AEMCP.id === 'games.engine-room.ae-mcp' && typeof __AEMCP.call === 'function')";
 
+  // U+2028 and U+2029 are legal raw inside JSON but are line terminators in an
+  // ES3 string literal, and JSON.stringify leaves them raw — so a text layer or
+  // run_jsx script containing one became an unterminated literal and the whole
+  // op died as "EvalScript error." (issue #163). Escaped in the JSON text, they
+  // survive both the literal and ExtendScript's JSON.parse as the same
+  // characters; the literal is escaped too, as a second line of defence.
+  function escapeLineSeparators(json) {
+    return json.replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  }
+
   function opScript(payload) {
-    // Use \uXXXX-safe JSON pass: JSON.stringify on the panel side, JSON.parse on ExtendScript side.
-    return NS_READY + " ? __AEMCP.call(" + JSON.stringify(payload) + ") : '" + NS_MISSING + "'";
+    // JSON.stringify on the panel side, JSON.parse on the ExtendScript side.
+    var literal = escapeLineSeparators(JSON.stringify(escapeLineSeparators(payload)));
+    return NS_READY + " ? __AEMCP.call(" + literal + ") : '" + NS_MISSING + "'";
   }
 
   // One reload for however many ops found the namespace gone at once.
@@ -434,11 +445,11 @@
   // converts those to 8-bit, tells us when the frame is entirely transparent,
   // and hands back the decoded samples so a frame can be recognised if After
   // Effects serves the same buffer again for a different request.
-  function readPngFrame(file) {
+  function readPngFrame(file, opts) {
     // waitForCompletePng owns the temp file and removes it on every path,
     // success or failure. A file left behind is one a later read could find,
     // which is how a corrupt frame would start coming back for free.
-    return waitForCompletePng(file).then(function (buf) {
+    return waitForCompletePng(file, opts).then(function (buf) {
       var norm;
       try {
         norm = pngCodec.normalizePng(buf);
@@ -730,27 +741,64 @@
     return String(s).split("\n")[0];
   }
 
-  function readSheetTile(info, tile) {
+  function sheetOutOfTime(tile) {
+    return {
+      time: tile.time,
+      status: "failed",
+      note: "not read: the contact sheet's overall time limit (" +
+        Math.round(contactSheetModule.CONTACT_SHEET_BUDGET_MS / 1000) + "s) ran out before this tile",
+    };
+  }
+
+  function readSheetTile(info, tile, deadline) {
     if (tile.error) {
       return Promise.resolve({ time: tile.time, status: "failed", note: tile.error });
     }
-    return readPngFrame(tile.path).then(function (img) {
+    var budget = contactSheetModule.tileBudgetMs(deadline, Date.now(), frameReaderModule.FRAME_RENDER_BUDGET_MS);
+    if (!budget) {
+      // Never read, so nothing else will remove it.
+      unlinkQuietly(tile.path);
+      return Promise.resolve(sheetOutOfTime(tile));
+    }
+    return readPngFrame(tile.path, { budgetMs: budget }).then(function (img) {
       return { time: tile.time, status: "ok", img: img };
     }, function (err) {
       if (err.code !== "FRAME_INCOMPLETE") {
         return { time: tile.time, status: "failed", note: shortReason(err) };
+      }
+      // A re-render is a whole render plus a read. Started with less than
+      // RETRY_MIN_MS left, it could only finish past the sheet's deadline.
+      if (deadline - Date.now() < contactSheetModule.RETRY_MIN_MS) {
+        return { time: tile.time, status: "failed", note: shortReason(err) + "; too little of the sheet's time limit left to re-render it" };
       }
       // The same bounded retry the single-frame path gets, and safe for the same
       // reason — but re-rendering only this one time. The already-derived
       // downsample is passed explicitly so the per-tile factor cannot drift from
       // the rest of the sheet.
       log("warn", "contact sheet tile at " + tile.time + "s: " + shortReason(err) + " — re-rendering once");
-      return runOp("screenshot_frame", {
+      // The render itself cannot be interrupted once it is in ExtendScript, but
+      // the sheet does not wait for it past the deadline: the race settles the
+      // tile then, and a render that answers later has its file removed.
+      var outOfTime = false;
+      var rerender = runOp("screenshot_frame", {
         compId: info.compId,
         time: tile.time,
         downsample: info.downsample,
-      }).then(function (retry) {
-        return readPngFrame(retry.path).then(function (img) {
+      });
+      rerender.then(function (late) { if (outOfTime && late && late.path) unlinkQuietly(late.path); }, function () {});
+      var timer;
+      var expire = new Promise(function (resolve) {
+        timer = setTimeout(function () { outOfTime = true; resolve(null); }, Math.max(0, deadline - Date.now()));
+      });
+      return Promise.race([rerender, expire]).then(function (retry) {
+        clearTimeout(timer);
+        if (!retry) return sheetOutOfTime(tile);
+        var left = contactSheetModule.tileBudgetMs(deadline, Date.now(), frameReaderModule.FRAME_RENDER_BUDGET_MS);
+        if (!left) {
+          unlinkQuietly(retry.path);
+          return sheetOutOfTime(tile);
+        }
+        return readPngFrame(retry.path, { budgetMs: left }).then(function (img) {
           return { time: tile.time, status: "ok", img: img };
         });
       }).catch(function (again) {
@@ -900,6 +948,8 @@
   }
 
   function renderContactSheet(args) {
+    // Started before the render, because the server's clock starts then too.
+    var deadline = Date.now() + contactSheetModule.CONTACT_SHEET_BUDGET_MS;
     return runOp("screenshot_frame", args).then(function (info) {
       var jsxTiles = info.tiles || [];
       // Sequentially: `evalScript` is a mutex anyway, a per-tile retry re-enters
@@ -909,7 +959,7 @@
       for (var i = 0; i < jsxTiles.length; i++) {
         chain = chain.then(function (tile) {
           return function () {
-            return readSheetTile(info, tile).then(function (res) { read.push(res); });
+            return readSheetTile(info, tile, deadline).then(function (res) { read.push(res); });
           };
         }(jsxTiles[i]));
       }

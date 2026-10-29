@@ -1,5 +1,5 @@
 import type { AeSourceInfo } from "../util/errors.js";
-import { AeError, BridgeAuthError, BridgeTimeoutError, BridgeUnreachableError, isTimeoutError } from "../util/errors.js";
+import { AeError, BridgeAuthError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, isResetError, isTimeoutError, isUnsentError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { authHeaders, DEFAULT_PORT, discoverPort, locatePanel, panelToken, pinnedPort, portCandidates, type LocateResult } from "./discovery.js";
 
@@ -180,6 +180,9 @@ export class HttpClient {
       // Collapsing them into "cannot reach the panel" is what sends people off
       // restarting a bridge that was only busy.
       if (isTimeoutError(e)) throw new BridgeTimeoutError(this.port, timeoutMs, { op });
+      // A reset is a third case (#163): the request reached a panel, so it is
+      // not "unreachable" — and must not be, because runOp re-sends those.
+      if (!isUnsentError(e) && isResetError(e)) throw new BridgeResetError(this.port, op, e as Error);
       throw new BridgeUnreachableError(this.port, e as Error);
     }
     // A refusal is not an After Effects error and must not be dressed as one.
@@ -261,6 +264,7 @@ export class HttpClient {
       });
     } catch (e) {
       if (isTimeoutError(e)) throw new BridgeTimeoutError(this.port, timeoutMs, { op: "cancel_job" });
+      if (!isUnsentError(e) && isResetError(e)) throw new BridgeResetError(this.port, "cancel_job", e as Error);
       throw new BridgeUnreachableError(this.port, e as Error);
     }
     if (resp.status === 401 || resp.status === 403) {

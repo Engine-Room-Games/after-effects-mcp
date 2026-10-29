@@ -24,11 +24,12 @@ import {
   resolveAerender,
   type RenderPlan,
 } from "./render/aerender.js";
+import { markRendered } from "./render/markDone.js";
 import { aerenderCandidates, afterEffectsInstallRoots } from "./setup/platform.js";
 import { SnapshotStore } from "./snapshots/store.js";
 import type { CompFingerprint } from "./snapshots/store.js";
 import { descriptions } from "./tools/descriptions.js";
-import { AeError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
+import { AeError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
 import { resolveRunJsxSource, type RunJsxArgs } from "./tools/runJsxSource.js";
 import { toolAnnotations } from "./tools/annotations.js";
 import {
@@ -173,17 +174,9 @@ export function createServer(opts: CreateServerOptions = {}) {
   // live queue so they do not render twice — once, as one named undo step, and
   // a write to the project, so it queues behind any other write like one.
   const renders = new RenderRunner(jobs, {
-    onRendered: async (items) => {
-      const lease = await writes.acquire("render_queue");
-      try {
-        const res = (await bridge.runOp("_render_mark_done", {
-          items: items.map((i) => ({ index: i.index, compId: i.compId, outputPath: i.outputs[0]?.path ?? null })),
-        })) as { results: { index: number; marked: boolean; reason?: string }[] };
-        return res.results;
-      } finally {
-        lease.release();
-      }
-    },
+    // Bounded wait (#163): the job settles after this answers, so an
+    // unbounded queue wait held await_job hostage to an unrelated edit.
+    onRendered: (items) => markRendered(writes, (op, a) => bridge.runOp(op, a), items),
   });
   const snapshots = new SnapshotStore();
   // Follows the bridge's port rather than copying it: see wsClient.ts.
@@ -194,6 +187,15 @@ export function createServer(opts: CreateServerOptions = {}) {
   // new) panel is answering, and the verdict about the old one is void (#156).
   ws.onReopen(() => panelGate.invalidate());
   ws.start();
+  // The event socket and its reconnect timer are what kept an orphaned server
+  // alive after its client went (#163). Closing the server releases them, so
+  // the process can end by draining its event loop — never by process.exit,
+  // which crashes Node 24 on Windows after a fetch.
+  const priorOnClose = server.onclose;
+  server.onclose = () => {
+    ws.stop();
+    priorOnClose?.();
+  };
 
   // The issue journal, pushed rather than pulled: every failed tool call is
   // answered with the journal entries that match its tool and error text, so
@@ -777,6 +779,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       // the journal, and the error path is the only place it can live.
       if (e instanceof BridgeTimeoutError) return fail(name, e.message);
       if (e instanceof BridgeUnreachableError) return fail(name, e.message);
+      if (e instanceof BridgeResetError) return fail(name, e.message);
       if (e instanceof AeError) {
         // A failure the panel diagnosed itself — a stale render buffer, so far.
         // Those messages are already a complete instruction to the agent, and

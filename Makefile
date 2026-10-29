@@ -28,7 +28,8 @@ build: ## Compile TypeScript and the ExtendScript bundle
 
 jsx: ## Rebuild bundle.jsx only, then hot-reload it into a running AE
 	@npm run build:jsx
-	@curl -fsS -X POST http://127.0.0.1:7777/reload-jsx >/dev/null 2>&1 \
+	@curl -fsS -X POST -H "x-ae-mcp-token: $$(cat "$$HOME/.engineroom-ae-mcp/token-7777" 2>/dev/null)" \
+		http://127.0.0.1:7777/reload-jsx >/dev/null 2>&1 \
 		&& echo "reloaded into the running panel" \
 		|| echo "panel not reachable — restart After Effects to pick this up"
 

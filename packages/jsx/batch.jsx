@@ -210,6 +210,8 @@ OPS._continue_job = noUndo(function (args) {
   var jobId = args.jobId;
   var j = JOBS[jobId];
   if (!j) throw new Error("No job: " + jobId);
+  // Its result was returned by the call that finished it, and freed then.
+  if (j.finished) throw new Error("Job " + jobId + " has already finished; its result was delivered when it did.");
   if (j.cancelled) {
     var stopped = {
       done: true, cancelled: true, jobId: jobId,
@@ -218,7 +220,7 @@ OPS._continue_job = noUndo(function (args) {
       note: __batchUndoNote(j.undoSteps, j.name, false, true),
     };
     if (j.diffState) stopped.diff = __diffFinish(j.diffState);
-    return stopped;
+    return __finishJob(jobId, stopped);
   }
   var chunkSize = args.chunkSize || j.chunkSize || __BATCH_CHUNK;
   var endAt = Math.min(j.cursor + chunkSize, j.total);
@@ -262,7 +264,7 @@ OPS._continue_job = noUndo(function (args) {
         "stay applied. Read the state back rather than re-running the batch.",
     };
     if (j.diffState) failed.diff = __diffFinish(j.diffState);
-    return failed;
+    return __finishJob(jobId, failed);
   }
   if (j.cursor >= j.total) {
     var done = {
@@ -272,7 +274,7 @@ OPS._continue_job = noUndo(function (args) {
       note: __batchUndoNote(j.undoSteps, j.name, false, true),
     };
     if (j.diffState) done.diff = __diffFinish(j.diffState);
-    return done;
+    return __finishJob(jobId, done);
   }
   return { done: false, jobId: jobId, progress: j.cursor, total: j.total, undoSteps: j.undoSteps };
 });
@@ -280,6 +282,9 @@ OPS._continue_job = noUndo(function (args) {
 OPS._cancel_job = noUndo(function (args) {
   var j = JOBS[args.jobId];
   if (!j) return { ok: false, error: "No such job" };
+  // Known, and over: the server learns how it ended from the job's own
+  // completion event, which is already on its way.
+  if (j.finished) return { ok: true, finished: true };
   j.cancelled = true;
   return { ok: true };
 });
@@ -289,6 +294,7 @@ OPS._get_job = noUndo(function (args) {
   if (!j) return null;
   return {
     cursor: j.cursor, total: j.total, cancelled: j.cancelled,
-    errorCount: j.errors.length, undoSteps: j.undoSteps,
+    errorCount: j.finished ? j.errorCount : j.errors.length, undoSteps: j.undoSteps,
+    finished: !!j.finished,
   };
 });
