@@ -18,9 +18,12 @@
 //     var a = args;  var tm = args.trackMatte || {};  const { x, ...rest } = a;
 //     for (var i...) { var step = args.ops[i]; }   args.items.forEach(function (it) {})
 //
-//   — into every function the arguments (or a part of them, or an object
-//   spread from them) are passed to, across files, and from the server into the
-//   ExtendScript op it forwards to. A read is `v.field` or `v["field"]` where
+//   — into object literals built from them (`sides = {"in": args.easeIn}`),
+//   through return values, into every function they (or a part of them, or
+//   an object spread from them) are passed to, across files, and from the
+//   server into the ExtendScript op it forwards to. It walks in source order:
+//   reassigning a variable to something else drops it (both arms of an `if`
+//   are merged), and a nested function's own parameters shadow the outer ones. A read is `v.field` or `v["field"]` where
 //   `v` holds the path above it. A string literal, a comment, or a property of
 //   the same name on some other object credits nothing: a refusal message that
 //   says "fill" is not a read of `fill`.
@@ -241,187 +244,288 @@ const unwrap = (e) => {
 };
 const ARRAY_CALLBACKS = new Set(["forEach", "map", "filter", "some", "every", "find", "findIndex", "flatMap", "reduce"]);
 
+// What a variable can hold, as far as this test cares: a list of abstract
+// values, each either
+//   { path }            — the arguments object or a part of it ("" is the root,
+//                          "easeIn" is args.easeIn; arrays are transparent);
+//   { rec, fields, spreads } — an object literal built from such parts, so
+//                          `var sides = { "in": args.easeIn }` and a later
+//                          `sides["in"].speed` read `easeIn.speed`.
+// Anything else is the empty list: not the arguments, and reads off it credit
+// nothing.
+const P = (path) => ({ key: `p:${path}`, path });
+const uniq = (list) => {
+  const seen = new Map();
+  for (const v of list) if (!seen.has(v.key)) seen.set(v.key, v);
+  return [...seen.values()];
+};
+const valuesKey = (vs) => vs.map((v) => v.key).sort().join(",");
+const paramNames = (fn) => {
+  const out = [];
+  const names = (n) => {
+    if (ts.isIdentifier(n)) out.push(n.text);
+    else if (ts.isObjectBindingPattern(n) || ts.isArrayBindingPattern(n)) for (const e of n.elements) if (e.name) names(e.name);
+  };
+  for (const p of fn.parameters) names(p.name);
+  return out;
+};
+
 /**
- * Follows the arguments of one op. `reads` collects the field paths read off
- * them; `enumerated` the paths a `for…in` walked.
+ * Follows the arguments of one op, in source order, through the functions it
+ * reaches. `reads` collects the field paths read off them; `enumerated` the
+ * paths a `for…in` walked.
  */
 class ArgFlow {
   constructor(jsx) {
     this.jsx = jsx;
     this.reads = new Set();
     this.enumerated = new Set();
-    this.entered = new Set();
+    this.memo = new Map(); // fn -> Map(key -> return values)
   }
 
-  /** Enter function `fn` with parameter `i` holding the path `p`. */
-  enterFn(fn, i, p, index) {
-    const key = `${i}\u0000${p}`;
-    fn.__entered ??= new WeakMap();
-    let seen = fn.__entered.get(this);
-    if (!seen) fn.__entered.set(this, (seen = new Set()));
-    if (seen.has(key)) return;
-    seen.add(key);
-    const param = fn.parameters[i];
-    if (!param) return;
-    const env = new Map();
-    if (ts.isIdentifier(param.name)) env.set(param.name.text, p);
-    else this.bindPattern(param.name, p, env);
-    if (fn.body) this.walk(fn.body, env, index);
+  /**
+   * Enter `fn` with parameter `i` holding `values`, inside the scope `outer`
+   * (a closure sees its parent's variables, minus the ones its parameters
+   * shadow). Returns what the function can return.
+   */
+  enterFn(fn, i, values, index, outer = new Map()) {
+    if (!fn.parameters[i] || values.length === 0) return [];
+    let m = this.memo.get(fn);
+    if (!m) this.memo.set(fn, (m = new Map()));
+    const key = `${i}|${valuesKey(values)}`;
+    if (m.has(key)) return m.get(key);
+    m.set(key, []); // recursion sees nothing
+    const env = new Map(outer);
+    for (const n of paramNames(fn)) env.delete(n);
+    this.bind(fn.parameters[i].name, values, env);
+    const returns = [];
+    if (fn.body) {
+      this.walk(fn.body, env, index, returns);
+      if (!ts.isBlock(fn.body)) returns.push(...this.valueOf(fn.body, env, index));
+    }
+    const out = uniq(returns);
+    m.set(key, out);
+    return out;
   }
 
-  /** `{ a, b: c, ...rest }` bound from path `p`. */
-  bindPattern(pat, p, env) {
-    if (!ts.isObjectBindingPattern(pat)) return;
-    for (const el of pat.elements) {
+  /** Bind a name or a destructuring pattern to `values`, crediting what a pattern reads. */
+  bind(name, values, env) {
+    if (ts.isIdentifier(name)) {
+      if (values.length) env.set(name.text, values);
+      else env.delete(name.text);
+      return;
+    }
+    if (!ts.isObjectBindingPattern(name)) return;
+    for (const el of name.elements) {
       if (el.dotDotDotToken) {
-        if (ts.isIdentifier(el.name)) env.set(el.name.text, p);
+        this.bind(el.name, values, env);
         continue;
       }
       const k = el.propertyName ?? el.name;
       if (!ts.isIdentifier(k) && !ts.isStringLiteral(k)) continue;
-      const fp = join(p, k.text);
-      this.reads.add(fp);
-      if (ts.isIdentifier(el.name)) env.set(el.name.text, fp);
-      else this.bindPattern(el.name, fp, env);
+      this.bind(el.name, this.member(values, k.text, true), env);
     }
   }
 
-  /** The argument path `e` evaluates to, or null when it is not one. */
-  pathOf(e, env) {
-    e = unwrap(e);
-    if (!e) return null;
-    if (ts.isIdentifier(e)) return env.has(e.text) ? env.get(e.text) : null;
-    if (ts.isPropertyAccessExpression(e)) {
-      const b = this.pathOf(e.expression, env);
-      return b === null ? null : join(b, e.name.text);
+  /** `values[key]` (or every member, when `key` is null), crediting path reads when `credit`. */
+  member(values, key, credit) {
+    const out = [];
+    for (const v of values) {
+      if (v.path !== undefined) {
+        if (key === null) out.push(v); // an index into an array of them
+        else {
+          const p = v.path ? `${v.path}.${key}` : key;
+          if (credit) this.reads.add(p);
+          out.push(P(p));
+        }
+      } else {
+        if (key === null) for (const f of v.fields.values()) out.push(...f);
+        else if (v.fields.has(key)) out.push(...v.fields.get(key));
+        else out.push(...this.member(v.spreads, key, credit));
+      }
     }
+    return uniq(out);
+  }
+
+  /** The values `e` can evaluate to. Pure apart from entering functions it calls. */
+  valueOf(e, env, index) {
+    e = unwrap(e);
+    if (!e) return [];
+    if (ts.isIdentifier(e)) return env.get(e.text) ?? [];
+    if (ts.isPropertyAccessExpression(e)) return this.member(this.valueOf(e.expression, env, index), e.name.text, false);
     if (ts.isElementAccessExpression(e)) {
-      const b = this.pathOf(e.expression, env);
-      if (b === null) return null;
-      // A literal key is a field; anything else indexes an array (or a record).
-      return ts.isStringLiteralLike(e.argumentExpression) ? join(b, e.argumentExpression.text) : b;
+      const lit = ts.isStringLiteralLike(e.argumentExpression) ? e.argumentExpression.text : null;
+      return this.member(this.valueOf(e.expression, env, index), lit, false);
     }
     if (ts.isBinaryExpression(e)) {
       const op = e.operatorToken.kind;
       if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken) {
-        return this.pathOf(e.left, env) ?? this.pathOf(e.right, env);
+        return uniq([...this.valueOf(e.left, env, index), ...this.valueOf(e.right, env, index)]);
       }
-      if (op === ts.SyntaxKind.AmpersandAmpersandToken) return this.pathOf(e.right, env);
-      return null;
+      if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.EqualsToken || op === ts.SyntaxKind.CommaToken) {
+        return this.valueOf(e.right, env, index);
+      }
+      return [];
     }
-    if (ts.isConditionalExpression(e)) return this.pathOf(e.whenTrue, env) ?? this.pathOf(e.whenFalse, env);
-    // zod's `.parse(args)` hands back the same fields.
-    if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === "parse") {
-      return e.arguments.length === 1 ? this.pathOf(e.arguments[0], env) : null;
+    if (ts.isConditionalExpression(e)) {
+      return uniq([...this.valueOf(e.whenTrue, env, index), ...this.valueOf(e.whenFalse, env, index)]);
     }
-    return null;
-  }
-
-  /** What a call argument hands over: a tracked path, or an object spread from one. */
-  passedPath(arg, env) {
-    const p = this.pathOf(arg, env);
-    if (p !== null) return p;
-    const a = unwrap(arg);
-    if (a && ts.isObjectLiteralExpression(a)) {
-      for (const prop of a.properties) {
-        if (ts.isSpreadAssignment(prop)) {
-          const s = this.pathOf(prop.expression, env);
-          if (s !== null) return s;
+    if (ts.isObjectLiteralExpression(e)) {
+      const fields = new Map();
+      const spreads = [];
+      for (const prop of e.properties) {
+        if (ts.isPropertyAssignment(prop) && (ts.isIdentifier(prop.name) || ts.isStringLiteralLike(prop.name))) {
+          fields.set(prop.name.text, this.valueOf(prop.initializer, env, index));
+        } else if (ts.isShorthandPropertyAssignment(prop)) {
+          fields.set(prop.name.text, env.get(prop.name.text) ?? []);
+        } else if (ts.isSpreadAssignment(prop)) {
+          spreads.push(...this.valueOf(prop.expression, env, index));
         }
       }
+      const any = spreads.length || [...fields.values()].some((f) => f.length);
+      // Keyed by the literal's position: the same literal is the same record.
+      return any ? [{ key: `r:${e.getSourceFile().fileName}:${e.pos}`, fields, spreads: uniq(spreads) }] : [];
     }
-    return null;
+    if (ts.isArrayLiteralExpression(e)) {
+      return uniq(e.elements.flatMap((x) => this.valueOf(ts.isSpreadElement(x) ? x.expression : x, env, index)));
+    }
+    if (ts.isCallExpression(e)) {
+      const c = unwrap(e.expression);
+      // zod's `.parse(args)` hands back the same fields.
+      if (ts.isPropertyAccessExpression(c) && c.name.text === "parse" && e.arguments.length === 1) {
+        return this.valueOf(e.arguments[0], env, index);
+      }
+      const out = [];
+      e.arguments.forEach((arg, i) => {
+        const vs = this.valueOf(arg, env, index);
+        if (!vs.length) return;
+        for (const [f, idx, scope] of this.callees(e, index, env)) out.push(...this.enterFn(f, i, vs, idx, scope));
+      });
+      return uniq(out);
+    }
+    return [];
   }
 
-  /** Functions a callee names, with the index they live in. */
-  callees(call, index) {
+  /** Functions a callee names: [fn, index, closure scope]. */
+  callees(call, index, env) {
     const c = unwrap(call.expression);
     const out = [];
-    const fromDecls = (name, idx) => {
-      for (const d of idx.decls.get(name) ?? []) {
-        if (isFn(d)) out.push([d, idx]);
-        else if (ts.isVariableDeclaration(d) && isFn(unwrap(d.initializer))) out.push([unwrap(d.initializer), idx]);
+    if (ts.isIdentifier(c)) {
+      // A function local to the one being walked shadows a top-level one.
+      const local = env.get(`\u0000fn:${c.text}`);
+      if (local) return [[local.fn, index, local.scope]];
+      for (const d of index.decls.get(c.text) ?? []) {
+        if (isFn(d)) out.push([d, index, new Map()]);
+        else if (ts.isVariableDeclaration(d) && isFn(unwrap(d.initializer))) out.push([unwrap(d.initializer), index, new Map()]);
       }
-    };
-    if (ts.isIdentifier(c)) fromDecls(c.text, index);
-    else if (ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression) && c.expression.text === "OPS") {
-      for (const f of handlerFns(this.jsx.ops.get(c.name.text))) out.push([f, this.jsx]);
+    } else if (ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression) && c.expression.text === "OPS") {
+      for (const f of handlerFns(this.jsx.ops.get(c.name.text))) out.push([f, this.jsx, new Map()]);
     }
     return out;
   }
 
-  walk(body, env, index) {
-    // Aliases first, to a fixed point, so a use above its declaration in the
-    // source (hoisting, loops) is still seen.
-    let size = -1;
-    while (size !== env.size + this.enumerated.size) {
-      size = env.size + this.enumerated.size;
-      const collect = (n) => {
-        if (ts.isVariableDeclaration(n) && n.initializer) {
-          const p = this.pathOf(n.initializer, env);
-          if (p !== null) {
-            if (ts.isIdentifier(n.name)) env.set(n.name.text, p);
-            else this.bindPattern(n.name, p, env);
-          }
-        } else if (
-          ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left)
-        ) {
-          const p = this.pathOf(n.right, env);
-          if (p !== null) env.set(n.left.text, p);
-        } else if (ts.isForOfStatement(n) || ts.isForInStatement(n)) {
-          const p = this.pathOf(n.expression, env);
-          if (p !== null) {
-            if (ts.isForInStatement(n)) this.enumerated.add(p);
-            else {
-              const v = n.initializer;
-              const name = ts.isVariableDeclarationList(v) ? v.declarations[0].name : v;
-              if (ts.isIdentifier(name)) env.set(name.text, p);
-              else this.bindPattern(name, p, env);
-            }
-          }
-        } else if (
-          ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) &&
-          ARRAY_CALLBACKS.has(n.expression.name.text)
-        ) {
-          // args.items.forEach(function (item) { … }) — the element is the array's path.
-          const p = this.pathOf(n.expression.expression, env);
-          const cb = n.arguments[0] && unwrap(n.arguments[0]);
-          if (p !== null && isFn(cb)) {
-            const at = n.expression.name.text === "reduce" ? 1 : 0;
-            const prm = cb.parameters[at];
-            if (prm && ts.isIdentifier(prm.name)) env.set(prm.name.text, p);
-            else if (prm) this.bindPattern(prm.name, p, env);
-          }
-        }
-        ts.forEachChild(n, collect);
-      };
-      collect(body);
-    }
+  /**
+   * Walk `body` in source order. An assignment replaces what a variable holds
+   * — `o = getCompById(…)` stops `o` being the arguments from there on — and a
+   * nested function is walked in its own scope, where its parameters shadow
+   * the outer names.
+   */
+  walk(body, env, index, returns) {
+    // Function declarations are hoisted: register them before anything runs.
+    const hoist = (n) => {
+      if (ts.isFunctionDeclaration(n) && n.name && n !== body) env.set(`\u0000fn:${n.name.text}`, { fn: n, scope: env });
+      if (!isFn(n) || n === body) ts.forEachChild(n, hoist);
+    };
+    if (ts.isBlock(body)) ts.forEachChild(body, hoist);
+
+    const closure = (fn, bound) => {
+      const inner = new Map(env);
+      for (const n of paramNames(fn)) inner.delete(n);
+      if (bound) this.bind(fn.parameters[bound.i].name, bound.values, inner);
+      if (fn.body) this.walk(fn.body, inner, index, []);
+    };
 
     const visit = (n) => {
-      if (ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)) {
-        const p = this.pathOf(n, env);
-        const base = this.pathOf(n.expression, env);
-        if (p !== null && p !== base) this.reads.add(p);
-      } else if (ts.isCallExpression(n)) {
-        const c = unwrap(n.expression);
-        // bridge.runOp("<op>", <tracked>) — the server forwarding to a panel op.
-        if (
-          ts.isPropertyAccessExpression(c) && c.name.text === "runOp" && n.arguments.length >= 2 &&
-          ts.isStringLiteralLike(n.arguments[0])
-        ) {
-          const p = this.passedPath(n.arguments[1], env);
-          if (p !== null) for (const f of handlerFns(this.jsx.ops.get(n.arguments[0].text))) this.enterFn(f, 0, p, this.jsx);
+      if (isFn(n)) {
+        closure(n, null);
+        return;
+      }
+      if (ts.isVariableDeclaration(n)) {
+        if (n.initializer) visit(n.initializer);
+        const init = unwrap(n.initializer);
+        if (ts.isIdentifier(n.name) && isFn(init)) env.set(`\u0000fn:${n.name.text}`, { fn: init, scope: env });
+        this.bind(n.name, n.initializer ? this.valueOf(n.initializer, env, index) : [], env);
+        return;
+      }
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(unwrap(n.left))) {
+        visit(n.right);
+        this.bind(unwrap(n.left), this.valueOf(n.right, env, index), env);
+        return;
+      }
+      if (ts.isForInStatement(n) || ts.isForOfStatement(n)) {
+        visit(n.expression);
+        const vs = this.valueOf(n.expression, env, index);
+        const v = n.initializer;
+        const name = ts.isVariableDeclarationList(v) ? v.declarations[0].name : v;
+        if (ts.isForInStatement(n)) {
+          for (const x of vs) if (x.path !== undefined) this.enumerated.add(x.path);
+          if (ts.isIdentifier(name)) env.delete(name.text); // the key, a string
+        } else this.bind(name, this.member(vs, null, false), env);
+        visit(n.statement);
+        return;
+      }
+      if (ts.isIfStatement(n)) {
+        // Either branch may have run: afterwards a variable holds what it held
+        // on either side (`if (!args) args = {};` leaves args the arguments).
+        visit(n.expression);
+        const before = new Map(env);
+        visit(n.thenStatement);
+        const afterThen = new Map(env);
+        env.clear();
+        for (const [k, v] of before) env.set(k, v);
+        if (n.elseStatement) visit(n.elseStatement);
+        for (const [k, v] of afterThen) env.set(k, env.has(k) && Array.isArray(v) ? uniq([...env.get(k), ...v]) : v);
+        return;
+      }
+      if (ts.isReturnStatement(n)) {
+        if (n.expression) {
+          visit(n.expression);
+          returns.push(...this.valueOf(n.expression, env, index));
         }
-        n.arguments.forEach((arg, i) => {
-          const p = this.passedPath(arg, env);
-          if (p === null) return;
-          for (const [f, idx] of this.callees(n, index)) this.enterFn(f, i, p, idx);
-        });
+        return;
+      }
+      if (ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)) {
+        const key = ts.isPropertyAccessExpression(n)
+          ? n.name.text
+          : ts.isStringLiteralLike(n.argumentExpression) ? n.argumentExpression.text : null;
+        if (key !== null) this.member(this.valueOf(n.expression, env, index), key, true);
+        ts.forEachChild(n, visit);
+        return;
+      }
+      if (ts.isCallExpression(n)) {
+        const c = unwrap(n.expression);
+        visit(n.expression);
+        // args.items.forEach(function (item) { … }) — the callback's parameter
+        // is an element of the array.
+        if (ts.isPropertyAccessExpression(c) && ARRAY_CALLBACKS.has(c.name.text) && isFn(unwrap(n.arguments[0]))) {
+          const cb = unwrap(n.arguments[0]);
+          const vs = this.member(this.valueOf(c.expression, env, index), null, false);
+          const i = c.name.text === "reduce" ? 1 : 0;
+          closure(cb, vs.length && cb.parameters[i] ? { i, values: vs } : null);
+          n.arguments.slice(1).forEach(visit);
+        } else n.arguments.forEach(visit);
+        // bridge.runOp("<op>", <tracked>) — the server forwarding to a panel op.
+        if (ts.isPropertyAccessExpression(c) && c.name.text === "runOp" && n.arguments.length >= 2 && ts.isStringLiteralLike(n.arguments[0])) {
+          const vs = this.valueOf(n.arguments[1], env, index);
+          for (const f of handlerFns(this.jsx.ops.get(n.arguments[0].text))) this.enterFn(f, 0, vs, this.jsx);
+        }
+        this.valueOf(n, env, index); // enters every callee handed a tracked value
+        return;
       }
       ts.forEachChild(n, visit);
     };
-    visit(body);
+    if (ts.isBlock(body)) ts.forEachChild(body, visit);
+    else visit(body); // an arrow's expression body
   }
 }
 
@@ -462,7 +566,7 @@ function readersFor(op, jsx = JSX) {
   if (!spec) {
     const fns = handlerFns(jsx.ops.get(op));
     if (fns.length === 0) return null;
-    for (const f of fns) flow.enterFn(f, 0, "", jsx);
+    for (const f of fns) flow.enterFn(f, 0, [P("")], jsx);
     return flow;
   }
   const files = [...new Set([SERVER_TS, ...(spec.files ?? []).map((f) => path.join(srcDir, f))])];
@@ -472,19 +576,19 @@ function readersFor(op, jsx = JSX) {
   if (spec.branch) {
     const blocks = branchesFor(index.files.get(SERVER_TS), op);
     assert.ok(blocks.length > 0, `SERVER_READERS.${op} says branch, but server.ts has no \`if (name === "${op}")\``);
-    for (const b of blocks) flow.walk(b, new Map([["args", ""], ["rawArgs", ""]]), index);
+    for (const b of blocks) flow.walk(b, new Map([["args", [P("")]], ["rawArgs", [P("")]]]), index, []);
   }
   for (const fn of spec.fns ?? []) {
     const d = (index.decls.get(fn) ?? []).filter(isFn);
     assert.ok(d.length, `SERVER_READERS.${op} names ${fn}, which none of its files declares as a function`);
     for (const f of d) {
       const i = f.parameters.findIndex((p) => ts.isIdentifier(p.name) && p.name.text === "args");
-      flow.enterFn(f, i < 0 ? 0 : i, "", index);
+      flow.enterFn(f, i < 0 ? 0 : i, [P("")], index);
     }
   }
   for (const o of spec.ops ?? []) {
     assert.ok(jsx.ops.has(o), `SERVER_READERS.${op} names OPS.${o}, which no .jsx file defines`);
-    for (const f of handlerFns(jsx.ops.get(o))) flow.enterFn(f, 0, "", jsx);
+    for (const f of handlerFns(jsx.ops.get(o))) flow.enterFn(f, 0, [P("")], jsx);
   }
   return flow;
 }
@@ -635,6 +739,57 @@ check("a helper that reads the same names off something else credits nothing", (
     };
   `);
   assert.deepEqual(paths, ["comment", "url"]);
+});
+
+check("a variable reassigned to something else stops being the arguments", () => {
+  const paths = unreadIn("add_marker", `
+    OPS.add_marker = function (args) {
+      var o = args;
+      var t = [o.compId, o.layerId, o.time, o.duration, o.label, o.chapter, o.url];
+      o = getCompById(args.compId);
+      return [t, o.comment, o.frameTarget];
+    };
+  `);
+  assert.deepEqual(paths, ["comment", "frameTarget"]);
+});
+
+check("an inner function's own parameter shadows the arguments", () => {
+  const paths = unreadIn("add_marker", `
+    OPS.add_marker = function (args) {
+      function f(args) { return [args.comment, args.url]; }
+      var g = function (args) { return args.label; };
+      f(getCompById(1));
+      g({});
+      return [args.compId, args.layerId, args.time, args.duration, args.chapter, args.frameTarget];
+    };
+  `);
+  assert.deepEqual(paths, ["comment", "label", "url"]);
+  // …and is followed when it is handed the arguments.
+  assert.deepEqual(
+    unreadIn("add_marker", `
+      OPS.add_marker = function (args) {
+        function f(a) { return [a.comment, a.url, a.label]; }
+        f(args);
+        return [args.compId, args.layerId, args.time, args.duration, args.chapter, args.frameTarget];
+      };
+    `),
+    []
+  );
+});
+
+check("a part of the arguments carried in an object literal and a return value is followed", () => {
+  // keyframes.jsx's shape: sides = {"in": easeIn, "out": easeOut}, returned
+  // from one helper and read as sides["in"][i].speed in another.
+  const paths = unreadIn("set_temporal_ease", `
+    function __sides(a, b) { var s = { "in": a, "out": b, known: null }; return s; }
+    function __apply(spec) { return [spec[0].speed, spec[0].influence]; }
+    OPS.set_temporal_ease = function (args) {
+      var sides = __sides(args.easeIn, null);
+      __apply(sides["in"]);
+      return [args.compId, args.layerId, args.propertyPath, args.keyIndex, args.easeOut];
+    };
+  `);
+  assert.deepEqual(paths, ["easeOut.influence", "easeOut.speed"]);
 });
 
 console.log(`schema-handler-contract: ${passed} checks passed (${Object.keys(OpSchemas).length} ops)`);
