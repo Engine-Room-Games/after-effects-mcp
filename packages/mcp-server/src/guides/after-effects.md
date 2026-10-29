@@ -6,7 +6,8 @@ description: How to drive Adobe After Effects well through the AE MCP tools — 
 # Driving After Effects
 
 You have direct control of a live After Effects session. The user sees every
-change immediately, and every tool call is a real undo step in their project.
+change immediately, and every tool call that changes something is a real undo
+step in their project.
 Work like a motion designer at the keyboard, not like a script that fires blind.
 
 This file holds only what silently produces wrong output on *any* task. Each
