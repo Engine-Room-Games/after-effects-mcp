@@ -214,6 +214,11 @@ jobs:
       - name: A keyframe needs a time, and 3D-only transforms are refused on 2D
         run: node tests/unit/keyframe-transform.mjs
 
+      # set_transform, set_effect_param and set_shape_property share one
+      # set-or-keyframe helper (#184); it keeps every rule the three copies had.
+      - name: One set-or-keyframe path for transforms, effect params and shape properties
+        run: node tests/unit/set-or-key.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.

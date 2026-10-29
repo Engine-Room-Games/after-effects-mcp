@@ -1,16 +1,5 @@
 // transforms.jsx — fast-path for setting common transform properties.
-
-function __setOrKeyAtTime(prop, value, time, keyframe) {
-  if (keyframe && time !== undefined && time !== null) {
-    prop.setValueAtTime(time, value);
-  } else if (time !== undefined && time !== null && !keyframe) {
-    // Set value at time only meaningful if property has keyframes; else set static.
-    if (prop.numKeys > 0) prop.setValueAtTime(time, value);
-    else __setValue(prop, value);
-  } else {
-    __setValue(prop, value);
-  }
-}
+// Each write goes through __setOrKeyAtTime (values.jsx).
 
 // Each field's property, by match name. Display names change with the UI
 // language and the layer type: a 2D layer's "Rotation" is a 3D layer's
@@ -104,7 +93,7 @@ OPS.set_transform = function (args) {
   var written = [];
   for (i = 0; i < plan.length; i++) {
     try {
-      __setOrKeyAtTime(plan[i][0], plan[i][1], t, kf);
+      __setOrKeyAtTime(plan[i][0], plan[i][1], t, kf, "set_transform");
     } catch (e3) {
       var msg = (e3 && e3.message) ? e3.message : String(e3);
       throw new Error(

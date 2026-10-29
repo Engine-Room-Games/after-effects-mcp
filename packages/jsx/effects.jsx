@@ -185,9 +185,7 @@ OPS.set_effect_param = function (args) {
     throw new Error(__effectParamMissMessage(eff, args, lang));
   }
   __requireKeyTime(!!args.keyframe, args.time, "set_effect_param");
-  if (args.keyframe && args.time !== undefined) p.setValueAtTime(args.time, args.value);
-  else if (args.time !== undefined && p.numKeys > 0) p.setValueAtTime(args.time, args.value);
-  else __setValue(p, args.value);
+  __setOrKeyAtTime(p, args.value, args.time, !!args.keyframe, "set_effect_param");
   return { ok: true };
 };
 

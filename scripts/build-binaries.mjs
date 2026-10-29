@@ -21,11 +21,13 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadPackagingCopy } from "./lib/setup.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serverPkg = path.join(root, "packages", "mcp-server");
 const panelSrc = path.join(root, "packages", "ae-panel");
 const wsSrc = path.join(root, "node_modules", "ws");
+const copy = await loadPackagingCopy();
 
 const outIdx = process.argv.indexOf("--out");
 const outDir = outIdx >= 0 ? path.resolve(process.argv[outIdx + 1]) : path.join(root, "dist-release");
@@ -139,18 +141,6 @@ fs.writeFileSync(
 );
 
 console.log(`\n${built.length} target(s) in ${path.relative(root, outDir)}`);
-
-function copy(src, dst) {
-  const base = path.basename(src);
-  if (base === "node_modules" || base === ".DS_Store") return;
-  const stat = fs.lstatSync(src);
-  if (stat.isDirectory()) {
-    fs.mkdirSync(dst, { recursive: true });
-    for (const entry of fs.readdirSync(src)) copy(path.join(src, entry), path.join(dst, entry));
-  } else {
-    fs.copyFileSync(src, dst);
-  }
-}
 
 function dirSize(dir) {
   let total = 0;

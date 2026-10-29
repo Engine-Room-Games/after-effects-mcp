@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadPackagingCopy } from "./lib/setup.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serverPkg = path.join(root, "packages", "mcp-server");
@@ -31,6 +32,7 @@ if (!fs.existsSync(bundleJsx)) {
   console.error(`Missing ${bundleJsx}. Run \`npm run build:jsx\` first.`);
   process.exit(1);
 }
+const copy = await loadPackagingCopy();
 
 // The guidance the agent reads is compiled in from generated/content.ts. Packing
 // a stale copy would ship tool guidance that disagrees with the tools, silently
@@ -76,7 +78,6 @@ console.log(`Bundled ${path.relative(root, outFile)} (${(fs.statSync(outFile).si
 
 // Vendor the panel. node_modules is excluded: setup_panel re-vendors `ws` from
 // the server's own dependency tree at install time.
-const SKIP = new Set(["node_modules", ".DS_Store"]);
 fs.rmSync(panelDst, { recursive: true, force: true });
 copy(panelSrc, panelDst);
 console.log(`Vendored panel -> ${path.relative(root, panelDst)}`);
@@ -88,14 +89,3 @@ for (const name of ["README.md", "LICENSE"]) {
   if (fs.existsSync(from)) fs.copyFileSync(from, path.join(serverPkg, name));
 }
 console.log("Copied README.md + LICENSE into the package");
-
-function copy(src, dst) {
-  if (SKIP.has(path.basename(src))) return;
-  const stat = fs.lstatSync(src);
-  if (stat.isDirectory()) {
-    fs.mkdirSync(dst, { recursive: true });
-    for (const entry of fs.readdirSync(src)) copy(path.join(src, entry), path.join(dst, entry));
-  } else {
-    fs.copyFileSync(src, dst);
-  }
-}

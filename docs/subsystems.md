@@ -327,7 +327,7 @@ How the restore is ordered, and why:
   deleted id throws "internal verification failure {Item Not Found}", so a
   checkpoint whose comp was deleted made `list_checkpoints` fail for the whole
   project. Every lookup goes through `__findItem` (`ids.jsx`), which
-  `getCompById`/`getItemById` and `delete_comp`/`duplicate_comp` now use too.
+  `getCompById` and `delete_comp`/`duplicate_comp` now use too.
 - **An explicit `compId` can re-bind an imported checkpoint.** Importing a
   project renumbers every item, so its checkpoints name ids that are gone or
   belong to something else. `revert_comp` accepts a `compId` that differs from
