@@ -18,7 +18,8 @@ description: Keyframes, easing, rigging and expressions through the AE MCP tools
 
 **Pass one `{influence, speed}` pair per side and nothing else.**
 `set_temporal_ease` and `add_keyframe` size the ease array for the property
-themselves and report the count that worked as `easeDimensions`. That number is
+themselves and report the count that worked as `easeDimensions`; pass only one
+side and the other keeps the ease the key already has. That count is
 not derivable from the value's dimension — After Effects wants a different count
 per property, and the measured table is in the `extendscript-gotchas` topic for
 the day you script an ease by hand. Through the tools you never need it; from a
