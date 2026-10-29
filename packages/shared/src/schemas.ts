@@ -115,7 +115,13 @@ export type CrossFieldKind =
   /** Zero or one. Both together are two readings of the same question. */
   | "atMostOne"
   /** One or more. Zero means the call would do nothing. */
-  | "atLeastOne";
+  | "atLeastOne"
+  /**
+   * When the first field is `true`, every other field is required too.
+   * `keyframe: true` with no `time` has no keyframe to write (issue #151);
+   * `keyframe: false` or absent asks for nothing, so needs nothing.
+   */
+  | "whenTrue";
 
 export interface CrossFieldRule {
   kind: CrossFieldKind;
@@ -148,6 +154,17 @@ const joinWith = (parts: readonly string[], conjunction: string) => {
  * those apart re-sends the same mistake.
  */
 export function crossFieldMessage(rule: CrossFieldRule, present: readonly string[]): string {
+  if (rule.kind === "whenTrue") {
+    const [trigger, ...needed] = rule.fields;
+    const missing = needed.filter((f) => !present.includes(f));
+    const listed = missing.length ? missing : needed;
+    return (
+      `\`${trigger}: true\` requires ${joinWith(backticked(needed), "and")}` +
+      ` — ${joinWith(backticked(listed), "and")} ${listed.length === 1 ? "was" : "were"} not passed.` +
+      ` Pass ${joinWith(backticked(listed), "and")}, or drop \`${trigger}\` to set a static value.` +
+      (rule.then ? " " + rule.then : "")
+    );
+  }
   const want = joinWith(backticked(rule.fields), "or");
   const got = joinWith(backticked(present), "and");
   const head =
@@ -173,6 +190,11 @@ export function crossFieldPresent(rule: CrossFieldRule, value: unknown): string[
 }
 
 export function crossFieldSatisfied(rule: CrossFieldRule, value: unknown): boolean {
+  if (rule.kind === "whenTrue") {
+    const obj = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+    if (obj[rule.fields[0]] !== true) return true;
+    return rule.fields.slice(1).every((f) => obj[f] !== undefined);
+  }
   const n = crossFieldPresent(rule, value).length;
   if (rule.kind === "exactlyOne") return n === 1;
   if (rule.kind === "atLeastOne") return n >= 1;
@@ -197,6 +219,18 @@ export function crossFieldJsonSchema(rule: CrossFieldRule): Record<string, unkno
   const each = rule.fields.map((f) => ({ required: [f] }));
   if (rule.kind === "exactlyOne") return { oneOf: each };
   if (rule.kind === "atLeastOne") return { anyOf: each };
+  if (rule.kind === "whenTrue") {
+    // "Either the trigger is not `true`, or the rest are all there." Written
+    // as `anyOf` over a negation rather than `if`/`then`, for the same
+    // portability reason as the other three shapes.
+    const [trigger, ...needed] = rule.fields;
+    return {
+      anyOf: [
+        { not: { required: [trigger], properties: { [trigger]: { const: true } } } },
+        { required: needed },
+      ],
+    };
+  }
   // "at most one" is the absence of every pair. Written as a negated `anyOf`
   // rather than as `oneOf` + an all-absent branch, because the negation is what
   // the rule actually says and reads that way to anything parsing it.
@@ -613,7 +647,16 @@ export const ReorderLayer = crossField(
 );
 
 // ---------- transforms ----------
-export const SetTransform = z.object({
+// A keyframe with no time used to fall through to a static write and report
+// ok (issue #151). Declared here so the model sees it in the schema and the
+// server refuses before anything reaches After Effects.
+const keyframeNeedsTime: CrossFieldRule = {
+  kind: "whenTrue",
+  fields: ["keyframe", "time"],
+  then: "`time` is the keyframe's time in comp seconds.",
+};
+
+export const SetTransform = crossField(z.object({
   compId: z.number(),
   layerId: z.number(),
   time: z.number().optional(),
@@ -629,7 +672,7 @@ export const SetTransform = z.object({
     yRotation: z.number().optional(),
     zRotation: z.number().optional(),
   }),
-});
+}), keyframeNeedsTime);
 
 // ---------- keyframes ----------
 export const AddKeyframe = z.object({
@@ -698,7 +741,7 @@ export const ClearExpression = z.object({ compId: z.number(), layerId: z.number(
 export const ListEffects = z.object({ compId: z.number(), layerId: z.number(), ...effectParamFields });
 export const AddEffect = z.object({ compId: z.number(), layerId: z.number(), matchName: z.string() });
 export const RemoveEffect = z.object({ compId: z.number(), layerId: z.number(), effectIndex: z.number().int().positive() });
-export const SetEffectParam = crossField(
+const SetEffectParamBase = crossField(
   z.object({
     compId: z.number(),
     layerId: z.number(),
@@ -721,6 +764,7 @@ export const SetEffectParam = crossField(
     then: "list_effects on the layer reports both for every parameter of every effect.",
   }
 );
+export const SetEffectParam = crossField(SetEffectParamBase, keyframeNeedsTime);
 export const SetEffectEnabled = z.object({ compId: z.number(), layerId: z.number(), effectIndex: z.number().int().positive(), enabled: z.boolean() });
 // The result is cached for the AE session because enumerating app.effects is
 // slow enough to time the bridge out (issue #26). `filter` is a case-insensitive
@@ -864,7 +908,7 @@ export const AddShapeContent = z.object({
   zOrder: z.enum(["front", "back"]).optional()
     .describe("Where the new node sits in its group's render stack. Index 1 renders in FRONT, and AE appends new content to the end — so the default, 'back', puts each node behind everything already there. 'front' moves it to index 1. Prefer ordering your calls front-to-back (details first, background rects last) over reaching for 'front': it needs an internal moveTo, which has been seen to disturb nested renders of the comp in AE 26.3."),
 });
-export const SetShapeProperty = z.object({
+export const SetShapeProperty = crossField(z.object({
   compId: z.number(),
   layerId: z.number(),
   contentPath: PropertyPath,
@@ -872,7 +916,7 @@ export const SetShapeProperty = z.object({
   value: VecAny,
   time: z.number().optional(),
   keyframe: z.boolean().optional().meta({ default: false }),
-});
+}), keyframeNeedsTime);
 
 // ---------- masks ----------
 export const AddMask = z.object({

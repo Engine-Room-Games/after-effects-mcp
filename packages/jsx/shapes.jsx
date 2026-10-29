@@ -244,6 +244,7 @@ OPS.set_shape_property = function (args) {
   var node = walkProperty(l, args.contentPath);
   var pp = node.property(args.property);
   if (!pp) throw new Error("No property: " + args.property);
+  __requireKeyTime(!!args.keyframe, args.time, "set_shape_property");
   if (args.keyframe && args.time !== undefined) pp.setValueAtTime(args.time, args.value);
   else if (args.time !== undefined && pp.numKeys > 0) pp.setValueAtTime(args.time, args.value);
   else __setValue(pp, args.value);
