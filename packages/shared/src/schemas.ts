@@ -998,7 +998,7 @@ export const RunJsx = crossField(
     diffCompId: diffCompIdParam,
   }),
   // `resolveRunJsxSource` refuses both and neither too, and keeps doing so —
-  // it is reachable from `run_batch`, whose steps are never zod-validated. What
+  // it is reachable from a hand-rolled `POST /op`, which nothing validates. What
   // the rule buys here is the half that runs *before* the call: declared, it
   // reaches the emitted JSON Schema, so the model sees the choice rather than
   // discovering it.
@@ -1571,3 +1571,115 @@ export const OpMutation = {
 } as const satisfies Record<OpName, "write" | "read" | "server">;
 
 export type OpEffect = (typeof OpMutation)[OpName];
+
+// ---------- runtime strictness ----------
+/**
+ * Every object in an op schema, closed — at every depth (issue #147).
+ *
+ * zod's default for an object is to **strip** a key it does not declare, and
+ * the emitted JSON Schema says the opposite: `toolInputSchema()` closes every
+ * object (`additionalProperties: false`), so the model is told an unknown key
+ * is refused. Before this, a misspelt `positon` reached no handler, nothing
+ * failed, and the tool answered `{ok: true}` for a change that never happened
+ * — the swallowed error this repo refuses everywhere else. The agent never
+ * learnt it had to try again.
+ *
+ * Writing `.strict()` on every object by hand is a rule that holds until the
+ * next schema somebody adds, and the failure is invisible. So the closing is
+ * done here, once, over every op: a `ZodObject` with no catchall of its own is
+ * cloned with `catchall: never`, which is what `.strict()` does, and every
+ * wrapper around it is cloned onto the closed copy. A clone keeps its `checks`,
+ * so `crossField()` rules travel with it; it does not keep `.describe()`/
+ * `.meta()`, which is why the **emitted** schema is still built from the
+ * originals in `OpSchemas` and only the **parse** uses these.
+ *
+ * A `z.record()` or `z.unknown()` is free-form by declaration and stays so.
+ * A node type this does not know is left as it was and named in
+ * `STRICT_UNHANDLED`; `tests/unit/strict-args.mjs` fails the build on any, for
+ * the same reason the cross-field guard throws rather than skips. It does not
+ * throw here: this runs at module load, and a throw would take down every tool
+ * in the session rather than leave one of them lenient.
+ */
+type AnyZod = z.ZodType;
+interface CloneableDef {
+  type: string;
+  [k: string]: unknown;
+}
+const defOf = (s: unknown): CloneableDef => (s as { _zod: { def: CloneableDef } })._zod.def;
+const cloneWith = (s: AnyZod, patch: Record<string, unknown>): AnyZod =>
+  (s as unknown as { clone(def: unknown): AnyZod }).clone({ ...defOf(s), ...patch });
+
+/** Node types that hold no object, and are returned as they are. */
+const STRICT_LEAVES = new Set([
+  "string", "number", "int", "boolean", "bigint", "date", "enum", "literal", "unknown", "any",
+  "never", "null", "undefined", "void", "nan", "symbol", "file", "transform", "custom", "template_literal",
+]);
+
+/** Paths of nodes `strictDeep` did not know how to close. Empty in a healthy build. */
+export const STRICT_UNHANDLED: string[] = [];
+
+export function strictDeep<T extends AnyZod>(schema: T, where = "(root)"): T {
+  const cache = new Map<unknown, AnyZod>();
+  const walk = (node: AnyZod, path: string): AnyZod => {
+    const hit = cache.get(node);
+    if (hit) return hit;
+    const def = defOf(node);
+    let out: AnyZod;
+    switch (def.type) {
+      case "object": {
+        const shape = def.shape as Record<string, AnyZod>;
+        const closed: Record<string, AnyZod> = {};
+        for (const key of Object.keys(shape)) closed[key] = walk(shape[key], `${path}.${key}`);
+        // An object that declared its own catchall (`.loose()`, `.catchall(x)`)
+        // said so on purpose; only the default — strip — is closed.
+        const catchall = def.catchall === undefined ? z.never() : walk(def.catchall as AnyZod, `${path}.*`);
+        out = cloneWith(node, { shape: closed, catchall });
+        break;
+      }
+      case "optional":
+      case "default":
+      case "prefault":
+      case "nullable":
+      case "readonly":
+      case "nonoptional":
+      case "catch":
+        out = cloneWith(node, { innerType: walk(def.innerType as AnyZod, path) });
+        break;
+      case "array":
+        out = cloneWith(node, { element: walk(def.element as AnyZod, `${path}[]`) });
+        break;
+      case "tuple":
+        out = cloneWith(node, {
+          items: (def.items as AnyZod[]).map((s, i) => walk(s, `${path}[${i}]`)),
+          rest: def.rest ? walk(def.rest as AnyZod, `${path}[...]`) : def.rest,
+        });
+        break;
+      case "union":
+        // Covers `discriminatedUnion` too: same node type, with a
+        // `discriminator` in the def that the spread carries over.
+        out = cloneWith(node, { options: (def.options as AnyZod[]).map((s, i) => walk(s, `${path}|${i}`)) });
+        break;
+      case "record":
+        out = cloneWith(node, { valueType: walk(def.valueType as AnyZod, `${path}{}`) });
+        break;
+      case "pipe":
+        out = cloneWith(node, { in: walk(def.in as AnyZod, path), out: walk(def.out as AnyZod, path) });
+        break;
+      default:
+        if (!STRICT_LEAVES.has(def.type)) STRICT_UNHANDLED.push(`${where}${path === "(root)" ? "" : path}: ${def.type}`);
+        out = node;
+    }
+    cache.set(node, out);
+    return out;
+  };
+  return walk(schema, "") as T;
+}
+
+/**
+ * `OpSchemas`, closed at every depth. **Parse with these; emit from
+ * `OpSchemas`.** Used for every direct tool call and for every `run_batch`
+ * step (issue #157), so a step is held to exactly what the tool itself is.
+ */
+export const StrictOpSchemas: { readonly [K in OpName]: (typeof OpSchemas)[K] } = Object.fromEntries(
+  Object.entries(OpSchemas).map(([name, s]) => [name, strictDeep(s as AnyZod, name)])
+) as { readonly [K in OpName]: (typeof OpSchemas)[K] };
