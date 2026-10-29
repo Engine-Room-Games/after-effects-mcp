@@ -224,14 +224,14 @@ If you forget the second step, nothing breaks silently: the next thing you ask f
 
 **On the Claude Code plugin**, update the plugin itself as well — that is what brings the new skills and slash commands:
 
-```bash
-claude plugin marketplace update engine-room
-claude plugin update after-effects@engine-room
+```
+/plugin marketplace update engine-room
+/plugin update after-effects@engine-room
 ```
 
 Then restart Claude Code, and do step 2 above.
 
-**Then catch your project notes up.** Earlier sessions may have written workarounds into your project folder — in `AGENTS.md` or `CLAUDE.md`, or in the issue notebook — that the new version makes unnecessary. In the project folder, run `/absorb-release`: it reads what changed since that folder last caught up, fixes the notes that went stale, and records the version so the same history is never read twice.
+**Then catch your project notes up.** Earlier sessions may have written workarounds into your project folder — in `AGENTS.md` or `CLAUDE.md`, or in the issue notebook — that the new version makes unnecessary. In the project folder, run `/absorb-release` (that's its name in Claude Code; other clients that support MCP prompts list it as `absorb-release` in their own prompt menu): it reads what changed since that folder last caught up, fixes the notes that went stale, and records the version so the same history is never read twice.
 
 ---
 
@@ -239,14 +239,18 @@ Then restart Claude Code, and do step 2 above.
 
 Quit After Effects first, then remove whichever pieces you have.
 
-1. **The tools.** Claude Desktop: remove the After Effects extension in Settings → Extensions. Claude Code plugin: `claude plugin uninstall after-effects@engine-room`. Anywhere else: delete the `after-effects` entry from your client's MCP configuration (and the unzipped folder, if you used the standalone download).
+1. **The tools.** Claude Desktop: remove the After Effects extension in Settings → Extensions. Claude Code plugin: `/plugin uninstall after-effects@engine-room`. Anywhere else: delete the `after-effects` entry from your client's MCP configuration (and the unzipped folder, if you used the standalone download).
 2. **The panel.** Delete the folder `games.engine-room.ae-mcp` from the CEP extensions folder:
    - macOS: `~/Library/Application Support/Adobe/CEP/extensions/games.engine-room.ae-mcp`
    - Windows: `%APPDATA%\Adobe\CEP\extensions\games.engine-room.ae-mcp`
-3. **The small files it keeps in your user folder.** `~/.engineroom-ae-mcp` holds the panel's port and its secret key; `~/.ae-mcp` and `~/.after-effects-mcp` hold issue notes, if any were written there. All three are safe to delete. Notes kept inside a project live in that project's `.ae-mcp` folder.
+3. **The small files it keeps in your user folder.** `~/.engineroom-ae-mcp` holds the panel's port, its secret key and, if you ever created one, a `config.json` with port settings; `~/.ae-mcp` and `~/.after-effects-mcp` hold issue notes, if any were written there. All three are safe to delete. Notes kept inside a project live in that project's `.ae-mcp` folder.
 4. **Adobe's debug setting** — only if nothing else you use needs it. Setup turned on `PlayerDebugMode` (and CEP logging) for CEP versions 9 to 12. Other unsigned Adobe panels rely on the same setting, so leave it on if you have any. To turn it off:
    - macOS: `for v in 9 10 11 12; do defaults delete com.adobe.CSXS.$v PlayerDebugMode; done`
    - Windows (Command Prompt): `for %v in (9 10 11 12) do reg delete HKCU\Software\Adobe\CSXS.%v /v PlayerDebugMode /f`
+
+   Setup only turned CEP logging on where it had never been set, so unless you set a log level yourself, remove that too:
+   - macOS: `for v in 9 10 11 12; do defaults delete com.adobe.CSXS.$v LogLevel; done`
+   - Windows (Command Prompt): `for %v in (9 10 11 12) do reg delete HKCU\Software\Adobe\CSXS.%v /v LogLevel /f`
 
 Your `house-style.md` files and project folders are yours and are never touched.
 
