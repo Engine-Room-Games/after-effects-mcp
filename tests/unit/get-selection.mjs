@@ -180,44 +180,60 @@ check("no active comp answers comp:null with a reason", () => {
   assert.match(r.reason, /Could not determine the comp in the viewer \(no viewer is open\)/);
 });
 
-check("Project panel focused on a different comp: the viewer's comp wins, and the difference is said", () => {
-  const ctx = load(SCENE + `
+// A spy on setActive: focus is the user's, so it is touched only when
+// activeItem cannot answer.
+const SPY = `
+  var setActiveCalls = 0;
+  function spyViewer(item, refuses) {
+    var v = mkViewer(ViewerType.VIEWER_COMPOSITION, item, refuses);
+    var inner = v.setActive;
+    v.setActive = function () { setActiveCalls++; return inner(); };
+    return v;
+  }
+`;
+
+check("activeItem is a comp: it is used as is and focus is never touched", () => {
+  const ctx = load(SCENE + SPY + `
     var other = new CompItem(); other.id = 200; other.name = "Lower third";
     app.project.activeItem = other;
-  `);
-  const r = plain(ctx.OPS.get_selection({}));
-  assert.equal(r.comp.id, 100, "activeItem followed the Project panel; the viewer's comp must be read");
-  assert.equal(r.source, "viewer");
-  assert.match(r.note, /Lower third/);
-  assert.match(r.note, /Main/);
-});
-
-check("the viewer's comp with nothing else in focus carries no note", () => {
-  const ctx = load(SCENE);
-  const r = plain(ctx.OPS.get_selection({}));
-  assert.equal(r.source, "viewer");
-  assert.equal(r.note, undefined);
-});
-
-check("no viewer: activeItem is the fallback, and the answer says it may be the Project panel's", () => {
-  const ctx = load(SCENE + "app.activeViewer = null;");
-  const r = plain(ctx.OPS.get_selection({}));
-  assert.equal(r.comp.id, 100);
-  assert.equal(r.source, "activeItem");
-  assert.match(r.note, /Project panel/);
-});
-
-check("a viewer that refuses focus is not read as the viewer's comp", () => {
-  const ctx = load(SCENE + `
-    var other = new CompItem(); other.id = 200; other.name = "Lower third";
-    app.activeViewer = mkViewer(ViewerType.VIEWER_COMPOSITION, comp, true);
-    app.project.activeItem = other;
+    app.activeViewer = spyViewer(comp);
   `);
   const r = plain(ctx.OPS.get_selection({}));
   assert.equal(r.comp.id, 200);
   assert.equal(r.source, "activeItem");
-  assert.match(r.note, /could not be read/);
+  assert.equal(ctx.setActiveCalls, 0, "setActive must not be called when activeItem is already a comp");
+  assert.equal(r.note, undefined);
 });
+
+check("activeItem not a comp: the viewer is asked, and the answer says so", () => {
+  const ctx = load(SCENE + SPY + `
+    var f = new FootageItem(); f.id = 5; f.name = "clip.mov";
+    app.project.activeItem = f;
+    app.activeViewer = spyViewer(comp);
+  `);
+  const r = plain(ctx.OPS.get_selection({}));
+  assert.equal(r.comp.id, 100);
+  assert.equal(r.source, "viewer");
+  assert.equal(ctx.setActiveCalls, 1);
+  assert.match(r.note, /clip\.mov/);
+  assert.match(r.note, /composition viewer/);
+});
+
+check("activeItem empty: the viewer is asked", () => {
+  const ctx = load(SCENE + SPY + "app.project.activeItem = null; app.activeViewer = spyViewer(comp);");
+  const r = plain(ctx.OPS.get_selection({}));
+  assert.equal(r.comp.id, 100);
+  assert.equal(r.source, "viewer");
+  assert.match(r.note, /was empty/);
+});
+
+check("a viewer that refuses focus is not read as the viewer's comp", () => {
+  const ctx = load(SCENE + SPY + "app.project.activeItem = null; app.activeViewer = spyViewer(comp, true);");
+  const r = plain(ctx.OPS.get_selection({}));
+  assert.equal(r.comp, null);
+  assert.match(r.reason, /could not be read/);
+});
+
 
 check("Project panel focused with items selected: the reason says so, never 'nothing open'", () => {
   const ctx = load("app.project.activeItem = null; app.project.selection = [{}, {}];");

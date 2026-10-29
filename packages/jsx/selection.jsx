@@ -69,13 +69,14 @@ function __selProperty(prop) {
   return out;
 }
 
-// Which comp the user is looking at. app.project.activeItem follows whichever
-// panel has focus — with the Project panel focused it is the item selected
-// there, not the comp in the viewer — so the viewer is asked first:
-// app.activeViewer is the last-focused viewer even while another panel has
-// focus, and setActive() on it makes activeItem answer for that viewer. That
-// moves keyboard focus to the viewer, which changes nothing in the project.
-// activeItem is the fallback, and every way of not knowing is said as such.
+// Which comp the user is looking at. app.project.activeItem is read first and,
+// when it is a comp, used as it is — no focus is touched (`source:
+// "activeItem"`). Only when it is not a comp (the Project panel has focus on
+// footage, a folder, or nothing) is the viewer asked: app.activeViewer is the
+// last-focused viewer even while another panel has focus, and setActive() on
+// it makes activeItem answer for that viewer (`source: "viewer"`). That moves
+// keyboard focus to the viewer, which changes nothing in the project. Every
+// way of not knowing is said as such.
 function __selProjectSelectionCount() {
   try { return app.project.selection ? app.project.selection.length : 0; } catch (e) { return 0; }
 }
@@ -83,9 +84,11 @@ function __selProjectSelectionCount() {
 function __selResolveComp() {
   var before = null;
   try { before = app.project.activeItem; } catch (e) { before = null; }
+  if (before && before instanceof CompItem) return { comp: before, source: "activeItem" };
+
   var viewer = null;
   try { viewer = app.activeViewer; } catch (e) { viewer = null; }
-  var viewerNote = null;
+  var viewerNote;
   if (viewer) {
     var isComp = false;
     try { isComp = viewer.type === ViewerType.VIEWER_COMPOSITION; } catch (e) { isComp = false; }
@@ -98,12 +101,12 @@ function __selResolveComp() {
         if (viewer.setActive() !== false) fromViewer = app.project.activeItem;
       } catch (e) { fromViewer = null; }
       if (fromViewer && fromViewer instanceof CompItem) {
-        var res = { comp: fromViewer, source: "viewer" };
-        if (before && before instanceof CompItem && before.id !== fromViewer.id) {
-          res.note = "The Project panel had '" + before.name + "' (id " + before.id + ") active, but the comp in the viewer is '" +
-            fromViewer.name + "' (id " + fromViewer.id + "); this is the viewer's selection. If the user meant the other comp, ask.";
-        }
-        return res;
+        return {
+          comp: fromViewer,
+          source: "viewer",
+          note: "The project's active item was " + (before ? "'" + before.name + "', not a comp" : "empty") +
+            ", so this is the comp in the composition viewer; reading it moved keyboard focus to that viewer."
+        };
       }
       viewerNote = "a composition viewer is open but its comp could not be read";
     } else {
@@ -111,13 +114,6 @@ function __selResolveComp() {
     }
   } else {
     viewerNote = "no viewer is open";
-  }
-  if (before && before instanceof CompItem) {
-    return {
-      comp: before, source: "activeItem",
-      note: "Could not read the comp from the viewer (" + viewerNote + "); this is the project's active item '" + before.name +
-        "', which may be the comp selected in the Project panel rather than the one the user is looking at."
-    };
   }
   var why = "Could not determine the comp in the viewer (" + viewerNote + ")";
   if (before) {
