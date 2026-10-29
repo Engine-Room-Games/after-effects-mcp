@@ -484,11 +484,13 @@ OPS.get_project_summary = noUndo(function (args) {
   var items = [];
   for (var i = 1; i <= p.numItems; i++) {
     var it = p.item(i);
-    items.push({
+    var entry = {
       id: it.id,
       name: it.name,
       type: __itemKind(it),
-    });
+    };
+    if (__cpIsCheckpoint(it)) entry.checkpoint = true;
+    items.push(entry);
   }
   return {
     path: p.file ? p.file.fsName : null,

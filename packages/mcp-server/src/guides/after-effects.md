@@ -142,7 +142,9 @@ back you can count on across calls. `checkpoint_comp({compId, label})` saves a
 copy of the comp; `revert_comp({checkpointId})` puts it back **into the same
 comp** — the comp id does not change, but every layer id does, so switch to
 the ids in `layerIdMap` and drop any layer id you read since. Read `verified`:
-`false` means it is not a clean revert, and the `mismatches` say where. A
+`false` means it is not a clean revert, and the `mismatches` say where; `true`
+covers structure, timing, switches, parenting, mattes and layer picks, not
+keyframe or effect values (`checked` lists it). A
 checkpoint is shallow — edits inside a nested precomp are not undone. Each one
 is a full comp in the user's project: `delete_checkpoints` when you are done.
 

@@ -35,7 +35,13 @@ OPS.list_comps = noUndo(function (args) {
   var out = [];
   for (var i = 1; i <= app.project.numItems; i++) {
     var it = app.project.item(i);
-    if (it instanceof CompItem) out.push(__compSummary(it, sections));
+    if (!(it instanceof CompItem)) continue;
+    var s = __compSummary(it, sections);
+    // A checkpoint (checkpoint.jsx) is a full copy of a real comp; flagged so
+    // nobody builds in one by mistake. Not filtered: hiding comps from the map
+    // an agent orients with is a bigger lie than listing them.
+    if (__cpIsCheckpoint(it)) s.checkpoint = true;
+    out.push(s);
   }
   return out;
 });

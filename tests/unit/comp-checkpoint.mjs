@@ -19,6 +19,12 @@
 //     reported rather than smoothed over.
 //   - Checkpoints are found by their comment tag, and duplicate_comp of one
 //     does not produce a second.
+//   - Effect layer picks (Layer Control and friends) are re-pointed. The stub's
+//     pick holds a layer and reads back as its index, and a copy keeps holding
+//     the checkpoint's layer, so in the restored comp it reads as nothing.
+//   - A record naming a comp by id alone is not trusted when the name differs.
+//   - Comp settings land before the layers are copied in, and are put back
+//     when a copy fails.
 //
 // There is no ExtendScript runtime on a runner, so After Effects is stubbed
 // down to what the ops use. The stub's copyToComp follows the measured rules in
@@ -36,7 +42,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (f) => fs.readFileSync(path.join(root, "packages", "jsx", f), "utf8");
-const SOURCES = ["core.jsx", "ids.jsx", "comps.jsx", "layers.jsx", "snapshot.jsx", "footage.jsx", "checkpoint.jsx"];
+const SOURCES = ["core.jsx", "ids.jsx", "values.jsx", "comps.jsx", "layers.jsx", "snapshot.jsx", "footage.jsx", "checkpoint.jsx", "explore.jsx"];
 
 let passed = 0;
 const ok = (cond, msg) => { assert.ok(cond, msg); passed++; };
@@ -58,6 +64,25 @@ var ITEMS = [];
 var UNDO = { open: 0, begun: 0 };
 var FAIL_COPY = null;       // name of a layer whose copyToComp throws
 var COPY_FORCES_ENABLED = false;
+var COPY_DROPS_SHY = false;
+var PropertyType = { PROPERTY: 6212, INDEXED_GROUP: 6213, NAMED_GROUP: 6214 };
+var PropertyValueType = { OneD: 6417, LAYER_INDEX: 6421, MASK_INDEX: 6422 };
+
+// A Layer Control effect: one LAYER_INDEX parameter that holds a layer.
+function mkLayerPick(owner, ref) {
+  var pick = { name: "Layer", propertyType: PropertyType.PROPERTY, propertyValueType: PropertyValueType.LAYER_INDEX,
+    ref: ref, numKeys: 0 };
+  pick.__defineGetter__("value", function () {
+    if (!pick.ref) return 0;
+    return pick.ref.comp === owner.comp && pick.ref.index > 0 ? pick.ref.index : 0;
+  });
+  pick.setValue = function (i) { pick.ref = i ? owner.comp.layer(i) : null; };
+  pick.removeKey = function () {};
+  var fx = { name: "Layer Control", propertyType: PropertyType.NAMED_GROUP, numProperties: 1,
+    property: function () { return pick; } };
+  return { name: "Effects", propertyType: PropertyType.INDEXED_GROUP, numProperties: 1,
+    property: function () { return fx; }, pick: pick };
+}
 
 function nextId() { NEXT_ID += 1; return NEXT_ID; }
 function removeItem(it) {
@@ -79,7 +104,7 @@ function mkLayer(comp, name, opts) {
   l.id = nextId();
   l.name = name;
   l.comp = comp;
-  l.enabled = true; l.locked = false;
+  l.enabled = true; l.locked = false; l.shy = false;
   l.inPoint = 0; l.outPoint = 5; l.startTime = 0;
   l.parent = null; l.expr = false; l.posKeys = 0;
   l.trackMatteLayer = null; l.trackMatteType = 0;
@@ -90,6 +115,7 @@ function mkLayer(comp, name, opts) {
     return 0;
   });
   l.property = function (n) {
+    if (n === "ADBE Effect Parade" || n === "Effects") return l.fx || null;
     if (n !== "Transform") return null;
     return { numProperties: 1, property: function () {
       return { name: "Position", numKeys: l.posKeys, canSetExpression: true, expression: l.expr ? "wiggle(1,1)" : "" };
@@ -103,8 +129,13 @@ function mkLayer(comp, name, opts) {
     var c = mkLayer(target, l.name, {
       enabled: COPY_FORCES_ENABLED ? true : l.enabled, locked: l.locked,
       inPoint: l.inPoint, outPoint: l.outPoint, startTime: l.startTime,
-      expr: l.expr, posKeys: l.posKeys, trackMatteType: 0, source: l.source
+      expr: l.expr, posKeys: l.posKeys, trackMatteType: 0, source: l.source,
+      shy: COPY_DROPS_SHY ? false : l.shy, copiedAtDuration: target.duration
     });
+    // The pick still holds the SOURCE comp's layer, so in the destination it
+    // resolves to nothing. Whether AE does this or resolves it to an old layer
+    // by index is a live-AE measurement; either way the restored value is wrong.
+    if (l.fx) c.fx = mkLayerPick(c, l.fx.pick.ref);
     // The first copy lands on top, each later one below the previous copy.
     var at = 0;
     if (target._lastCopy) {
@@ -173,8 +204,12 @@ function mkComp(name) {
     for (var k = 0; k < c.markerProperty.keys.length; k++) d.markerProperty.keys.push(c.markerProperty.keys[k]);
     for (var i = 0; i < c._layers.length; i++) {
       var s = c._layers[i];
-      d.add(s.name, { enabled: s.enabled, locked: s.locked, inPoint: s.inPoint, outPoint: s.outPoint,
+      d.add(s.name, { enabled: s.enabled, locked: s.locked, inPoint: s.inPoint, outPoint: s.outPoint, shy: s.shy,
         startTime: s.startTime, expr: s.expr, posKeys: s.posKeys, trackMatteType: s.trackMatteType, source: s.source });
+    }
+    for (var q = 0; q < c._layers.length; q++) {
+      var sf = c._layers[q].fx;
+      if (sf) d._layers[q].fx = mkLayerPick(d._layers[q], sf.pick.ref ? d._layers[sf.pick.ref.index - 1] : null);
     }
     for (var j = 0; j < c._layers.length; j++) {
       if (c._layers[j].parent) d._layers[j].parent = d._layers[c._layers[j].parent.index - 1];
@@ -217,7 +252,9 @@ title.parent = ctrl;
 var matte = main.add("Matte");
 var fill = main.add("Fill");
 fill.trackMatteLayer = matte; fill.trackMatteType = 2;
-var bg = main.add("BG", { locked: true, enabled: false });
+var bg = main.add("BG", { locked: true, enabled: false, shy: true });
+var picker = main.add("Picker");
+picker.fx = mkLayerPick(picker, matte);
 main.markerProperty.setValueAtTime(1, { comment: "beat", duration: 0 });
 var scene = mkComp("Scene");
 var usage = scene.add("Main", { source: main });
@@ -250,7 +287,7 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
 
   eq(r.compId, mainId, "the checkpoint names the comp it is of");
   eq(r.label, "before easing");
-  eq(r.numLayers, 5);
+  eq(r.numLayers, 6);
   eq(r.folderName, "AE MCP Checkpoints", "filed in the one checkpoints folder");
   ok(/\[checkpoint before easing\]$/.test(r.name), "named so it reads as a checkpoint and never answers comp('Main')");
   ok(/NOT/.test(r.covers) && /nested precomps/.test(r.covers), "the result says what a checkpoint does not cover");
@@ -297,9 +334,9 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   eq(r.compId, mainId, "the comp keeps its id");
   ok(get(`app.project.itemByID(${mainId})`) === objBefore, "…because it is the same item, restored in place");
   ok(get("usage.source === main"), "a precomp usage elsewhere still points at the comp, with nothing re-linked");
-  eq(get("names(main)"), ["CTRL", "Title", "Matte", "Fill", "BG"], "layers back, in the checkpoint's order");
-  eq(r.layersRestored, 5);
-  eq(r.layersRemoved, 5, "the five layers it held are gone, the stray one included");
+  eq(get("names(main)"), ["CTRL", "Title", "Matte", "Fill", "BG", "Picker"], "layers back, in the checkpoint's order");
+  eq(r.layersRestored, 6);
+  eq(r.layersRemoved, 6, "the six layers it held are gone, the stray one included");
   eq(get("byName(main, 'Junk')"), null);
 
   eq(get("byName(main, 'Title').parent === byName(main, 'CTRL')"), true, "parenting re-applied to the restored layers");
@@ -312,6 +349,12 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   eq(get("main.workAreaDuration"), 10);
   eq(get("main.bgColor"), [0, 0, 0]);
   eq(get("main.markerProperty.numKeys"), 1, "comp markers restored");
+  eq(get("byName(main, 'Picker').fx.pick.ref === byName(main, 'Matte')"), true,
+    "the Layer Control pick points at the restored Matte, not the removed old one");
+  eq(r.layerReferencesRepointed, 1, "and the re-point is counted");
+  eq(get("byName(main, 'BG').shy"), true);
+  eq(get("byName(main, 'CTRL').copiedAtDuration"), 10, "comp settings were restored before the layers were copied in");
+  ok(/keyframe values/.test(r.checked), "the result says what verified did not compare");
 
   eq(Object.keys(r.layerIdMap).map(Number), atCheckpoint, "the id map is keyed by the ids the comp had at the checkpoint");
   eq(Object.values(r.layerIdMap), get("ids(main)"), "…and maps them to the layers now in the comp");
@@ -328,7 +371,7 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   // Reverting twice is safe — the checkpoint is unchanged by a revert.
   const again = mustOk(call("revert_comp", { checkpointId: cp.checkpointId, compId: mainId }));
   eq(again.verified, true, "a second revert to the same checkpoint is clean too");
-  eq(get("names(main)"), ["CTRL", "Title", "Matte", "Fill", "BG"]);
+  eq(get("names(main)"), ["CTRL", "Title", "Matte", "Fill", "BG", "Picker"]);
 }
 
 // ---------- the name is not reverted, and says so ----------
@@ -336,7 +379,12 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   const { get, run, call } = load();
   const cp = mustOk(call("checkpoint_comp", { compId: get("main.id") }));
   run(`main.name = "Main renamed";`);
-  const r = mustOk(call("revert_comp", { checkpointId: cp.checkpointId }));
+  const before = get("ids(main)");
+  const refused = call("revert_comp", { checkpointId: cp.checkpointId });
+  eq(refused.ok, false, "a comp whose name no longer matches the record is not reverted on the id alone");
+  ok(/pass compId: \d+ to confirm/.test(refused.error) && /another project/.test(refused.error));
+  eq(get("ids(main)"), before, "…and nothing changed");
+  const r = mustOk(call("revert_comp", { checkpointId: cp.checkpointId, compId: get("main.id") }));
   eq(r.name, "Main renamed", "comp('Name') lookups elsewhere would break if a revert renamed the comp");
   eq(r.nameAtCheckpoint, "Main");
   ok(/set_comp renames it/.test(r.note));
@@ -346,7 +394,7 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
 {
   const { get, run, call } = load();
   const cp = mustOk(call("checkpoint_comp", { compId: get("main.id") }));
-  run(`main.add("Junk");`);
+  run(`main.add("Junk"); main.duration = 4; main.workAreaDuration = 4;`);
   const before = get("ids(main)");
   run(`FAIL_COPY = "Fill";`);
   const r = call("revert_comp", { checkpointId: cp.checkpointId });
@@ -354,6 +402,7 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   ok(/layer 4 \("Fill"\)/.test(r.error), "naming the layer that failed");
   ok(/as it was before the call/.test(r.error), "and saying the comp is untouched");
   eq(get("ids(main)"), before, "…which it is: the copies made before the failure were removed");
+  eq(get("main.duration"), 4, "and the comp settings written before the copies were put back");
   eq(get(`app.project.itemByID(${cp.checkpointId}) !== null`), true, "the checkpoint survives");
 }
 
@@ -368,6 +417,27 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   ok(/^NOT a clean revert/.test(r.note), "said first, not buried");
   eq(r.checkpointDeleted, false, "keepCheckpoint:false is not honoured on a revert that did not verify");
   eq(get(`app.project.itemByID(${cp.checkpointId}) !== null`), true);
+}
+
+// ---------- verification covers switches the fingerprint does not ----------
+{
+  const { get, run, call } = load();
+  const cp = mustOk(call("checkpoint_comp", { compId: get("main.id") }));
+  run(`COPY_DROPS_SHY = true;`);
+  const r = mustOk(call("revert_comp", { checkpointId: cp.checkpointId }));
+  eq(r.verified, false, "a dropped shy switch is caught");
+  ok(r.mismatches.some((m) => m.name === "BG" && m.changes.shy), "and named");
+}
+
+// ---------- checkpoints are flagged in the orienting reads ----------
+{
+  const { get, call } = load();
+  const cp = mustOk(call("checkpoint_comp", { compId: get("main.id") }));
+  const comps = mustOk(call("list_comps", { include: [] }));
+  eq(comps.find((c) => c.id === cp.checkpointId).checkpoint, true, "list_comps flags a checkpoint");
+  eq(comps.find((c) => c.id === get("main.id")).checkpoint, undefined, "and nothing else");
+  const sum = mustOk(call("get_project_summary", {}));
+  eq(sum.items.find((i) => i.id === cp.checkpointId).checkpoint, true, "so does get_project_summary");
 }
 
 // ---------- keepCheckpoint:false on a clean revert ----------
@@ -387,7 +457,7 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   const r = mustOk(call("revert_comp", { checkpointId: cp.checkpointId, saveCurrent: true }));
   ok(r.savedCheckpoint && r.savedCheckpoint.checkpointId, "the current state was checkpointed first");
   eq(r.savedCheckpoint.label, "before revert to clean");
-  eq(r.savedCheckpoint.numLayers, 6, "…holding the layer the revert removed");
+  eq(r.savedCheckpoint.numLayers, 7, "…holding the layer the revert removed");
   const back = mustOk(call("revert_comp", { checkpointId: r.savedCheckpoint.checkpointId }));
   eq(back.verified, true);
   ok(get("names(main)").includes("Work in progress"), "and reverting to it brings the work back");

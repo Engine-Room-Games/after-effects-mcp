@@ -17,7 +17,7 @@ session is a tax on every request the user ever makes.
 | [`docs/fragile-areas-ae.md`](docs/fragile-areas-ae.md) | Measured After Effects and ExtendScript behaviour: undo, shapes, text, audio, mogrt, expressions, `run_jsx`. |
 | [`docs/fragile-areas-bridge.md`](docs/fragile-areas-bridge.md) | The bridge, ports, CEP, the panel, and the screenshot pipeline. |
 | [`docs/fragile-areas-server.md`](docs/fragile-areas-server.md) | Tool schemas and the MCP protocol, the journal's caches, packaging and binaries. |
-| [`docs/verification-recipes.md`](docs/verification-recipes.md) | The 50 recipes run by hand against a live AE 2026. |
+| [`docs/verification-recipes.md`](docs/verification-recipes.md) | The 55 recipes run by hand against a live AE 2026. |
 
 **Nothing in `docs/` is generated** — hand-written, like this file. The generated
 prose is elsewhere and is called out below.

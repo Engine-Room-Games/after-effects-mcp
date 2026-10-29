@@ -310,15 +310,43 @@ How the restore is ordered, and why:
   copy is attempted inside the dispatcher's group and only on that refusal
   retried through `withoutUndoGroup`. An unrigged comp reverts as one step; a
   rigged one reports `undoSplits` and tells the agent not to Cmd-Z it.
-- **Verified, not assumed.** Both comps are fingerprinted with `snapshot.jsx`'s
-  walk, parent ids are rewritten as parent indices, and the layers are
-  compared position by position with the diff's own `__diffLayer`, plus the
-  comp fields. Any difference is `verified: false` with `mismatches`, said
-  first in the note. `keepCheckpoint:false` is not honoured on a revert that
-  did not verify.
+- **Verified, and the verdict names its scope.** Both comps are fingerprinted
+  with `snapshot.jsx`'s walk, parent ids are rewritten as parent indices, and
+  the layers are compared position by position with the diff's own
+  `__diffLayer` — plus what the fingerprint does not record but a revert must
+  get right: locks, shy/solo/3D/adjustment/motion-blur switches, blend mode,
+  quality, label, stretch, track matte and type, every layer/mask pick, and
+  every restored comp setting including background colour and pixel aspect.
+  It does **not** compare keyframe values or other effect parameter values;
+  the result carries `checked`, the exact list, beside `verified`, and the
+  note says so on a clean result too. Any difference is `verified: false`
+  with `mismatches`, said first. `keepCheckpoint:false` is not honoured on a
+  revert that did not verify.
 - **The comp name is not reverted.** Other comps' expressions find this one by
   name; restoring an old name would break them. A changed name is reported as
   `nameAtCheckpoint`.
+- **But a changed name stops a revert that was not confirmed.** The record
+  holds an item id, and ids are unique only within one project: a checkpoint
+  that came in with an imported .aep can name an id that here belongs to an
+  unrelated comp. So when the target's name differs from the recorded one,
+  `revert_comp` refuses unless the caller passes `compId` to confirm.
+- **Comp settings go first.** Size, rate, duration and the rest are written
+  before any layer is copied in, so nothing is copied against the wrong
+  timeline; a failed copy puts the previous settings back with the copies.
+- **Effect layer picks are re-pointed after the removal.** Layer Control,
+  Displacement Map, Set Matte and the like pick a layer by index, and a text
+  path picks a mask the same way. While the copies land the old layers still
+  exist, so a copied pick points at an old layer, or at nothing once those
+  go. After the removal the restored layers sit at exactly the checkpoint's
+  indices, so every `LAYER_INDEX` / `MASK_INDEX` property under Effects and
+  Text is set from the checkpoint's value, keyframes included
+  (`layerReferencesRepointed` counts them).
+- **Lookups go through a mirror of the layer order.** A layer reference is
+  index-bound, so every layer is re-resolved by id after anything that moves
+  one; scanning the comp per lookup made a revert O(n²) DOM reads. The mirror
+  keeps the id order in plain JS, updated on every move, insert and removal
+  the op makes, and confirms each lookup with one read — rescanning only on a
+  mismatch, so it can be stale but never wrong.
 
 What a checkpoint is, in the project:
 
@@ -338,10 +366,19 @@ What a checkpoint is, in the project:
   with a diff. A deep checkpoint is possible (`duplicate_comp`'s `deep` walk)
   but a deep *revert* would have to restore every nested comp in place too;
   that is a follow-up if anyone needs it.
-- **Kept out of searches.** `find_layers` across the project skips checkpoint
-  comps and counts them in `checkpointsSkipped` — otherwise every match comes
-  back twice, and an agent editing the copy has edited the restore point, not
-  the scene. `list_comps` still lists them; the name says what they are.
+- **Kept out of searches, flagged in the map.** `find_layers` across the
+  project skips checkpoint comps and counts them in `checkpointsSkipped` —
+  otherwise every match comes back twice, and an agent editing the copy has
+  edited the restore point, not the scene. `list_comps` and
+  `get_project_summary` list them with `checkpoint: true`: hiding comps from
+  the map an agent orients with would be the bigger lie.
+- **The write ops do not refuse a checkpoint comp.** It was considered. The
+  only central place for that guard is `getCompById`, which every read and
+  `duplicate_comp` (the recovery path) also use, so it would need an
+  allow-list across some sixty ops for a mistake the flag, the name and the
+  `find_layers` skip already make hard to make. And an edited checkpoint is
+  still a valid restore point — it restores what it now holds, and the
+  revert's verification compares against that.
 - **They keep their footage alive.** A checkpoint's layers use the same solid
   and footage items as the original, so `purge_unused_footage` and
   `delete_comp({purgeUnusedSolids})` correctly treat those items as in use.

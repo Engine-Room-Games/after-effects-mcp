@@ -298,12 +298,79 @@ function __cpResolveAny(id) {
 // Reverting
 // ---------------------------------------------------------------------------
 
-function __cpLayerById(comp, id) {
-  for (var i = 1; i <= comp.numLayers; i++) {
-    var l = comp.layer(i);
+// What `verified` compared — returned with every revert, because a verdict
+// that does not say what it looked at reads as "identical", which it is not.
+var __CP_CHECKED = "verified compares, layer by layer at the same index: name, type, in/out/start, enabled, " +
+  "parent, keyframe counts on Transform/Marker/Time Remap/Source Text/Audio Levels, expression and effect counts, " +
+  "locked, shy, solo, 3D, blend mode, adjustment, motion blur, quality, label, stretch, track matte and type, and " +
+  "the layer/mask a Layer Control, Displacement Map, Set Matte or text-path parameter points at; and per comp: size, " +
+  "pixel aspect, frame rate, duration, work area, background colour, the other restored settings and markers. It does " +
+  "NOT compare keyframe values, other effect parameter values, expression text, mask shapes, shape contents or text.";
+
+// ---------- a mirror of a comp's layer order ----------
+// A comp.layer(n) reference is index-bound, not a handle (extendscript-gotchas
+// guide), so every layer is re-resolved by id after anything that moves one.
+// Scanning the comp for each lookup made a revert O(n^2) DOM reads; the mirror
+// keeps the id order in plain JS, updated on every move/insert/remove we make,
+// and one comp.layer(i) read confirms each lookup. A mismatch — the comp moved
+// under us — falls back to one rescan, so the mirror can be stale but never wrong.
+
+function __cpMirror(comp) {
+  var m = { comp: comp, ids: [] };
+  __cpRescan(m);
+  return m;
+}
+
+function __cpRescan(m) {
+  m.ids = [];
+  for (var i = 1; i <= m.comp.numLayers; i++) m.ids.push(m.comp.layer(i).id);
+}
+
+function __cpPos(ids, id) {
+  for (var i = 0; i < ids.length; i++) if (ids[i] === id) return i;
+  return -1;
+}
+
+function __cpGet(m, id) {
+  var p = __cpPos(m.ids, id);
+  if (p >= 0 && p < m.comp.numLayers) {
+    var l = m.comp.layer(p + 1);
     if (l.id === id) return l;
   }
-  return null;
+  __cpRescan(m);
+  p = __cpPos(m.ids, id);
+  return p >= 0 ? m.comp.layer(p + 1) : null;
+}
+
+/**
+ * After one copyToComp: find the new layer and record it in the mirror. The
+ * measured landing rule (first copy on top, each later one directly below the
+ * previous copy) is tried first — one read — and a full rescan is the fallback.
+ */
+function __cpLanded(m, known, prevId) {
+  var n = m.comp.numLayers;
+  var guesses = [1];
+  if (prevId !== null) {
+    var pp = __cpPos(m.ids, prevId);
+    if (pp >= 0) guesses.push(pp + 2);
+  }
+  for (var g = 0; g < guesses.length; g++) {
+    var at = guesses[g];
+    if (at < 1 || at > n || n !== m.ids.length + 1) continue;
+    var l = m.comp.layer(at);
+    if (!known.hasOwnProperty("L" + l.id)) {
+      m.ids.splice(at - 1, 0, l.id);
+      return l;
+    }
+  }
+  __cpRescan(m);
+  var found = null;
+  for (var i = 0; i < m.ids.length; i++) {
+    if (known.hasOwnProperty("L" + m.ids[i])) continue;
+    if (found) return null; // more than one new layer: we cannot tell which is ours
+    found = m.comp.layer(i + 1);
+  }
+  return found;
 }
 
 /**
@@ -323,27 +390,17 @@ function __cpCopyLayer(src, target) {
   }
 }
 
-/** The one layer in `comp` whose id is not in `known`. */
-function __cpNewLayer(comp, known) {
-  var found = null;
-  for (var i = 1; i <= comp.numLayers; i++) {
-    var l = comp.layer(i);
-    if (known.hasOwnProperty("L" + l.id)) continue;
-    if (found) return null; // more than one: we cannot tell which is ours
-    found = l;
-  }
-  return found;
-}
-
 /** Remove the layers we added. Returns the ids that would not go. */
-function __cpRemoveLayers(comp, ids) {
+function __cpRemoveLayers(m, ids) {
   var stuck = [];
   for (var i = ids.length - 1; i >= 0; i--) {
-    var l = __cpLayerById(comp, ids[i]);
+    var l = __cpGet(m, ids[i]);
     if (!l) continue;
     try {
       if (l.locked) l.locked = false;
       l.remove();
+      var p = __cpPos(m.ids, ids[i]);
+      if (p >= 0) m.ids.splice(p, 1);
     } catch (e) {
       stuck.push(ids[i]);
     }
@@ -360,30 +417,43 @@ function __cpSame(a, b) {
   return a === b;
 }
 
-/** Comp settings, then the work area, then markers. Failures are collected, never thrown. */
-function __cpRestoreComp(cp, target, notRestored) {
-  var i;
-  for (i = 0; i < __CP_COMP_FIELDS.length; i++) {
+// ---------- comp settings ----------
+
+/** The settings a revert restores, read off a comp into a plain object — so the pre-revert state can be put back on failure. */
+function __cpReadSettings(c) {
+  var s = {};
+  for (var i = 0; i < __CP_COMP_FIELDS.length; i++) {
     var f = __CP_COMP_FIELDS[i];
-    var want;
-    try { want = cp[f]; } catch (e0) { continue; }
-    if (want === undefined) continue;
+    try { if (c[f] !== undefined) s[f] = c[f]; } catch (e) {}
+  }
+  try { s.bgColor = [c.bgColor[0], c.bgColor[1], c.bgColor[2]]; } catch (e2) {}
+  s.workAreaStart = c.workAreaStart;
+  s.workAreaDuration = c.workAreaDuration;
+  return s;
+}
+
+/** Write a settings object onto a comp. Failures are collected, never thrown. */
+function __cpWriteSettings(s, target, notRestored) {
+  for (var i = 0; i < __CP_COMP_FIELDS.length; i++) {
+    var f = __CP_COMP_FIELDS[i];
+    if (!s.hasOwnProperty(f)) continue;
     try {
-      if (!__cpSame(target[f], want)) target[f] = want;
+      if (!__cpSame(target[f], s[f])) target[f] = s[f];
     } catch (e1) {
       notRestored.push({ what: "comp " + f, reason: String(e1.message || e1) });
     }
   }
-  try {
-    var bg = cp.bgColor;
-    if (!__cpSame(target.bgColor, bg)) target.bgColor = [bg[0], bg[1], bg[2]];
-  } catch (e2) {
-    notRestored.push({ what: "comp bgColor", reason: String(e2.message || e2) });
+  if (s.bgColor) {
+    try {
+      if (!__cpSame(target.bgColor, s.bgColor)) target.bgColor = [s.bgColor[0], s.bgColor[1], s.bgColor[2]];
+    } catch (e2) {
+      notRestored.push({ what: "comp bgColor", reason: String(e2.message || e2) });
+    }
   }
   // The work area has to fit inside the duration at every intermediate step,
   // so whichever order fails first is retried the other way round.
-  var ws = cp.workAreaStart;
-  var wd = cp.workAreaDuration;
+  var ws = s.workAreaStart;
+  var wd = s.workAreaDuration;
   if (target.workAreaStart !== ws || target.workAreaDuration !== wd) {
     try {
       target.workAreaStart = ws;
@@ -397,7 +467,6 @@ function __cpRestoreComp(cp, target, notRestored) {
       }
     }
   }
-  __cpRestoreMarkers(cp, target, notRestored);
 }
 
 function __cpRestoreMarkers(cp, target, notRestored) {
@@ -405,15 +474,122 @@ function __cpRestoreMarkers(cp, target, notRestored) {
   var dst = null;
   try { src = cp.markerProperty; dst = target.markerProperty; } catch (e) { return; }
   if (!src || !dst) return;
-  var a = __fpCompMarkers(cp);
-  var b = __fpCompMarkers(target);
-  if (__cpSame(a, b)) return;
+  if (__cpSame(__fpCompMarkers(cp), __fpCompMarkers(target))) return;
   try {
     for (var i = dst.numKeys; i >= 1; i--) dst.removeKey(i);
     for (var j = 1; j <= src.numKeys; j++) dst.setValueAtTime(src.keyTime(j), src.keyValue(j));
   } catch (e2) {
     notRestored.push({ what: "comp markers", reason: String(e2.message || e2) });
   }
+}
+
+// ---------- layer and mask references ----------
+// Layer Control, Displacement Map, Set Matte, Compound Blur and friends pick a
+// layer BY INDEX, and a text path picks a mask the same way. The copies land
+// while the old layers still exist, so those picks point at the wrong layer —
+// and at nothing once the old ones go. After the removal the restored layers
+// sit at exactly the checkpoint's indices, so the checkpoint's value is the
+// right value, and it is copied across, keyframes included.
+
+var __CP_REF_GROUPS = ["ADBE Effect Parade", "ADBE Text Properties"];
+
+function __cpIsRefProp(p) {
+  if (typeof PropertyValueType === "undefined") return false;
+  var vt = null;
+  try { vt = p.propertyValueType; } catch (e) { return false; }
+  return vt === PropertyValueType.LAYER_INDEX || vt === PropertyValueType.MASK_INDEX;
+}
+
+function __cpIsLeaf(p) {
+  try { return p.propertyType === PropertyType.PROPERTY; } catch (e) { return false; }
+}
+
+/** Calls fn(srcProp, dstProp, path) for every layer/mask reference under the two layers, walked in parallel. */
+function __cpWalkRefs(srcLayer, dstLayer, fn) {
+  for (var g = 0; g < __CP_REF_GROUPS.length; g++) {
+    var sg = null;
+    var dg = null;
+    try { sg = srcLayer.property(__CP_REF_GROUPS[g]); } catch (e) { sg = null; }
+    if (!sg) continue;
+    if (dstLayer) { try { dg = dstLayer.property(__CP_REF_GROUPS[g]); } catch (e2) { dg = null; } }
+    __cpWalkGroup(sg, dg, sg.name, fn, 0);
+  }
+}
+
+function __cpWalkGroup(sg, dg, path, fn, depth) {
+  if (depth > 16) return;
+  var n = 0;
+  try { n = sg.numProperties; } catch (e) { return; }
+  for (var i = 1; i <= n; i++) {
+    var sp = sg.property(i);
+    if (!sp) continue;
+    var dp = null;
+    if (dg) { try { dp = dg.property(i); } catch (e2) { dp = null; } }
+    var here = path + " > " + sp.name;
+    if (__cpIsLeaf(sp)) {
+      if (__cpIsRefProp(sp)) fn(sp, dp, here);
+    } else {
+      __cpWalkGroup(sp, dp, here, fn, depth + 1);
+    }
+  }
+}
+
+/** A comparable string for one reference property: its value, or every key. */
+function __cpRefValue(p) {
+  var n = 0;
+  try { n = p.numKeys; } catch (e) { n = 0; }
+  if (!n) return String(p.value);
+  var parts = [];
+  for (var k = 1; k <= n; k++) parts.push(__fpRound(p.keyTime(k)) + "=" + String(p.keyValue(k)));
+  return parts.join(",");
+}
+
+function __cpRestoreRefs(cpComp, m, copies, notRestored) {
+  var fixed = 0;
+  for (var i = 1; i <= copies.length; i++) {
+    var src = cpComp.layer(i);
+    var dst = __cpGet(m, copies[i - 1]);
+    __cpWalkRefs(src, dst, function (sp, dp, path) {
+      try {
+        if (!dp) throw new Error("the restored layer has no matching property");
+        if (__cpRefValue(sp) === __cpRefValue(dp)) return;
+        var nk = sp.numKeys;
+        if (nk > 0) {
+          for (var r = dp.numKeys; r >= 1; r--) dp.removeKey(r);
+          for (var k = 1; k <= nk; k++) dp.setValueAtTime(sp.keyTime(k), sp.keyValue(k));
+        } else {
+          if (dp.numKeys > 0) { for (var r2 = dp.numKeys; r2 >= 1; r2--) dp.removeKey(r2); }
+          __setValue(dp, sp.value);
+        }
+        fixed += 1;
+      } catch (e) {
+        notRestored.push({ what: "layer " + i + " (\"" + src.name + "\") " + path, reason: String(e.message || e) });
+      }
+    });
+  }
+  return fixed;
+}
+
+// ---------- verification ----------
+
+var __CP_LAYER_FLAGS = ["locked", "shy", "solo", "threeDLayer", "blendingMode", "adjustmentLayer", "motionBlur",
+  "quality", "label", "stretch"];
+
+/** What the fingerprint does not record but a revert must get right: switches, mattes and layer references. */
+function __cpLayerExtras(l) {
+  var out = {};
+  for (var i = 0; i < __CP_LAYER_FLAGS.length; i++) {
+    var f = __CP_LAYER_FLAGS[i];
+    try { out[f] = l[f]; } catch (e) { out[f] = null; }
+  }
+  var mt = null;
+  try { mt = l.trackMatteLayer; } catch (e2) { mt = null; }
+  out.matteIndex = mt ? mt.index : null;
+  try { out.matteType = l.trackMatteType; } catch (e3) { out.matteType = null; }
+  var refs = [];
+  __cpWalkRefs(l, null, function (sp, dp, path) { refs.push(path + "=" + __cpRefValue(sp)); });
+  out.refs = refs.join(";");
+  return out;
 }
 
 /** Fingerprints with parent ids rewritten as parent indices, so two comps can be compared position by position. */
@@ -429,9 +605,9 @@ function __cpComparable(fp) {
   return fp;
 }
 
-function __cpVerify(cpId, targetId) {
-  var a = __cpComparable(__compFingerprint(cpId));
-  var b = __cpComparable(__compFingerprint(targetId));
+function __cpVerify(cpComp, target) {
+  var a = __cpComparable(__compFingerprint(cpComp.id));
+  var b = __cpComparable(__compFingerprint(target.id));
   var mismatches = [];
   if (a.layers.length !== b.layers.length) {
     mismatches.push({ what: "layer count", checkpoint: a.layers.length, comp: b.layers.length });
@@ -439,13 +615,31 @@ function __cpVerify(cpId, targetId) {
   var n = Math.min(a.layers.length, b.layers.length);
   for (var i = 0; i < n; i++) {
     var d = __diffLayer(a.layers[i], b.layers[i]);
-    if (d) mismatches.push({ index: i + 1, name: b.layers[i].name, changes: d.changes });
+    var changes = d ? d.changes : {};
+    var any = !!d;
+    var ea = __cpLayerExtras(cpComp.layer(i + 1));
+    var eb = __cpLayerExtras(target.layer(i + 1));
+    for (var k in ea) {
+      if (!ea.hasOwnProperty(k)) continue;
+      if (ea[k] !== eb[k]) { changes[k] = { from: ea[k], to: eb[k] }; any = true; }
+    }
+    if (any) mismatches.push({ index: i + 1, name: b.layers[i].name, changes: changes });
   }
   b.name = a.name;
-  var cf = __diffCompFields(a, b);
-  if (cf) mismatches.push({ what: "comp", changes: cf });
+  var cf = __diffCompFields(a, b) || {};
+  var cany = false;
+  for (var ck in cf) if (cf.hasOwnProperty(ck)) cany = true;
+  var sa = __cpReadSettings(cpComp);
+  var sb = __cpReadSettings(target);
+  for (var f in sa) {
+    if (!sa.hasOwnProperty(f) || cf.hasOwnProperty(f)) continue;
+    if (!__cpSame(sa[f], sb[f]) && __diffMoved(sa[f], sb[f])) { cf[f] = { from: sa[f], to: sb[f] }; cany = true; }
+  }
+  if (cany) mismatches.push({ what: "comp", changes: cf });
   return mismatches;
 }
+
+// ---------- the op ----------
 
 OPS.revert_comp = function (args) {
   var cp = __cpResolve(args.checkpointId);
@@ -453,7 +647,8 @@ OPS.revert_comp = function (args) {
   var cpComp = cp.item;
   var cpId = cpComp.id;
   var targetId = meta.compId;
-  if (args.compId !== undefined && args.compId !== null && args.compId !== targetId) {
+  var explicit = (args.compId !== undefined && args.compId !== null);
+  if (explicit && args.compId !== targetId) {
     throw new Error("Checkpoint " + cpId + " was taken of comp " + targetId + " (\"" + meta.compName + "\"), not comp " +
       args.compId + ". A checkpoint only reverts the comp it was taken of. Nothing was changed.");
   }
@@ -462,6 +657,16 @@ OPS.revert_comp = function (args) {
     throw new Error("Checkpoint " + cpId + " was taken of comp " + targetId + " (\"" + meta.compName + "\"), which no " +
       "longer exists, so there is nothing to revert into. duplicate_comp the checkpoint to get its contents back as " +
       "an ordinary comp (it gets a new id). Nothing was changed.");
+  }
+  // The record holds an item id, and ids are only unique within one project:
+  // a checkpoint that arrived by importing another .aep can name an id that
+  // here belongs to an unrelated comp. A name that still matches is the
+  // cheap evidence it is the same comp; without it the caller has to say so.
+  if (!explicit && target.name !== meta.compName) {
+    throw new Error("Checkpoint " + cpId + " was taken of a comp named \"" + meta.compName + "\" (id " + targetId +
+      "), but comp " + targetId + " is now named \"" + target.name + "\". It may have been renamed, or the checkpoint " +
+      "came from another project whose ids collide with this one. If comp " + targetId + " really is the one to " +
+      "revert, pass compId: " + targetId + " to confirm. Nothing was changed.");
   }
 
   var n = cpComp.numLayers;
@@ -475,49 +680,59 @@ OPS.revert_comp = function (args) {
     out.savedCheckpoint = __cpSummary(saved.item, saved.meta);
   }
 
-  // The layers the comp holds now: the ones to remove once the restore has landed.
-  var oldIds = [];
+  var m = __cpMirror(target);
+  var oldIds = m.ids.slice(0);
   var known = {};
   var i;
-  for (i = 1; i <= target.numLayers; i++) {
-    var ol = target.layer(i);
-    oldIds.push(ol.id);
-    known["L" + ol.id] = true;
-  }
+  for (i = 0; i < oldIds.length; i++) known["L" + oldIds[i]] = true;
+
+  // Comp settings go first: a layer copied into a comp of the wrong length or
+  // rate is copied against the wrong timeline. The pre-revert settings are kept
+  // so a failed copy can put them back along with removing the copies.
+  var notRestored = [];
+  var before = __cpReadSettings(target);
+  __cpWriteSettings(__cpReadSettings(cpComp), target, notRestored);
 
   var copies = [];
   var splits = 0;
   var stage = "copying";
   var at = 0;
+  var wantLocked = [];
   try {
     // 1. Copy every checkpoint layer in, before anything existing is touched.
+    var prev = null;
     for (i = 1; i <= n; i++) {
       at = i;
       if (__cpCopyLayer(cpComp.layer(i), target)) splits += 1;
-      var fresh = __cpNewLayer(target, known);
+      var fresh = __cpLanded(m, known, prev);
       if (!fresh) throw new Error("the copy of layer " + i + " could not be told apart from the comp's other layers");
       known["L" + fresh.id] = true;
       copies.push(fresh.id);
+      prev = fresh.id;
     }
 
-    // 2. Order, parenting and track mattes, from the checkpoint.
+    // 2. Order and parenting, from the checkpoint.
     stage = "arranging";
-    var wantLocked = [];
     for (i = 0; i < n; i++) {
-      var c0 = __cpLayerById(target, copies[i]);
+      var c0 = __cpGet(m, copies[i]);
       wantLocked.push(!!c0.locked);
       if (c0.locked) c0.locked = false;
     }
     for (i = n - 1; i >= 0; i--) {
       at = i + 1;
-      __cpLayerById(target, copies[i]).moveToBeginning();
+      __cpGet(m, copies[i]).moveToBeginning();
+      var mp = __cpPos(m.ids, copies[i]);
+      if (mp >= 0) m.ids.splice(mp, 1);
+      m.ids.unshift(copies[i]);
     }
+    // From here the copies are layers 1..n in checkpoint order, and nothing
+    // below moves a layer until the removal, so index reads are direct.
     for (i = 1; i <= n; i++) {
       at = i;
       var src = cpComp.layer(i);
-      var dst = __cpLayerById(target, copies[i - 1]);
-      var wantParent = null;
-      if (src.parent) wantParent = __cpLayerById(target, copies[src.parent.index - 1]);
+      var dst = target.layer(i);
+      if (dst.id !== copies[i - 1]) throw new Error("layer " + i + " is not the copy it should be after reordering");
+      var wantParent = src.parent ? target.layer(src.parent.index) : null;
       var curParentId = dst.parent ? dst.parent.id : null;
       var wantParentId = wantParent ? wantParent.id : null;
       // With the jump: the copy already holds the parent-relative values the
@@ -528,33 +743,40 @@ OPS.revert_comp = function (args) {
       }
     }
   } catch (e) {
-    var stuck = __cpRemoveLayers(target, copies);
+    var stuck = __cpRemoveLayers(m, copies);
+    var back = [];
+    __cpWriteSettings(before, target, back);
     var what = "";
     if (at > 0 && at <= n) what = " at layer " + at + " (\"" + cpComp.layer(at).name + "\")";
     var msg = "revert_comp failed while " + stage + what + ": " + (e.message || e) + ".";
-    if (stuck.length === 0) {
-      msg += " The " + copies.length + " layer(s) it had copied in were removed again, so comp " + targetId +
-        " is as it was before the call.";
+    if (stuck.length === 0 && back.length === 0) {
+      msg += " The " + copies.length + " layer(s) it had copied in were removed again and the comp settings put " +
+        "back, so comp " + targetId + " is as it was before the call.";
     } else {
-      msg += " It could not remove every layer it had copied in: ids " + stuck.join(", ") + " are still in comp " +
-        targetId + " beside the original layers. delete_layer them.";
+      if (stuck.length > 0) {
+        msg += " It could not remove every layer it had copied in: ids " + stuck.join(", ") + " are still in comp " +
+          targetId + " beside the original layers. delete_layer them.";
+      }
+      if (back.length > 0) {
+        msg += " It could not put back these comp settings: " + back.length + " (first: " + back[0].what + "); read get_comp.";
+      }
     }
     if (out.savedCheckpoint) msg += " The saveCurrent checkpoint " + out.savedCheckpoint.checkpointId + " was taken and still exists.";
     throw new Error(msg);
   }
 
-  // 3. Track mattes. Done before the old layers go so a copy that AE linked to
-  //    an old matte is re-pointed first. A failure is reported, not thrown: the
-  //    layers are in, and the agent is better served by a named gap.
-  var notRestored = [];
+  // 3. Track mattes, while the copies are still layers 1..n. Done before the
+  //    old layers go so a copy AE linked to an old matte is re-pointed first.
+  //    A failure is reported, not thrown: the layers are in, and a named gap
+  //    serves the agent better than an error over a half-finished revert.
   for (i = 1; i <= n; i++) {
     var s = cpComp.layer(i);
-    var m = null;
-    try { m = s.trackMatteLayer; } catch (em) { m = null; }
-    if (!m) continue;
+    var mt = null;
+    try { mt = s.trackMatteLayer; } catch (em) { mt = null; }
+    if (!mt) continue;
     try {
-      var d = __cpLayerById(target, copies[i - 1]);
-      var wantM = __cpLayerById(target, copies[m.index - 1]);
+      var d = target.layer(i);
+      var wantM = target.layer(mt.index);
       var curM = null;
       try { curM = d.trackMatteLayer; } catch (em2) { curM = null; }
       if (!curM || curM.id !== wantM.id) d.setTrackMatte(wantM, s.trackMatteType);
@@ -563,35 +785,42 @@ OPS.revert_comp = function (args) {
     }
   }
 
-  // 4. Remove what the comp held before.
-  for (i = 0; i < oldIds.length; i++) {
-    var gone = __cpLayerById(target, oldIds[i]);
+  // 4. Remove what the comp held before: the old layers are n+1.. now, so the
+  //    bottom of the stack is removed first and no removal shifts one still to go.
+  for (i = oldIds.length - 1; i >= 0; i--) {
+    var gone = __cpGet(m, oldIds[i]);
     if (!gone) continue;
     try {
       if (gone.locked) gone.locked = false;
       gone.remove();
+      var gp = __cpPos(m.ids, oldIds[i]);
+      if (gp >= 0) m.ids.splice(gp, 1);
     } catch (er) {
       var left = [];
-      for (var j = i; j < oldIds.length; j++) if (__cpLayerById(target, oldIds[j])) left.push(oldIds[j]);
+      for (var j = 0; j <= i; j++) if (__cpGet(m, oldIds[j])) left.push(oldIds[j]);
       throw new Error("revert_comp copied all " + n + " checkpoint layers into comp " + targetId + " (ids " +
         copies.join(", ") + ", on top) but failed removing the comp's previous layer " + oldIds[i] + ": " +
         (er.message || er) + ". Previous layers still present: ids " + left.join(", ") + ". delete_layer them, " +
-        "or call revert_comp again - it is safe to repeat.");
+        "or call revert_comp again - it is safe to repeat. Effect layer references (Layer Control, Displacement " +
+        "Map, Set Matte) are not re-pointed until the previous layers are gone.");
     }
   }
 
-  // 5. Re-lock what the checkpoint had locked.
+  // 5. Layer and mask references, now that the indices are the checkpoint's.
+  var refsFixed = __cpRestoreRefs(cpComp, m, copies, notRestored);
+
+  // 6. Re-lock what the checkpoint had locked.
   for (i = 0; i < n; i++) {
     if (!wantLocked[i]) continue;
-    try { __cpLayerById(target, copies[i]).locked = true; }
+    try { __cpGet(m, copies[i]).locked = true; }
     catch (el) { notRestored.push({ what: "lock on layer " + (i + 1), reason: String(el.message || el) }); }
   }
 
-  // 6. Comp settings and comp markers.
-  __cpRestoreComp(cpComp, target, notRestored);
+  // 7. Comp markers.
+  __cpRestoreMarkers(cpComp, target, notRestored);
 
-  // 7. Check it.
-  var mismatches = __cpVerify(cpId, targetId);
+  // 8. Check it.
+  var mismatches = __cpVerify(cpComp, target);
 
   var layerIdMap = {};
   var mapped = meta.layerIds && meta.layerIds.length === n;
@@ -608,7 +837,9 @@ OPS.revert_comp = function (args) {
   out.layersRemoved = oldIds.length;
   out.layerIds = copies;
   if (mapped) out.layerIdMap = layerIdMap;
+  if (refsFixed > 0) out.layerReferencesRepointed = refsFixed;
   out.verified = mismatches.length === 0 && notRestored.length === 0;
+  out.checked = __CP_CHECKED;
   if (mismatches.length > 0) out.mismatches = mismatches;
   if (notRestored.length > 0) out.notRestored = notRestored;
   if (made.name !== meta.compName) {
@@ -620,8 +851,10 @@ OPS.revert_comp = function (args) {
     (mapped ? "layerIdMap maps the ids the comp had when the checkpoint was taken to the restored ones."
             : "The checkpoint's layer count no longer matches its record, so no id map is given; read the comp back with list_layers."));
   if (!out.verified) {
-    notes.unshift("NOT a clean revert: " + mismatches.length + " recorded field(s) differ from the checkpoint and " +
-      notRestored.length + " item(s) could not be restored - see mismatches/notRestored.");
+    notes.unshift("NOT a clean revert: " + mismatches.length + " layer(s)/comp differ from the checkpoint in the " +
+      "fields compared and " + notRestored.length + " item(s) could not be restored - see mismatches/notRestored.");
+  } else {
+    notes.push("verified:true covers the fields listed in `checked`, not keyframe or effect values.");
   }
   if (out.nameAtCheckpoint) {
     notes.push("The comp's name was left as it is now; it was \"" + meta.compName + "\" at the checkpoint. set_comp renames it.");
