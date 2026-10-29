@@ -97,20 +97,23 @@ maintainer or another session may be mid-project. Brief the agent to:
   `docs/fragile-areas-bridge.md` before touching the panel;
 - **drive the PR-built server, never this session's `after-effects` tools.**
   `.mcp.json` runs the main checkout's `dist/` — whatever was last built there,
-  never the PR — and its gate cached the old bundle hash, so it falsely says
-  "panel out of date". Start the PR worktree's own server over stdio. POSTing
+  never the PR — and once the running bundle changes, its gate rightly reports
+  "panel out of date": the running bundle no longer matches the hash that
+  server holds. Start the PR worktree's own server over stdio. POSTing
   the panel's `/op` directly (header `x-ae-mcp-token`, token in
   `~/.engineroom-ae-mcp/token-<port>`) skips zod validation, `crossField()` and
   the `run_jsx` input rewrite, so it is valid only for a jsx-only change;
-- hot-load without breaking other sessions: back up the installed `bundle.jsx`,
-  run `AE_MCP_SYNC_PANEL=1 npm run build` **in the PR worktree** (never the
-  main checkout — that rewrites the `dist/` other sessions' `.mcp.json`
-  serves), `POST /reload-jsx` with the token header, test, then restore the
-  backup and reload again;
-- changes under `packages/ae-panel/client/` cannot be hot-loaded — they need
-  `npm run install:panel` with AE quit; ask the maintainer before quitting AE.
-  That install replaces the whole installed extension folder, so back up the
-  whole folder first and restore it byte-identical afterwards;
+- hot-load: back up the installed `bundle.jsx`, run
+  `AE_MCP_SYNC_PANEL=1 npm run build` **in the PR worktree** (never the main
+  checkout — that rewrites the `dist/` other sessions' `.mcp.json` serves),
+  `POST /reload-jsx` with the token header, test, then restore the backup and
+  reload again. `/reload-jsx` swaps the running bundle for every session on
+  that AE until restored, so keep the window short and tell the maintainer;
+- changes under `packages/ae-panel/client/` cannot be hot-loaded. Sequence:
+  ask the maintainer → quit AE → back up the whole installed extension folder
+  (`install:panel` replaces all of it) → `npm run install:panel` → launch →
+  test → quit → restore the folder byte-identical → relaunch. Ask before every
+  quit. A restore takes effect only at the next launch;
 - report what was observed, not inferred, and what could not be exercised.
 
 Plan a live run before merging any AE-facing change; only the maintainer can
