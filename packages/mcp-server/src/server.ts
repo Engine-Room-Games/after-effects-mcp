@@ -436,7 +436,10 @@ export function createServer(opts: CreateServerOptions = {}) {
         if (name === "get_job") {
           const a = GetJobSchema.parse(rawArgs);
           const st = jobs.get(a.jobId);
-          return textResult(st ?? null);
+          // A bare `null` read as "no news yet" and invited polling for ever;
+          // say what await_job and cancel_job say about the same id (#163).
+          if (!st) return fail(name, unknownJobMessage(a.jobId, "There is no progress to report."));
+          return textResult(st);
         }
         if (name === "cancel_job") {
           const a = CancelJobSchema.parse(rawArgs);

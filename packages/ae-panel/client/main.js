@@ -606,7 +606,30 @@
   // only a pacing knob any more: it decides how many undo steps a long batch
   // costs the user. It comes off the job envelope so the JSX side owns the
   // number and the two cannot drift.
+  // Every batch this panel is driving, by id, with how far it has got. The
+  // job table lives in the bundle's closure, so /reload-jsx would drop each of
+  // these mid-run; it reads this to refuse instead (issue #163).
+  var jobsInFlight = {};
+
+  function jobsInFlightText() {
+    var parts = [];
+    for (var id in jobsInFlight) {
+      if (!jobsInFlight.hasOwnProperty(id)) continue;
+      var j = jobsInFlight[id];
+      parts.push(id + " (" + j.attempted + " of " + (j.total === null ? "?" : j.total) + " ops attempted)");
+    }
+    return parts.join(", ");
+  }
+
   function driveJob(jobId, progressToken, chunkSize, total) {
+    var tracked = { attempted: 0, total: (typeof total === "number") ? total : null };
+    jobsInFlight[jobId] = tracked;
+    function untrack(v) { delete jobsInFlight[jobId]; return v; }
+    function untrackThrow(e) { delete jobsInFlight[jobId]; throw e; }
+    return driveJobSteps(jobId, progressToken, chunkSize, total, tracked).then(untrack, untrackThrow);
+  }
+
+  function driveJobSteps(jobId, progressToken, chunkSize, total, tracked) {
     var totalGuess = (typeof total === "number") ? total : null;
     var size = chunkSize || 25;
     // The cursor: ops attempted, not ops that succeeded — a continue-on-error
@@ -616,8 +639,10 @@
     function step() {
       return runOp("_continue_job", { jobId: jobId, chunkSize: size }).then(function (res) {
         if (res.total) totalGuess = res.total;
+        tracked.total = totalGuess;
         if (!res.done) {
           if (typeof res.progress === "number") attempted = res.progress;
+          tracked.attempted = attempted;
           if (typeof res.undoSteps === "number") stepsTaken = res.undoSteps;
           broadcast({ type: "progress", jobId: jobId, progress: res.progress, total: res.total, message: "running" });
           // Yield to UI so AE stays responsive.
@@ -1077,6 +1102,11 @@
     return new Promise(function (resolve, reject) {
       var server = http.createServer(function (req, res) {
         var url = req.url || "/";
+        // Only /reload-jsx takes a query (`?force=1`); every other route is
+        // still matched on the whole url, as before.
+        var qAt = url.indexOf("?");
+        var route = qAt < 0 ? url : url.slice(0, qAt);
+        var query = qAt < 0 ? "" : url.slice(qAt + 1);
 
         // No CORS headers, deliberately: nothing that legitimately calls this
         // bridge is a web page (issue #106).
@@ -1163,8 +1193,25 @@
             return;
           }
 
-          if (url === "/reload-jsx") {
+          if (route === "/reload-jsx") {
             // Dev-only: re-evalFile the bundle. Useful while editing .jsx without restarting AE.
+            // A reload replaces the bundle's job table, so every batch in flight
+            // stops mid-run with part of it applied (issue #163). Refused while
+            // one runs; `?force=1` reloads anyway, and the batch then reports
+            // exactly what had landed.
+            var busy = jobsInFlightText();
+            if (busy && !/(^|&)force=1(&|$)/.test(query)) {
+              res.statusCode = 409;
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify({
+                ok: false,
+                code: "batch_in_flight",
+                error: "Not reloaded: a run_batch is still running — " + busy + ". Reloading the bundle now " +
+                  "would stop it mid-run with part of it applied. Wait for it to finish (await_job), or cancel " +
+                  "it (cancel_job), then reload. POST /reload-jsx?force=1 reloads anyway.",
+              }));
+              return;
+            }
             loadJsxBundle()
               .then(function () { res.statusCode = 200; res.end(JSON.stringify({ ok: true })); })
               .catch(function (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); });

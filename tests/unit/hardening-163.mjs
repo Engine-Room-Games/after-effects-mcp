@@ -259,6 +259,7 @@ function makeDom() {
  * `__AEMCP` in a fresh context (so a literal broken by U+2028 really fails to
  * parse), and holds any op named `slow` for `holdMs`.
  */
+let batchCursor = 0;
 function makeHost(extDir, events) {
   return {
     getSystemPath: () => extDir,
@@ -283,6 +284,19 @@ function makeHost(extDir, events) {
             call: (payload) => {
               const req = JSON.parse(payload);
               op = req.op;
+              // A chunked batch: 4 chunks of 5, each held (below) so a test
+              // can act while it is in flight.
+              if (op === "run_batch") {
+                batchCursor = 0;
+                return JSON.stringify({ ok: true, result: { async: true, jobId: "j_live", chunkSize: 5, total: 20 } });
+              }
+              if (op === "_continue_job") {
+                batchCursor += 5;
+                const done = batchCursor >= 20;
+                return JSON.stringify({ ok: true, result: done
+                  ? { done: true, jobId: "j_live", results: [], errors: [], total: 20, undoSteps: 4 }
+                  : { done: false, jobId: "j_live", progress: batchCursor, total: 20, undoSteps: batchCursor / 5 } });
+              }
               return JSON.stringify({ ok: true, result: { echoed: req.args } });
             },
           },
@@ -293,7 +307,7 @@ function makeHost(extDir, events) {
         return void setTimeout(() => cb("EvalScript error."), 0);
       }
       events.push(`op:${op}:start`);
-      const hold = op === "slow" ? 300 : 0;
+      const hold = op === "slow" ? 300 : op === "_continue_job" ? 250 : 0;
       setTimeout(() => { events.push(`op:${op}:end`); cb(out); }, hold);
     },
   };
@@ -388,6 +402,35 @@ try {
       events.indexOf("reload:start") > events.indexOf("op:slow:end"),
       `the reload ran inside the op: ${events.join(", ")}`
     );
+  });
+
+  await check("/reload-jsx refuses while a batch is in flight, naming it; ?force=1 overrides", async () => {
+    const env = await (await post("/op", { op: "run_batch", args: { ops: [] } })).json();
+    assert.equal(env.ok, true);
+    assert.equal(env.result.jobId, "j_live");
+    // Let the first chunk land so there is progress to name.
+    for (let i = 0; i < 100 && batchCursor < 5; i++) await new Promise((r) => setTimeout(r, 10));
+
+    events.length = 0;
+    const refused = await post("/reload-jsx");
+    assert.equal(refused.status, 409);
+    const body = await refused.json();
+    assert.equal(body.ok, false);
+    assert.equal(body.code, "batch_in_flight");
+    assert.match(body.error, /j_live \(\d+ of 20 ops attempted\)/);
+    assert.match(body.error, /\?force=1/);
+    assert.ok(!events.includes("reload:start"), "a refused reload must not reach After Effects");
+
+    const forced = await post("/reload-jsx?force=1");
+    assert.equal(forced.status, 200);
+    assert.equal((await forced.json()).ok, true);
+    assert.ok(events.includes("reload:start"), "force=1 reloads");
+
+    // Once the batch is over, a plain reload goes through again.
+    for (let i = 0; i < 300 && batchCursor < 20; i++) await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 400));
+    const after = await post("/reload-jsx");
+    assert.equal(after.status, 200, `still refused after the batch ended: ${await after.text()}`);
   });
 } finally {
   panel.close();
