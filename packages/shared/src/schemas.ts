@@ -1377,8 +1377,12 @@ export const OpMutation = {
   add_marker: "write",
   remove_marker: "write",
   // vision — read-only despite being the slowest thing here. `screenshot_*`
-  // borrows the comp's resolutionFactor and restores it in a `finally`;
-  // nothing in the project changes.
+  // borrows the comp's resolutionFactor (and screenshot_layer the solo
+  // switches) and restores them in a `finally`; nothing in the project changes.
+  // The borrow can cost one undo step, "AE MCP: screenshot", when the comp was
+  // not already at the requested factor (#116) — a step whose net effect is
+  // nil, so landing between two chunks of a long batch moves nothing the batch
+  // wrote. Queuing a render behind every write would cost far more than that.
   screenshot_frame: "read",
   screenshot_layer: "read",
   // batch
