@@ -353,14 +353,14 @@ async function cli(argv) {
         /* no Rosetta */
       }
     }
-    const { run, skip } = runnableTargets(manifest.targets, { rosetta });
-    for (const t of skip) console.log(`    ${t.name}: not runnable on this host — uploaded without a smoke run`);
-    if (!run.length) {
-      console.error("    no binary target is runnable on this host, so none could be smoke-run");
-      return 1;
-    }
-    let failed = 0;
-    for (const t of run) {
+    const { run } = runnableTargets(manifest.targets, { rosetta });
+    const runnable = new Set(run.map((t) => t.name));
+    if (!run.length) console.error("    no binary target is runnable on this host, so none can be launched");
+    let failed = run.length ? 0 : 1;
+    // Every target's zip is unpacked and checked — the executable, the ws
+    // copy, the signature — whether or not this host can launch it. Only the
+    // launch itself is skipped for a target the host cannot execute.
+    for (const t of manifest.targets) {
       // Run what ships: the zip, unpacked fresh. The staging folder is an input
       // to the zip, and a signature or file the archiver dropped only shows here.
       const zip = path.join(target, `${t.stageName}.zip`);
@@ -375,6 +375,11 @@ async function cli(argv) {
         else execFileSync("unzip", ["-q", zip, "-d", dir], { stdio: "inherit" });
         const folder = path.join(dir, t.stageName);
         const exe = path.join(folder, t.exe);
+        if (!fs.existsSync(exe)) {
+          console.error(`    ${t.name}: FAILED — ${t.exe} is not in the zip`);
+          failed++;
+          continue;
+        }
         const problem = wsProblem(folder, isWs);
         if (problem) {
           console.error(`    ${t.name}: FAILED — ${problem}`);
@@ -389,6 +394,10 @@ async function cli(argv) {
             failed++;
             continue;
           }
+        }
+        if (!runnable.has(t.name)) {
+          console.log(`    ${t.name}: contents checked; not runnable on this host — uploaded without a launch`);
+          continue;
         }
         const res = await smokeServer({ command: exe, cwd: folder, opNames });
         if (!report(t.name, res)) failed++;

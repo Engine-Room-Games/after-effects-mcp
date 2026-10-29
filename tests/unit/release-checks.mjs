@@ -271,25 +271,52 @@ try {
   });
 
   if (process.platform === "darwin") {
-    await check("smoke-binaries fails a binary zip that lacks ws", () => {
-      const dist = path.join(scratch, "dist");
-      const stageName = "after-effects-mcp-0.0.0-test";
-      const stage = path.join(dist, stageName);
-      fs.mkdirSync(stage, { recursive: true });
-      fs.writeFileSync(path.join(stage, "after-effects-mcp"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    // A fake release dir: a host-runnable macOS "binary" (a shell script that
+    // starts the built server, so its launch passes) beside a Windows zip,
+    // which this host can never launch but must still check.
+    const server = path.join(root, "packages", "mcp-server", "dist", "index.js");
+    const fakeDist = (label, { macWs = true, winWs = true } = {}) => {
+      const dist = path.join(scratch, `dist-${label}`);
+      const targets = [
+        { name: `macos-${process.arch}`, exe: "after-effects-mcp", sign: false, ws: macWs,
+          body: `#!/bin/sh\nexec "${process.execPath}" "${server}"\n` },
+        { name: "windows-x64", exe: "after-effects-mcp.exe", sign: false, ws: winWs, body: "MZ" },
+      ];
+      for (const t of targets) {
+        t.stageName = `after-effects-mcp-0.0.0-${t.name}`;
+        const stage = path.join(dist, t.stageName);
+        fs.mkdirSync(stage, { recursive: true });
+        fs.writeFileSync(path.join(stage, t.exe), t.body, { mode: 0o755 });
+        if (t.ws) fs.cpSync(realWs, path.join(stage, "node_modules", "ws"), { recursive: true });
+        execFileSync("/usr/bin/ditto", ["-c", "-k", "--keepParent", stage, path.join(dist, `${t.stageName}.zip`)]);
+      }
       fs.writeFileSync(
         path.join(dist, "binaries.json"),
-        JSON.stringify({
-          version: "0.0.0",
-          targets: [{ name: `macos-${process.arch}`, exe: "after-effects-mcp", sign: false, stageName }],
-        })
+        JSON.stringify({ version: "0.0.0", targets: targets.map(({ name, exe, sign, stageName }) => ({ name, exe, sign, stageName })) })
       );
-      execFileSync("/usr/bin/ditto", ["-c", "-k", "--keepParent", stage, path.join(dist, `${stageName}.zip`)]);
-      const r = spawnSync(process.execPath, [path.join(root, "scripts", "lib", "release-checks.mjs"), "smoke-binaries", dist], {
+      return dist;
+    };
+    const smokeBinaries = (dist) =>
+      spawnSync(process.execPath, [path.join(root, "scripts", "lib", "release-checks.mjs"), "smoke-binaries", dist], {
         encoding: "utf8",
       });
+
+    await check("smoke-binaries passes good zips, checking a non-runnable one without launching it", () => {
+      const r = smokeBinaries(fakeDist("good"));
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.match(r.stdout, /windows-x64: contents checked; not runnable/);
+    });
+
+    await check("smoke-binaries fails a macOS zip that lacks ws", () => {
+      const r = smokeBinaries(fakeDist("mac-no-ws", { macWs: false }));
       assert.equal(r.status, 1, r.stdout + r.stderr);
-      assert.match(r.stderr, /node_modules\/ws is missing/);
+      assert.match(r.stderr, /macos-\S+: FAILED — node_modules\/ws is missing/);
+    });
+
+    await check("smoke-binaries fails a Windows zip that lacks ws, though it cannot launch it", () => {
+      const r = smokeBinaries(fakeDist("win-no-ws", { winWs: false }));
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /windows-x64: FAILED — node_modules\/ws is missing/);
     });
   }
 } finally {
