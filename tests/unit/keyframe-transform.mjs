@@ -93,7 +93,7 @@ var MATCH = {
 // A 2D layer keeps its hidden 3D properties, as AE's does. A camera or light
 // has no Scale/Opacity, and its Point of Interest is ADBE Anchor Point. This
 // mock's light has no Z Rotation either, to exercise the refusal. A point
-// light and a one-node camera carry properties AE reports canSetValue:false.
+// light and a one-node camera carry hidden properties.
 function makeLayer(kind) {
   var cam = kind === "camera" || kind === "oneNodeCamera";
   var light = kind === "light" || kind === "pointLight";
@@ -103,7 +103,8 @@ function makeLayer(kind) {
   var locked = kind === "oneNodeCamera" ? ["Anchor Point"] : kind === "pointLight" ? ["Orientation", "X Rotation", "Y Rotation"] : [];
   var props = {};
   for (var i = 0; i < names.length; i++) props[names[i]] = new MockProp(names[i], 0);
-  for (i = 0; i < locked.length; i++) props[locked[i]].canSetValue = false;
+  // AE 26.5 has no canSetValue; a hidden property reports canSetExpression:false.
+  for (i = 0; i < locked.length; i++) props[locked[i]].canSetExpression = false;
   var tr = { property: function (n) { return props[MATCH[n]] || null; } };
   var l = cam ? new CameraLayer() : light ? new LightLayer() : {};
   l.name = "Card";
@@ -263,6 +264,24 @@ check("a property that exists but cannot be set is refused before any write", ()
     assert.throws(() => run(ctx, `OPS.set_transform({compId:1, layerId:2, properties:${call}})`), named, kind);
     assert.deepEqual(plain(run(ctx, "allWrites()")), [], `${kind}: position must not land when the call is refused`);
   }
+});
+
+check("a write that throws anyway names what already landed", () => {
+  const ctx = makeCtx();
+  run(ctx, 'LAYER = makeLayer("camera");');
+  run(ctx, `LAYER.props["Orientation"].setValue = function () {
+    throw new Error('Can not "set value" with this property, because the property or a parent property is hidden.');
+  };`);
+  let err;
+  try {
+    run(ctx, "OPS.set_transform({compId:1, layerId:2, properties:{position:[1,2,3], orientation:[0,90,0]}})");
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err);
+  assert.match(err.message, /could not set orientation/);
+  assert.match(err.message, /Already written in this call: position/);
+  assert.doesNotMatch(err.message, /Nothing was changed/);
 });
 
 console.log(`keyframe-transform: ${passed} checks passed`);

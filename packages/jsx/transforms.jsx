@@ -69,6 +69,8 @@ OPS.set_transform = function (args) {
   // and some of what it does have is there but unsettable (a one-node camera's
   // Point of Interest, a point light's Orientation and rotations), so a field
   // that is absent or cannot take a value is refused by name, not skipped.
+  // AE 26.5 has no canSetValue (it reads undefined); a hidden property reports
+  // canSetExpression:false, measured — so that is the pre-write test.
   // On a camera or light, anchorPoint (ADBE Anchor Point) IS the Point of Interest.
   var plan = [];
   var missing = [];
@@ -80,16 +82,16 @@ OPS.set_transform = function (args) {
     try { prop = tr.property(__TRANSFORM_FIELDS[i][1]); } catch (e) { prop = null; }
     var settable = true;
     if (prop) {
-      try { settable = prop.canSetValue !== false; } catch (e2) { settable = false; }
+      try { settable = prop.canSetExpression !== false; } catch (e2) { settable = false; }
     }
     if (!prop) missing.push(field);
     else if (!settable) unsettable.push(field);
-    else plan.push([prop, p[field]]);
+    else plan.push([prop, p[field], field]);
   }
   if (missing.length || unsettable.length) {
     var what = [];
     if (missing.length) what.push("has no " + missing.join(", ") + " property");
-    if (unsettable.length) what.push("cannot set " + unsettable.join(", ") + " (After Effects reports it read-only on this layer)");
+    if (unsettable.length) what.push("cannot set " + unsettable.join(", ") + " (hidden on this layer)");
     var drop = missing.concat(unsettable);
     throw new Error(
       "set_transform: layer '" + l.name + "'" + (isCamOrLight ? " (a camera or light)" : "") +
@@ -97,6 +99,21 @@ OPS.set_transform = function (args) {
       "; get_layer_full lists the transform properties this layer has."
     );
   }
-  for (i = 0; i < plan.length; i++) __setOrKeyAtTime(plan[i][0], plan[i][1], t, kf);
+  // Fallback for a hidden property the check above did not see: name what
+  // already landed, so the failure is never read as "nothing changed".
+  var written = [];
+  for (i = 0; i < plan.length; i++) {
+    try {
+      __setOrKeyAtTime(plan[i][0], plan[i][1], t, kf);
+    } catch (e3) {
+      var msg = (e3 && e3.message) ? e3.message : String(e3);
+      throw new Error(
+        "set_transform: could not set " + plan[i][2] + " on layer '" + l.name + "': " + msg +
+        (written.length ? " Already written in this call: " + written.join(", ") + "." : " Nothing was changed.") +
+        (/hidden/i.test(msg) ? " The property is hidden on this layer; drop " + plan[i][2] + "." : "")
+      );
+    }
+    written.push(plan[i][2]);
+  }
   return { ok: true };
 };
