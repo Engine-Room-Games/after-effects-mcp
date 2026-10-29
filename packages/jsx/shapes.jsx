@@ -21,7 +21,7 @@ OPS.set_shape_path = function (args) {
 
 /**
  * The Path property (matchName "ADBE Vector Shape") that `node` names: the node
- * itself (or a mask's path), or — for a "Path N" group (ADBE Vector Shape - Group) — its Path
+ * itself (or a mask's path, or a mask whose path it is), or — for a "Path N" group (ADBE Vector Shape - Group) — its Path
  * child. Resolved by match name, never by the display name "Path", which is
  * localized and missed on a non-English After Effects (issue #163). Anything
  * else is refused with its match name, rather than handing setValue a group.
@@ -30,7 +30,9 @@ function __shapePathProp(node, path) {
   // A mask's path (ADBE Mask Shape) holds a Shape too, and has always been writable here.
   if (node.matchName === "ADBE Vector Shape" || node.matchName === "ADBE Mask Shape") return node;
   var child = null;
-  if (node.propertyType === PropertyType.NAMED_GROUP || node.propertyType === PropertyType.INDEXED_GROUP) {
+  if (node.matchName === "ADBE Mask Atom") {
+    try { child = node.property("ADBE Mask Shape"); } catch (e0) { child = null; }
+  } else if (node.propertyType === PropertyType.NAMED_GROUP || node.propertyType === PropertyType.INDEXED_GROUP) {
     try { child = node.property("ADBE Vector Shape"); } catch (e) { child = null; }
   }
   if (child) return child;

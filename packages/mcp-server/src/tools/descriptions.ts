@@ -93,7 +93,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- masks ----------
   add_mask: "Add a mask with vertices/tangents/closed/mode.",
-  set_mask: "Modify mask vertices/tangents/closed/mode/inverted/expansion/feather/opacity. Each path field applies on its own on top of the mask's current path: `closed:false` alone opens it, `inTangents` alone re-curves the existing vertices. Tangents not given are kept while the vertex count is unchanged and reset to straight corners when new `vertices` change it; a tangent array must have one entry per vertex or the call is refused with nothing changed.",
+  set_mask: "Modify mask vertices/tangents/closed/mode/inverted/expansion/feather/opacity. Each path field applies on its own on top of the mask's current path: `closed:false` alone opens it, `inTangents` alone re-curves the existing vertices. Tangents not given are kept while the vertex count is unchanged and reset to straight corners when new `vertices` change it; a tangent array must have one entry per vertex or the call is refused with nothing changed. Variable-width feather points are kept; a vertex-count change on a mask that has them is refused, as is any path field on a keyframed mask path (use add_keyframe there).",
   remove_mask: "Remove a mask by 1-based index.",
 
   // ---------- markers ----------

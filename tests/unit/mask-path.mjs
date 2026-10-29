@@ -38,14 +38,21 @@ const PropertyType = { PROPERTY: 6812, INDEXED_GROUP: 6813, NAMED_GROUP: 6814 };
 
 // AE's Shape: a plain value object. Reading `.value` hands back a copy, so a
 // handler that mutates what it read and never writes it back changes nothing.
+// A mask's variable-width feather points ride on the same Shape, indexed by
+// segment; a fresh `new Shape()` has none.
+const FEATHER = ["featherSegLocs", "featherRelSegLocs", "featherRadii", "featherInterps",
+  "featherTensions", "featherTypes", "featherRelCornerAngles"];
 class Shape {
-  constructor() { this.vertices = []; this.inTangents = []; this.outTangents = []; this.closed = true; }
+  constructor() {
+    this.vertices = []; this.inTangents = []; this.outTangents = []; this.closed = true;
+    for (const k of FEATHER) this[k] = [];
+  }
 }
 const copyShape = (s) => Object.assign(new Shape(), JSON.parse(JSON.stringify(s)));
 
 class ShapeProp {
   constructor(matchName, name, shape) {
-    Object.assign(this, { matchName, name, propertyType: PropertyType.PROPERTY, _v: shape, writes: 0 });
+    Object.assign(this, { matchName, name, propertyType: PropertyType.PROPERTY, _v: shape, writes: 0, numKeys: 0 });
   }
   get value() { return copyShape(this._v); }
   write(v) {
@@ -62,7 +69,10 @@ function mask(shape) {
     "ADBE Mask Shape": new ShapeProp("ADBE Mask Shape", "Mask Path", shape),
     "ADBE Mask Offset": { value: 0 }, "ADBE Mask Feather": { value: [0, 0] }, "ADBE Mask Opacity": { value: 100 },
   };
-  return { maskMode: MaskMode.ADD, inverted: false, props, property: (n) => props[n] };
+  return {
+    matchName: "ADBE Mask Atom", name: "Mask 1", propertyType: PropertyType.INDEXED_GROUP,
+    maskMode: MaskMode.ADD, inverted: false, props, property: (n) => props[n],
+  };
 }
 
 function group(matchName, name, children) {
@@ -152,6 +162,38 @@ check("a tangent count that differs from the vertex count is refused before any 
   assert.equal(m.inverted, false);
 });
 
+const feathered = () => Object.assign(square(), {
+  featherSegLocs: [1, 2], featherRelSegLocs: [0.5, 0.25], featherRadii: [12, -6], featherInterps: [0, 1],
+  featherTensions: [0, 0.3], featherTypes: [0, 1], featherRelCornerAngles: [0, 0],
+});
+
+check("variable-width feather points survive a path edit that keeps the vertex count", () => {
+  const { ops, maskPath } = scene();
+  maskPath._v = feathered();
+  ops.set_mask({ ...base, closed: false, inTangents: [[0, -20], [0, 0], [0, 0], [0, 0]] });
+  ops.set_mask({ ...base, vertices: [[1, 1], [2, 1], [2, 2], [1, 2]] });
+  assert.equal(maskPath._v.closed, false);
+  for (const k of FEATHER) assert.deepEqual(maskPath._v[k], feathered()[k], `${k} must be kept`);
+});
+
+check("a vertex-count change on a feathered mask is refused, not a silent drop", () => {
+  const { ops, maskPath } = scene();
+  maskPath._v = feathered();
+  assert.throws(() => ops.set_mask({ ...base, vertices: [[0, 0], [1, 0], [1, 1]] }),
+    /2 variable-width feather point\(s\).*Nothing was changed/);
+  assert.equal(maskPath.writes, 0);
+});
+
+check("an animated mask path is refused by name before any write", () => {
+  const { ops, m, maskPath } = scene();
+  maskPath.numKeys = 2;
+  assert.throws(() => ops.set_mask({ ...base, closed: false, inverted: true }), /path is animated \(2 keyframes\).*Nothing was changed/);
+  assert.equal(maskPath.writes, 0);
+  assert.equal(m.inverted, false);
+  ops.set_mask({ ...base, inverted: true });
+  assert.equal(m.inverted, true, "fields off the path still apply to an animated mask");
+});
+
 check("fields that do not touch the path leave it unwritten", () => {
   const { ops, m, maskPath } = scene();
   ops.set_mask({ ...base, inverted: true, opacity: 50 });
@@ -177,13 +219,15 @@ check("a Path N group resolves to its path on a localized After Effects", () => 
   assert.equal(shapePath._v.closed, false);
 });
 
-check("the Path property itself, or a mask's path, is accepted as given", () => {
+check("the Path property itself, a mask's path, or the mask itself is accepted", () => {
   const { ops, shapePath, maskPath } = scene();
   ops.set_shape_path({ compId: 1, layerId: 7, shapePath: ["Contents", "Path 1", "ADBE Vector Shape"], vertices: verts });
   assert.deepEqual(shapePath._v.vertices, verts);
   assert.equal(shapePath._v.closed, true);
   ops.set_shape_path({ compId: 1, layerId: 7, shapePath: ["Masks", 1, "ADBE Mask Shape"], vertices: verts });
   assert.deepEqual(maskPath._v.vertices, verts);
+  ops.set_shape_path({ compId: 1, layerId: 7, shapePath: ["Masks", 1], vertices: verts, closed: false });
+  assert.equal(maskPath._v.closed, false, "a mask group resolves to its Mask Path");
 });
 
 check("a node that is not a path is refused with its match name", () => {
