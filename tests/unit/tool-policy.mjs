@@ -238,9 +238,9 @@ const clients = {
 };
 const listed = async (client) => (await client.listTools()).tools.map((t) => t.name);
 
-await check("tools/list: default lists all 84 ops", async () => {
+await check("tools/list: default lists all 85 ops", async () => {
   assert.deepEqual(await listed(clients.default), ALL);
-  assert.equal(ALL.length, 84, "the op count moved — update this and the README's tool count together");
+  assert.equal(ALL.length, 85, "the op count moved — update this and the README's tool count together");
 });
 
 await check("tools/list: read-only lists exactly enabledOps, and no write", async () => {

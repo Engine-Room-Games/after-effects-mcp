@@ -62,6 +62,7 @@ bounded form is the one to reach for:
 | What comps exist? | `list_comps({include: []})` — ids and names |
 | What is in this comp? | `list_layers({compId, include: []})` — id, index, name, type; `get_comp_tree` for the nesting |
 | Where is a layer, by name, type or effect? | `find_layers` — `{matches, count, compsSearched, included}`; a match is id, index, name, sourceType, compId and compName, and `include` (`flags`, `timing`, `parent` — the `list_layers` names) widens it. Unlike `list_layers`, omitting `include` here does **not** return everything |
+| What does the user mean by "this" or "these"? | `get_selection` — the active comp, its playhead `time`, the selected layers, and the selected properties as `propertyPath`s with their selected keyframe times. Call it before asking the user to name a layer, and say which layer you took it to mean |
 | One layer, in depth | `get_layer_full({compId, layerId, include: […]})` ⭐ |
 | What did my last change actually do? | `snapshot_comp` → `diff_comp` ⭐ |
 

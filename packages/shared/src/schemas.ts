@@ -1055,6 +1055,7 @@ export const RunBatch = z.object({
 
 // ---------- explore ----------
 export const GetProjectSummary = z.object({}).strict();
+export const GetSelection = z.object({}).strict();
 export const FindLayers = z.object({
   compId: z.number().optional(),
   namePattern: z.string().optional(),
@@ -1468,6 +1469,7 @@ export const OpSchemas = {
   run_batch: RunBatch,
   // explore
   get_project_summary: GetProjectSummary,
+  get_selection: GetSelection,
   find_layers: FindLayers,
   // footage
   import_footage: ImportFootage,
@@ -1616,6 +1618,8 @@ export const OpMutation = {
   run_batch: "write",
   // explore
   get_project_summary: "read",
+  // The user's selection and playhead in the active comp; reads only.
+  get_selection: "read",
   find_layers: "read",
   // footage
   import_footage: "write",
