@@ -23,41 +23,42 @@ on:
 permissions:
   contents: read
 
+# Two jobs, so the credential and the build never share a process (issue #171).
+# `build` runs every install and lifecycle script there is — npm ci, prepack —
+# with no OIDC token in reach, and hands on one tarball. `publish` holds the
+# token and runs no package code at all: it downloads that tarball and
+# publishes it with --ignore-scripts.
+#
+# Both jobs use the same pinned npm, never npm@latest: the tarball is packed and
+# published by a version that was chosen, and a new npm release cannot change
+# either step between one tag and the next. OIDC trusted publishing needs
+# npm >= 11.5.1. Bump NPM_VERSION deliberately.
+env:
+  NPM_VERSION: "11.6.2"
+  NODE_VERSION: "24"
+
 jobs:
-  publish:
+  build:
     runs-on: macos-latest # the package declares os:["darwin"]; build and verify where it runs
     permissions:
-      id-token: write # required for OIDC
       contents: read
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
     steps:
       - uses: actions/checkout@v4
 
-      # NOTE: deliberately no `registry-url`. It makes setup-node write
-      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into .npmrc; with
-      # no NODE_AUTH_TOKEN set, npm sees an empty token, decides auth is already
-      # configured, and never starts the OIDC exchange.
-      # See https://github.com/actions/setup-node/issues/1551
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: ${{ env.NODE_VERSION }}
 
-      # OIDC trusted publishing needs npm >= 11.5.1.
-      - name: Install a publish-capable npm
-        run: |
-          npm install -g npm@latest
-          npm --version
+      - name: Install the pinned npm
+        run: npm install -g "npm@${NPM_VERSION}"
 
-      - name: Confirm the OIDC environment is present
+      # Recorded in the log of the run that built what npm serves.
+      - name: Toolchain
         run: |
-          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
-            echo "::error::No OIDC token endpoint — the job is missing id-token: write." >&2
-            exit 1
-          fi
-          if [ -f .npmrc ] && grep -q "_authToken" .npmrc; then
-            echo "::error::.npmrc contains an _authToken line; npm will skip OIDC. Remove registry-url from setup-node." >&2
-            exit 1
-          fi
-          echo "OIDC endpoint present, no conflicting .npmrc"
+          echo "node $(node --version)"
+          echo "npm  $(npm --version)"
 
       - run: npm ci
 
@@ -74,12 +75,22 @@ jobs:
           fi
           echo "Publishing version $PKG"
 
+      # The one tarball both the smoke test below and the publish job use: what
+      # was run here is byte for byte what reaches npm.
+      - name: Pack
+        id: pack
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pkg"
+          npm pack -w @engine-room/after-effects-mcp --pack-destination "$RUNNER_TEMP/pkg"
+          TARBALL=$(cd "$RUNNER_TEMP/pkg" && ls engine-room-after-effects-mcp-*.tgz)
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
       - name: Verify the packed tarball actually runs
         run: |
           set -euo pipefail
-          npm pack -w @engine-room/after-effects-mcp --pack-destination /tmp
-          TARBALL=$(ls /tmp/engine-room-after-effects-mcp-*.tgz)
-          mkdir -p /tmp/consumer && cd /tmp/consumer
+          TARBALL="$RUNNER_TEMP/pkg/${{ steps.pack.outputs.tarball }}"
+          mkdir -p "$RUNNER_TEMP/consumer" && cd "$RUNNER_TEMP/consumer"
           npm init -y >/dev/null
           npm install "$TARBALL" >/dev/null
           # The panel must resolve from the published layout, not the checkout.
@@ -118,5 +129,52 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: ${{ runner.temp }}/pkg/${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: macos-latest
+    permissions:
+      id-token: write # required for OIDC
+      contents: read
+    steps:
+      # NOTE: deliberately no `registry-url`. It makes setup-node write
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into .npmrc; with
+      # no NODE_AUTH_TOKEN set, npm sees an empty token, decides auth is already
+      # configured, and never starts the OIDC exchange.
+      # See https://github.com/actions/setup-node/issues/1551
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install the pinned npm
+        run: |
+          npm install -g "npm@${NPM_VERSION}"
+          npm --version
+
+      - name: Confirm the OIDC environment is present
+        run: |
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::No OIDC token endpoint — the job is missing id-token: write." >&2
+            exit 1
+          fi
+          if [ -f .npmrc ] && grep -q "_authToken" .npmrc; then
+            echo "::error::.npmrc contains an _authToken line; npm will skip OIDC. Remove registry-url from setup-node." >&2
+            exit 1
+          fi
+          echo "OIDC endpoint present, no conflicting .npmrc"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball
+          path: ${{ runner.temp }}/pkg
+
+      # No checkout, no npm ci, no lifecycle scripts: nothing from the package
+      # runs in the job that holds the publish credential.
       - name: Publish
-        run: npm publish -w @engine-room/after-effects-mcp
+        run: npm publish "$RUNNER_TEMP/pkg/${{ needs.build.outputs.tarball }}" --ignore-scripts --provenance

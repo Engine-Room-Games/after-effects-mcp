@@ -22,3 +22,9 @@ packages/ae-panel/node_modules/
 
 # Worktrees created by background agents; the branches live on the remote.
 .claude/worktrees/
+
+# Signing material: an App Store Connect API key, a Developer ID export, a
+# private key. They live on one machine and never in a commit (issue #171).
+*.p8
+*.p12
+*.pem

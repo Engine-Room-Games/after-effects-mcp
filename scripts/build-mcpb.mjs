@@ -79,6 +79,10 @@ fs.writeFileSync(
       type: "module",
       private: true,
       dependencies: { ws: manifestJson.dependencies.ws },
+      // The toolchain this bundle was built with, so a bad release can be traced
+      // to it (issue #171). Desktop runs the bundle on its own Node; this is
+      // the Node that ran esbuild.
+      builtWith: { node: process.version },
     },
     null,
     2

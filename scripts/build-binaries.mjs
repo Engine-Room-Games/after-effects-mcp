@@ -44,12 +44,17 @@ const TARGETS = [
   { name: "windows-x64", bun: "bun-windows-x64", exe: "after-effects-mcp.exe", sign: false },
 ];
 
+// Recorded in every target folder and in binaries.json, so a bad release can be
+// traced to the compiler that built it (issue #171).
+let bunVersion;
 try {
-  execFileSync("bun", ["--version"], { stdio: "ignore" });
+  bunVersion = execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();
 } catch {
   console.error("bun is not installed. It compiles the standalone binaries: https://bun.sh");
   process.exit(1);
 }
+const builtWith = { bun: bunVersion, node: process.version };
+console.log(`Toolchain: bun ${builtWith.bun}, node ${builtWith.node}`);
 for (const dir of [panelSrc, wsSrc]) {
   if (!fs.existsSync(dir)) {
     console.error(`Missing ${path.relative(root, dir)}. Run \`npm install && npm run build\` first.`);
@@ -116,7 +121,7 @@ for (const target of TARGETS) {
 
   fs.writeFileSync(
     path.join(stage, "package.json"),
-    JSON.stringify({ name: "@engine-room/after-effects-mcp", version, private: true }, null, 2) + "\n"
+    JSON.stringify({ name: "@engine-room/after-effects-mcp", version, private: true, builtWith }, null, 2) + "\n"
   );
   copy(panelSrc, path.join(stage, "panel"));
   copy(wsSrc, path.join(stage, "node_modules", "ws"));
@@ -130,7 +135,7 @@ for (const target of TARGETS) {
 // Emitted for the release script, which signs the macOS ones and zips them all.
 fs.writeFileSync(
   path.join(outDir, "binaries.json"),
-  JSON.stringify({ version, targets: built.map(({ name, exe, sign, stageName }) => ({ name, exe, sign, stageName })) }, null, 2) + "\n"
+  JSON.stringify({ version, builtWith, targets: built.map(({ name, exe, sign, stageName }) => ({ name, exe, sign, stageName })) }, null, 2) + "\n"
 );
 
 console.log(`\n${built.length} target(s) in ${path.relative(root, outDir)}`);
