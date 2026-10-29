@@ -54,6 +54,18 @@ export interface RenderItemPlan {
   /** Seconds of comp time this item renders, as After Effects reports it. */
   timeSpanDuration?: number;
   outputs: RenderOutputPlan[];
+  /** Every file-backed footage item this item reads, as After Effects resolves it now (#145). */
+  footage?: FootageRef[];
+  /** Missing footage the render probably does not read, but might (#144). Reported, never refused. */
+  footageWarnings?: string[];
+  /** Missing footage the render provably does not read, with why (#144). */
+  footageSkipped?: string[];
+}
+
+/** A footage file a render reads: its project item's name and its path on disk. */
+export interface FootageRef {
+  name: string;
+  path: string;
 }
 
 /** What `_render_prepare` answers. */
@@ -433,6 +445,8 @@ export interface RenderedItem {
   framesVerified?: number;
   /** Set when the frame count differs from the comp span's, or could only be read from the file. */
   framesNote?: string;
+  /** Carried from the plan: missing footage this item probably did not read, but might have (#144). */
+  footageWarnings?: string[];
 }
 
 export interface CancelReport {
@@ -519,10 +533,11 @@ export interface RenderRunnerOptions {
  * both an absolute and a relative path for each file and tries the absolute
  * one first, and the project was just saved by an AE that had every file
  * resolved, so the absolute paths in the copy are current. What is left is a
- * project that was moved and never re-saved since (a clean project is not
- * saved by render_queue) — aerender then reports missing footage, the job
- * fails with its own error lines, and `missingFootageHint` names the fix. The
- * copy keeps the project's file name, so aerender's messages read the same.
+ * project that was moved and never re-saved since — refused before this runs
+ * by `checkPlanFootage`, which reads the paths the saved file records (issue
+ * #145). aerender's own missing-footage line, and `missingFootageHint`, remain
+ * the second layer. The copy keeps the project's file name, so aerender's
+ * messages read the same.
  */
 export function snapshotProject(projectPath: string, jobId: string, tmpRoot: string = os.tmpdir()): string {
   const dir = path.join(tmpRoot, "ae-mcp-render", jobId);
@@ -674,6 +689,209 @@ export function missingFootageHint(lines: string[]): string {
     "through a path relative to the project (the project was moved since it was last saved), ask the " +
     "user to save the project in After Effects so it records where the files are now, then render again."
   );
+}
+
+/**
+ * The absolute footage paths a saved project records (issue #145).
+ *
+ * After Effects stores two paths for every footage file — an absolute one and
+ * one relative to the project — and opens the absolute one first. The render
+ * reads a copy of the project in the temp folder, where the relative path
+ * points nowhere. So footage the user's After Effects found only through the
+ * relative path (the project folder was moved and has not been saved since) is
+ * footage the copy cannot find: aerender renders the missing-footage
+ * placeholder, and only its English wording ever said so.
+ *
+ * MEASURED on .aep files saved by 26.x on macOS (RIFX, big-endian): each
+ * footage item holds a LIST `Als2` whose `alas` chunk is UTF-8 JSON —
+ *   {"ascendcount_base":1,"ascendcount_target":3,"fullpath":"/Users/…/pop.wav",
+ *    "platform":2,"server_name":"","server_volume_name":"","target_is_folder":false}
+ * `fullpath` is the absolute path; the ascend counts are the relative one. An
+ * .aepx is assumed to carry the same as `fullpath="…"` attributes on a
+ * `<fileReference>` (not measured). This is a byte scan, not a parse of the
+ * format: a chunk it does not recognise is passed over, and `records` says how
+ * many were read, so a file this cannot read is known as such rather than
+ * mistaken for one with no footage.
+ */
+export function storedFootagePaths(bytes: Buffer, isXml = false): { paths: string[]; folders: string[]; records: number } {
+  const paths: string[] = [];
+  const folders: string[] = [];
+  let records = 0;
+  if (isXml) {
+    const text = bytes.toString("utf8");
+    const decode = (v: string) =>
+      v.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+    for (const m of text.matchAll(/<fileReference\b[^>]*>/g)) {
+      const full = /\bfullpath="([^"]*)"/.exec(m[0]);
+      if (!full) continue;
+      records++;
+      (/\btarget_is_folder="(?:1|true)"/.test(m[0]) ? folders : paths).push(decode(full[1]));
+    }
+    return { paths, folders, records };
+  }
+  const tag = Buffer.from("alas", "latin1");
+  let at = bytes.indexOf(tag);
+  while (at !== -1 && at + 8 <= bytes.length) {
+    const size = bytes.readUInt32BE(at + 4);
+    const start = at + 8;
+    if (size > 0 && size < 1 << 20 && start + size <= bytes.length && bytes[start] === 0x7b /* { */) {
+      try {
+        const rec = JSON.parse(bytes.toString("utf8", start, start + size).replace(/\0+$/, "")) as {
+          fullpath?: unknown;
+          target_is_folder?: unknown;
+        };
+        if (typeof rec.fullpath === "string") {
+          records++;
+          (rec.target_is_folder === true ? folders : paths).push(rec.fullpath);
+        }
+      } catch {
+        // Not an alias record after all; keep scanning.
+      }
+    }
+    at = bytes.indexOf(tag, at + 4);
+  }
+  return { paths, folders, records };
+}
+
+/**
+ * One spelling for a path, so a stored path and a resolved one compare equal
+ * when they name the same file: Unicode NFC (Finder hands out NFD), forward
+ * slashes, no trailing slash, and on Windows no case and `/c/…` read as `c:/…`.
+ */
+export function canonicalFootagePath(p: string, platform: NodeJS.Platform = process.platform): string {
+  let s = p.normalize("NFC");
+  if (platform === "win32") s = s.replace(/\\/g, "/").toLowerCase().replace(/^\/([a-z])\//, "$1:/");
+  return s.replace(/\/+$/, "");
+}
+
+function realOrSelf(p: string): string {
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    return p;
+  }
+}
+
+export interface FootageCheck {
+  /** Footage After Effects still shows, whose file is no longer on disk. */
+  gone: FootageRef[];
+  /** Footage on disk that the saved project does not record at any path leading to it. */
+  stale: FootageRef[];
+  /** The items read footage, and no footage path at all could be read from the saved file. */
+  unreadable: boolean;
+}
+
+/**
+ * Check every file the plan's items read against the disk and against the
+ * saved project (issue #145). Language-independent by construction: nothing
+ * here reads aerender's output.
+ *
+ *  - `gone`: the file After Effects resolved is not on disk. Measured on 26.5:
+ *    a file deleted while the project is open reads as present
+ *    (`footageMissing` false) until the project is reopened, so the up-front
+ *    refusal in render.jsx missed it and only aerender's English line caught it.
+ *  - `stale`: the file is on disk, but no absolute path the saved project
+ *    records leads to it — After Effects found it through the relative path,
+ *    which the temp copy cannot follow. A save fixes it: After Effects writes
+ *    the absolute path it resolved.
+ *  - `unreadable`: the items read footage and no footage path could be read
+ *    from the file at all. Nothing can be proved about the copy.
+ */
+export function checkPlanFootage(
+  plan: RenderPlan,
+  projectPath: string,
+  platform: NodeJS.Platform = process.platform
+): FootageCheck {
+  const used = new Map<string, FootageRef>();
+  for (const item of plan.items) for (const f of item.footage ?? []) if (!used.has(f.path)) used.set(f.path, f);
+  const gone: FootageRef[] = [];
+  const present: FootageRef[] = [];
+  for (const f of used.values()) (fs.existsSync(f.path) ? present : gone).push(f);
+  if (!present.length) return { gone, stale: [], unreadable: false };
+
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(projectPath);
+  } catch {
+    return { gone, stale: [], unreadable: true };
+  }
+  const stored = storedFootagePaths(bytes, /\.aepx$/i.test(projectPath));
+  if (!stored.records) return { gone, stale: [], unreadable: true };
+  const canon = (p: string) => canonicalFootagePath(p, platform);
+  const files = new Set<string>();
+  for (const p of stored.paths) {
+    files.add(canon(p));
+    // /tmp and /private/tmp, a symlinked volume: one file under two names.
+    if (fs.existsSync(p)) files.add(canon(realOrSelf(p)));
+  }
+  const folders = stored.folders.map((d) => canon(d) + "/");
+  const stale = present.filter((f) => {
+    const a = canon(f.path);
+    const b = canon(realOrSelf(f.path));
+    if (files.has(a) || files.has(b)) return false;
+    return !folders.some((d) => a.startsWith(d) || b.startsWith(d));
+  });
+  return { gone, stale, unreadable: false };
+}
+
+/**
+ * Why a render must not start, given a footage check — or null when it may.
+ *
+ * `gone` and `unreadable` refuse outright: no save can bring a deleted file
+ * back, and a file this cannot read proves nothing. `stale` is fixed by a save,
+ * so before one it refuses unless the caller passed saveProject:true (the save
+ * is never a surprise, the same rule as unsaved changes), and after one —
+ * `afterSave`, the check re-run on the file just written — any stale path left
+ * means the save did not record it, and it refuses rather than render.
+ * Refusing over rendering from a copy beside the original: see
+ * "The render queue" in docs/fragile-areas-ae.md.
+ */
+export function footageRefusal(check: FootageCheck, opts: { saveProject: boolean; afterSave: boolean }): string | null {
+  const lead = opts.afterSave ? "The project WAS saved, but nothing was rendered: " : "Nothing was saved or rendered: ";
+  if (check.gone.length) {
+    return (
+      lead +
+      `After Effects still shows this footage as present, but its file is no longer on disk: ${footageList(check.gone)}. ` +
+      "It was moved, renamed or deleted while the project was open — After Effects only notices when the project " +
+      "is reopened, and the render would carry the missing-footage placeholder. Ask the user to put the file back " +
+      "or relink it (File > Dependencies > Find Missing Footage), then call render_queue again."
+    );
+  }
+  if (check.unreadable) {
+    return (
+      lead +
+      "the render reads a copy of the saved project, and no footage path could be read from that file to prove the " +
+      "copy finds its footage — this version of After Effects may save projects in a form this server does not " +
+      "know. Rendering anyway could produce the missing-footage placeholder and report it as done. Log this with " +
+      "log_issue; meanwhile the user can render from After Effects' own Render Queue panel."
+    );
+  }
+  if (check.stale.length && opts.afterSave) {
+    return (
+      lead +
+      `the saved file still does not record where this footage is: ${footageList(check.stale)}. The render reads a ` +
+      "copy of the project in the temp folder, which can only find footage by the absolute path the project " +
+      "records. Ask the user to relink the footage (File > Dependencies > Find Missing Footage) and save, then " +
+      "call render_queue again."
+    );
+  }
+  if (check.stale.length && !opts.saveProject) {
+    return (
+      lead +
+      `After Effects found this footage only through its path relative to the project, which usually means the ` +
+      `project folder was moved and has not been saved since: ${footageList(check.stale)}. The render reads a copy ` +
+      "of the project in the temp folder, where that relative path leads nowhere, so it would render the " +
+      "missing-footage placeholder. Saving makes After Effects record where the files are now: tell the user the " +
+      "project will be saved, then call render_queue again with saveProject:true."
+    );
+  }
+  return null;
+}
+
+/** Footage for a message: at most `cap` of them, then how many more. */
+export function footageList(refs: FootageRef[], cap = 10): string {
+  const shown = refs.slice(0, cap).map((f) => `"${f.name}" (${f.path})`);
+  return shown.join(", ") + (refs.length > cap ? ` and ${refs.length - cap} more` : "");
 }
 
 /**
@@ -893,6 +1111,7 @@ export class RenderRunner {
           frames,
           ...(onDisk !== null ? { framesVerified: onDisk } : {}),
           elapsedMs: Date.now() - itemStart,
+          ...(item.footageWarnings?.length ? { footageWarnings: item.footageWarnings } : {}),
         };
         if (r.itemFrames === 0) {
           done.framesNote =

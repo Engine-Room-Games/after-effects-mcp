@@ -40,19 +40,33 @@ ProRes 4444 with alpha is an **output module template** that already says so.
 - **It renders the saved file.** The render runs in a separate background copy
   of After Effects (`aerender`) that reads the `.aep` on disk. With unsaved
   changes it refuses unless you pass `saveProject: true` — tell the user the
-  project will be saved before you pass it. A clean project is never saved. A
+  project will be saved before you pass it. A clean project is never saved,
+  except to fix footage paths (below), and only with `saveProject: true`. A
   project never saved, read-only, or converted from an older After Effects
   (which only *Save As* will write) is refused; the user fixes that by hand.
-- **Missing footage is refused before rendering**, with the missing items
-  named — relink them first (File > Dependencies > Find Missing Footage).
+- **Missing footage the render draws is refused before rendering**, with the
+  missing items named — relink them first (File > Dependencies > Find Missing
+  Footage). Missing footage only on switched-off layers, or on layers outside
+  the rendered time span, is not a reason to refuse: it comes back in
+  `missingFootageNotRendered` — mention it to the user. A switched-off layer
+  still counts as drawn when it is a track matte or another layer's effect
+  points at it (Displacement Map, Set Matte, a Layer Control). When an
+  expression calls `sampleImage()`, those skips come back as `footageWarnings`
+  instead, because the expression may read them: tell the user, and look at
+  those frames.
+- **Footage the saved project records at an old location is refused** — the
+  project folder was moved and not saved since, so After Effects found the
+  files only relative to the project, which the render's copy cannot do. The
+  refusal names the files; pass `saveProject: true` (tell the user — this
+  saves a project with no unsaved changes) and the save records where they
+  are now. Footage After Effects still shows but whose file is gone from disk
+  (deleted or moved while the project was open) is refused outright.
 - **Existing files are refused** unless `overwrite: true` — that includes an
   item the user queued by hand that points at last week's render.
 - **Edits made while it renders are not in the render.** The render reads a
   private copy in the system temp folder taken at its start, so neither your
   later edits nor a save by the user mid-render change it. After Effects stays
-  fully usable. A failure that mentions missing footage usually means the
-  project was moved since it was last saved — the user saves it, then render
-  again.
+  fully usable.
 - **It is slow to start.** The background copy takes several seconds to launch,
   and progress sits at 0 until the first frame.
 - **One render at a time.** A second `render_queue` is refused while one runs.
