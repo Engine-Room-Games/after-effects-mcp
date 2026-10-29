@@ -18,9 +18,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 const sharedDist = (...p) => pathToFileURL(path.join(root, "packages", "shared", "dist", ...p)).href;
 
-const { OpSchemas, OpMutation } = await import(sharedDist("schemas.js"));
-const { READ_ONLY_SERVER_OPS } = await import(dist("tools", "policy.js"));
-const { toolAnnotations, DESTRUCTIVE_VERBS } = await import(dist("tools", "annotations.js"));
+const { OpSchemas, OpMutation, ServerOpEffect, OpDiskWrite } = await import(sharedDist("schemas.js"));
+const { toolAnnotations, DESTRUCTIVE_VERBS, IDEMPOTENT_VERBS, overwritesDisk } = await import(dist("tools", "annotations.js"));
+const { z } = await import("zod");
 const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
 
 let passed = 0;
@@ -100,31 +100,61 @@ await check("every listed tool carries all four annotations as booleans", () => 
   }
 });
 
-await check("readOnlyHint follows OpMutation, and READ_ONLY_SERVER_OPS for server ops", () => {
+await check("readOnlyHint follows OpMutation, and ServerOpEffect for server ops", () => {
   for (const t of tools) {
     const effect = OpMutation[t.name];
-    const expected = effect === "read" || (effect === "server" && READ_ONLY_SERVER_OPS[t.name] === "keep");
+    const expected = effect === "read" || (effect === "server" && ServerOpEffect[t.name] === "read");
     assert.equal(t.annotations.readOnlyHint, expected, `${t.name} (${effect})`);
-    if (effect === "write") assert.equal(t.annotations.readOnlyHint, false, `${t.name} is a write`);
+  }
+  // Pure reads that read-only mode drops for another reason are still reads.
+  for (const name of ["get_job", "await_job", "ae_guide", "check_setup", "list_known_issues"]) {
+    assert.equal(toolAnnotations(name).readOnlyHint, true, name);
+  }
+  for (const name of ["cancel_job", "setup_panel", "init_project", "log_issue", "archive_issue"]) {
+    assert.equal(toolAnnotations(name).readOnlyHint, false, name);
   }
 });
 
-await check("no read-only tool is destructive; idempotent only when read-only", () => {
+await check("no read-only tool is destructive; openWorld is false", () => {
   for (const t of tools) {
-    if (t.annotations.readOnlyHint) assert.equal(t.annotations.destructiveHint, false, t.name);
-    assert.equal(t.annotations.idempotentHint, t.annotations.readOnlyHint, t.name);
+    if (t.annotations.readOnlyHint) {
+      assert.equal(t.annotations.destructiveHint, false, t.name);
+      assert.equal(t.annotations.idempotentHint, true, t.name);
+    }
     assert.equal(t.annotations.openWorldHint, false, t.name);
   }
 });
 
-await check("destructive = a removing verb, or a tool that runs arbitrary steps", () => {
+await check("every op with an `overwrite` argument, or that overwrites disk, is destructive", () => {
+  const withField = Object.keys(OpSchemas).filter((n) => {
+    const j = z.toJSONSchema(OpSchemas[n], { io: "input", unrepresentable: "any" });
+    return j.properties && Object.hasOwn(j.properties, "overwrite");
+  });
+  assert.ok(withField.length >= 4, `only ${withField} have an overwrite field`);
+  for (const n of withField) assert.equal(toolAnnotations(n).destructiveHint, true, `${n} has overwrite`);
+  for (const [n, kind] of Object.entries(OpDiskWrite)) {
+    assert.ok(Object.hasOwn(OpSchemas, n), `OpDiskWrite names unknown op ${n}`);
+    if (kind === "overwrites") assert.equal(toolAnnotations(n).destructiveHint, true, `${n} overwrites disk`);
+  }
+  for (const n of ["set_house_style", "export_mogrt", "render_queue", "add_to_render_queue", "setup_panel"]) {
+    assert.equal(overwritesDisk(n), true, n);
+    assert.equal(toolAnnotations(n).destructiveHint, true, n);
+  }
+  // Additive disk writes do not cry wolf.
+  for (const n of ["init_project", "log_issue", "mark_issue_reported", "archive_issue"]) {
+    assert.equal(toolAnnotations(n).destructiveHint, false, n);
+  }
+});
+
+await check("destructive = a removing verb, arbitrary steps, or overwriting disk", () => {
   const destructive = tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort();
   for (const name of destructive) {
     const verb = name.split("_")[0];
-    assert.ok(DESTRUCTIVE_VERBS.includes(verb) || name === "run_jsx" || name === "run_batch", `${name} flagged destructive`);
+    assert.ok(
+      DESTRUCTIVE_VERBS.includes(verb) || name === "run_jsx" || name === "run_batch" || overwritesDisk(name),
+      `${name} flagged destructive`
+    );
   }
-  // The ones a user most needs warned about, named so a rule change that drops
-  // them fails here rather than in a client's approval dialog.
   for (const name of [
     "delete_comp", "delete_layer", "delete_checkpoints", "revert_comp", "purge_unused_footage",
     "remove_effect", "remove_keyframe", "remove_mask", "remove_marker", "remove_render_item",
@@ -132,9 +162,22 @@ await check("destructive = a removing verb, or a tool that runs arbitrary steps"
   ]) {
     assert.ok(destructive.includes(name), `${name} should be destructive`);
   }
-  // And the additive ones must not cry wolf.
   for (const name of ["create_comp", "add_keyframe", "set_transform", "duplicate_layer", "import_footage", "checkpoint_comp"]) {
     assert.equal(toolAnnotations(name).destructiveHint, false, name);
+  }
+});
+
+await check("idempotent writes are exactly the absolute-state verbs", () => {
+  for (const t of tools) {
+    if (t.annotations.readOnlyHint) continue;
+    const expected = IDEMPOTENT_VERBS.includes(t.name.split("_")[0]);
+    assert.equal(t.annotations.idempotentHint, expected, t.name);
+  }
+  for (const n of ["set_transform", "set_layer", "toggle_expression", "parent_layer", "reorder_layer", "set_house_style"]) {
+    assert.equal(toolAnnotations(n).idempotentHint, true, n);
+  }
+  for (const n of ["add_keyframe", "create_comp", "duplicate_layer", "import_footage", "delete_layer", "run_jsx", "run_batch", "log_issue"]) {
+    assert.equal(toolAnnotations(n).idempotentHint, false, n);
   }
 });
 

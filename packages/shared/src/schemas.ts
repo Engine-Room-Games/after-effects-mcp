@@ -1576,6 +1576,65 @@ export const OpMutation = {
 
 export type OpEffect = (typeof OpMutation)[OpName];
 
+type ServerOpName = { [K in OpName]: (typeof OpMutation)[K] extends "server" ? K : never }[OpName];
+
+/**
+ * What each `"server"` op does, as a read or a write (issue #165).
+ *
+ * `OpMutation` says only that these never reach the bridge, and
+ * `READ_ONLY_SERVER_OPS` (tools/policy.ts) answers a different question —
+ * whether read-only mode offers them, which drops `get_job` and `await_job`
+ * for having nothing to read, not for writing. This is the plain answer, used
+ * for `readOnlyHint`. Typed over every server op, so a new one does not
+ * compile until it is decided: no default, like `OpMutation`.
+ */
+export const ServerOpEffect = {
+  await_job: "read",
+  get_job: "read",
+  // Stops a batch or kills an aerender process.
+  cancel_job: "write",
+  check_setup: "read",
+  setup_panel: "write",
+  init_project: "write",
+  ae_guide: "read",
+  log_issue: "write",
+  list_known_issues: "read",
+  mark_issue_reported: "write",
+  archive_issue: "write",
+} as const satisfies Record<ServerOpName, "read" | "write">;
+
+/**
+ * Ops that write files outside After Effects' undo stack (issue #165), and
+ * whether that can lose what was there.
+ *
+ *   "overwrites" — can replace an existing file's content: Edit > Undo does
+ *                  not bring it back, so the tool is `destructiveHint: true`.
+ *   "adds"       — only creates files, or merges into one without losing what
+ *                  it held. Not destructive.
+ *
+ * An op whose arguments carry an `overwrite` field is treated as "overwrites"
+ * whether or not it is listed here (tools/annotations.ts reads the schema), so
+ * this table is for the ops that write disk without one. An op absent from
+ * both writes nothing outside the project.
+ */
+export const OpDiskWrite = {
+  // Saves the .aep, then writes the .mogrt (overwrite field too).
+  export_mogrt: "overwrites",
+  // Can save the .aep (`saveProject`) and replace render outputs.
+  render_queue: "overwrites",
+  // Replaces house-style.md beside the .aep.
+  set_house_style: "overwrites",
+  // Replaces the installed panel and can change Adobe's debug preference.
+  setup_panel: "overwrites",
+  // Refuses to clobber any existing file.
+  init_project: "adds",
+  // The journal: a repeat merges into its entry, a report or an archive adds a
+  // field to it. The file and what it said are kept.
+  log_issue: "adds",
+  mark_issue_reported: "adds",
+  archive_issue: "adds",
+} as const satisfies Partial<Record<OpName, "overwrites" | "adds">>;
+
 // ---------- runtime strictness ----------
 /**
  * Every object in an op schema, closed — at every depth (issue #147).
