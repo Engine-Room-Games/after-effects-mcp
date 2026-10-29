@@ -26,6 +26,16 @@
 //   - Comp settings land before the layers are copied in, and are put back
 //     when a copy fails.
 //
+// Three behaviours of AE 26.5 measured on the live pass of this PR are in the
+// stub, because each broke the first version of the op:
+//   - itemByID of a deleted id THROWS ("internal verification failure {Item
+//     Not Found}") instead of returning null.
+//   - copyToComp appends " 2" to an explicitly named layer when the
+//     destination already holds that name.
+//   - copyToComp of a PARENTED layer bakes its keys into comp space and parents
+//     the copy to the destination's namesake of the parent. Stubbed as a
+//     `baked` flag: a restored layer carrying it renders in the wrong place.
+//
 // There is no ExtendScript runtime on a runner, so After Effects is stubbed
 // down to what the ops use. The stub's copyToComp follows the measured rules in
 // the extendscript-gotchas guide: copies land on top and then below the
@@ -126,7 +136,13 @@ function mkLayer(comp, name, opts) {
       throw new Error("After Effects error: Can't copy a layer with a parent or with a linked expression, while an Undo Group is open.");
     }
     if (FAIL_COPY === l.name) throw new Error("After Effects refused to copy " + l.name);
-    var c = mkLayer(target, l.name, {
+    var cname = l.name;
+    if (!l.sourceNamed) {
+      for (var t = 0; t < target._layers.length; t++) {
+        if (target._layers[t].name === cname) { cname = l.name + " 2"; break; }
+      }
+    }
+    var c = mkLayer(target, cname, {
       enabled: COPY_FORCES_ENABLED ? true : l.enabled, locked: l.locked,
       inPoint: l.inPoint, outPoint: l.outPoint, startTime: l.startTime,
       expr: l.expr, posKeys: l.posKeys, trackMatteType: 0, source: l.source,
@@ -136,6 +152,12 @@ function mkLayer(comp, name, opts) {
     // resolves to nothing. Whether AE does this or resolves it to an old layer
     // by index is a live-AE measurement; either way the restored value is wrong.
     if (l.fx) c.fx = mkLayerPick(c, l.fx.pick.ref);
+    if (l.parent) {
+      c.baked = true;
+      for (var pn = 0; pn < target._layers.length; pn++) {
+        if (target._layers[pn].name === l.parent.name) { c.parent = target._layers[pn]; break; }
+      }
+    }
     // The first copy lands on top, each later one below the previous copy.
     var at = 0;
     if (target._lastCopy) {
@@ -228,16 +250,20 @@ var app = {
     item: function (i) { return ITEMS[i - 1]; },
     itemByID: function (id) {
       for (var i = 0; i < ITEMS.length; i++) if (ITEMS[i].id === id) return ITEMS[i];
-      return null;
+      throw new Error("After Effects error: internal verification failure, sorry! {Item Not Found}");
     },
+    rootFolder: { id: 0, name: "Root" },
     items: { addFolder: function (name) { return mkFolder(name); } }
   }
 };
 app.project.__defineGetter__("numItems", function () { return ITEMS.length; });
 
+function find(id) { for (var i = 0; i < ITEMS.length; i++) if (ITEMS[i].id === id) return ITEMS[i]; return null; }
 function names(c) { var o = []; for (var i = 1; i <= c.numLayers; i++) o.push(c.layer(i).name); return o; }
 function ids(c) { var o = []; for (var i = 1; i <= c.numLayers; i++) o.push(c.layer(i).id); return o; }
 function byName(c, n) { for (var i = 1; i <= c.numLayers; i++) if (c.layer(i).name === n) return c.layer(i); return null; }
+function cpLayer(n) { var cs = checkpoints(); return byName(cs[cs.length - 1], n); }
+function cpTitle() { return cpLayer("Title"); }
 function checkpoints() { var o = []; for (var i = 0; i < ITEMS.length; i++) if (__cpIsCheckpoint(ITEMS[i])) o.push(ITEMS[i]); return o; }
 `;
 
@@ -254,6 +280,7 @@ var fill = main.add("Fill");
 fill.trackMatteLayer = matte; fill.trackMatteType = 2;
 var bg = main.add("BG", { locked: true, enabled: false, shy: true });
 var picker = main.add("Picker");
+var solidNamed = main.add("Red Solid 1", { sourceNamed: true });
 picker.fx = mkLayerPick(picker, matte);
 main.markerProperty.setValueAtTime(1, { comment: "beat", duration: 0 });
 var scene = mkComp("Scene");
@@ -287,13 +314,13 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
 
   eq(r.compId, mainId, "the checkpoint names the comp it is of");
   eq(r.label, "before easing");
-  eq(r.numLayers, 6);
+  eq(r.numLayers, 7);
   eq(r.folderName, "AE MCP Checkpoints", "filed in the one checkpoints folder");
   ok(/\[checkpoint before easing\]$/.test(r.name), "named so it reads as a checkpoint and never answers comp('Main')");
   ok(/NOT/.test(r.covers) && /nested precomps/.test(r.covers), "the result says what a checkpoint does not cover");
   eq(get("ids(main)"), before, "the comp itself is untouched");
-  eq(get(`app.project.itemByID(${r.checkpointId}).parentFolder.name`), "AE MCP Checkpoints");
-  ok(get(`app.project.itemByID(${r.checkpointId}).comment`).indexOf("ae-mcp-checkpoint:v1 ") === 0, "tagged through the comment");
+  eq(get(`find(${r.checkpointId}).parentFolder.name`), "AE MCP Checkpoints");
+  ok(get(`find(${r.checkpointId}).comment`).indexOf("ae-mcp-checkpoint:v1 ") === 0, "tagged through the comment");
 
   const r2 = mustOk(call("checkpoint_comp", { compId: mainId }));
   eq(r2.label, "#2", "an unlabelled checkpoint is numbered per comp");
@@ -332,15 +359,19 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   const r = mustOk(call("revert_comp", { checkpointId: cp.checkpointId }));
 
   eq(r.compId, mainId, "the comp keeps its id");
-  ok(get(`app.project.itemByID(${mainId})`) === objBefore, "…because it is the same item, restored in place");
+  ok(get(`find(${mainId})`) === objBefore, "…because it is the same item, restored in place");
   ok(get("usage.source === main"), "a precomp usage elsewhere still points at the comp, with nothing re-linked");
-  eq(get("names(main)"), ["CTRL", "Title", "Matte", "Fill", "BG", "Picker"], "layers back, in the checkpoint's order");
-  eq(r.layersRestored, 6);
-  eq(r.layersRemoved, 6, "the six layers it held are gone, the stray one included");
+  eq(get("names(main)"), ["CTRL", "Title", "Matte", "Fill", "BG", "Picker", "Red Solid 1"], "layers back, in the checkpoint's order");
+  eq(r.layersRestored, 7);
+  eq(r.layersRemoved, 7, "the seven layers it held are gone, the stray one included");
   eq(get("byName(main, 'Junk')"), null);
 
   eq(get("byName(main, 'Title').parent === byName(main, 'CTRL')"), true, "parenting re-applied to the restored layers");
   eq(get("byName(main, 'Title').jumped"), true, "with setParentWithJump, so the parent-relative values are not compensated");
+  eq(get("byName(main, 'Title').baked"), undefined,
+    "the checkpoint layer was copied with its parent detached, so AE had nothing to bake into comp space");
+  eq(get("cpTitle().parent === cpLayer('CTRL')"), true, "and the checkpoint's own parenting was put back");
+  eq(get("byName(main, 'CTRL 2')"), null, "copyToComp's ' 2' collision rename is undone");
   eq(get("byName(main, 'Fill').trackMatteLayer === byName(main, 'Matte')"), true, "track matte re-pointed at the restored matte");
   eq(get("byName(main, 'Fill').trackMatteType"), 2);
   eq(get("byName(main, 'BG').locked"), true, "the lock comes back");
@@ -366,12 +397,12 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   eq(r.undoSplits, 1, "Title (parented, with an expression) had to be copied with the group closed");
   ok(get("UNDO.begun") - groupsBefore >= 2, "and that split really did reopen a group");
   ok(/Do not try to Cmd-Z/.test(r.note));
-  eq(get(`app.project.itemByID(${cp.checkpointId}) !== null`), true, "the checkpoint is kept by default");
+  eq(get(`find(${cp.checkpointId}) !== null`), true, "the checkpoint is kept by default");
 
   // Reverting twice is safe — the checkpoint is unchanged by a revert.
   const again = mustOk(call("revert_comp", { checkpointId: cp.checkpointId, compId: mainId }));
   eq(again.verified, true, "a second revert to the same checkpoint is clean too");
-  eq(get("names(main)"), ["CTRL", "Title", "Matte", "Fill", "BG", "Picker"]);
+  eq(get("names(main)"), ["CTRL", "Title", "Matte", "Fill", "BG", "Picker", "Red Solid 1"]);
 }
 
 // ---------- the name is not reverted, and says so ----------
@@ -403,7 +434,7 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   ok(/as it was before the call/.test(r.error), "and saying the comp is untouched");
   eq(get("ids(main)"), before, "…which it is: the copies made before the failure were removed");
   eq(get("main.duration"), 4, "and the comp settings written before the copies were put back");
-  eq(get(`app.project.itemByID(${cp.checkpointId}) !== null`), true, "the checkpoint survives");
+  eq(get(`find(${cp.checkpointId}) !== null`), true, "the checkpoint survives");
 }
 
 // ---------- verification: a restore that does not match is reported ----------
@@ -416,7 +447,7 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   ok(r.mismatches.some((m) => m.name === "BG" && m.changes.enabled), "and the mismatch names the layer and the field");
   ok(/^NOT a clean revert/.test(r.note), "said first, not buried");
   eq(r.checkpointDeleted, false, "keepCheckpoint:false is not honoured on a revert that did not verify");
-  eq(get(`app.project.itemByID(${cp.checkpointId}) !== null`), true);
+  eq(get(`find(${cp.checkpointId}) !== null`), true);
 }
 
 // ---------- verification covers switches the fingerprint does not ----------
@@ -446,7 +477,7 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   const cp = mustOk(call("checkpoint_comp", { compId: get("main.id") }));
   const r = mustOk(call("revert_comp", { checkpointId: cp.checkpointId, keepCheckpoint: false }));
   eq(r.checkpointDeleted, true);
-  eq(get(`app.project.itemByID(${cp.checkpointId})`), null);
+  eq(get(`find(${cp.checkpointId})`), null);
 }
 
 // ---------- saveCurrent: the revert is itself reversible ----------
@@ -457,7 +488,7 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   const r = mustOk(call("revert_comp", { checkpointId: cp.checkpointId, saveCurrent: true }));
   ok(r.savedCheckpoint && r.savedCheckpoint.checkpointId, "the current state was checkpointed first");
   eq(r.savedCheckpoint.label, "before revert to clean");
-  eq(r.savedCheckpoint.numLayers, 7, "…holding the layer the revert removed");
+  eq(r.savedCheckpoint.numLayers, 8, "…holding the layer the revert removed");
   const back = mustOk(call("revert_comp", { checkpointId: r.savedCheckpoint.checkpointId }));
   eq(back.verified, true);
   ok(get("names(main)").includes("Work in progress"), "and reverting to it brings the work back");
@@ -488,8 +519,36 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
 
   const dup = mustOk(call("duplicate_comp", { compId: cp.checkpointId, name: "Main recovered" }));
   eq(dup.fromCheckpoint, true, "duplicate_comp of a checkpoint recovers it as an ordinary comp");
-  eq(get(`app.project.itemByID(${dup.id}).comment`), "", "…with the tag cleared");
+  eq(get(`find(${dup.id}).comment`), "", "…with the tag cleared");
+  eq(get(`find(${dup.id}).parentFolder === app.project.rootFolder`), true, "…and out of the checkpoints folder");
   eq(mustOk(call("list_checkpoints", {})).count, 1, "so it does not turn up as a second checkpoint");
+}
+
+// ---------- a checkpoint imported with its project ----------
+// Importing an .aep renumbers every item, so the record names an id that is
+// gone (or belongs to something else). Simulated by rewriting the record.
+{
+  const { get, run, call } = load();
+  const mainId = get("main.id");
+  const cp = mustOk(call("checkpoint_comp", { compId: mainId }));
+  run(`(function () {
+    var c = find(${cp.checkpointId});
+    var m = __cpMeta(c); m.compId = 99999;
+    c.comment = "ae-mcp-checkpoint:v1 " + JSON.stringify(m);
+  })(); main.add("Junk");`);
+
+  const list = mustOk(call("list_checkpoints", {}));
+  eq(list.checkpoints[0].originMissing, true, "a recorded id that throws in itemByID is reported, not an internal error");
+  const bare = call("revert_comp", { checkpointId: cp.checkpointId });
+  eq(bare.ok, false);
+  ok(/no longer exists/.test(bare.error) && !/verification failure/.test(bare.error), "the bare revert gives the real reason");
+
+  const r = mustOk(call("revert_comp", { checkpointId: cp.checkpointId, compId: mainId }));
+  eq(r.verified, true, "an explicit compId of the same comp under its new id reverts it");
+  eq(r.checkpointRebound, true);
+  eq(get("byName(main, 'Junk')"), null);
+  eq(mustOk(call("list_checkpoints", { compId: mainId })).count, 1, "the checkpoint now belongs to the comp's new id");
+  eq(mustOk(call("revert_comp", { checkpointId: cp.checkpointId })).verified, true, "and later reverts need no compId");
 }
 
 // ---------- deleting ----------
@@ -512,7 +571,7 @@ const mustOk = (r) => { assert.equal(r.ok, true, `expected ok, got: ${r.error}`)
   eq(all.removed.map((x) => x.id), [b.checkpointId]);
   eq(all.folderRemoved, true, "the empty checkpoints folder is cleaned up");
   eq(get("checkpoints().length"), 0);
-  eq(get(`app.project.itemByID(${mainId}) !== null`), true, "the comp itself is never touched");
+  eq(get(`find(${mainId}) !== null`), true, "the comp itself is never touched");
 }
 
 // ---------- the schema half: delete_checkpoints takes exactly one selector ----------

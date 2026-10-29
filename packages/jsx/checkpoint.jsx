@@ -113,7 +113,7 @@ function __cpSummary(it, m) {
   if (m.unreadable) {
     return { checkpointId: it.id, name: it.name, unreadable: true, numLayers: it.numLayers };
   }
-  var origin = app.project.itemByID(m.compId);
+  var origin = __findItem(m.compId);
   var exists = !!(origin && origin instanceof CompItem && !__cpIsCheckpoint(origin));
   var out = {
     checkpointId: it.id,
@@ -129,7 +129,7 @@ function __cpSummary(it, m) {
 
 /** A checkpoint by id, or a thrown error naming what the id actually is. */
 function __cpResolve(id) {
-  var it = app.project.itemByID(id);
+  var it = __findItem(id);
   if (!it) throw new Error("No project item with id " + id + ". list_checkpoints shows the checkpoints that exist.");
   var m = __cpMeta(it);
   if (!m) {
@@ -181,7 +181,7 @@ function __cpTake(c, label) {
   var folder = __cpFolder(true);
   var dup = c.duplicate();
   var cpId = dup.id;
-  var made = app.project.itemByID(cpId);
+  var made = __findItem(cpId);
   if (!made) throw new Error("checkpoint_comp duplicated comp " + compId + " but the copy (id " + cpId + ") could not be read back");
   if (made.numLayers !== layerIds.length) {
     var got = made.numLayers;
@@ -284,7 +284,7 @@ OPS.delete_checkpoints = function (args) {
 
 /** Like __cpResolve, but a checkpoint with a damaged record may still be deleted. */
 function __cpResolveAny(id) {
-  var it = app.project.itemByID(id);
+  var it = __findItem(id);
   if (!it) throw new Error("No project item with id " + id + ". list_checkpoints shows the checkpoints that exist. Nothing was deleted.");
   var m = __cpMeta(it);
   if (!m) {
@@ -390,6 +390,44 @@ function __cpCopyLayer(src, target) {
   }
 }
 
+/**
+ * Copy a checkpoint layer with its parent detached for the duration.
+ *
+ * Measured on 26.5 (issue #136 live pass): copying a PARENTED layer into a comp
+ * that holds a layer of its parent's name leaves the copy parented there with
+ * its Position keys converted to comp space — the transform applied twice, a
+ * visible jump that no fingerprint sees. Detaching the parent first with
+ * setParentWithJump() leaves the layer's own values untouched (they are only
+ * read in a different space), so the copy carries exactly the checkpoint's
+ * local values, and the restored layer is re-parented the same way, also
+ * without compensation. The checkpoint's parent is put back in every case;
+ * failing to do that would damage the restore point, so it is an error.
+ */
+function __cpCopyDetached(src, target) {
+  var parent = src.parent || null;
+  if (!parent) return __cpCopyLayer(src, target);
+  var wasLocked = !!src.locked;
+  if (wasLocked) src.locked = false;
+  src.setParentWithJump();
+  var split = false;
+  var failure = null;
+  try {
+    split = __cpCopyLayer(src, target);
+  } catch (e) {
+    failure = e;
+  }
+  try {
+    src.setParentWithJump(parent);
+    if (wasLocked) src.locked = true;
+  } catch (e2) {
+    throw new Error("could not re-parent checkpoint layer \"" + src.name + "\" to \"" + parent.name + "\" after copying it (" +
+      (e2.message || e2) + "); the checkpoint comp now has that layer unparented - re-parent it with parent_layer " +
+      "and preserveTransform:false before reverting to it again");
+  }
+  if (failure) throw failure;
+  return split;
+}
+
 /** Remove the layers we added. Returns the ids that would not go. */
 function __cpRemoveLayers(m, ids) {
   var stuck = [];
@@ -489,7 +527,8 @@ function __cpRestoreMarkers(cp, target, notRestored) {
 // while the old layers still exist, so those picks point at the wrong layer —
 // and at nothing once the old ones go. After the removal the restored layers
 // sit at exactly the checkpoint's indices, so the checkpoint's value is the
-// right value, and it is copied across, keyframes included.
+// right value, and it is copied across. Measured on 26.5: a bare copyToComp
+// leaves both a Layer Control and a Displacement Map pick at 0 ("None").
 
 var __CP_REF_GROUPS = ["ADBE Effect Parade", "ADBE Text Properties"];
 
@@ -553,14 +592,11 @@ function __cpRestoreRefs(cpComp, m, copies, notRestored) {
       try {
         if (!dp) throw new Error("the restored layer has no matching property");
         if (__cpRefValue(sp) === __cpRefValue(dp)) return;
-        var nk = sp.numKeys;
-        if (nk > 0) {
-          for (var r = dp.numKeys; r >= 1; r--) dp.removeKey(r);
-          for (var k = 1; k <= nk; k++) dp.setValueAtTime(sp.keyTime(k), sp.keyValue(k));
-        } else {
-          if (dp.numKeys > 0) { for (var r2 = dp.numKeys; r2 >= 1; r2--) dp.removeKey(r2); }
-          __setValue(dp, sp.value);
-        }
+        // A Layer Control pick cannot vary over time on 26.5 (canVaryOverTime
+        // false, measured), so a keyframed pick is not a case worth code; if
+        // one ever appears it is named rather than half-restored.
+        if (sp.numKeys > 0) throw new Error("a keyframed layer/mask pick is not restored");
+        __setValue(dp, sp.value);
         fixed += 1;
       } catch (e) {
         notRestored.push({ what: "layer " + i + " (\"" + src.name + "\") " + path, reason: String(e.message || e) });
@@ -646,13 +682,25 @@ OPS.revert_comp = function (args) {
   var meta = cp.meta;
   var cpComp = cp.item;
   var cpId = cpComp.id;
-  var targetId = meta.compId;
   var explicit = (args.compId !== undefined && args.compId !== null);
-  if (explicit && args.compId !== targetId) {
-    throw new Error("Checkpoint " + cpId + " was taken of comp " + targetId + " (\"" + meta.compName + "\"), not comp " +
-      args.compId + ". A checkpoint only reverts the comp it was taken of. Nothing was changed.");
+  var targetId = explicit ? args.compId : meta.compId;
+  var target = __findItem(targetId);
+  // A different compId is the same comp under a new id — which is what an
+  // imported project gives every item — or a mistake. The name is the evidence
+  // that tells them apart; with it, the checkpoint is re-bound to the new id.
+  var rebind = explicit && args.compId !== meta.compId;
+  if (rebind) {
+    if (!target || !(target instanceof CompItem) || __cpIsCheckpoint(target)) {
+      throw new Error("No comp with id " + args.compId + " to revert into (checkpoint " + cpId + " was taken of comp " +
+        meta.compId + ", \"" + meta.compName + "\"). Nothing was changed.");
+    }
+    if (target.name !== meta.compName) {
+      throw new Error("Checkpoint " + cpId + " was taken of comp " + meta.compId + " (\"" + meta.compName + "\"), and " +
+        "comp " + args.compId + " is \"" + target.name + "\". A checkpoint only reverts the comp it was taken of; a " +
+        "different compId is accepted for that same comp under a new id (after importing its project), recognised by " +
+        "its name. If comp " + args.compId + " is that comp, set_comp it to \"" + meta.compName + "\" first. Nothing was changed.");
+    }
   }
-  var target = app.project.itemByID(targetId);
   if (!target || !(target instanceof CompItem) || __cpIsCheckpoint(target)) {
     throw new Error("Checkpoint " + cpId + " was taken of comp " + targetId + " (\"" + meta.compName + "\"), which no " +
       "longer exists, so there is nothing to revert into. duplicate_comp the checkpoint to get its contents back as " +
@@ -703,7 +751,7 @@ OPS.revert_comp = function (args) {
     var prev = null;
     for (i = 1; i <= n; i++) {
       at = i;
-      if (__cpCopyLayer(cpComp.layer(i), target)) splits += 1;
+      if (__cpCopyDetached(cpComp.layer(i), target)) splits += 1;
       var fresh = __cpLanded(m, known, prev);
       if (!fresh) throw new Error("the copy of layer " + i + " could not be told apart from the comp's other layers");
       known["L" + fresh.id] = true;
@@ -806,20 +854,32 @@ OPS.revert_comp = function (args) {
     }
   }
 
-  // 5. Layer and mask references, now that the indices are the checkpoint's.
+  // 5. Names. copyToComp appends " 2" to an explicitly named layer when the
+  //    destination already holds that name (measured, 26.5), and the old
+  //    layers were all still there during the copy. Layers named after their
+  //    source keep their names and are not touched, so they stay unnamed.
+  for (i = 1; i <= n; i++) {
+    var sn = cpComp.layer(i);
+    var dn = target.layer(i);
+    if (dn.name === sn.name) continue;
+    try { dn.name = sn.name; }
+    catch (enm) { notRestored.push({ what: "name of layer " + i + " (\"" + sn.name + "\")", reason: String(enm.message || enm) }); }
+  }
+
+  // 6. Layer and mask references, now that the indices are the checkpoint's.
   var refsFixed = __cpRestoreRefs(cpComp, m, copies, notRestored);
 
-  // 6. Re-lock what the checkpoint had locked.
+  // 7. Re-lock what the checkpoint had locked.
   for (i = 0; i < n; i++) {
     if (!wantLocked[i]) continue;
     try { __cpGet(m, copies[i]).locked = true; }
     catch (el) { notRestored.push({ what: "lock on layer " + (i + 1), reason: String(el.message || el) }); }
   }
 
-  // 7. Comp markers.
+  // 8. Comp markers.
   __cpRestoreMarkers(cpComp, target, notRestored);
 
-  // 8. Check it.
+  // 9. Check it.
   var mismatches = __cpVerify(cpComp, target);
 
   var layerIdMap = {};
@@ -828,7 +888,17 @@ OPS.revert_comp = function (args) {
     for (i = 0; i < n; i++) layerIdMap[String(meta.layerIds[i])] = copies[i];
   }
 
-  var made = app.project.itemByID(targetId);
+  if (rebind) {
+    try {
+      meta.compId = targetId;
+      cpComp.comment = __CP_TAG + JSON.stringify(meta);
+      out.checkpointRebound = true;
+    } catch (erb) {
+      notRestored.push({ what: "re-binding the checkpoint to comp " + targetId, reason: String(erb.message || erb) });
+    }
+  }
+
+  var made = __findItem(targetId);
   out.compId = targetId;
   out.name = made.name;
   out.checkpointId = cpId;
@@ -856,6 +926,11 @@ OPS.revert_comp = function (args) {
   } else {
     notes.push("verified:true covers the fields listed in `checked`, not keyframe or effect values.");
   }
+  if (out.checkpointRebound) {
+    notes.push("The checkpoint now belongs to comp " + targetId + " (it recorded another id, as a checkpoint " +
+      "imported with its project does); later reverts need no compId. layerIdMap keys are the layer ids from " +
+      "the project the checkpoint was taken in.");
+  }
   if (out.nameAtCheckpoint) {
     notes.push("The comp's name was left as it is now; it was \"" + meta.compName + "\" at the checkpoint. set_comp renames it.");
   }
@@ -868,7 +943,7 @@ OPS.revert_comp = function (args) {
   var keep = args.keepCheckpoint !== false;
   if (!keep && out.verified) {
     try {
-      app.project.itemByID(cpId).remove();
+      __findItem(cpId).remove();
       out.checkpointDeleted = true;
     } catch (ed) {
       out.checkpointDeleted = false;

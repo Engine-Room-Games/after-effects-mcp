@@ -299,10 +299,34 @@ How the restore is ordered, and why:
   and been re-parented are the old layers removed. A failure there names the
   layers still present and says a second revert is safe, because a revert
   never modifies the checkpoint.
-- **Parenting with `setParentWithJump`.** `copyToComp` drops the parent and
-  keeps the parent-relative values, so plain `parent =` would compensate them
-  into the wrong place. The jump form is exactly "attach without touching the
-  values". Track mattes (2023+ `setTrackMatte`) and locks are re-applied the
+- **Copied with the parent detached, re-parented with the jump.** Measured on
+  26.5: copying a parented layer into a comp that holds a layer of its parent's
+  name parents the copy to that namesake and converts its Position keys to comp
+  space — the transform applied twice, a visible jump that no fingerprint
+  sees, because it does not compare keyframe values. So each parented
+  checkpoint layer is unparented with `setParentWithJump()` (its own values
+  untouched), copied, and re-parented the same way, always — a checkpoint left
+  unparented would be a damaged restore point, so that failure is an error.
+  The restored layer is then parented with `setParentWithJump` too: plain
+  `parent =` would compensate the values. The jump form is exactly "attach
+  without touching the values".
+- **Names are put back.** `copyToComp` appends " 2" to an explicitly named
+  layer when the destination already holds that name (measured, 26.5), and the
+  old layers are all still there during the copy, so every unchanged rig layer
+  came back renamed. Once the old layers are gone each restored layer whose
+  name differs from the checkpoint's is renamed; a layer named after its source
+  already matches and is left unnamed.
+- **A missing item is `null`, never an exception.** On 26.5 `itemByID` of a
+  deleted id throws "internal verification failure {Item Not Found}", so a
+  checkpoint whose comp was deleted made `list_checkpoints` fail for the whole
+  project. Every lookup goes through `__findItem` (`ids.jsx`), which
+  `getCompById`/`getItemById` and `delete_comp`/`duplicate_comp` now use too.
+- **An explicit `compId` can re-bind an imported checkpoint.** Importing a
+  project renumbers every item, so its checkpoints name ids that are gone or
+  belong to something else. `revert_comp` accepts a `compId` that differs from
+  the record when that comp has the recorded name — the same comp under a new
+  id — and rewrites the record to it (`checkpointRebound`); a differently named
+  comp is still refused. Track mattes (2023+ `setTrackMatte`) and locks are re-applied the
   same way, explicitly, and a matte that cannot be re-pointed lands in
   `notRestored` rather than failing the call.
 - **The undo group is tried, then given up per layer.** `copyToComp` refuses a
@@ -372,6 +396,10 @@ What a checkpoint is, in the project:
   edited the restore point, not the scene. `list_comps` and
   `get_project_summary` list them with `checkpoint: true`: hiding comps from
   the map an agent orients with would be the bigger lie.
+- **Layer picks are not keyframed or expression-driven on 26.5.** A Layer
+  Control's pick has `canVaryOverTime` false and refuses an expression
+  (measured), so the re-point sets a static value and names a keyframed pick
+  in `notRestored` rather than carrying code for a case that cannot occur.
 - **The write ops do not refuse a checkpoint comp.** It was considered. The
   only central place for that guard is `getCompById`, which every read and
   `duplicate_comp` (the recovery path) also use, so it would need an

@@ -102,7 +102,7 @@ OPS.delete_comp = function (args) {
     // Re-fetched by id after the removal rather than held across it — the
     // handle staleness this repo has measured elsewhere is not worth risking
     // for one lookup per solid.
-    var item = app.project.itemByID(solids[i].id);
+    var item = __findItem(solids[i].id);
     if (!item) { gone.push(solids[i]); continue; }
     var uses = __usedInList(item);
     if (uses.length > 0) {
@@ -220,7 +220,7 @@ function __dupRepoint(comp, opts, depth) {
 // A `folderId` argument resolved to a FolderItem, or a thrown error naming the
 // id and what it actually is. Shared by duplicate_comp and purge_unused_footage.
 function __folderArg(id) {
-  var f = app.project.itemByID(id);
+  var f = __findItem(id);
   if (!f) throw new Error("No project item with id " + id + " to use as folderId");
   if (!(f instanceof FolderItem)) {
     throw new Error(
@@ -268,14 +268,19 @@ OPS.duplicate_comp = function (args) {
   }
 
   // Re-fetch by id rather than trusting the handle held across the duplication.
-  var made = app.project.itemByID(newId);
+  var made = __findItem(newId);
   if (!made) throw new Error("duplicate_comp created comp " + newId + " but it could not be read back");
   if (folder) made.parentFolder = folder;
   // A copy of a checkpoint (checkpoint.jsx) is how its contents are recovered
   // once the comp it was taken of is gone. Whether or not AE carries the item
   // comment across a duplicate, the copy must not read as a second checkpoint.
   var wasCheckpoint = (typeof __cpIsCheckpoint === "function") && __cpIsCheckpoint(made);
-  if (wasCheckpoint) made.comment = "";
+  if (wasCheckpoint) {
+    made.comment = "";
+    // AE files a duplicate beside its source, which for a checkpoint is the
+    // checkpoints folder (measured, 26.5). The recovered comp is ordinary work.
+    if (!folder) made.parentFolder = app.project.rootFolder;
+  }
 
   var out = __compSummary(made);
   if (wasCheckpoint) out.fromCheckpoint = true;

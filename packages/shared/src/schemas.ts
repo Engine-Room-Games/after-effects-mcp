@@ -352,7 +352,7 @@ export const RevertComp = z
   .object({
     checkpointId: z.number().describe("The checkpointId from checkpoint_comp or list_checkpoints - not the comp's own id."),
     compId: z.number().optional()
-      .describe("The comp being reverted. Optional - the checkpoint knows which comp it belongs to - but when passed it must match, as a guard against reverting the wrong comp."),
+      .describe("The comp being reverted. Optional - the checkpoint knows which comp it belongs to. Pass it to confirm a comp that was renamed since the checkpoint, or to name the same comp under a new id after its project was imported (it must then carry the recorded name, and the checkpoint is re-bound to it)."),
     saveCurrent: z.boolean().optional().meta({ default: false })
       .describe("Checkpoint the comp's current state first, so the revert itself can be reverted. Its id comes back in savedCheckpoint."),
     keepCheckpoint: z.boolean().optional().meta({ default: true })
