@@ -68,29 +68,93 @@ function __easeArray(ease, n) {
 }
 
 /**
+ * The key's current ease on one side, entry for entry, or null when it cannot
+ * be read. `which` is "in" or "out".
+ */
+function __readTemporalEase(prop, keyIndex, which) {
+  var arr = null;
+  try {
+    arr = which === "in" ? prop.keyInTemporalEase(keyIndex) : prop.keyOutTemporalEase(keyIndex);
+  } catch (e) { return null; }
+  if (!arr || !arr.length) return null;
+  var out = [];
+  for (var i = 0; i < arr.length; i++) {
+    if (!arr[i] || typeof arr[i].influence !== "number" || typeof arr[i].speed !== "number") return null;
+    out.push({ influence: arr[i].influence, speed: arr[i].speed });
+  }
+  return out;
+}
+
+/**
+ * `n` KeyframeEase entries for one side. `spec` is either one {influence, speed}
+ * pair, copied to every entry, or the per-dimension list read off the key, which
+ * is reapplied entry for entry — a kept side must come back exactly as it was,
+ * not collapsed to its first dimension. A list of another length only reaches
+ * here on a count AE is about to refuse anyway; its first entry fills it.
+ */
+function __easeSide(spec, n) {
+  if (spec && spec.length) {
+    if (spec.length !== n) return __easeArray(spec[0], n);
+    var arr = [];
+    for (var i = 0; i < n; i++) arr.push(new KeyframeEase(spec[i].speed, spec[i].influence));
+    return arr;
+  }
+  return __easeArray(spec, n);
+}
+
+/**
  * Apply one {influence, speed} pair to every dimension of `prop` at `keyIndex`,
  * and return the number of KeyframeEase entries After Effects accepted.
+ *
+ * AE only sets both sides in one call, so a side the caller did not pass is
+ * read off the key and reapplied unchanged (issue #153). It used to be reset to
+ * 33/0, which silently threw away the easing on the side nobody asked about.
+ * The array read back also has the length AE uses for this property, so that
+ * count is tried first. A side that cannot be read is refused, not guessed:
+ * overwriting it with a default is exactly the bug this replaces.
  *
  * Throws only when no count works, naming every one it tried. An ease that
  * quietly failed to land is invisible until someone watches the render, which
  * is the same class of lie as a swallowed error.
  */
 function __applyTemporalEase(prop, keyIndex, easeIn, easeOut) {
-  var inEase = easeIn || { influence: 33, speed: 0 };
-  var outEase = easeOut || { influence: 33, speed: 0 };
+  var label = "the property";
+  try { label = "'" + prop.name + "'"; } catch (eName) {}
+  var sides = { "in": easeIn, "out": easeOut };
+  var known = null;
+  var which = ["in", "out"];
+  for (var w = 0; w < which.length; w++) {
+    if (sides[which[w]]) continue;
+    var current = __readTemporalEase(prop, keyIndex, which[w]);
+    if (!current) {
+      throw new Error(
+        "Could not read the current " + which[w] + " ease of " + label + " at key " + keyIndex +
+        ", so it cannot be kept as it is — nothing was changed. Pass both easeIn and easeOut."
+      );
+    }
+    sides[which[w]] = current;
+    known = current.length;
+  }
   var candidates = __easeArityCandidates(prop);
+  // Spatial keeps its derived 1 first: a 3D Position may also accept 3, which
+  // means something else (one per axis), so a read-back must not outrank it.
+  if (known !== null && candidates[0] !== known && !prop.isSpatial) {
+    var reordered = [known];
+    for (var c = 0; c < candidates.length; c++) {
+      if (candidates[c] !== known) reordered.push(candidates[c]);
+    }
+    candidates = reordered;
+  }
   var lastMessage = "";
   for (var i = 0; i < candidates.length; i++) {
     var n = candidates[i];
     try {
-      prop.setTemporalEaseAtKey(keyIndex, __easeArray(inEase, n), __easeArray(outEase, n));
+      prop.setTemporalEaseAtKey(keyIndex, __easeSide(sides["in"], n), __easeSide(sides["out"], n));
       return n;
     } catch (e) {
       lastMessage = (e && e.message) ? String(e.message) : String(e);
     }
   }
-  var label = "the property";
-  try { label = "'" + prop.name + "'"; } catch (eName) {}
   throw new Error(
     "Could not set the temporal ease on " + label + " at key " + keyIndex + ": After Effects rejected ease " +
     "arrays of " + candidates.join(", ") + " entries. Last error from AE: " + lastMessage
