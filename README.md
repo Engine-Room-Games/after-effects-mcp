@@ -324,7 +324,7 @@ These switches limit what your assistant can do through this connection. They do
 | Batch (1) | `run_batch` |
 | Footage (3) | `import_footage`, `create_footage_layer`, `purge_unused_footage` — remove the solids (or any footage) no comp uses, with a dry run |
 | Audio (1) | `place_audio_cues` — a whole cue list placed as one undo step |
-| Motion Graphics (1) | `export_mogrt` — export a comp as a `.mogrt` template for Premiere |
+| Motion Graphics (2) | `add_essential_property`, `export_mogrt` — fill the Essential Graphics panel, then export a comp as a `.mogrt` template for Premiere |
 | Render queue (4) | `add_to_render_queue`, `list_render_queue`, `remove_render_item`, `render_queue` — render in the background, with progress and cancel |
 | Explore (3) | `get_project_summary`, `find_layers`, `get_selection` — what the user has selected and where the playhead is |
 | Raw (1) | `run_jsx` |

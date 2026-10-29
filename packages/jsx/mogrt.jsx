@@ -209,10 +209,10 @@ OPS.export_mogrt = noUndo(function (args) {
       "This comp has 0 Essential Graphics controllers, and After Effects cannot export a template " +
       "from a comp with an empty Essential Graphics panel. It refuses without writing a file and " +
       "without reporting anything a script can read, so nothing was exported and nothing in the " +
-      "project was changed. To fix it, put at least one property into the panel: in After Effects " +
-      "open Window > Essential Graphics, pick this comp in the panel's dropdown, then drag a layer " +
-      "property into it — a text layer's Source Text, a colour, a slider, a position. Then call " +
-      "export_mogrt again."
+      "project was changed. To fix it, put at least one property into the panel with " +
+      "add_essential_property — a text layer's Source Text, a colour, a slider, a position — or have " +
+      "the user drag one in by hand from Window > Essential Graphics with this comp picked in the " +
+      "panel's dropdown. Then call export_mogrt again."
     );
   }
 
@@ -387,3 +387,178 @@ OPS.export_mogrt = noUndo(function (args) {
 
   return result;
 });
+
+// ---------- add_essential_property (issue #177) ----------
+//
+// export_mogrt refuses a comp with an empty Essential Graphics panel (#71), and
+// until this op the only way to fill the panel was the user dragging a
+// property in by hand. The scripting API has had the call since AE 16.1:
+// `Property.addToMotionGraphicsTemplate(comp)` and
+// `addToMotionGraphicsTemplateAs(comp, name)`, with
+// `canAddToMotionGraphicsTemplate(comp)` as the up-front question.
+//
+// What is known and what is not. The add returns a boolean; whether a false is
+// ever accompanied by a controller anyway, whether adding the same property
+// twice makes a second controller, and which end of the list
+// `getMotionGraphicsTemplateControllerName(index)` puts the new one at were
+// all unmeasured when this was written. So nothing here leans on any of them:
+// the controller count and the full list of controller names are read before
+// and after, the new controller is found by comparing the two lists, and the
+// result reports what the panel actually holds afterwards. A call that leaves
+// the count where it was is a refusal whatever the boolean said.
+
+/** Every controller name in the comp's panel, or null when the host will not list them. */
+function __controllerNames(comp, count) {
+  if (typeof count !== "number") return null;
+  var names = [];
+  try {
+    for (var i = 1; i <= count; i++) names.push(String(comp.getMotionGraphicsTemplateControllerName(i)));
+  } catch (e) { return null; }
+  return names;
+}
+
+/**
+ * The 1-based index in `after` of the one controller that is not in `before`,
+ * or null. `after` has exactly one more entry; the new controller is the index
+ * whose removal leaves `before` unchanged. Order-agnostic on purpose — see the
+ * header — and with duplicate names any matching index names the same label.
+ */
+function __newControllerIndex(before, after) {
+  if (!before || !after || after.length !== before.length + 1) return null;
+  for (var i = 0; i < after.length; i++) {
+    var same = true;
+    for (var j = 0, k = 0; j < before.length; j++, k++) {
+      if (k === i) k++;
+      if (after[k] !== before[j]) { same = false; break; }
+    }
+    if (same) return i + 1;
+  }
+  return null;
+}
+
+function __propertyValueTypeLabel(prop) {
+  var t;
+  try { t = prop.propertyValueType; } catch (e) { return "unknown"; }
+  var names = ["NO_VALUE", "ThreeD_SPATIAL", "ThreeD", "TwoD_SPATIAL", "TwoD", "OneD", "COLOR",
+    "CUSTOM_VALUE", "MARKER", "LAYER_INDEX", "MASK_INDEX", "SHAPE", "TEXT_DOCUMENT"];
+  try {
+    for (var i = 0; i < names.length; i++) {
+      if (PropertyValueType[names[i]] === t) return names[i];
+    }
+  } catch (e2) {}
+  return String(t);
+}
+
+OPS.add_essential_property = function (args) {
+  var comp = getCompById(args.compId);
+  var layer = getLayerById(comp, args.layerId);
+  var prop = walkProperty(layer, args.propertyPath);
+  var label = __propertyPathLabel(args.propertyPath);
+  var hasName = typeof args.name === "string" && args.name.length > 0;
+  if (hasName && __isBlank(args.name)) {
+    throw new Error("The controller name is blank. Pass a name with something in it, or omit `name` for the property's own.");
+  }
+
+  var isLeaf = false;
+  try { isLeaf = prop.propertyType === PropertyType.PROPERTY; } catch (eT) {}
+  if (!isLeaf) {
+    throw new Error(
+      label + " is a property group, not a property, and only a single property can go into Essential " +
+      "Graphics. Name a leaf under it — get_layer_full lists them. Nothing was added."
+    );
+  }
+
+  if (typeof prop.canAddToMotionGraphicsTemplate !== "function" ||
+      typeof prop.addToMotionGraphicsTemplate !== "function") {
+    throw new Error(
+      "This version of After Effects has no scripting call for adding a property to Essential Graphics " +
+      "(it arrived in After Effects 16.1). Nothing was added. Ask the user to drag " + label +
+      " into Window > Essential Graphics by hand."
+    );
+  }
+  if (hasName && typeof prop.addToMotionGraphicsTemplateAs !== "function") {
+    throw new Error(
+      "This version of After Effects cannot name a controller as it adds it. Nothing was added. Call " +
+      "again without `name` to keep the property's own name."
+    );
+  }
+
+  var can = false;
+  try { can = prop.canAddToMotionGraphicsTemplate(comp) === true; } catch (eC) { can = false; }
+  if (!can) {
+    throw new Error(
+      "After Effects says " + label + " (value type " + __propertyValueTypeLabel(prop) + ") cannot go " +
+      "into this comp's Essential Graphics panel. It takes Source Text, colours, checkboxes, single " +
+      "numbers such as sliders, angles and opacity, 2D points such as position and scale, and dropdown " +
+      "menus; it refuses paths, masks, markers, layer pickers and a property that belongs to a different " +
+      "comp. Nothing was added. To expose a value of another kind, put an expression control (a slider, " +
+      "colour, checkbox, point or dropdown effect) on the layer, drive " + label + " from it with an " +
+      "expression, and add the control's property instead."
+    );
+  }
+
+  var beforeCount = __controllerCount(comp);
+  var beforeNames = __controllerNames(comp, beforeCount);
+
+  var added;
+  if (hasName) added = prop.addToMotionGraphicsTemplateAs(comp, args.name);
+  else added = prop.addToMotionGraphicsTemplate(comp);
+
+  var afterCount = __controllerCount(comp);
+  if (typeof beforeCount === "number" && typeof afterCount === "number" && afterCount <= beforeCount) {
+    throw new Error(
+      "After Effects did not add " + label + " to the Essential Graphics panel: it returned " +
+      String(added) + " and the panel still holds " + afterCount + " controller" +
+      (afterCount === 1 ? "" : "s") + ". If the property is already in the panel, that is the likeliest " +
+      "reason — it is not added twice. Nothing was changed."
+    );
+  }
+  if (added !== true && (typeof beforeCount !== "number" || typeof afterCount !== "number")) {
+    throw new Error(
+      "After Effects returned " + String(added) + " for adding " + label + " to the Essential Graphics " +
+      "panel and will not report a controller count, so whether anything was added cannot be told. " +
+      "Ask the user to check Window > Essential Graphics for this comp."
+    );
+  }
+
+  var afterNames = __controllerNames(comp, afterCount);
+  var index = __newControllerIndex(beforeNames, afterNames);
+  var controllerName = index !== null ? afterNames[index - 1] : null;
+
+  // The name AE gave it is checked, not assumed. One correction attempt via
+  // setMotionGraphicsControllerName on the index just found; a label that
+  // still disagrees is reported as a failure, because the controller exists
+  // under a name the caller did not ask for.
+  if (hasName && index !== null && controllerName !== args.name) {
+    try { comp.setMotionGraphicsControllerName(index, args.name); } catch (eN) {}
+    try { controllerName = String(comp.getMotionGraphicsTemplateControllerName(index)); } catch (eR) {}
+    if (controllerName !== args.name) {
+      throw new Error(
+        label + " was added to the Essential Graphics panel, but under the name \"" + controllerName +
+        "\", not \"" + args.name + "\", and renaming it did not take. The controller is in the panel; " +
+        "undo this step to remove it, or rename it by hand in Window > Essential Graphics."
+      );
+    }
+  }
+
+  var templateName = null;
+  try { templateName = String(comp.motionGraphicsTemplateName); } catch (eM) {}
+
+  var result = {
+    ok: true,
+    compId: comp.id,
+    layerId: layer.id,
+    propertyPath: args.propertyPath,
+    controllerIndex: index,
+    controllerName: controllerName,
+    controllerCount: afterCount,
+    templateName: templateName
+  };
+  if (index === null) {
+    result.note =
+      "The controller was added, but After Effects would not list the panel's controller names, so its " +
+      "index and label could not be read back" + (hasName ? ", and whether it carries the name asked for " +
+      "is unconfirmed" : "") + ".";
+  }
+  return result;
+};
