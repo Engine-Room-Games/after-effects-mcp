@@ -27,7 +27,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine } =
   await import(dist("render", "aerender.js"));
 const { aerenderCandidates } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
@@ -207,6 +207,36 @@ await check("the snapshot goes to a per-job temp folder, never beside the projec
   assert.ok(fs.existsSync(proj));
   assert.throws(() => snapshotProject(path.join(tmp, "nope", "x.aep"), "r_1_2", tmpRoot), /nothing was rendered/);
 });
+await check("a render clears day-old snapshot folders, never a newer one or its own", () => {
+  const root = path.join(tmp, "sweepTmp");
+  const base = path.join(root, "ae-mcp-render");
+  const now = Date.now();
+  const mk = (name, ageMs) => {
+    const d = path.join(base, name);
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, "show.aep"), "aep");
+    const t = new Date(now - ageMs);
+    fs.utimesSync(d, t, t);
+    return d;
+  };
+  const old = mk("r_old_1", 2 * 24 * 3600_000);
+  const fresh = mk("r_fresh_2", 3600_000);
+  const mine = mk("r_mine_3", 3 * 24 * 3600_000);
+  fs.writeFileSync(path.join(base, "stray.txt"), "not a job folder");
+  const removed = sweepStaleSnapshots("r_mine_3", root, 24 * 3600_000, now);
+  assert.deepEqual(removed, [old]);
+  assert.ok(!fs.existsSync(old));
+  assert.ok(fs.existsSync(fresh), "another session's newer render is left alone");
+  assert.ok(fs.existsSync(mine), "the current job's folder is never touched");
+  assert.ok(fs.existsSync(path.join(base, "stray.txt")));
+  assert.deepEqual(sweepStaleSnapshots("x", path.join(tmp, "never-rendered")), []);
+});
+await check("missing-footage lines are recognised, ordinary ones are not", () => {
+  assert.ok(isMissingFootageLine("aerender WARNING: Footage file missing: /x/clip.mov"));
+  assert.ok(isMissingFootageLine("aerender ERROR: File not found: C:\\clip.mov"));
+  assert.ok(!isMissingFootageLine("PROGRESS:  0:00:00:05 (6): 0 Seconds"));
+  assert.ok(!isMissingFootageLine("PROGRESS:  Finished composition “Comp”."));
+});
 await check("a missing-footage failure says how to fix it, other failures do not", () => {
   assert.match(missingFootageHint(["aerender ERROR: Footage file missing: /x/clip.mov"]), /save the project/);
   assert.equal(missingFootageHint(["aerender ERROR: Out of memory"]), "");
@@ -231,6 +261,14 @@ fs.writeFileSync(process.env.FAKE_ARGS, JSON.stringify(args));
 console.log("PROGRESS:  10/29/2026 10:00:00 AM: Starting composition “Comp”.");
 console.log("PROGRESS:  Duration: 0:00:00:04");
 if (mode === "fail") { console.log("aerender ERROR: Unable to find comp"); process.exit(3); }
+if (mode === "placeholder") {
+  // Exit 0 with a fresh, non-empty file — but the footage was missing, so
+  // the file holds AE's placeholder rather than the real media.
+  console.log("aerender WARNING: Footage file missing: /proj/footage/clip.mov");
+  console.log("PROGRESS:  0:00:00:00 (1): 0 Seconds");
+  fs.writeFileSync(out, "colour bars");
+  process.exit(0);
+}
 if (mode === "hang") {
   fs.writeFileSync(process.env.FAKE_SELF, String(process.pid));
   // Stands in for the render engine aerender starts: a grandchild that keeps
@@ -260,6 +298,9 @@ const t = setInterval(() => {
 fs.chmodSync(fake, 0o755);
 
 const projectFile = path.join(tmp, "show.aep");
+// Snapshots from the runner tests go here, never into the real temp folder,
+// where the stale sweep could reach another session's leftovers.
+const runTmp = path.join(tmp, "runTmp");
 fs.writeFileSync(projectFile, "aep bytes");
 
 function plan(out, frames = 4) {
@@ -292,6 +333,7 @@ if (process.platform !== "win32") {
     const jobs = new JobManager();
     const hooked = [];
     const runner = new RenderRunner(jobs, {
+      tmpRoot: runTmp,
       onRendered: async (items) => { hooked.push(items.map((i) => i.index)); return items.map((i) => ({ index: i.index, marked: true })); },
     });
     const out = path.join(tmp, "ok.mov");
@@ -324,7 +366,7 @@ if (process.platform !== "win32") {
 
   await check("progress lines it cannot read are reported, not silently left at 0%", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs);
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "quiet.mov");
     env("quiet", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -334,9 +376,22 @@ if (process.platform !== "win32") {
     assert.match(st.result.rendered[0].progressWarning, /FORTSCHRITT/);
   });
 
+  await check("exit 0 with missing footage is a failure, even with a fresh file on disk", async () => {
+    const jobs = new JobManager();
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
+    const out = path.join(tmp, "placeholder.mov");
+    env("placeholder", out);
+    const { jobId } = runner.start(plan(out), fake);
+    await assert.rejects(
+      jobs.waitFor(jobId, 10_000),
+      (e) => /reported missing footage/.test(e.message) && /NOT reported as rendered/.test(e.message) && /clip\.mov/.test(e.message)
+    );
+    assert.ok(fs.existsSync(out), "the file exists — which is exactly why the on-disk check alone was not enough");
+  });
+
   await check("exit 0 with no file written is a failure, not a render", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs);
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "liar.mov");
     env("liar", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -346,7 +401,7 @@ if (process.platform !== "win32") {
 
   await check("a non-zero exit fails with aerender's own error lines", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs);
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "fail.mov");
     env("fail", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -358,14 +413,14 @@ if (process.platform !== "win32") {
 
   await check("an aerender that cannot be started fails the job instead of hanging it", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs);
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
     const { jobId } = runner.start(plan(path.join(tmp, "x.mov")), path.join(tmp, "no-such-aerender"));
     await assert.rejects(jobs.waitFor(jobId, 10_000), /could not be started/);
   });
 
   await check("cancel kills the whole tree and reports stopped only after the exit", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs, { graceMs: 3000 });
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, graceMs: 3000 });
     const out = path.join(tmp, "hang.mov");
     env("hang", out);
     const { jobId } = runner.start(plan(out, 100), fake);
@@ -389,7 +444,7 @@ if (process.platform !== "win32") {
     const jobs = new JobManager();
     // A stop that does nothing: the process outlives the cancel, as an engine
     // started outside aerender's group would.
-    const runner = new RenderRunner(jobs, { graceMs: 100, stop: async () => {} });
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp, graceMs: 100, stop: async () => {} });
     const out = path.join(tmp, "stubborn.mov");
     env("hang", out);
     const { jobId } = runner.start(plan(out, 100), fake);
@@ -410,7 +465,7 @@ if (process.platform !== "win32") {
 
   await check("cancelling a finished render says there was nothing to cancel", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs);
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "ok2.mov");
     env("ok", out);
     const { jobId } = runner.start(plan(out), fake);
@@ -424,7 +479,7 @@ if (process.platform !== "win32") {
 
   await check("one render at a time", async () => {
     const jobs = new JobManager();
-    const runner = new RenderRunner(jobs);
+    const runner = new RenderRunner(jobs, { tmpRoot: runTmp });
     const out = path.join(tmp, "ok3.mov");
     env("ok", out);
     const { jobId } = runner.start(plan(out), fake);

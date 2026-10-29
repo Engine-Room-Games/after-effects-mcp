@@ -282,6 +282,8 @@ export interface RenderRunnerOptions {
    * file is good. A hook failure is reported on the items, never thrown.
    */
   onRendered?: (items: RenderItemPlan[]) => Promise<{ index: number; marked: boolean; reason?: string }[]>;
+  /** Where snapshots go. The OS temp folder, unless a test needs its own. */
+  tmpRoot?: string;
   /** How a process tree is stopped. The platform's, unless a test needs one that fails. */
   stop?: (pid: number, force: boolean) => Promise<void>;
 }
@@ -323,11 +325,73 @@ export function snapshotProject(projectPath: string, jobId: string, tmpRoot: str
   return snap;
 }
 
+/** How old another job's snapshot folder must be before a new render clears it away. */
+export const STALE_SNAPSHOT_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Remove snapshot folders that earlier jobs left behind.
+ *
+ * A render's copy is removed when its job ends, and on exit and on signals —
+ * but not after a hard kill (Task Manager's End task, `kill -9`, a crash), and
+ * Windows never empties %TEMP% by itself, so every such kill would leave a
+ * full .aep behind for good. Each new render sweeps them. Only folders older
+ * than a day go: another server session on this machine may be rendering from
+ * a newer one right now, and the current job's folder is never touched.
+ * Failures are logged to stderr and otherwise ignored — housekeeping must not
+ * stop a render. Returns the folders removed, for the test.
+ */
+export function sweepStaleSnapshots(
+  currentJobId: string,
+  tmpRoot: string = os.tmpdir(),
+  maxAgeMs: number = STALE_SNAPSHOT_MS,
+  now: number = Date.now()
+): string[] {
+  const root = path.join(tmpRoot, "ae-mcp-render");
+  const removed: string[] = [];
+  let names: string[];
+  try {
+    names = fs.readdirSync(root);
+  } catch {
+    return removed; // nothing has ever rendered here
+  }
+  for (const n of names) {
+    if (n === currentJobId) continue;
+    const dir = path.join(root, n);
+    try {
+      const st = fs.statSync(dir);
+      if (!st.isDirectory() || now - st.mtimeMs < maxAgeMs) continue;
+      fs.rmSync(dir, { recursive: true, force: true });
+      removed.push(dir);
+    } catch (e) {
+      logger.warn(`could not clear an old render snapshot at ${dir}: ${(e as Error).message}`);
+    }
+  }
+  return removed;
+}
+
 /** Remove a snapshot and the per-job folder it was made in — and nothing else. */
 export function removeSnapshot(snap: string): void {
   const dir = path.dirname(snap);
   if (path.basename(path.dirname(dir)) !== "ae-mcp-render") return;
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+}
+
+/**
+ * aerender lines that say footage could not be found.
+ *
+ * aerender has been seen to exit 0 with footage missing, rendering AE's
+ * placeholder (colour bars) into the file — a file that exists, is fresh and
+ * is not empty, so the on-disk check alone would accept it. Any such line
+ * fails the item instead. The wording is aerender's own and not yet measured
+ * on 26.x (recipe 57); this matches the forms After Effects uses in its UI.
+ */
+const MISSING_FOOTAGE_LINE =
+  /file not found|could not (?:be )?(?:found|located)|unable to (?:find|locate)|cannot find/i;
+
+export function isMissingFootageLine(line: string): boolean {
+  if (MISSING_FOOTAGE_LINE.test(line)) return true;
+  // "Footage file missing", "missing footage", "media is missing", …
+  return /\bmissing\b/i.test(line) && /\b(?:footage|file|files|media|source)\b/i.test(line);
 }
 
 /** Appended to a failure whose lines talk about footage — see snapshotProject. */
@@ -371,12 +435,14 @@ export class RenderRunner {
   private readonly graceMs: number;
 
   private readonly onRendered?: RenderRunnerOptions["onRendered"];
+  private readonly tmpRoot: string;
   private readonly stop: (pid: number, force: boolean) => Promise<void>;
   private disarm: (() => void) | null = null;
 
   constructor(private jobs: JobManager, opts: RenderRunnerOptions = {}) {
     this.graceMs = opts.graceMs ?? DEFAULT_GRACE_MS;
     this.onRendered = opts.onRendered;
+    this.tmpRoot = opts.tmpRoot ?? os.tmpdir();
     this.stop = opts.stop ?? ((pid, force) => stopProcessTree(pid, force));
   }
 
@@ -439,7 +505,8 @@ export class RenderRunner {
   start(plan: RenderPlan, aerender: string): { jobId: string; totalFrames: number } {
     if (this.current) throw new Error(`A render is already running (job ${this.current.jobId}).`);
     const jobId = `r_${Date.now()}_${++seq}`;
-    const snapshot = snapshotProject(plan.projectPath, jobId);
+    sweepStaleSnapshots(jobId, this.tmpRoot);
+    const snapshot = snapshotProject(plan.projectPath, jobId, this.tmpRoot);
     const totalFrames = Math.max(1, plan.items.reduce((n, i) => n + Math.max(0, i.frames || 0), 0));
     const r: Running = {
       jobId,
@@ -490,6 +557,22 @@ export class RenderRunner {
           r.settled = true;
           await this.unqueue(r);
           this.jobs.fail(r.jobId, this.failureText(r, item, outcome) + this.unqueueText(r));
+          return;
+        }
+        if (outcome.missing.length) {
+          status = "failed";
+          r.settled = true;
+          await this.unqueue(r);
+          this.jobs.fail(
+            r.jobId,
+            `aerender finished ${label} but reported missing footage, so the file at ` +
+              `${item.outputs.map((x) => x.path).join(", ")} may contain After Effects' missing-footage ` +
+              `placeholder instead of the real media. It is NOT reported as rendered. aerender said: ` +
+              `${outcome.missing.join(" | ")}.` +
+              missingFootageHint(outcome.missing) +
+              this.renderedSoFar(r) +
+              this.unqueueText(r)
+          );
           return;
         }
         const { verified, problems } = verifyOutputs(item.outputs, itemStart);
@@ -613,9 +696,10 @@ export class RenderRunner {
     r: Running,
     item: RenderItemPlan,
     label: string
-  ): Promise<{ code: number | null; signal: NodeJS.Signals | null; spawnError?: Error; errors: string[]; tail: string[] }> {
+  ): Promise<{ code: number | null; signal: NodeJS.Signals | null; spawnError?: Error; errors: string[]; tail: string[]; missing: string[] }> {
     return new Promise((resolve) => {
       const errors: string[] = [];
+      const missing: string[] = [];
       const tail: string[] = [];
       let child: ChildProcess;
       try {
@@ -624,7 +708,7 @@ export class RenderRunner {
           stdio: ["ignore", "pipe", "pipe"],
         });
       } catch (e) {
-        resolve({ code: null, signal: null, spawnError: e as Error, errors, tail });
+        resolve({ code: null, signal: null, spawnError: e as Error, errors, tail, missing });
         return;
       }
       r.child = child;
@@ -637,7 +721,7 @@ export class RenderRunner {
           err.end();
           r.child = null;
           res();
-          resolve({ code, signal, spawnError, errors, tail });
+          resolve({ code, signal, spawnError, errors, tail, missing });
         };
         child.on("error", (e) => finish(null, null, e));
         child.on("exit", (code, signal) => finish(code, signal));
@@ -645,6 +729,7 @@ export class RenderRunner {
       const onLine = (line: string) => {
         tail.push(line.trim());
         if (tail.length > TAIL_LINES) tail.shift();
+        if (isMissingFootageLine(line) && missing.length < 20) missing.push(line.trim());
         const parsed = parseAerenderLine(line);
         if (parsed.kind === "frame") {
           r.itemFrames++;
