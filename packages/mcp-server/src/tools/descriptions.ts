@@ -142,6 +142,19 @@ export const descriptions: Record<string, string> = {
     "`name` defaults to the comp name — AE's own default is the literal 'Untitled', so every export would otherwise overwrite the same file. Pass `posterTime` to render that frame as the template's thumbnail, replacing the black one AE writes; the export still succeeds if only the thumbnail fails. Needs the project saved once by hand first. `fonts` in the result lists the fonts the template will require — tell the user, since non-Adobe ones make Premiere flag the template. " +
     "If an export still fails, read the message before acting: it lists what was checked, and it only names a modal dialog when dialogs were left unsuppressed. Under the default suppression a dialog is impossible, the cause is genuinely unknown, and the way to see AE's own reason is for the user to run the same export by hand from the Essential Graphics panel.",
 
+  // ---------- render queue ----------
+  add_to_render_queue:
+    "Add a comp to After Effects' render queue, writing to `outputPath` (absolute; its folder must exist; use [####] in the name for an image sequence). Choose the format by TEMPLATE NAME — `outputModuleTemplate` (e.g. 'High Quality with Alpha', or one the user saved) and `renderSettingsTemplate` (e.g. 'Best Settings'). A script cannot set codec, bit depth or alpha directly, so if no template gives what the user needs, ask them to save one once in AE (Edit > Templates > Output Module) and pass its name. An unknown name is refused with the list that exists. " +
+    "The result reads back what AE will actually write — `outputs[0].settings` (format/channels/depth/color) and the final path, which AE may change to match the format's extension; check alpha there rather than trusting a template's name. Refuses an existing file unless `overwrite:true`. A refused call leaves nothing in the queue. This only queues — render_queue renders.",
+  list_render_queue:
+    "The render queue: per item its 1-based `index`, comp, status (QUEUED, DONE, NEEDS_OUTPUT, …), frame count and output paths with their template names. `includeSettings:true` adds each output's format/channels/depth/color as AE reports them; `includeTemplates:true` adds every template name (needs at least one item in the queue). Items have no stable id — re-read before acting on an index.",
+  remove_render_item:
+    "Remove one render queue item by its current `index`, checked against `compId` so a shifted index is refused instead of deleting the wrong item.",
+  render_queue:
+    "Render QUEUED render queue items (all of them, or `indices`) to their output files. Returns a jobId at once; the render runs in a separate background `aerender` process, so After Effects stays responsive and nothing else waits on it. " +
+    "**It saves the project first** — aerender renders the saved file — so tell the user, and know that edits made while it runs are not in the output. Needs the project saved once by hand. " +
+    "Then call await_job (with a generous `timeoutMs` for long renders; send a progressToken for per-frame progress). The finished result lists each output file with its size, checked on disk — a render whose file is missing or older than the render is reported as a failure, never as done. cancel_job stops it by killing the process and names any incomplete file it left. One render at a time. AE's own Render Queue panel keeps showing the items as Queued afterwards.",
+
   // ---------- house style ----------
   get_house_style:
     "The user's palette, type, motion and layout defaults for the project that is open, read from `house-style.md` beside the .aep. Call it once before building anything so your work matches the rest of theirs. Returns a few-hundred-token summary by default — palette as named hexes, type, motion, layout, and a note naming anything it could not summarise; pass `detail:'full'` for the whole document, which you need before editing the guide with set_house_style. `found:false` means none exists yet — build with sensible defaults and offer to capture one afterwards. Cheap; never a reason to skip.",
@@ -154,11 +167,12 @@ export const descriptions: Record<string, string> = {
 
   // ---------- jobs ----------
   await_job:
-    "Block until a chunked run_batch job is done. Default 10min timeout. Returns the same payload the tool would have, `undoSteps` included. " +
+    "Block until a job is done — a chunked run_batch, or a render_queue render. Default 10min timeout. Returns the same payload the tool would have, `undoSteps` included. " +
     "**This is the call that carries progress**: send it with a progressToken and notifications/progress arrive while it waits, every one before its response. run_batch's own response is back before the first chunk runs, so no progress can ride on that call — a token there is ignored.",
   get_job:
     "Non-blocking job status: progress/total/state/error. Poll this when you cannot keep an await_job open. It never sends notifications/progress — that is await_job's job.",
-  cancel_job: "Set cancel flag; chunked loop stops at next boundary.",
+  cancel_job:
+    "Stop a job. A chunked run_batch stops at the next chunk boundary (what already ran stays applied). A render_queue render is stopped by ending its aerender process; `stopped:true` only once the process has exited, with `partialFiles` naming any incomplete output left on disk — never present those as a render.",
 
   // ---------- setup ----------
   check_setup: "Diagnose the After Effects connection: panel installed, up to date, the version AE is actually running, Adobe debug preference on, AE running, bridge answering — on whichever port it answers, since the port file is only a hint — plus `portAgreement` (do tool calls go to the port the panel answers on?) and, when nothing answers at all, `panelSignature` (did CEP's own log say it refused to load the panel?). Read-only and safe to call any time. Call this FIRST whenever another tool reports it cannot reach After Effects or says the panel is out of date, then relay `nextSteps` to the user in plain language. `panelRunningCurrent` is the one that predicts whether calls will work — it can fail while `panelUpToDate` passes, which means an update is installed but AE has not been restarted. A failing `portAgreement` means the server's port went stale, not the panel: retry the call (the server re-discovers the port whenever a call is refused) or reconnect the MCP server — never restart After Effects for it, a panel is listening. A failing `panelSignature` means no restart and no reinstall will help; `nextSteps` carries the self-signing fix.",

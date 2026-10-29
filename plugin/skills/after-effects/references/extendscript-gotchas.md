@@ -7,7 +7,7 @@ description: The run_jsx reference — when to script instead of calling a tool,
 # Scripting After Effects with run_jsx
 
 `run_jsx` executes arbitrary ExtendScript inside After Effects. Reach for it
-when a needed operation has no tool — the render queue, a bulk edit no single op
+when a needed operation has no tool — a bulk edit no single op
 expresses, a rig that is easier to describe as a loop than as forty calls. Check
 the tool list first: duplicating a comp, easing a keyframe, reordering a layer,
 placing a shape layer at a sane origin and scoring a scene all have tools, and
@@ -275,6 +275,14 @@ as a script, so they are in the `shapes` topic. The raw-scripting traps:
   with `loop: true`.
 
 ## Render queue and output modules
+
+The render queue has tools — `add_to_render_queue`, `list_render_queue`,
+`remove_render_item`, `render_queue` (the `rendering` topic). Do not call
+`app.project.renderQueue.render()` from `run_jsx`: it blocks After Effects and
+this connection for the whole render, the call times out while the render goes
+on, and nothing can stop it but the user. What follows is for scripts that touch
+output modules anyway.
+
 
 - **`OutputModule.setSettings` rejects Format, Channels, Depth and Color as
   read-only** — `Invalid Value for key: <Depth>. Property is read-only`, and

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,12 +13,14 @@ export const CSXS_VERSIONS = [12, 11, 10, 9];
  * Everything that differs between macOS and Windows lives here, so the rest of
  * the setup code stays platform-neutral.
  *
- * The two hosts diverge in exactly four places:
+ * The two hosts diverge in exactly five places:
  *   - where the "allow unsigned extensions" flag is stored (defaults vs registry),
  *     and CEP's LogLevel beside it
  *   - how you ask whether After Effects is running (pgrep vs tasklist)
  *   - the CEP extensions directory (see paths.ts)
  *   - where CEP writes its own log (see cepLogDir below)
+ *   - where `aerender` lives and how a render it is running is stopped
+ *     (see "aerender" at the bottom — render_queue, issue #137)
  */
 
 export async function isDebugModeOn(): Promise<{ on: boolean; detail: string }> {
@@ -209,4 +211,134 @@ export function cepLogLevelCommand(version: number = CSXS_VERSIONS[0]): string {
   return process.platform === "win32"
     ? `reg add HKCU\\Software\\Adobe\\CSXS.${version} /v LogLevel /t REG_SZ /d ${CEP_LOG_LEVEL} /f`
     : `defaults write com.adobe.CSXS.${version} LogLevel ${CEP_LOG_LEVEL}`;
+}
+
+// ---------------------------------------------------------------------------
+// aerender (render_queue, issue #137)
+//
+// The render runs in a separate process the *server* spawns, not the panel:
+// the panel does not update itself, so a wrong path guessed there would stay
+// wrong until the user reinstalled it and relaunched After Effects, and the
+// server is where host differences are already kept. Both run on the same
+// machine by construction — the bridge only listens on 127.0.0.1.
+// ---------------------------------------------------------------------------
+
+/**
+ * Where aerender may be, most trusted first. Not checked for existence here —
+ * `resolveAerender` in render/aerender.ts does that, so this stays pure.
+ *
+ * `appPackage` is ExtendScript's `Folder.appPackage.fsName` from the running
+ * After Effects, which is the one answer that cannot name the wrong install.
+ * Documented, not yet measured on 26.x:
+ *
+ *   macOS:   …/Adobe After Effects 2026/Adobe After Effects 2026.app
+ *            → aerender sits beside the .app, in the folder above it.
+ *   Windows: …\Adobe After Effects 2026\Support Files
+ *            → aerender.exe sits inside it.
+ *
+ * Each platform also gets the other spelling, and the stock install folders,
+ * because a guess that is checked costs nothing and a missing one costs the
+ * render. `AE_MCP_AERENDER` overrides everything.
+ */
+export function aerenderCandidates(
+  appPackage: string | null | undefined,
+  opts: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; installRoots?: string[] } = {}
+): string[] {
+  const platform = opts.platform ?? process.platform;
+  const env = opts.env ?? process.env;
+  const p = platform === "win32" ? path.win32 : path.posix;
+  const out: string[] = [];
+  const add = (c: string | null | undefined) => {
+    if (c && !out.includes(c)) out.push(c);
+  };
+
+  const override = env.AE_MCP_AERENDER?.trim();
+  if (override) add(override);
+
+  if (platform === "win32") {
+    if (appPackage) {
+      add(p.join(appPackage, "aerender.exe"));
+      add(p.join(appPackage, "Support Files", "aerender.exe"));
+    }
+    for (const root of opts.installRoots ?? []) add(p.join(root, "Support Files", "aerender.exe"));
+  } else {
+    if (appPackage) {
+      const pkg = appPackage.replace(/\/+$/, "");
+      if (/\.app$/i.test(pkg)) add(p.join(p.dirname(pkg), "aerender"));
+      add(p.join(pkg, "aerender"));
+    }
+    for (const root of opts.installRoots ?? []) add(p.join(root, "aerender"));
+  }
+  return out;
+}
+
+/**
+ * The stock After Effects install folders on this machine, newest name first.
+ * Only a fallback behind `appPackage`; "newest" is by name, which is the year.
+ */
+export function afterEffectsInstallRoots(platform: NodeJS.Platform = process.platform): string[] {
+  const join = platform === "win32" ? path.win32.join : path.posix.join;
+  const base = platform === "win32" ? join(process.env.ProgramFiles ?? "C:\\Program Files", "Adobe") : "/Applications";
+  let names: string[];
+  try {
+    names = fs.readdirSync(base);
+  } catch {
+    return [];
+  }
+  return names
+    .filter((n) => /^Adobe After Effects/i.test(n))
+    .sort()
+    .reverse()
+    .map((n) => join(base, n));
+}
+
+/**
+ * Spawn options for a process whose whole tree has to be stoppable.
+ *
+ * POSIX: a process group of its own (`detached`), so `stopProcessTree` can
+ * signal aerender *and* the render engine it starts in one call — killing only
+ * aerender's own pid can leave the engine rendering. Windows has no groups;
+ * `taskkill /T` walks the tree instead, and `detached` there would open a
+ * console window, so it is off.
+ */
+export function treeSpawnOptions(platform: NodeJS.Platform = process.platform): { detached: boolean; windowsHide: boolean } {
+  return platform === "win32" ? { detached: false, windowsHide: true } : { detached: true, windowsHide: true };
+}
+
+/**
+ * Signal a process tree started with `treeSpawnOptions` to stop. `force` skips
+ * the polite signal (Windows only has the forceful one). Never throws — a tree
+ * that is already gone is the outcome being asked for. Whether it actually
+ * stopped is for the caller to observe, from the child's own `exit` event.
+ */
+export async function stopProcessTree(pid: number, force = false, platform: NodeJS.Platform = process.platform): Promise<void> {
+  if (platform === "win32") {
+    try {
+      await exec("taskkill", ["/PID", String(pid), "/T", "/F"]);
+    } catch {
+      // Exits non-zero when the process has already gone.
+    }
+    return;
+  }
+  const signal = force ? "SIGKILL" : "SIGTERM";
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try { process.kill(pid, signal); } catch {}
+  }
+}
+
+/** The synchronous last resort, for `process.on("exit")`, where nothing async runs. */
+export function stopProcessTreeSync(pid: number, platform: NodeJS.Platform = process.platform): void {
+  if (platform === "win32") {
+    try {
+      execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    } catch {}
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try { process.kill(pid, "SIGKILL"); } catch {}
+  }
 }

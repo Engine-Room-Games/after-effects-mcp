@@ -164,6 +164,13 @@ jobs:
       - name: CEP signature refusals are diagnosed from the CEP log
         run: node tests/unit/cep-signature.mjs
 
+      # render_queue renders in an aerender process the server owns: progress
+      # off its stdout, outputs verified on disk, and a cancel that stops the
+      # whole process tree — against a fake aerender (POSIX; the pure parts,
+      # aerender's location on both hosts included, run everywhere).
+      - name: Render queue jobs are honest about progress, output and cancel
+        run: node tests/unit/render-queue.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.

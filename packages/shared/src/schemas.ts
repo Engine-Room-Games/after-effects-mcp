@@ -1065,6 +1065,43 @@ export const ExportMogrt = z
   })
   .strict();
 
+// ---------- render queue (issue #137) ----------
+export const AddToRenderQueue = z
+  .object({
+    compId: z.number(),
+    outputPath: z.string()
+      .describe("Absolute path of the file to write. Its folder must already exist. For an image sequence put the frame number in as [####], e.g. /renders/shot_[####].png."),
+    outputModuleTemplate: z.string().optional()
+      .describe("Output module template by name, e.g. 'High Quality with Alpha' or one the user saved. Omit for After Effects' default. An unknown name is refused with the list of names that exist. Codec, bit depth and alpha can only be chosen this way — a script cannot set them directly."),
+    renderSettingsTemplate: z.string().optional()
+      .describe("Render settings template by name, e.g. 'Best Settings'. Omit for After Effects' default."),
+    startTime: z.number().optional().describe("Seconds, comp time. Omit to start where After Effects defaults the item (the work area)."),
+    duration: z.number().optional().describe("Seconds to render from startTime. Omit for After Effects' default span."),
+    overwrite: z.boolean().optional().meta({ default: false })
+      .describe("Required when a file already exists at outputPath; the render replaces it."),
+  })
+  .strict();
+export const ListRenderQueue = z
+  .object({
+    includeSettings: z.boolean().optional().meta({ default: false })
+      .describe("Read back each output module's format, channels, depth and color as After Effects reports them."),
+    includeTemplates: z.boolean().optional().meta({ default: false })
+      .describe("Also list every render settings and output module template name. Only readable when the queue has at least one item."),
+  })
+  .strict();
+export const RemoveRenderItem = z
+  .object({
+    index: z.number().int().positive().describe("1-based index, as list_render_queue reports it now."),
+    compId: z.number().describe("The comp that item renders. Checked against the item, because indices shift when an earlier item is removed."),
+  })
+  .strict();
+export const RenderQueue = z
+  .object({
+    indices: z.array(z.number().int().positive()).min(1).optional()
+      .describe("Which render queue items to render, 1-based. Omit to render every QUEUED item."),
+  })
+  .strict();
+
 // ---------- house style (a markdown file beside the .aep, read over the bridge) ----------
 export const GetHouseStyle = z
   .object({
@@ -1105,6 +1142,7 @@ export const GUIDE_TOPICS = [
   "extendscript-gotchas",
   "issue-journal",
   "mogrt-and-footage",
+  "rendering",
   "shapes",
   "sound",
   "style-guide",
@@ -1293,6 +1331,11 @@ export const OpSchemas = {
   place_audio_cues: PlaceAudioCues,
   // motion graphics templates
   export_mogrt: ExportMogrt,
+  // render queue
+  add_to_render_queue: AddToRenderQueue,
+  list_render_queue: ListRenderQueue,
+  remove_render_item: RemoveRenderItem,
+  render_queue: RenderQueue,
   // raw
   run_jsx: RunJsx,
   // house style
@@ -1433,6 +1476,15 @@ export const OpMutation = {
   place_audio_cues: "write",
   // motion graphics templates — saves the project before exporting.
   export_mogrt: "write",
+  // render queue. Adding and removing items edits the project's queue.
+  add_to_render_queue: "write",
+  list_render_queue: "read",
+  remove_render_item: "write",
+  // Saves the project, so it takes the lease — but only for the save. The
+  // render itself runs in a separate aerender process from the file on disk,
+  // and holding the lock for it would freeze every write for minutes to
+  // protect a render that cannot see them anyway. See server.ts.
+  render_queue: "write",
   // raw — the script is the caller's and may do anything. Assume the worst.
   run_jsx: "write",
   // house style — written over the bridge into a file beside the .aep.

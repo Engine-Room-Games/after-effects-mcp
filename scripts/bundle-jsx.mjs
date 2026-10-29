@@ -31,6 +31,7 @@ const order = [
   "footage.jsx",
   "audio.jsx",
   "mogrt.jsx",
+  "render.jsx",
   "style.jsx",
   "batch.jsx",
   "explore.jsx",
