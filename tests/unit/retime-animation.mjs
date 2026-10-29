@@ -113,6 +113,7 @@ class MockProp {
   keyLabel(i) { return this._k(i).label; }
 
   setValueAtTime(t, v) {
+    if (this.hidden && this.hidden()) throw new Error(`After Effects error: Can not "set value at time" on a hidden property`);
     this.writes++;
     const at = this.keys.find((k) => Math.abs(k.time - t) < 0.001);
     if (at) { at.value = v; return; }
@@ -124,10 +125,18 @@ class MockProp {
     });
     this.keys.sort((a, b) => a.time - b.time);
   }
-  removeKey(i) { this.writes++; this._k(i); this.keys.splice(i - 1, 1); }
+  removeKey(i) {
+    this.writes++;
+    this._k(i);
+    this.keys.splice(i - 1, 1);
+    if (this.onEmpty && this.keys.length === 0) this.onEmpty();
+  }
   setTemporalEaseAtKey(i, inArr, outArr) {
     this.writes++;
     if (inArr.length !== this.arity || outArr.length !== this.arity) throw new Error("After Effects error: parameter 2");
+    for (const e of [...inArr, ...outArr]) {
+      if (!(e.influence >= 0.1 && e.influence <= 100)) throw new Error(`After Effects error: Value ${e.influence} out of range 0.1 to 100`);
+    }
     const k = this._k(i);
     // Array.from, not .map: the arrays come from the vm realm, and a host-realm
     // copy keeps deepEqual honest.
@@ -189,10 +198,24 @@ class MockLayer extends MockGroup {
       new MockProp("Rotation", "ADBE Rotate Z", { value: 0 }),
       new MockProp("Opacity", "ADBE Opacity", { value: 100 }),
       new MockProp("Orientation", "ADBE Orientation", { value: [0, 0, 0] }),
+      new MockProp("X Position", "ADBE Position_0", { value: 0 }),
+      new MockProp("Y Position", "ADBE Position_1", { value: 0 }),
     ]);
+    const posProp = transform.property("Position");
+    posProp.dimensionsSeparated = false;
+    for (const n of ["X Position", "Y Position"]) {
+      const f = transform.property(n);
+      f.isSeparationFollower = true;
+      f.separationLeader = posProp;
+    }
+    const remap = new MockProp("Time Remap", "ADBE Time Remapping", { value: 0 });
     const marker = new MockProp("Marker", "ADBE Marker");
     const fx = new MockGroup("Effects", "ADBE Effect Parade", effects, PT.INDEXED_GROUP);
-    super(name, "ADBE AV Layer", [marker, transform, fx]);
+    super(name, "ADBE AV Layer", [marker, remap, transform, fx]);
+    // Removing the last Time Remap key switches time remapping off, and the
+    // property is hidden from then on (measured on 26.5).
+    remap.onEmpty = () => { this.timeRemapEnabled = false; };
+    remap.hidden = () => !this.timeRemapEnabled;
     this.id = id;
     this.startTime = startTime;
     this.timeRemapEnabled = false;
@@ -552,6 +575,70 @@ check("a write that fails part-way names what already changed and the one undo",
     () => ctx.OPS.retime_keyframes({ compId: 10, layers: [{ layerId: 1 }], offset: 1 }),
     (e) => /retime_keyframes failed part-way: boom/.test(e.message) && /Rotation \(2 keys retimed\)/.test(e.message) && /Edit > Undo/.test(e.message)
   );
+});
+
+check("Time Remap is never emptied, so time remapping stays on (live AE 26.5)", () => {
+  const s = new MockLayer(1, "Src");
+  s.timeRemapEnabled = true;
+  s.p("Time Remap").addKey(0, 0).addKey(2, 2);
+  const t = new MockLayer(2, "T");
+  t.timeRemapEnabled = true;
+  t.p("Time Remap").addKey(0, 0).addKey(5, 5);
+  const ctx = makeWorld([new CompItem(10, [s, t])]);
+  ctx.OPS.retime_keyframes({ compId: 10, layers: [{ layerId: 1 }], offset: 1 });
+  assert.equal(s.timeRemapEnabled, true);
+  assert.deepEqual(s.p("Time Remap").keys.map((k) => +k.time.toFixed(6)), [1, 3]);
+  ctx.OPS.copy_animation({ compId: 10, layerId: 1, targets: [{ layerId: 2 }], replaceExisting: true });
+  assert.equal(t.timeRemapEnabled, true);
+  assert.deepEqual(t.p("Time Remap").keys.map((k) => +k.time.toFixed(6)), [1, 3]);
+  // A new key that lands where an old one sat reuses it rather than losing it.
+  ctx.OPS.retime_keyframes({ compId: 10, layers: [{ layerId: 1 }], scale: 2 });
+  assert.deepEqual(s.p("Time Remap").keys.map((k) => +k.time.toFixed(6)), [1, 5]);
+  assert.deepEqual(s.p("Time Remap").keys.map((k) => k.value), [0, 2]);
+});
+
+check("Source Text keys move with no ease written, and the call succeeds (live AE 26.5)", () => {
+  const s = new MockLayer(1, "Title");
+  const st = new MockProp("Source Text", "ADBE Text Document", { value: "a" });
+  const text = new MockGroup("Text", "ADBE Text Properties", [st]);
+  s.adopt(text);
+  setDepths(s, 0);
+  // AE reads a TextDocument key's ease as influence 0 and refuses it back.
+  st.addKey(0, "Hello", { inType: KIT.HOLD, outType: KIT.HOLD, inEase: [{ influence: 0, speed: 0 }], outEase: [{ influence: 0, speed: 0 }] })
+    .addKey(1, "World", { inType: KIT.HOLD, outType: KIT.HOLD, inEase: [{ influence: 0, speed: 0 }], outEase: [{ influence: 0, speed: 0 }] });
+  const t = new MockLayer(2, "T2");
+  const st2 = new MockProp("Source Text", "ADBE Text Document", { value: "" });
+  t.adopt(new MockGroup("Text", "ADBE Text Properties", [st2]));
+  setDepths(t, 0);
+  const ctx = makeWorld([new CompItem(10, [s, t])]);
+  const res = plain(ctx.OPS.retime_keyframes({ compId: 10, layers: [{ layerId: 1 }], offset: 1 }));
+  assert.equal(res.ok, true);
+  assert.deepEqual(st.keys.map((k) => [+k.time.toFixed(6), k.value, k.inType, k.outType]), [[1, "Hello", KIT.HOLD, KIT.HOLD], [2, "World", KIT.HOLD, KIT.HOLD]]);
+  assert.equal(plain(ctx.OPS.copy_animation({ compId: 10, layerId: 1, targets: [{ layerId: 2 }] })).ok, true);
+  assert.deepEqual(st2.keys.map((k) => [k.value, k.outType]), [["Hello", KIT.HOLD], ["World", KIT.HOLD]]);
+});
+
+check("separated X/Y Position: copied when both are separated, refused for the right reason when not", () => {
+  const s = new MockLayer(1, "Src");
+  s.p("Transform", "Position").dimensionsSeparated = true;
+  s.p("Transform", "X Position").addKey(0, 0).addKey(1, 100);
+  s.p("Transform", "Y Position").addKey(0, 0).addKey(1, 50);
+  const sep = new MockLayer(2, "Sep");
+  sep.p("Transform", "Position").dimensionsSeparated = true;
+  // Pessimistic: even a follower in use reporting canSetExpression:false.
+  sep.p("Transform", "X Position").canSetExpression = false;
+  const joined = new MockLayer(3, "Joined");
+  for (const n of ["X Position", "Y Position"]) joined.p("Transform", n).canSetExpression = false;
+  const ctx = makeWorld([new CompItem(10, [s, sep, joined])]);
+  ctx.OPS.copy_animation({ compId: 10, layerId: 1, targets: [{ layerId: 2 }] });
+  assert.deepEqual(sep.p("Transform", "X Position").keys.map((k) => k.value), [0, 100]);
+  assert.deepEqual(sep.p("Transform", "Y Position").keys.map((k) => k.value), [0, 50]);
+  assert.throws(
+    () => ctx.OPS.copy_animation({ compId: 10, layerId: 1, targets: [{ layerId: 3 }] }),
+    (e) => /X Position is not in use — this layer's Position is not separated/.test(e.message) && !/hidden/.test(e.message)
+  );
+  ctx.OPS.retime_keyframes({ compId: 10, layers: [{ layerId: 1 }], offset: 1 });
+  assert.deepEqual(s.p("Transform", "X Position").keys.map((k) => +k.time.toFixed(6)), [1, 2]);
 });
 
 console.log(`retime-animation: ${passed} checks passed`);

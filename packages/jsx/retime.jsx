@@ -145,6 +145,24 @@ function __rtTry(fn) {
   try { return fn(); } catch (e) { return null; }
 }
 
+/** A property whose keys carry no temporal ease: Source Text's TextDocument. */
+function __rtEaseless(prop) {
+  try {
+    if (prop.matchName === "ADBE Text Document") return true;
+    if (typeof PropertyValueType !== "undefined" && PropertyValueType.TEXT_DOCUMENT !== undefined &&
+        prop.propertyValueType === PropertyValueType.TEXT_DOCUMENT) return true;
+  } catch (e) {}
+  return false;
+}
+
+/** AE refuses an influence outside 0.1..100; a side reading one is not ease we can carry, so it is not written. */
+function __rtEaseWritable(list) {
+  for (var i = 0; i < list.length; i++) {
+    if (!(list[i].influence >= 0.1 && list[i].influence <= 100)) return false;
+  }
+  return true;
+}
+
 function __rtReadKey(prop, i) {
   var k = {
     time: prop.keyTime(i),
@@ -158,11 +176,15 @@ function __rtReadKey(prop, i) {
     spatial: false,
     label: __rtTry(function () { return prop.keyLabel(i); }),
   };
-  // A property with no temporal ease (Source Text holds) reads none; the key
-  // keeps its interpolation types and nothing is invented for it.
+  // Source Text is hold-only and has no temporal ease or flags to carry: AE
+  // reads it an influence of 0, which it then refuses to write back ("Value 0
+  // out of range 0.1 to 100", measured on 26.5). Only the types (and label)
+  // travel with such a key, and nothing is invented for it.
+  k.easeless = __rtEaseless(prop);
+  if (k.easeless) { k.tCont = null; k.tAuto = null; return k; }
   var ri = __readTemporalEase(prop, i, "in");
   var ro = __readTemporalEase(prop, i, "out");
-  if (ri.ease && ro.ease) { k.inEase = ri.ease; k.outEase = ro.ease; }
+  if (ri.ease && ro.ease && __rtEaseWritable(ri.ease) && __rtEaseWritable(ro.ease)) { k.inEase = ri.ease; k.outEase = ro.ease; }
   if (prop.isSpatial) {
     k.spatial = true;
     k.inTan = __rtTry(function () { return prop.keyInSpatialTangent(i); });
@@ -221,7 +243,9 @@ function __rtSetEase(prop, i, inList, outList) {
 }
 
 function __rtApplyAttrs(prop, i, k) {
-  if (k.inEase && k.outEase) __rtSetEase(prop, i, k.inEase, k.outEase);
+  // A key held on both sides has no curve for an ease to shape.
+  var bothHold = k.inType === KeyframeInterpolationType.HOLD && k.outType === KeyframeInterpolationType.HOLD;
+  if (k.inEase && k.outEase && !bothHold) __rtSetEase(prop, i, k.inEase, k.outEase);
   prop.setInterpolationTypeAtKey(i, k.inType, k.outType);
   if (k.tCont !== null) prop.setTemporalContinuousAtKey(i, k.tCont);
   if (k.tAuto !== null) prop.setTemporalAutoBezierAtKey(i, k.tAuto);
@@ -255,7 +279,8 @@ function __rtVerifyKey(prop, i, k) {
   // Ease is compared only where it shapes the curve: a bezier side that AE is
   // not computing itself. A linear or hold side reads back whatever AE derives,
   // and so does a roving key, whose timing AE works out from its neighbours.
-  if (k.inEase && !k.tAuto && !k.roving) {
+  if (k.inEase && !k.tAuto && !k.roving &&
+      !(k.inType === KeyframeInterpolationType.HOLD && k.outType === KeyframeInterpolationType.HOLD)) {
     var sides = [["in", k.inType, k.inEase], ["out", k.outType, k.outEase]];
     for (var s = 0; s < sides.length; s++) {
       if (sides[s][1] !== KeyframeInterpolationType.BEZIER) continue;
@@ -293,9 +318,22 @@ function __rtVerifyKey(prop, i, k) {
  * back. Returns the list of problems found on read-back; throws only if a write
  * itself is refused, with the property and key named.
  */
-function __rtWriteKeys(prop, keys, where) {
+function __rtWriteKeys(prop, keys, where, staleTimes) {
   var i;
+  // New keys first, old ones after: removing the last key of a property can
+  // change the property itself — the last Time Remap key switches time
+  // remapping off (measured on 26.5), and every write after that is refused as
+  // hidden. So the property never drops to zero keys. An old key sitting where
+  // a new one lands is simply overwritten, and its attributes rewritten below.
   for (i = 0; i < keys.length; i++) prop.setValueAtTime(keys[i].time, keys[i].value);
+  var stale = (staleTimes || []).slice(0).sort(function (a, b) { return b - a; });
+  for (i = 0; i < stale.length; i++) {
+    var reused = false;
+    for (var r = 0; r < keys.length; r++) if (Math.abs(keys[r].time - stale[i]) < 0.001) reused = true;
+    if (reused) continue;
+    var old = __findKeyIndexAtTime(prop, stale[i]);
+    if (old > 0) prop.removeKey(old);
+  }
   var idx = [];
   for (i = 0; i < keys.length; i++) {
     var at = __findKeyIndexAtTime(prop, keys[i].time);
@@ -309,11 +347,13 @@ function __rtWriteKeys(prop, keys, where) {
   }
   // Roving last: a roving key's time is AE's to compute from its neighbours, so
   // it moves once the flag is set — and every neighbour must be in place first.
+  // An overwritten old key may have been roving; a new one that is not must say so.
   for (i = 0; i < keys.length; i++) {
-    if (keys[i].spatial && keys[i].roving) {
-      try { prop.setRovingAtKey(idx[i], true); } catch (eR) {
-        throw new Error(where + ", key at " + __rtSecs(keys[i].time) + ": After Effects refused roving: " + __rtMsg(eR));
-      }
+    if (!keys[i].spatial || keys[i].roving === null) continue;
+    var now = __rtTry(function () { return prop.keyRoving(idx[i]); });
+    if (now === keys[i].roving) continue;
+    try { prop.setRovingAtKey(idx[i], keys[i].roving); } catch (eR) {
+      throw new Error(where + ", key at " + __rtSecs(keys[i].time) + ": After Effects refused roving: " + __rtMsg(eR));
     }
   }
   var problems = [];
@@ -324,10 +364,12 @@ function __rtWriteKeys(prop, keys, where) {
   return problems;
 }
 
-/** Remove keys by index, highest first so the lower indices stay valid. */
-function __rtRemoveKeys(prop, indices) {
-  var sorted = indices.slice(0).sort(function (a, b) { return b - a; });
-  for (var i = 0; i < sorted.length; i++) prop.removeKey(sorted[i]);
+/** Time remapping must still be on after its keys were rewritten; a problem phrase is pushed if not. */
+function __rtTimeRemapStillOn(prop, layer, where, problems) {
+  if (prop.matchName !== __RT_TIME_REMAP) return;
+  var on = true;
+  try { on = layer.timeRemapEnabled !== false; } catch (e) {}
+  if (!on) problems.push(where + ": After Effects switched time remapping off on this layer");
 }
 
 function __rtRefuse(op, problems) {
@@ -511,12 +553,12 @@ OPS.retime_keyframes = function (args) {
     var layerOut = { layerId: pl.layer.id, name: pl.layer.name, shift: pl.shift, properties: [] };
     for (var x = 0; x < pl.props.length; x++) {
       var pr = pl.props[x];
-      var idxs = [];
-      for (var y = 0; y < pr.moved.length; y++) idxs.push(pr.moved[y].index);
+      var oldTimes = [];
+      for (var y = 0; y < pr.moved.length; y++) oldTimes.push(pr.moved[y].key.time);
       var bad;
       try {
-        __rtRemoveKeys(pr.prop, idxs);
-        bad = __rtWriteKeys(pr.prop, pr.newKeys, pr.where);
+        bad = __rtWriteKeys(pr.prop, pr.newKeys, pr.where, oldTimes);
+        __rtTimeRemapStillOn(pr.prop, pl.layer, pr.where, bad);
       } catch (eW) {
         throw __rtWriteFailure("retime_keyframes", eW, done, pr.where + " (" + pr.newKeys.length + " keys)");
       }
@@ -607,6 +649,10 @@ OPS.copy_animation = function (args) {
           "groups in the same order as the source).");
         continue;
       }
+      // Separation first: a Position split into dimensions on one side and not
+      // the other reads as hidden on the target, which is the wrong reason.
+      var sep = __rtSeparationProblem(tp, tl, src.names, src.keys.length > 0);
+      if (sep) { problems.push(sep); continue; }
       // The same pre-write test set_transform uses (#204): AE 26.5 has no
       // canSetValue, and a hidden property reports canSetExpression:false.
       if (__RT_ONLY_3D[src.matchName] && !tl.threeDLayer && !__rtIsCamOrLight(tl)) {
@@ -616,13 +662,16 @@ OPS.copy_animation = function (args) {
       }
       var settable = true;
       try { settable = tp.canSetExpression !== false; } catch (eS) { settable = false; }
+      // X/Y/Z Position of a separated Position are in use whatever that flag
+      // says; the separation check above has already refused the other case.
+      try {
+        if (!settable && tp.isSeparationFollower && tp.separationLeader && tp.separationLeader.dimensionsSeparated) settable = true;
+      } catch (eF) {}
       if (!settable) {
         problems.push(where + " is hidden on the target and cannot be set (for example a camera's Point of Interest " +
           "in one-node mode, or a point light's Orientation). Leave it out of propertyPaths.");
         continue;
       }
-      var sep = __rtSeparationProblem(tp, tl, src.names, src.keys.length > 0);
-      if (sep) { problems.push(sep); continue; }
       if (src.keys.length) {
         if (src.matchName === __RT_TIME_REMAP && !tl.timeRemapEnabled) {
           problems.push(where + ": time remapping is not enabled on the target, so it has no Time Remap to key.");
@@ -668,9 +717,9 @@ OPS.copy_animation = function (args) {
     try {
       if (job.keys.length) {
         var existing = [];
-        for (var e = 1; e <= __rtNumKeys(job.prop); e++) existing.push(e);
-        __rtRemoveKeys(job.prop, existing);
-        var bad = __rtWriteKeys(job.prop, job.keys, job.where);
+        for (var e = 1; e <= __rtNumKeys(job.prop); e++) existing.push(job.prop.keyTime(e));
+        var bad = __rtWriteKeys(job.prop, job.keys, job.where, existing);
+        __rtTimeRemapStillOn(job.prop, job.layer, job.where, bad);
         for (var b = 0; b < bad.length; b++) verify.push(bad[b]);
       }
       if (job.expr) {
