@@ -353,6 +353,30 @@ export const ListLayers = z.object({
   compId: z.number(),
   include: includeParam(LAYER_SUMMARY_SECTIONS, "the id/index/name/type map alone"),
 });
+// Effect parameters are bounded by DEFAULT (issue #115) — the deliberate
+// exception to "absent means everything", like find_layers' bounded default.
+// A third-party effect can carry thousands of parameters (Trapcode Particular:
+// 7,401, ~1 MB in one read); every built-in one has under 15. The panel applies
+// the same number (`__EFFECT_PARAMS_DEFAULT` in effects.jsx), and
+// tests/unit/effect-params.mjs holds the two together.
+export const EFFECT_PARAMS_DEFAULT = 200;
+const effectParamFields = {
+  maxParams: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      `Cap the parameters serialized per effect. Default ${EFFECT_PARAMS_DEFAULT}, applied even when omitted, because a third-party effect can carry thousands (Trapcode Particular: 7,401). Every effect reports paramCount; a capped one also reports paramsOmitted and paramsTruncated, so a capped read is never mistaken for a complete one.`
+    ),
+  paramFilter: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Case-insensitive regex over each parameter's display name and matchName; only matches are returned (still under maxParams) and paramsMatched counts them. The way to read a few parameters of a heavy effect, e.g. 'velocity|emitter'."
+    ),
+};
 export const GetLayerFull = z.object({
   compId: z.number(),
   layerId: z.number(),
@@ -369,6 +393,7 @@ export const GetLayerFull = z.object({
     .describe(
       "Cap the keyframes serialized per property. Over the cap you get the first and last few plus a count of what was omitted — never a silent truncation. Omit for all of them."
     ),
+  ...effectParamFields,
   shapeDepth: z
     .number()
     .int()
@@ -583,7 +608,7 @@ export const ToggleExpression = z.object({ compId: z.number(), layerId: z.number
 export const ClearExpression = z.object({ compId: z.number(), layerId: z.number(), propertyPath: PropertyPath });
 
 // ---------- effects ----------
-export const ListEffects = z.object({ compId: z.number(), layerId: z.number() });
+export const ListEffects = z.object({ compId: z.number(), layerId: z.number(), ...effectParamFields });
 export const AddEffect = z.object({ compId: z.number(), layerId: z.number(), matchName: z.string() });
 export const RemoveEffect = z.object({ compId: z.number(), layerId: z.number(), effectIndex: z.number().int().positive() });
 export const SetEffectParam = crossField(

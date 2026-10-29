@@ -75,9 +75,10 @@ function __serializeTransformGroup(tg, opts) {
   return out;
 }
 
-// The cap is applied after the fact rather than inside __serializeEffect,
-// which effects.jsx also uses for list_effects and add_effect — those return
-// one effect and have no size problem to solve.
+// The keyframe cap is applied after the fact rather than inside
+// __serializeEffect, which effects.jsx also uses for list_effects and
+// add_effect. The parameter cap (maxParams/paramFilter, issue #115) is applied
+// inside it, by all three.
 function __capEffectKeyframes(effects, max) {
   if (!(max > 0)) return effects;
   for (var i = 0; i < effects.length; i++) {
@@ -105,7 +106,8 @@ function __serializeEffects(layer, opts) {
   var fx = layer.property("Effects");
   if (!fx || fx.numProperties === 0) return [];
   var arr = [];
-  for (var i = 1; i <= fx.numProperties; i++) arr.push(__serializeEffect(fx.property(i)));
+  var popts = (opts && opts.effectParams) ? opts.effectParams : __effectParamOpts(null);
+  for (var i = 1; i <= fx.numProperties; i++) arr.push(__serializeEffect(fx.property(i), popts));
   return __capEffectKeyframes(arr, (opts && opts.maxKeyframes) ? opts.maxKeyframes : 0);
 }
 
@@ -395,6 +397,8 @@ OPS.get_layer_full = noUndo(function (args) {
   // absent by default, and absent means "everything", exactly as before.
   var want = (args && args.include) ? args.include : null;
   var opts = { maxKeyframes: (args && args.maxKeyframes > 0) ? args.maxKeyframes : 0 };
+  // Effect parameters are the exception: bounded by default (issue #115).
+  if (__wantsSection(want, "effects")) opts.effectParams = __effectParamOpts(args);
   var out = {
     id: l.id,
     index: l.index,

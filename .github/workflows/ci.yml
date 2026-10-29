@@ -277,6 +277,7 @@ jobs:
       - name: Reads are bounded and writes are verified
         run: |
           node tests/unit/find-layers.mjs
+          node tests/unit/effect-params.mjs
           node tests/unit/text-justification.mjs
           node tests/unit/expression-error.mjs
       # Release history is read once per release per project and then never

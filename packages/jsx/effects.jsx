@@ -1,9 +1,60 @@
 // effects.jsx — effect graph ops.
 
-function __serializeEffect(eff) {
-  var out = { name: eff.name, matchName: eff.matchName, enabled: eff.enabled, index: eff.propertyIndex, params: [] };
-  for (var i = 1; i <= eff.numProperties; i++) {
+// Effect parameters are bounded by default (issue #115). Every built-in
+// effect has under 15 parameters and the heaviest common third-party ones
+// (Saber, Warp Stabilizer) under 100, but Trapcode Particular exposes 7,401 —
+// one list_effects on it was 1 MB, ~265k tokens, re-sent on every later
+// request. 200 returns every ordinary effect whole and caps a pathological one
+// at a few thousand tokens. This is a deliberate exception to "absent means
+// everything", the same way find_layers' bounded default is: what is left out
+// is always counted (paramCount, paramsOmitted) and named (paramsTruncated),
+// so a capped effect never passes for a complete one.
+var __EFFECT_PARAMS_DEFAULT = 200;
+
+// One parse of maxParams/paramFilter per call, shared by every effect in it.
+// paramFilter is a case-insensitive regex over each parameter's name and
+// matchName, the same convention as find_layers' name filter.
+function __effectParamOpts(args) {
+  var max = (args && args.maxParams > 0) ? args.maxParams : __EFFECT_PARAMS_DEFAULT;
+  var re = null;
+  if (args && typeof args.paramFilter === "string" && args.paramFilter.length > 0) {
+    try { re = new RegExp(args.paramFilter, "i"); }
+    catch (e) { throw new Error("paramFilter is not a valid regular expression: " + args.paramFilter); }
+  }
+  return { maxParams: max, paramFilter: re, paramFilterSource: re ? args.paramFilter : null };
+}
+
+function __paramsTruncationNote(total, returned, matched, popts) {
+  if (popts.paramFilter) {
+    var head = "paramFilter /" + popts.paramFilterSource + "/ matched " + matched + " of " + total + " parameters";
+    if (matched > returned) {
+      return head + "; first " + returned + " returned, " + (matched - returned) + " more matches omitted — raise maxParams";
+    }
+    return head + "; the other " + (total - matched) + " omitted";
+  }
+  return "first " + returned + " of " + total + " parameters; " + (total - returned) + " omitted — raise maxParams " +
+    "(up to " + total + "), or pass paramFilter, a regex over parameter name/matchName, to read only the ones you need";
+}
+
+// `popts` comes from __effectParamOpts; absent means the default cap, never
+// "everything".
+function __serializeEffect(eff, popts) {
+  if (!popts) popts = __effectParamOpts(null);
+  var max = popts.maxParams;
+  var re = popts.paramFilter;
+  var total = eff.numProperties;
+  var out = { name: eff.name, matchName: eff.matchName, enabled: eff.enabled, index: eff.propertyIndex, paramCount: total, params: [] };
+  var matched = 0;
+  for (var i = 1; i <= total; i++) {
     var p = eff.property(i);
+    if (re && !(re.test(p.name) || re.test(p.matchName))) continue;
+    matched++;
+    if (out.params.length >= max) {
+      // Unfiltered, the rest is only counted, so stop walking; filtered, keep
+      // going so the matched count is exact.
+      if (!re) break;
+      continue;
+    }
     var entry = { name: p.name, matchName: p.matchName, propertyType: String(p.propertyType) };
     try { entry.value = p.value; } catch (e) {}
     if (p.canSetExpression && p.expression) entry.expression = p.expression;
@@ -15,6 +66,13 @@ function __serializeEffect(eff) {
     }
     out.params.push(entry);
   }
+  if (re) out.paramsMatched = matched;
+  else matched = total;
+  var omitted = total - out.params.length;
+  if (omitted > 0) {
+    out.paramsOmitted = omitted;
+    out.paramsTruncated = __paramsTruncationNote(total, out.params.length, matched, popts);
+  }
   return out;
 }
 
@@ -23,17 +81,20 @@ OPS.list_effects = noUndo(function (args) {
   var l = getLayerById(c, args.layerId);
   var fx = l.property("Effects");
   if (!fx) return [];
+  var popts = __effectParamOpts(args);
   var out = [];
-  for (var i = 1; i <= fx.numProperties; i++) out.push(__serializeEffect(fx.property(i)));
+  for (var i = 1; i <= fx.numProperties; i++) out.push(__serializeEffect(fx.property(i), popts));
   return out;
 });
 
+// The new effect comes back under the default parameter cap: adding Particular
+// should not return 265k tokens nobody asked to read.
 OPS.add_effect = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
   var fx = l.property("Effects");
   var eff = fx.addProperty(args.matchName);
-  return __serializeEffect(eff);
+  return __serializeEffect(eff, __effectParamOpts(null));
 };
 
 OPS.remove_effect = function (args) {
