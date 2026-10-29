@@ -13,6 +13,7 @@ import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/proto
 import { schemas } from "@engineroom/shared";
 import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
+import { createPanelGate } from "./bridge/panelGate.js";
 import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge/writeQueue.js";
 import { JobManager } from "./jobs/manager.js";
 import {
@@ -42,8 +43,8 @@ import { findUnsafeArgKeys, unsafeArgsMessage } from "./util/argsSafety.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
-import { assessPanel, installedBundleHash, unknownOpMessage } from "./setup/panelVersion.js";
-import { installedPanelDir, packageVersion, panelInstallDiff, panelSourceDir } from "./setup/paths.js";
+import { unknownOpMessage } from "./setup/panelVersion.js";
+import { packageVersion } from "./setup/paths.js";
 import { renderWhatsNew } from "./tools/whatsNew.js";
 import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./generated/content.js";
 import { archiveIssue, listIssues, logIssue, markReported } from "./issues/journal.js";
@@ -172,8 +173,12 @@ export function createServer(opts: CreateServerOptions = {}) {
   const snapshots = new SnapshotStore();
   // Follows the bridge's port rather than copying it: see wsClient.ts.
   const ws = new WsClient(bridge, jobs);
-  ws.start();
   const panelGate = createPanelGate(bridge);
+  // Restarting After Effects rebinds the same port, so no port change fires;
+  // the event socket dropping and reopening is the signal that a (possibly
+  // new) panel is answering, and the verdict about the old one is void (#156).
+  ws.onReopen(() => panelGate.invalidate());
+  ws.start();
 
   // The issue journal, pushed rather than pulled: every failed tool call is
   // answered with the journal entries that match its tool and error text, so
@@ -922,63 +927,6 @@ const SNAPSHOT_COVERS =
   "Records layer id/name/index/type, in/out/start, parent, enabled, keyframe counts, expression count and " +
   "effect count, plus comp size/duration/frame rate/work area/markers. Property values, expression text, " +
   "effect parameters and shape contents are not recorded.";
-
-/**
- * Caches the panel-version verdict so it costs one /health per session rather
- * than one per tool call.
- *
- * Only a *stale* verdict is remembered indefinitely — that state cannot resolve
- * itself without a restart of After Effects, which drops the bridge and clears
- * the cache anyway. A healthy verdict is re-checked periodically so a panel that
- * gets replaced mid-session is noticed. An unreachable bridge caches nothing:
- * that is `runOp`'s error to report, with a much better message than this.
- */
-function createPanelGate(bridge: HttpClient) {
-  const RECHECK_MS = 60_000;
-  let verdict: string | null = null;
-  let checkedAt = 0;
-
-  // A verdict is about the panel on one port. When the bridge moves, whatever
-  // was decided about the old one — stale or healthy — says nothing about the
-  // panel now answering, so the next call has to ask again.
-  bridge.onPortChange(() => {
-    verdict = null;
-    checkedAt = 0;
-  });
-
-  return {
-    /** The message to return instead of forwarding, or null to proceed. */
-    async check(): Promise<string | null> {
-      if (verdict !== null) return verdict;
-      if (Date.now() - checkedAt < RECHECK_MS) return null;
-      try {
-        const health = await bridge.health();
-        // The gate is what every failed call quotes, so it has to know whether
-        // the files on disk are internally consistent. Without this it tells the
-        // user to restart After Effects for a half-updated install, which no
-        // number of restarts can resolve.
-        const installed = installedPanelDir();
-        const source = panelSourceDir();
-        const assessment = assessPanel(health.bundleHash, installedBundleHash(installed), {
-          installComplete: source ? panelInstallDiff(source, installed).length === 0 : undefined,
-        });
-        checkedAt = Date.now();
-        verdict = assessment.state === "current" || assessment.state === "unknown" ? null : assessment.message;
-        // "unknown" covers a panel too old to report a hash. Its message is a
-        // warning rather than a certainty, so it is logged, not enforced — the
-        // Unknown-op backstop catches it the moment it actually matters.
-        if (assessment.state === "unknown" && assessment.message) logger.warn(assessment.message);
-        return verdict;
-      } catch {
-        return null;
-      }
-    },
-    invalidate() {
-      verdict = null;
-      checkedAt = 0;
-    },
-  };
-}
 
 /**
  * Folders the client says it is working in, best first.

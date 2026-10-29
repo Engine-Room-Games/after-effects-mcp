@@ -47,9 +47,16 @@ keeps the old behaviour rather than quietly asserting the install is sound.
 
 Three enforcement points, in order of preference:
 
-1. **The gate in `server.ts`** — one `/health` per session, cached; refuses to
-   forward and returns the remediation. `panelGate.invalidate()` after
-   `setup_panel`, because the disk half of the comparison just changed.
+1. **The gate (`bridge/panelGate.ts`, called from `server.ts`)** — `/health`
+   cached; refuses to forward and returns the remediation. A healthy verdict is
+   re-checked every minute, a stale one every few seconds. `panelGate.invalidate()`
+   after `setup_panel`, because the disk half of the comparison just changed, and
+   on `WsClient.onReopen`. **A stale verdict must never be cached for good**
+   (issue #156): restarting After Effects rebinds the *same* port, so no port
+   change fires, and a verdict kept until one did told the user to restart After
+   Effects for the rest of the session after they had. An unreachable `/health`
+   drops the verdict (that is `runOp`'s error to report); a timeout keeps it (a
+   busy AE is still the old panel). `tests/unit/panel-gate.mjs` pins all of it.
 2. **The `Unknown op:` backstop** — for panels too old to report a hash at all.
    This is never a false positive: `server.ts` validates tool names against
    `OpSchemas` before forwarding, so any op the panel rejects is one this server
