@@ -91,6 +91,17 @@ class MockLayer {
   }
 }
 
+// AE's ExtendScript classes, as `instanceof` actually sees them: ShapeLayer,
+// TextLayer, CameraLayer and LightLayer are each their own class and none of
+// them is `instanceof AVLayer` (measured on 24.6.1, issue #120). So the mock
+// makes them siblings of AVLayer, not subclasses of it. The shared MockLayer
+// base is only the transform plumbing; it is not exposed to the handler.
+class MockAVLayer extends MockLayer {}
+class MockShapeLayer extends MockLayer {}
+class MockTextLayer extends MockLayer {}
+class MockCameraLayer extends MockLayer {}
+class MockLightLayer extends MockLayer {}
+
 // ---------- matrix helpers, written independently of the ones under test ----------
 // [a, b, c, d, tx, ty]: x' = a*x + c*y + tx, y' = b*x + d*y + ty
 const I = () => [1, 0, 0, 1, 0, 0];
@@ -157,8 +168,9 @@ function writeLocal(l, wanted, basis, worldBefore) {
 function loadOps(layers) {
   const ctx = {
     OPS: {},
-    AVLayer: MockLayer,
-    TextLayer: class {}, ShapeLayer: class {}, CameraLayer: class {}, LightLayer: class {},
+    AVLayer: MockAVLayer,
+    TextLayer: MockTextLayer, ShapeLayer: MockShapeLayer,
+    CameraLayer: MockCameraLayer, LightLayer: MockLightLayer,
     CompItem: class {}, FootageItem: class {},
     Math,
     isFinite,
@@ -191,13 +203,15 @@ let passed = 0;
 
 // The reported case: fig -> pb -> bubA, where pb was re-parented earlier in the
 // same evaluation so the compensation for bubA reads pb's pre-move matrix.
-function twoLevelScene(anchors) {
-  const fig = new MockLayer("fig", { id: 1, position: [400, 300], anchor: anchors.fig });
-  const pb = new MockLayer("pb", { id: 2, position: [700, 500], anchor: anchors.pb });
-  const bubA = new MockLayer("bubA", { id: 3, position: [900, 640], anchor: anchors.bub });
+// `kinds` picks the ExtendScript class of each layer; every one defaults to AVLayer.
+function twoLevelScene(anchors, kinds = {}) {
+  const K = (n) => kinds[n] || MockAVLayer;
+  const fig = new (K("fig"))("fig", { id: 1, position: [400, 300], anchor: anchors.fig });
+  const pb = new (K("pb"))("pb", { id: 2, position: [700, 500], anchor: anchors.pb });
+  const bubA = new (K("bubA"))("bubA", { id: 3, position: [900, 640], anchor: anchors.bub });
   // A second child, parented honestly, that exists only to let the handler see
   // AE agree with one reading of Position before the broken case arrives.
-  const kit = new MockLayer("kit", { id: 4, position: [760, 610], anchor: anchors.bub });
+  const kit = new (K("kit"))("kit", { id: 4, position: [760, 610], anchor: anchors.bub });
   return { fig, pb, bubA, kit, all: [fig, pb, bubA, kit] };
 }
 
@@ -406,6 +420,42 @@ for (const model of ["layer-space", "anchor-relative"]) {
   assert.equal(r.correction.applied, false);
   assert.match(r.correction.notes.join(" "), /3D layer/, "a 3D layer must say why it was not corrected");
   assert.equal(s.bubA.parent, s.pb, "the parenting itself must still happen");
+  passed += 3;
+}
+
+// Issue #120: shape and text layers anywhere in the chain — as the child, the
+// new parent, or a grandparent — must be corrected like any other 2D layer.
+// Before the fix __ptChain tested `instanceof AVLayer`, which is false for both
+// in ExtendScript, so each was refused as "a camera or light" and the child
+// was left wherever the broken compensation put it.
+for (const [kindName, Kind] of [["shape", MockShapeLayer], ["text", MockTextLayer]]) {
+  for (const slot of ["bubA", "pb", "fig"]) {
+    MODEL = "layer-space";
+    const s = twoLevelScene({ fig: [0, 0], pb: [0, 0], bub: [0, 0] }, { [slot]: Kind });
+    s.pb.props.Scale.v = [30, 30];
+    const ops = loadOps(s.all);
+    s.pb.parent = s.fig;
+    s.bubA.staleParentMatrix = staleBasis(s.pb);
+    const want = worldMatrix(s.bubA);
+    const r = ops.parent_layer({ compId: 1, layerId: 3, parentLayerId: 2 });
+    const label = `${kindName} layer as ${slot}`;
+    assert.doesNotMatch(r.correction.notes.join(" "), /camera or light/, `${label}: must not be refused as a camera or light`);
+    assert.equal(r.correction.applied, true, `${label}: the stale compensation must be corrected`);
+    assertSameWorld(label, worldMatrix(s.bubA), want);
+    passed += 3;
+  }
+}
+
+// A camera or light in the chain is still refused, and still says why.
+for (const [kindName, Kind] of [["camera", MockCameraLayer], ["light", MockLightLayer]]) {
+  MODEL = "layer-space";
+  const s = twoLevelScene({ fig: [0, 0], pb: [0, 0], bub: [0, 0] }, { fig: Kind });
+  const ops = loadOps(s.all);
+  s.pb.parent = s.fig;
+  const r = ops.parent_layer({ compId: 1, layerId: 3, parentLayerId: 2 });
+  assert.equal(r.correction.applied, false, `${kindName}: must not be corrected`);
+  assert.match(r.correction.notes.join(" "), /camera or light in the chain \("fig"\)/, `${kindName}: must name the layer`);
+  assert.equal(s.bubA.parent, s.pb, `${kindName}: the parenting itself must still happen`);
   passed += 3;
 }
 
