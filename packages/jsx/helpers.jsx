@@ -10,7 +10,7 @@
 // AE quirk wrong.
 //
 // The rule for adding one: it has to be something an agent would otherwise
-// write badly, not merely something it would write often. All four below wrap
+// write badly, not merely something it would write often. Each one below wraps
 // a documented AE trap.
 //
 // These are listed by signature in the run_jsx tool description. If you change
@@ -100,6 +100,21 @@ function shape(comp, opts) {
   if (o.name) l.name = o.name;
   var pos = o.position ? o.position : [0, 0];
   var value = (pos.length === 3) ? pos : [pos[0], pos[1]];
-  l.property("Transform").property("Position").setValue(value);
+  __setValue(l.property("Transform").property("Position"), value);
   return l;
+}
+
+// setValueChecked(prop, value) — setValue without the #129 false failure.
+//
+// In a comp that is not open in any viewer, setValue on a shape rectangle's
+// Size (and possibly elsewhere) can throw "invalid numeric result (divide by
+// zero?)" although the value was applied. A script that trusts the throw
+// retries, or reports a failure for work that landed. This reads the property
+// back when it sees that one error, and only swallows it when the value is the
+// one asked for; any other error, or a value that did not land, is rethrown.
+// Returns true when it absorbed the spurious throw, false for a clean write.
+// The same function every first-class op writes through (__setValue in
+// values.jsx), so a script and a tool can never disagree about it.
+function setValueChecked(prop, value) {
+  return __setValue(prop, value);
 }

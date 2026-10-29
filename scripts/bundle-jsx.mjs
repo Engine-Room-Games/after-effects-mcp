@@ -15,6 +15,7 @@ const BUNDLE_ID = "games.engine-room.ae-mcp";
 const order = [
   "core.jsx",
   "ids.jsx",
+  "values.jsx",
   "comps.jsx",
   "layers.jsx",
   "snapshot.jsx",

@@ -86,6 +86,7 @@ One line each. The annotated version — why each file is the way it is — is i
 | `packages/jsx/audio.jsx` | `place_audio_cues` — plan, import, build, roll back. Statement order is load-bearing. |
 | `packages/jsx/mogrt.jsx` | `export_mogrt` — preconditions first, dialogs suppressed, everything re-fetched afterwards. |
 | `packages/jsx/raw.jsx` | `run_jsx` — the result serializer, library inlining, failure attribution. |
+| `packages/jsx/values.jsx` | `__setValue` — every op's `setValue`; drops AE's false `invalid numeric result` throw only when the value read back landed (#129). |
 | `packages/jsx/helpers.jsx` | The helper scope a `run_jsx` script runs in. Listed by signature in the tool description — change both together. |
 | `packages/jsx/style.jsx` | `get_house_style` / `set_house_style`, read beside the .aep over the bridge. |
 | `packages/ae-panel/CSXS/manifest.xml` | CEP manifest. Auto-start on AE activate, Node enabled. |
