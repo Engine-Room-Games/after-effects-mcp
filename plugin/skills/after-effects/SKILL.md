@@ -91,6 +91,8 @@ English misses on a German or Japanese install. If you do not know a matchName,
 unfiltered list is several hundred entries and takes seconds every time.
 `list_effects` shows what is already on a layer, up to 200 parameters per effect
 (`maxParams` and `paramFilter` reach the rest).
+A newly added Gaussian Blur has **Repeat Edge Pixels on** by default, so a
+blurred solid keeps hard edges until you set `ADBE Gaussian Blur 2-0003` to 0.
 
 ## Identify things by id, never by index
 

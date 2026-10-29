@@ -268,17 +268,35 @@ function patchThumbnail(mogrtBuf, posterPng) {
   }
 
   var existing = pngCodec.decodePng8(inflateEntry(target));
+  // The poster is raw `saveFrameToPng` output, never through normalizePng, so
+  // its colour is premultiplied by alpha (issue #130). Two consequences, and the
+  // order below follows from them:
+  //
+  //   * Resample *before* un-premultiplying. A box filter over premultiplied
+  //     samples is the alpha-weighted average, so a transparent pixel's colour
+  //     cannot bleed into its neighbours; averaging straight colour would pull
+  //     every soft edge toward whatever undefined colour the clear pixels hold,
+  //     which is the halo this is meant to remove. The transparent padding
+  //     resampleFit adds is zeros, which is the same in both forms.
+  //   * Un-premultiply only when the thumbnail keeps an alpha channel. Dropping
+  //     alpha from premultiplied colour is exactly compositing over black, which
+  //     is the right picture for an opaque thumbnail; dropping it from straight
+  //     colour would leave every soft edge at full strength.
   var poster = pngCodec.decodePng8(posterPng);
+  var srcChannels = poster.channels;
+  var fitted = resampleFit(poster.pixels, poster.width, poster.height, srcChannels, existing.width, existing.height);
+  var data = fitted.data;
+  var outCount = existing.width * existing.height;
+  var srcAlpha = pngCodec.alphaIndexFor(poster.colorType);
+  if (srcAlpha >= 0 && pngCodec.alphaIndexFor(existing.colorType) >= 0) {
+    data = pngCodec.unpremultiply8(data, srcChannels, srcAlpha, outCount);
+  }
 
   // Encode at the thumbnail's own colour type so an archive whose thumbnail has
   // no alpha does not gain one, and vice versa.
   var channels = existing.channels;
-  var source = poster.channels === channels
-    ? poster.pixels
-    : convertChannels(poster.pixels, poster.channels, channels, poster.width * poster.height);
-
-  var fitted = resampleFit(source, poster.width, poster.height, channels, existing.width, existing.height);
-  var encoded = pngCodec.encodePng8(existing.width, existing.height, existing.colorType, fitted.data);
+  if (srcChannels !== channels) data = convertChannels(data, srcChannels, channels, outCount);
+  var encoded = pngCodec.encodePng8(existing.width, existing.height, existing.colorType, data);
 
   target.data = zlib.deflateRawSync(encoded, { level: 6 });
   target.method = 8;

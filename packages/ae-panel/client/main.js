@@ -426,9 +426,12 @@
         converted: norm.converted,
         sourceBitDepth: norm.bitDepth,
         // Decoded samples, kept only so the contact sheet can composite them
-        // without decoding the same PNG a second time. Null on the passthrough
-        // path, where the pixels were never interpreted.
-        pixels: norm.decoded ? norm.hashInput : null,
+        // without decoding the same PNG a second time. Already straight alpha —
+        // exactly what `buffer` decodes to — so the sheet must not convert them
+        // again (#130). Null on the passthrough path, where the pixels were
+        // never interpreted. The hash below is of the samples as After Effects
+        // wrote them, before un-premultiplying; see pngcodec.js.
+        pixels: norm.pixels,
         channels: norm.channels,
         hash: sha256(norm.hashInput),
         // The pixels could not be read, so "empty" was never evaluated and the
@@ -718,7 +721,11 @@
           // becomes a marked block rather than a wrong one.
           try {
             var dec = pngCodec.decodePng8(r.img.buffer);
-            px = dec.pixels;
+            // decodePng8 returns the file's samples as After Effects wrote
+            // them, premultiplied; every other tile arrives straight, so this
+            // one is converted here, once.
+            px = pngCodec.unpremultiply8(dec.pixels, dec.channels,
+              pngCodec.alphaIndexFor(dec.colorType), dec.width * dec.height);
             channels = dec.channels;
           } catch (e) {
             // Both records move together: `spec` is what gets drawn, `r` is what

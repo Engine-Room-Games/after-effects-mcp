@@ -5,9 +5,19 @@
 // on the far side of an MCP image content block included — reject those outright
 // with "Could not process image", so a perfectly good render arrives useless.
 // This converts to 8 bits per channel before the panel base64-encodes, and
-// passes anything already 8-bit through byte-for-byte untouched.
+// passes an 8-bit frame through byte-for-byte untouched unless it has partly
+// transparent pixels to un-premultiply (below).
 //
-// It also does the two other things that need the pixels rather than the file:
+// It also does the three other things that need the pixels rather than the file:
+//
+//   * converts premultiplied colour to straight alpha. `saveFrameToPng` writes
+//     colour already multiplied by alpha, but PNG is straight (unassociated)
+//     alpha by definition, so every decoder composites those edge pixels as if
+//     they were darker than they are: blurs, feathers, glows, shadows and
+//     anti-aliased edges all grew a dark fringe that is not in the comp, and an
+//     agent looking at it may "fix" artwork that is fine. Issue #130. Measured
+//     on AE 2026 at both 8 and 16 bits, so it is After Effects' output and not
+//     this conversion;
 //
 //   * reports a frame whose every pixel is fully transparent, because "this
 //     frame is empty" is the useful reading of a ~5KB PNG that decoders choke
@@ -15,7 +25,11 @@
 //     disabled layer;
 //   * hands back the decoded samples so the caller can hash them. Two different
 //     screenshot requests that produce byte-identical pixels are how a stale
-//     render buffer shows itself (see framecache.js).
+//     render buffer shows itself (see framecache.js). The hash is taken from
+//     the samples *as After Effects wrote them*, before un-premultiplying: the
+//     stale bug is one render buffer served twice, so the buffer is the thing
+//     to identify, and un-premultiplying is lossy enough at 16 bits to merge
+//     two frames that differ only in a low-alpha edge.
 //
 // Cost, since it is paid on every screenshot and not only on 16-bit ones: an
 // already-8-bit frame is still inflated and un-filtered, because that is the
@@ -358,6 +372,69 @@ function narrow16to8(data16, sampleCount) {
   return out;
 }
 
+// ---------- Premultiplied -> straight alpha ----------
+//
+// The colour channels of a premultiplied pixel are c = straight * a, so the
+// inverse is straight = c / a — at 8 bits, round(c * 255 / a). Three cases are
+// left exactly as they are:
+//
+//   * a = 0: the colour of an invisible pixel is undefined after division, and
+//     every decoder ignores it anyway;
+//   * a = max: dividing by one changes nothing, and skipping it keeps an opaque
+//     frame byte-identical to the file After Effects wrote;
+//   * a colour type with no alpha channel at all.
+//
+// A colour above its alpha is not valid premultiplied data, but a filter can
+// produce one and the division must not overflow the sample, so it clamps.
+
+/**
+ * Un-premultiply 8-bit samples. Returns `data` itself when no pixel needed it
+ * (opaque or fully clear everywhere), and a new buffer otherwise, so the caller
+ * can keep the source samples for hashing and can tell whether to re-encode.
+ */
+function unpremultiply8(data, channels, alphaIndex, pixelCount) {
+  if (alphaIndex < 0) return data;
+  var out = null;
+  for (var p = 0; p < pixelCount; p++) {
+    var base = p * channels;
+    var a = data[base + alphaIndex];
+    if (a === 0 || a === 255) continue;
+    if (out === null) out = Buffer.from(data);
+    for (var c = 0; c < channels; c++) {
+      if (c === alphaIndex) continue;
+      var v = Math.round((data[base + c] * 255) / a);
+      out[base + c] = v > 255 ? 255 : v;
+    }
+  }
+  return out === null ? data : out;
+}
+
+/**
+ * Un-premultiply 16-bit samples at full precision, then narrow to 8 bits by the
+ * same high-byte rule as `narrow16to8`. Dividing before narrowing is the point:
+ * a pixel at 16-bit alpha 300 has a colour of one or two 8-bit steps, and
+ * dividing that by alpha 1 would turn it into noise, where the 16-bit sample
+ * still holds the real colour.
+ */
+function unpremultiplyNarrow16(data16, channels, alphaIndex, pixelCount) {
+  var out = Buffer.alloc(pixelCount * channels);
+  for (var p = 0; p < pixelCount; p++) {
+    var base = p * channels;
+    var a = alphaIndex < 0 ? 65535 : data16.readUInt16BE((base + alphaIndex) * 2);
+    var straight = a !== 0 && a !== 65535;
+    for (var c = 0; c < channels; c++) {
+      var i = (base + c) * 2;
+      if (!straight || c === alphaIndex) {
+        out[base + c] = data16[i];
+        continue;
+      }
+      var v = Math.round((data16.readUInt16BE(i) * 65535) / a);
+      out[base + c] = (v > 65535 ? 65535 : v) >> 8;
+    }
+  }
+  return out;
+}
+
 function everyPixelTransparent(data8, channels, alphaIndex, pixelCount) {
   for (var i = 0; i < pixelCount; i++) {
     if (data8[i * channels + alphaIndex] !== 0) return false;
@@ -374,10 +451,18 @@ function everyPixelTransparent(data8, channels, alphaIndex, pixelCount) {
  *   width/height  from IHDR, so they can never disagree with the pixels
  *   bitDepth      of the *source*, before any conversion
  *   converted     true when the bytes were re-encoded from 16-bit
- *   channels      samples per pixel, for a caller that composites hashInput
+ *   unpremultiplied
+ *                 true when at least one pixel was partly transparent, so its
+ *                 colour was divided out of premultiplied form and the 8-bit
+ *                 file had to be re-encoded too
+ *   channels      samples per pixel, for a caller that composites `pixels`
  *   decoded       true when the pixels were actually interpreted
  *   empty         true when every pixel is fully transparent
- *   hashInput     bytes to hash for the stale-render check
+ *   pixels        8-bit straight-alpha samples — exactly what `buffer` decodes
+ *                 to, so a caller tiling them must not un-premultiply again.
+ *                 Null when the pixels were not decoded.
+ *   hashInput     bytes to hash for the stale-render check: the 8-bit samples
+ *                 as After Effects wrote them, *before* un-premultiplying
  *   hashBasis     "pixels" when hashInput is decoded samples, "idat" when it is
  *                 the compressed stream (metadata-free either way, so an
  *                 embedded timestamp can never make two identical frames differ)
@@ -410,8 +495,10 @@ function normalizePng(buf) {
     // sheet does not have to re-derive it from the colour type.
     channels: channels,
     converted: false,
+    unpremultiplied: false,
     decoded: false,
     empty: false,
+    pixels: null,
     hashInput: idat,
     hashBasis: "idat",
     passthrough: null,
@@ -439,17 +526,20 @@ function normalizePng(buf) {
     return result;
   }
 
+  var pixelCount = h.width * h.height;
   var un = unfilter(zlib.inflateSync(idat), h.width, h.height, h.bitDepth, channels);
-  var pixels = h.bitDepth === 16
-    ? narrow16to8(un.data, h.width * h.height * channels)
+  var source8 = h.bitDepth === 16
+    ? narrow16to8(un.data, pixelCount * channels)
     : un.data;
 
   result.decoded = true;
-  result.hashInput = pixels;
+  result.hashInput = source8;
   result.hashBasis = "pixels";
 
   var alphaIndex = alphaIndexFor(h.colorType);
-  if (alphaIndex >= 0 && everyPixelTransparent(pixels, channels, alphaIndex, h.width * h.height)) {
+  // Alpha is never touched by un-premultiplying, so this reads the same either
+  // side of it — and running it first skips the division for an empty frame.
+  if (alphaIndex >= 0 && everyPixelTransparent(source8, channels, alphaIndex, pixelCount)) {
     // Nothing to send, so nothing is encoded — and `buffer: null` makes it
     // impossible for a caller to ship the frame by forgetting to check `empty`.
     result.empty = true;
@@ -457,9 +547,23 @@ function normalizePng(buf) {
     return result;
   }
 
+  var straight;
   if (h.bitDepth === 16) {
-    result.buffer = encodePng8(h.width, h.height, h.colorType, pixels);
+    straight = alphaIndex >= 0
+      ? unpremultiplyNarrow16(un.data, channels, alphaIndex, pixelCount)
+      : source8;
+    result.unpremultiplied = alphaIndex >= 0 && !straight.equals(source8);
+  } else {
+    straight = unpremultiply8(source8, channels, alphaIndex, pixelCount);
+    result.unpremultiplied = straight !== source8;
+  }
+  result.pixels = straight;
+
+  if (h.bitDepth === 16) {
+    result.buffer = encodePng8(h.width, h.height, h.colorType, straight);
     result.converted = true;
+  } else if (result.unpremultiplied) {
+    result.buffer = encodePng8(h.width, h.height, h.colorType, straight);
   }
   return result;
 }
@@ -475,6 +579,12 @@ function normalizePng(buf) {
  *
  * Returns { width, height, colorType, channels, bitDepth, pixels }, where
  * `pixels` is width*height*channels bytes and `bitDepth` is the source's.
+ *
+ * The samples are returned as stored: no alpha interpretation at all. A frame
+ * straight from `saveFrameToPng` therefore comes back *premultiplied* — which
+ * is what a resampler wants, since averaging premultiplied samples is the
+ * alpha-weighted average — and it is the caller's job to `unpremultiply8`
+ * exactly once before encoding. See mogrt.js.
  */
 function decodePng8(buf) {
   if (!Buffer.isBuffer(buf)) throw new Error("decodePng8 expects a Buffer");
@@ -521,4 +631,8 @@ module.exports = {
   decodePng8: decodePng8,
   encodePng8: encodePng8,
   crc32: crc32,
+  // For mogrt.js and main.js's contact-sheet fallback, both of which hold
+  // premultiplied samples from decodePng8 and must convert them exactly once.
+  unpremultiply8: unpremultiply8,
+  alphaIndexFor: alphaIndexFor,
 };
