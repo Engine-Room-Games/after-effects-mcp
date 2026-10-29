@@ -530,8 +530,40 @@ function __rqFootageUse(item) {
     } catch (e) { return null; }
   }
 
+  // Effects that read a layer's input at OTHER times — Echo, Posterize Time,
+  // Timewarp and their kin. On an adjustment layer they read the composite of
+  // every layer below at earlier frames, so a layer that ends before the span
+  // still reaches the render. A comp where any switched-on layer carries one
+  // is read over all of its time. Matched loosely on match name and display
+  // name on purpose: a third-party time effect with a name like these costs a
+  // skip, an unrecognised one is the risk.
+  var TIME_EFFECT = /echo|posterize\s*time|time\s*warp|time\s*displacement|time\s*difference|time\s*blend|wide\s*time|motion\s*blur|frame\s*blend|pixel\s*motion|time\s*remap|freeze|optical\s*flow|\btime\b/i;
+  var timeFxMemo = {};
+  function readsOtherTimes(c) {
+    var key = String(idOf(c));
+    if (timeFxMemo.hasOwnProperty(key)) return timeFxMemo[key];
+    var found = false;
+    var n = 0;
+    try { n = c.numLayers || 0; } catch (e) { found = true; }
+    for (var i = 1; i <= n && !found; i++) {
+      try {
+        var L = c.layer(i);
+        if (L.enabled === false) continue;
+        var fx = L.property ? L.property("ADBE Effect Parade") : null;
+        var m = fx ? (fx.numProperties || 0) : 0;
+        for (var j = 1; j <= m && !found; j++) {
+          var ef = fx.property(j);
+          if (TIME_EFFECT.test(String(ef.matchName)) || TIME_EFFECT.test(String(ef.name))) found = true;
+        }
+      } catch (e2) { found = true; }
+    }
+    timeFxMemo[key] = found;
+    return found;
+  }
+
   function walk(c, iv, live, why, depth) {
     if (!c || depth > 32) return;
+    if (live && iv && readsOtherTimes(c)) iv = null;
     var key = String(idOf(c));
     var st = compState[key];
     if (!st) { st = compState[key] = { live: false, all: false, hull: null, skip: false }; visited.push(c); }
@@ -647,10 +679,11 @@ function __rqFootageUse(item) {
   for (var fk in skipFiles) {
     if (skipFiles.hasOwnProperty(fk) && !usedIds[fk]) unreadFiles.push(skipFiles[fk]);
   }
-  // The expression scan is paid for only when missing footage would be
-  // skipped — a full property walk of every layer is not free, and switched-off
-  // layers with their footage present are common.
-  var sampled = pending.length ? anySampleImage() : false;
+  // Whenever anything was left unread, missing or not: a skipped layer with
+  // its footage present must still be checked on disk (#145) when an
+  // expression may sample it. When nothing was skipped the scan could change
+  // nothing, so that is the one case it is not run.
+  var sampled = (pending.length || unreadFiles.length) ? anySampleImage() : false;
   for (var q = 0; q < pending.length && q < NAMES_CAP; q++) {
     var line = "\"" + pending[q].name + "\": " + pending[q].why;
     if (sampled) {

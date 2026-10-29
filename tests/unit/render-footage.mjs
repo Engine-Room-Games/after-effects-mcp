@@ -25,12 +25,22 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
-const { storedFootagePaths, checkPlanFootage, footageRefusal, canonicalFootagePath } = await import(dist("render", "aerender.js"));
+const { storedFootagePaths, readStoredFootagePaths, checkPlanFootage, footageRefusal, footageWarning, canonicalFootagePath, saveAndCheckFootage } =
+  await import(dist("render", "aerender.js"));
 
 let passed = 0;
 function check(name, fn) {
   try {
     fn();
+  } catch (e) {
+    console.error(`render-footage FAILED: ${name}`);
+    throw e;
+  }
+  passed++;
+}
+async function acheck(name, fn) {
+  try {
+    await fn();
   } catch (e) {
     console.error(`render-footage FAILED: ${name}`);
     throw e;
@@ -242,6 +252,32 @@ check("a sampleImage() expression turns a skip into a warning, never into silenc
   assert.match(plan.items[0].footageWarnings[0], /"ref\.mov".*sampleImage/);
 });
 
+check("a time effect on a switched-on layer makes the whole comp read: Echo on an adjustment layer reaches back", () => {
+  const echo = Object.assign(group([]), { matchName: "ADBE Echo", name: "Echo" });
+  const top = comp("Main", [
+    layer({ name: "Adjust", source: footage("Adjustment Layer 1", { file: null }) }),
+    layer({ name: "Early", source: footage("early.mov", { missing: true }), inPoint: 0, outPoint: 1 }),
+  ]);
+  assert.match(prepare(top, { span: [2, 4] }).items[0].footageSkipped[0], /early\.mov.*outside the rendered time span/);
+  const adj = top.layer(1);
+  const fx = group([echo]);
+  adj.property = (k) => (k === "ADBE Effect Parade" ? fx : null);
+  assert.match(throwsMsg(() => prepare(top, { span: [2, 4] })), /early\.mov/);
+  // Switched off, the effect does nothing.
+  adj.enabled = false;
+  assert.match(prepare(top, { span: [2, 4] }).items[0].footageSkipped[0], /early\.mov/);
+});
+
+check("with sampleImage in the render, present footage on a skipped layer is listed for the on-disk check", () => {
+  const top = comp("Main", [
+    layer({ name: "Ref", source: footage("ref.mov"), enabled: false }),
+    layer({ source: footage("bg.png"), props: [group([expressionProp('thisComp.layer("Ref").sampleImage([0,0])')])] }),
+  ]);
+  assert.deepEqual(plain(prepare(top).items[0].footage).map((f) => f.name).sort(), ["bg.png", "ref.mov"]);
+  const quiet = comp("Main", [layer({ source: footage("ref.mov"), enabled: false }), layer({ source: footage("bg.png") })]);
+  assert.deepEqual(plain(prepare(quiet).items[0].footage).map((f) => f.name), ["bg.png"]);
+});
+
 check("footage read in one place and skipped in another is read", () => {
   const shared = footage("shared.mov", { missing: true });
   const top = comp("Main", [
@@ -339,9 +375,9 @@ check("the absolute paths are read out of a saved project, wherever the chunks s
 });
 
 check("an .aepx's fileReference attributes are read too", () => {
-  const xml = '<x><fileReference fullpath="/a/b &amp; c.png" target_is_folder="0"/><fileReference fullpath="/seq" target_is_folder="1"/></x>';
+  const xml = '<x><fileReference fullpath="/a/b &amp; c&#46;png" target_is_folder="0"/><fileReference fullpath="/Pr&#xFC;fung/d.png"/><fileReference fullpath="/seq" target_is_folder="1"/></x>';
   const got = storedFootagePaths(Buffer.from(xml), true);
-  assert.deepEqual(got.paths, ["/a/b & c.png"]);
+  assert.deepEqual(got.paths, ["/a/b & c.png", "/Prüfung/d.png"]);
   assert.deepEqual(got.folders, ["/seq"]);
 });
 
@@ -374,13 +410,18 @@ check("footage After Effects still shows but whose file is gone is refused, save
   }
 });
 
-check("a project from which no footage path can be read proves nothing, and is refused", () => {
+check("a project whose footage paths cannot be read is not refused: it renders on the older checks, with a warning", () => {
+  // Fail-open on purpose: an older or unknown project format is not evidence
+  // of moved footage, and refusing it would refuse every render it has.
   fs.writeFileSync(aep, Buffer.from("RIFX but not a format this knows"));
   const r = checkPlanFootage(planWith({ name: "pic.png", path: pic }), aep);
   assert.equal(r.unreadable, true);
-  assert.match(footageRefusal(r, { saveProject: true, afterSave: false }), /no footage path could be read/);
-  // …but a render that reads no file-backed footage at all needs no paths.
+  assert.equal(footageRefusal(r, { saveProject: false, afterSave: false }), null);
+  assert.equal(footageRefusal(r, { saveProject: true, afterSave: true }), null);
+  assert.match(footageWarning(r), /could not be read.*missing-footage placeholder/);
+  // …and a render that reads no file-backed footage at all needs no paths.
   assert.deepEqual(checkPlanFootage(planWith(), aep), { gone: [], stale: [], unreadable: false });
+  assert.equal(footageWarning(checkPlanFootage(planWith(), aep)), null);
 });
 
 check("the same file under another name (NFD, symlink, folder record) is not stale", () => {
@@ -407,6 +448,112 @@ check("Windows paths compare without case or slash direction", () => {
   assert.equal(canonicalFootagePath("C:\\Proj\\Foot\\A.PNG", "win32"), canonicalFootagePath("c:/proj/foot/a.png", "win32"));
   assert.equal(canonicalFootagePath("/c/Proj/a.png", "win32"), "c:/proj/a.png");
   assert.notEqual(canonicalFootagePath("/Proj/A.png", "darwin"), canonicalFootagePath("/proj/a.png", "darwin"));
+});
+
+check("the chunked reader finds every record, including one cut by a chunk edge", () => {
+  const many = Array.from({ length: 40 }, (_v, i) => `/foot/clip-${i}-${"x".repeat(i * 7)}.mov`);
+  fs.writeFileSync(aep, fakeAep(many, { folder: ["/seq"] }));
+  const whole = storedFootagePaths(fs.readFileSync(aep));
+  for (const size of [37, 64, 211, 4096, 16 << 20]) {
+    assert.deepEqual(readStoredFootagePaths(aep, size), whole, `chunk ${size}`);
+    // With an overlap smaller than the file, so records really are cut by edges.
+    assert.deepEqual(readStoredFootagePaths(aep, size, 600), whole, `chunk ${size}, overlap 600`);
+  }
+  assert.equal(whole.records, 41);
+  assert.equal(readStoredFootagePaths(path.join(tmp, "nope.aep")), null);
+});
+
+// The order of refusals and the save (review of #146).
+const fresh = path.join(footDir, "fresh.png");
+fs.writeFileSync(fresh, "x");
+const dirtyPlan = (...refs) => ({ ...planWith(...refs), dirty: true });
+
+await acheck("new project + import + saveProject:true renders: the file is checked after the save, not before", async () => {
+  // On disk: the project as last saved, before `fresh.png` was imported.
+  fs.writeFileSync(aep, fakeAep([pic]));
+  const calls = [];
+  const r = await saveAndCheckFootage({
+    plan: dirtyPlan({ name: "pic.png", path: pic }, { name: "fresh.png", path: fresh }),
+    saveProject: true,
+    beforeSave: () => calls.push("beforeSave"),
+    save: async (force) => {
+      calls.push(`save:${force}`);
+      fs.writeFileSync(aep, fakeAep([pic, fresh])); // what After Effects writes
+      return { saved: true };
+    },
+  });
+  assert.deepEqual(calls, ["beforeSave", "save:false"]);
+  assert.deepEqual(r, { saved: true, savedForFootage: false, pathsWarning: null });
+  // The same with a never-before-readable file (a brand-new project saved
+  // once, empty): still only the file after the save is read.
+  fs.writeFileSync(aep, Buffer.from("RIFX"));
+  const r2 = await saveAndCheckFootage({
+    plan: dirtyPlan({ name: "fresh.png", path: fresh }),
+    saveProject: true,
+    save: async () => { fs.writeFileSync(aep, fakeAep([fresh])); return { saved: true }; },
+  });
+  assert.equal(r2.pathsWarning, null);
+});
+
+await acheck("unsaved changes without saveProject get the unsaved-changes refusal, before any footage check", async () => {
+  fs.writeFileSync(aep, Buffer.from("RIFX"));
+  let saved = false;
+  const msg = await saveAndCheckFootage({
+    plan: dirtyPlan({ name: "fresh.png", path: fresh }, { name: "gone.mov", path: path.join(footDir, "gone.mov") }),
+    saveProject: false,
+    save: async () => { saved = true; return { saved: true }; },
+  }).then(() => "no throw", (e) => e.message);
+  assert.match(msg, /unsaved changes.*saveProject:true/);
+  assert.doesNotMatch(msg, /footage/);
+  assert.equal(saved, false);
+});
+
+await acheck("footage gone from disk is refused before a dirty project is saved", async () => {
+  let saved = false;
+  const msg = await saveAndCheckFootage({
+    plan: dirtyPlan({ name: "gone.mov", path: path.join(footDir, "gone.mov") }),
+    saveProject: true,
+    save: async () => { saved = true; return { saved: true }; },
+  }).then(() => "no throw", (e) => e.message);
+  assert.match(msg, /^Nothing was saved or rendered: .*no longer on disk/);
+  assert.equal(saved, false);
+});
+
+await acheck("a clean project with moved footage: refused without saveProject, saved with force and re-read with it", async () => {
+  fs.writeFileSync(aep, fakeAep(["/Volumes/Old/pic.png"]));
+  const plan = planWith({ name: "pic.png", path: pic });
+  let calls = [];
+  const save = async (force) => { calls.push(force); fs.writeFileSync(aep, fakeAep([pic])); return { saved: true }; };
+  const msg = await saveAndCheckFootage({ plan, saveProject: false, save }).then(() => "no throw", (e) => e.message);
+  assert.match(msg, /relative to the project.*saveProject:true/);
+  assert.deepEqual(calls, []);
+  const r = await saveAndCheckFootage({ plan, saveProject: true, save });
+  assert.deepEqual(calls, [true]);
+  assert.deepEqual(r, { saved: true, savedForFootage: true, pathsWarning: null });
+  // A save that did not record them is refused after the fact.
+  fs.writeFileSync(aep, fakeAep(["/Volumes/Old/pic.png"]));
+  const noop = async () => ({ saved: true });
+  const after = await saveAndCheckFootage({ plan, saveProject: true, save: noop }).then(() => "no throw", (e) => e.message);
+  assert.match(after, /^The project WAS saved, but nothing was rendered/);
+  // Read-only: refused before the save.
+  fs.writeFileSync(aep, fakeAep(["/Volumes/Old/pic.png"]));
+  calls = [];
+  const ro = await saveAndCheckFootage({ plan, saveProject: true, readOnly: true, save }).then(() => "no throw", (e) => e.message);
+  assert.match(ro, /read-only and records footage at paths that have moved/);
+  assert.deepEqual(calls, []);
+});
+
+await acheck("a clean project whose file cannot be read renders with a warning and is not saved", async () => {
+  fs.writeFileSync(aep, Buffer.from("RIFX old format"));
+  let saved = false;
+  const r = await saveAndCheckFootage({
+    plan: planWith({ name: "pic.png", path: pic }),
+    saveProject: false,
+    save: async () => { saved = true; return { saved: true }; },
+  });
+  assert.equal(saved, false);
+  assert.equal(r.saved, false);
+  assert.match(r.pathsWarning, /could not be read/);
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

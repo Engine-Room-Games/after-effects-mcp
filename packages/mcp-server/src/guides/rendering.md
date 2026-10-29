@@ -60,7 +60,10 @@ ProRes 4444 with alpha is an **output module template** that already says so.
   refusal names the files; pass `saveProject: true` (tell the user — this
   saves a project with no unsaved changes) and the save records where they
   are now. Footage After Effects still shows but whose file is gone from disk
-  (deleted or moved while the project was open) is refused outright.
+  (deleted or moved while the project was open) is refused outright. If the
+  result carries `footagePathsUnchecked`, the project's format could not be
+  read for that check (an older project, say): the render runs anyway — open
+  the output and look before calling it done.
 - **Existing files are refused** unless `overwrite: true` — that includes an
   item the user queued by hand that points at last week's render.
 - **Edits made while it renders are not in the render.** The render reads a

@@ -708,49 +708,121 @@ export function missingFootageHint(lines: string[]): string {
  *    "platform":2,"server_name":"","server_volume_name":"","target_is_folder":false}
  * `fullpath` is the absolute path; the ascend counts are the relative one. An
  * .aepx is assumed to carry the same as `fullpath="…"` attributes on a
- * `<fileReference>` (not measured). This is a byte scan, not a parse of the
- * format: a chunk it does not recognise is passed over, and `records` says how
- * many were read, so a file this cannot read is known as such rather than
- * mistaken for one with no footage.
+ * `<fileReference>` (not measured; character references are decoded). This is
+ * a byte scan, not a parse of the format: a chunk it does not recognise is
+ * passed over, and `records` says how many were read, so a file this cannot
+ * read is known as such rather than mistaken for one with no footage.
  */
-export function storedFootagePaths(bytes: Buffer, isXml = false): { paths: string[]; folders: string[]; records: number } {
-  const paths: string[] = [];
-  const folders: string[] = [];
-  let records = 0;
-  if (isXml) {
-    const text = bytes.toString("utf8");
-    const decode = (v: string) =>
-      v.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-    for (const m of text.matchAll(/<fileReference\b[^>]*>/g)) {
-      const full = /\bfullpath="([^"]*)"/.exec(m[0]);
-      if (!full) continue;
-      records++;
-      (/\btarget_is_folder="(?:1|true)"/.test(m[0]) ? folders : paths).push(decode(full[1]));
-    }
-    return { paths, folders, records };
-  }
+export interface StoredFootagePaths {
+  paths: string[];
+  folders: string[];
+  records: number;
+}
+
+/** The longest `alas` record read; anything larger is not one. */
+const MAX_ALIAS_RECORD = 1 << 20;
+
+/**
+ * Scan `data` for `alas` records whose tag starts before `limit`, into `out`.
+ * A record has to lie wholly inside `data`; the chunked reader keeps an
+ * overlap longer than any record, so one cut by a chunk edge is read whole
+ * from the next pass.
+ */
+function scanAliasRecords(data: Buffer, limit: number, out: StoredFootagePaths): void {
   const tag = Buffer.from("alas", "latin1");
-  let at = bytes.indexOf(tag);
-  while (at !== -1 && at + 8 <= bytes.length) {
-    const size = bytes.readUInt32BE(at + 4);
+  let at = data.indexOf(tag);
+  while (at !== -1 && at < limit && at + 8 <= data.length) {
+    const size = data.readUInt32BE(at + 4);
     const start = at + 8;
-    if (size > 0 && size < 1 << 20 && start + size <= bytes.length && bytes[start] === 0x7b /* { */) {
+    if (size > 0 && size < MAX_ALIAS_RECORD && start + size <= data.length && data[start] === 0x7b /* { */) {
       try {
-        const rec = JSON.parse(bytes.toString("utf8", start, start + size).replace(/\0+$/, "")) as {
+        const rec = JSON.parse(data.toString("utf8", start, start + size).replace(/\0+$/, "")) as {
           fullpath?: unknown;
           target_is_folder?: unknown;
         };
         if (typeof rec.fullpath === "string") {
-          records++;
-          (rec.target_is_folder === true ? folders : paths).push(rec.fullpath);
+          out.records++;
+          (rec.target_is_folder === true ? out.folders : out.paths).push(rec.fullpath);
         }
       } catch {
         // Not an alias record after all; keep scanning.
       }
     }
-    at = bytes.indexOf(tag, at + 4);
+    at = data.indexOf(tag, at + 4);
   }
-  return { paths, folders, records };
+}
+
+/** XML character references and the five named entities, as an .aepx attribute holds them. */
+function decodeXmlAttr(v: string): string {
+  return v
+    .replace(/&#x([0-9a-f]+);/gi, (_m, h: string) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_m, d: string) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+export function storedFootagePaths(bytes: Buffer, isXml = false): StoredFootagePaths {
+  const out: StoredFootagePaths = { paths: [], folders: [], records: 0 };
+  if (isXml) {
+    const text = bytes.toString("utf8");
+    for (const m of text.matchAll(/<fileReference\b[^>]*>/g)) {
+      const full = /\bfullpath="([^"]*)"/.exec(m[0]);
+      if (!full) continue;
+      out.records++;
+      (/\btarget_is_folder="(?:1|true)"/.test(m[0]) ? out.folders : out.paths).push(decodeXmlAttr(full[1]));
+    }
+    return out;
+  }
+  scanAliasRecords(bytes, bytes.length, out);
+  return out;
+}
+
+/**
+ * `storedFootagePaths` for a file on disk, read in chunks: an .aep with
+ * embedded media can be several gigabytes, past what `readFileSync` will hold
+ * in one Buffer, and reading it whole would refuse exactly the projects that
+ * have the most footage. Null when the file cannot be read at all. An .aepx
+ * (text) is read whole up to 512 MB and reported unreadable above that.
+ */
+export function readStoredFootagePaths(
+  projectPath: string,
+  chunkSize = 16 << 20,
+  /** How far a record may run past a chunk's edge; a test shrinks it to exercise the edges. */
+  maxRecord = MAX_ALIAS_RECORD
+): StoredFootagePaths | null {
+  const out: StoredFootagePaths = { paths: [], folders: [], records: 0 };
+  let fd: number | null = null;
+  try {
+    if (/\.aepx$/i.test(projectPath)) {
+      if (fs.statSync(projectPath).size > 512 << 20) return out;
+      return storedFootagePaths(fs.readFileSync(projectPath), true);
+    }
+    fd = fs.openSync(projectPath, "r");
+    const overlap = maxRecord + 16;
+    const chunk = Buffer.alloc(chunkSize);
+    let carry: Buffer = Buffer.alloc(0);
+    for (;;) {
+      const n = fs.readSync(fd, chunk, 0, chunkSize, null);
+      const last = n === 0;
+      const data = n ? Buffer.concat([carry, chunk.subarray(0, n)]) : carry;
+      // Tags before `limit` are decided now; the rest, and any record that
+      // might run past the end of `data`, are carried into the next pass.
+      const limit = last ? data.length : Math.max(0, data.length - overlap);
+      scanAliasRecords(data, limit, out);
+      if (last) break;
+      carry = Buffer.from(data.subarray(limit));
+    }
+    return out;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
 }
 
 /**
@@ -777,46 +849,60 @@ export interface FootageCheck {
   gone: FootageRef[];
   /** Footage on disk that the saved project does not record at any path leading to it. */
   stale: FootageRef[];
-  /** The items read footage, and no footage path at all could be read from the saved file. */
+  /**
+   * The items read footage, and no footage path at all could be read from the
+   * saved file (a format this does not know, or a file it cannot open). The
+   * render goes ahead on the older checks, with a warning — see footageWarning.
+   */
   unreadable: boolean;
+}
+
+/** Every file-backed footage the plan's items read, once each. */
+function planFootage(plan: RenderPlan): FootageRef[] {
+  const used = new Map<string, FootageRef>();
+  for (const item of plan.items) for (const f of item.footage ?? []) if (!used.has(f.path)) used.set(f.path, f);
+  return [...used.values()];
+}
+
+/**
+ * Footage After Effects still shows whose file is no longer on disk. Measured
+ * on 26.5: a file deleted while the project is open reads as present
+ * (`footageMissing` false) until the project is reopened. Nothing a save
+ * writes changes this, so it is checked before any save.
+ */
+export function goneFootage(plan: RenderPlan): FootageRef[] {
+  return planFootage(plan).filter((f) => !fs.existsSync(f.path));
 }
 
 /**
  * Check every file the plan's items read against the disk and against the
- * saved project (issue #145). Language-independent by construction: nothing
- * here reads aerender's output.
+ * paths the SAVED project records (issue #145). Language-independent by
+ * construction: nothing here reads aerender's output.
  *
- *  - `gone`: the file After Effects resolved is not on disk. Measured on 26.5:
- *    a file deleted while the project is open reads as present
- *    (`footageMissing` false) until the project is reopened, so the up-front
- *    refusal in render.jsx missed it and only aerender's English line caught it.
+ * Only meaningful on a file that holds the project as it is now — call it
+ * after any save, never on the file a dirty project is about to replace: the
+ * old file does not record footage imported since, and would call it stale.
+ *
+ *  - `gone`: see goneFootage.
  *  - `stale`: the file is on disk, but no absolute path the saved project
  *    records leads to it — After Effects found it through the relative path,
  *    which the temp copy cannot follow. A save fixes it: After Effects writes
  *    the absolute path it resolved.
  *  - `unreadable`: the items read footage and no footage path could be read
- *    from the file at all. Nothing can be proved about the copy.
+ *    from the file. Reported, not refused: see footageWarning.
  */
 export function checkPlanFootage(
   plan: RenderPlan,
   projectPath: string,
   platform: NodeJS.Platform = process.platform
 ): FootageCheck {
-  const used = new Map<string, FootageRef>();
-  for (const item of plan.items) for (const f of item.footage ?? []) if (!used.has(f.path)) used.set(f.path, f);
   const gone: FootageRef[] = [];
   const present: FootageRef[] = [];
-  for (const f of used.values()) (fs.existsSync(f.path) ? present : gone).push(f);
+  for (const f of planFootage(plan)) (fs.existsSync(f.path) ? present : gone).push(f);
   if (!present.length) return { gone, stale: [], unreadable: false };
 
-  let bytes: Buffer;
-  try {
-    bytes = fs.readFileSync(projectPath);
-  } catch {
-    return { gone, stale: [], unreadable: true };
-  }
-  const stored = storedFootagePaths(bytes, /\.aepx$/i.test(projectPath));
-  if (!stored.records) return { gone, stale: [], unreadable: true };
+  const stored = readStoredFootagePaths(projectPath);
+  if (!stored || !stored.records) return { gone, stale: [], unreadable: true };
   const canon = (p: string) => canonicalFootagePath(p, platform);
   const files = new Set<string>();
   for (const p of stored.paths) {
@@ -837,14 +923,14 @@ export function checkPlanFootage(
 /**
  * Why a render must not start, given a footage check — or null when it may.
  *
- * `gone` and `unreadable` refuse outright: no save can bring a deleted file
- * back, and a file this cannot read proves nothing. `stale` is fixed by a save,
- * so before one it refuses unless the caller passed saveProject:true (the save
- * is never a surprise, the same rule as unsaved changes), and after one —
- * `afterSave`, the check re-run on the file just written — any stale path left
- * means the save did not record it, and it refuses rather than render.
- * Refusing over rendering from a copy beside the original: see
- * "The render queue" in docs/fragile-areas-ae.md.
+ * `gone` refuses outright: no save brings a deleted file back. `stale` is
+ * fixed by a save, so before one it refuses unless the caller passed
+ * saveProject:true (the save is never a surprise, the same rule as unsaved
+ * changes), and after one — `afterSave`, the check run on the file just
+ * written — any stale path left means the save did not record it, and it
+ * refuses rather than render. `unreadable` never refuses: see footageWarning.
+ * Refusing over rendering from a copy beside the original: see "Footage the
+ * copy cannot find" in docs/fragile-areas-ae.md.
  */
 export function footageRefusal(check: FootageCheck, opts: { saveProject: boolean; afterSave: boolean }): string | null {
   const lead = opts.afterSave ? "The project WAS saved, but nothing was rendered: " : "Nothing was saved or rendered: ";
@@ -855,15 +941,6 @@ export function footageRefusal(check: FootageCheck, opts: { saveProject: boolean
       "It was moved, renamed or deleted while the project was open — After Effects only notices when the project " +
       "is reopened, and the render would carry the missing-footage placeholder. Ask the user to put the file back " +
       "or relink it (File > Dependencies > Find Missing Footage), then call render_queue again."
-    );
-  }
-  if (check.unreadable) {
-    return (
-      lead +
-      "the render reads a copy of the saved project, and no footage path could be read from that file to prove the " +
-      "copy finds its footage — this version of After Effects may save projects in a form this server does not " +
-      "know. Rendering anyway could produce the missing-footage placeholder and report it as done. Log this with " +
-      "log_issue; meanwhile the user can render from After Effects' own Render Queue panel."
     );
   }
   if (check.stale.length && opts.afterSave) {
@@ -886,6 +963,95 @@ export function footageRefusal(check: FootageCheck, opts: { saveProject: boolean
     );
   }
   return null;
+}
+
+/**
+ * The warning a render carries when the saved file's footage paths could not
+ * be read — FAIL-OPEN, deliberately. An unreadable file is a project format
+ * this does not know (an older project, an .aepx, a future AE), not evidence
+ * of moved footage, and refusing it would refuse every render with footage
+ * from such a project. The render goes ahead on what held before #145:
+ * `footageMissing` up front, the on-disk check above, aerender's
+ * missing-footage and logged-error lines, and the judging of the file. What
+ * that leaves open is one case — a project moved and not saved, in a format
+ * this cannot read, on a non-English AE, in an output format the file judge
+ * cannot inspect — and the warning names it so the agent can tell the user.
+ */
+export function footageWarning(check: FootageCheck): string | null {
+  if (!check.unreadable) return null;
+  return (
+    "The footage paths in the saved project could not be read (a project format this server does not know), so " +
+    "it could not check that the render's copy of the project finds every file. If the project folder was moved " +
+    "since it was last saved, the render may show the missing-footage placeholder — open the output and look, or " +
+    "have the user save the project first."
+  );
+}
+
+/**
+ * render_queue's refusals and save, in the order that makes each one true.
+ *
+ * The order is the point (review of #146). The saved-path check reads the
+ * .aep on disk, so on a project with unsaved changes it must run AFTER the
+ * save: before it, the file is the old one, which does not record footage
+ * imported since — a new project, an import, then a render would be called
+ * "moved since saved", or unreadable. So:
+ *   1. unsaved changes without saveProject → the unsaved-changes refusal;
+ *   2. footage gone from disk → refused (no save brings it back);
+ *   3. a CLEAN project's file is checked now: stale paths refuse without
+ *      saveProject, and with it the project is saved (`force`);
+ *   4. read-only, then `beforeSave` (resolving aerender — anything that can
+ *      refuse does so before the save), then the save;
+ *   5. after any save, the file just written is checked, and a path it still
+ *      does not record refuses with "The project WAS saved".
+ * An unreadable file never refuses; it comes back as `pathsWarning`.
+ */
+export async function saveAndCheckFootage(opts: {
+  plan: RenderPlan;
+  saveProject: boolean;
+  readOnly?: boolean | null;
+  save: (force: boolean) => Promise<{ saved: boolean }>;
+  beforeSave?: () => void;
+  platform?: NodeJS.Platform;
+}): Promise<{ saved: boolean; savedForFootage: boolean; pathsWarning: string | null }> {
+  const { plan, saveProject } = opts;
+  const dirty = plan.dirty === true;
+  if (dirty && !saveProject) {
+    throw new Error(
+      "The project has unsaved changes, and the render reads the saved file, so it would not contain them. " +
+        "Nothing was saved or rendered. Tell the user the project will be saved, then call render_queue again " +
+        "with saveProject:true — or ask them to save it themselves."
+    );
+  }
+  const gone = goneFootage(plan);
+  if (gone.length) {
+    throw new Error(footageRefusal({ gone, stale: [], unreadable: false }, { saveProject, afterSave: false }) as string);
+  }
+  const pre = dirty ? null : checkPlanFootage(plan, plan.projectPath, opts.platform);
+  if (pre) {
+    const refused = footageRefusal(pre, { saveProject, afterSave: false });
+    if (refused) throw new Error(refused);
+  }
+  const stale = !!pre && pre.stale.length > 0;
+  const needSave = dirty || stale;
+  if (needSave && opts.readOnly === true) {
+    throw new Error(
+      `The project file ${plan.projectPath} is read-only and ` +
+        (dirty ? "has unsaved changes" : "records footage at paths that have moved") +
+        ", so it cannot be saved for the render. Nothing was rendered. Ask the user to make it writable or Save As " +
+        "somewhere else."
+    );
+  }
+  opts.beforeSave?.();
+  if (!needSave) return { saved: false, savedForFootage: false, pathsWarning: pre ? footageWarning(pre) : null };
+  // `force` only for a clean project: a dirty one is saved anyway, and its
+  // dirty flag is what proves the save happened.
+  const save = await opts.save(!dirty);
+  // A clean project's dirty flag cannot show whether the save happened, and a
+  // dirty one's old file never held the new footage: read what was written.
+  const post = checkPlanFootage(plan, plan.projectPath, opts.platform);
+  const refused = footageRefusal(post, { saveProject: true, afterSave: true });
+  if (refused) throw new Error(refused);
+  return { saved: save.saved, savedForFootage: stale, pathsWarning: footageWarning(post) };
 }
 
 /** Footage for a message: at most `cap` of them, then how many more. */

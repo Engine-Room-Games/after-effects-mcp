@@ -17,8 +17,7 @@ import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge
 import { JobManager } from "./jobs/manager.js";
 import {
   RenderRunner,
-  checkPlanFootage,
-  footageRefusal,
+  saveAndCheckFootage,
   logRenderStart,
   occupiedOutputs,
   resolveAerender,
@@ -771,37 +770,19 @@ async function runRender(
   // Every file the items read must be on disk, and recorded in the saved
   // project at a path that leads to it — the render reads a copy in the temp
   // folder, which cannot follow a path relative to the project (issue #145).
-  // Checked here, in Node, so it holds in any language.
-  const footage = checkPlanFootage(plan, plan.projectPath);
-  const footageRefused = footageRefusal(footage, { saveProject: args.saveProject === true, afterSave: false });
-  if (footageRefused) throw new Error(footageRefused);
-  const staleFootage = footage.stale.length > 0;
-  if (plan.dirty && !args.saveProject) {
-    throw new Error(
-      "The project has unsaved changes, and the render reads the saved file, so it would not contain them. " +
-        "Nothing was saved or rendered. Tell the user the project will be saved, then call render_queue again " +
-        "with saveProject:true — or ask them to save it themselves."
-    );
-  }
-  const needSave = plan.dirty === true || staleFootage;
-  if (needSave && plan.readOnly === true) {
-    throw new Error(
-      `The project file ${plan.projectPath} is read-only and ` +
-        (plan.dirty ? "has unsaved changes" : "records footage at paths that have moved") +
-        ", so it cannot be saved for the render. Nothing was rendered. Ask the user to make it writable or Save As " +
-        "somewhere else."
-    );
-  }
-  const aerender = resolveAerender(aerenderCandidates(plan.appPackage, { installRoots: afterEffectsInstallRoots() }));
-  const save = needSave
-    ? ((await bridge.runOp("_render_save", { force: staleFootage })) as { saved: boolean })
-    : { saved: false };
-  if (staleFootage) {
-    // A clean project's dirty flag cannot show whether the save happened, so
-    // the file it wrote is read again: render only if it now records them.
-    const again = footageRefusal(checkPlanFootage(plan, plan.projectPath), { saveProject: true, afterSave: true });
-    if (again) throw new Error(again);
-  }
+  // Checked in Node, so it holds in any language; on a dirty project only
+  // after the save, since the old file does not hold footage imported since.
+  let aerender = "";
+  const { saved, savedForFootage, pathsWarning } = await saveAndCheckFootage({
+    plan,
+    saveProject: args.saveProject === true,
+    readOnly: plan.readOnly,
+    beforeSave: () => {
+      aerender = resolveAerender(aerenderCandidates(plan.appPackage, { installRoots: afterEffectsInstallRoots() }));
+    },
+    save: async (force) => (await bridge.runOp("_render_save", { force })) as { saved: boolean },
+  });
+  const save = { saved };
   const footageWarnings = plan.items.flatMap((i) => (i.footageWarnings ?? []).map((w) => `item ${i.index}: ${w}`));
   const footageSkipped = plan.items.flatMap((i) => (i.footageSkipped ?? []).map((w) => `item ${i.index}: ${w}`));
   let started: { jobId: string; totalFrames: number };
@@ -824,7 +805,7 @@ async function runRender(
     })),
     projectPath: plan.projectPath,
     projectSaved: save.saved,
-    ...(staleFootage
+    ...(savedForFootage
       ? {
           projectSavedBecause:
             "the saved project recorded footage at paths it had moved from; the save made After Effects record where it is now",
@@ -837,6 +818,7 @@ async function runRender(
             "Missing footage this render should not read, but might — tell the user, and check those frames in the file.",
         }
       : {}),
+    ...(pathsWarning ? { footagePathsUnchecked: pathsWarning } : {}),
     ...(footageSkipped.length
       ? {
           missingFootageNotRendered: footageSkipped,
