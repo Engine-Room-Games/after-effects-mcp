@@ -345,6 +345,45 @@ function __rtAfterWrite(op, problems) {
 }
 
 /**
+ * A write that throws part-way leaves keys already removed or rewritten. The
+ * raw AE message alone would read as "nothing happened", so the failure names
+ * what had landed, what was in progress, and the one undo that restores it.
+ */
+function __rtWriteFailure(op, e, done, current) {
+  return new Error(
+    op + " failed part-way: " + __rtMsg(e) +
+    "\nAlready changed: " + (done.length ? done.join("; ") : "nothing before this property") + "." +
+    (current ? "\nIn progress: " + current + " — it may be only partly written, and any keys it was replacing were removed first." : "") +
+    "\nEverything this call did is one undo step: Edit > Undo in After Effects restores it all."
+  );
+}
+
+/**
+ * Why a property's keys cannot be moved or copied by value, or null. A custom-
+ * value property (Curves, Levels' histogram and the like) keeps its keys in a
+ * form keyValue cannot read or setValueAtTime write; a no-value one has none.
+ */
+function __rtUnmovable(prop, where) {
+  var vt = null;
+  try { vt = prop.propertyValueType; } catch (e) { vt = null; }
+  if (typeof PropertyValueType === "undefined" || vt === null || vt === undefined) return null;
+  if (vt === PropertyValueType.CUSTOM_VALUE) {
+    return where + " holds a custom value (as Curves and Levels do), whose keys cannot be read or written by script; " +
+      "leave it out of propertyPaths and move or copy it by hand in After Effects.";
+  }
+  if (vt === PropertyValueType.NO_VALUE) return where + " has no value to key.";
+  return null;
+}
+
+/** Orientation and X/Y Rotation exist on a 2D layer but only take effect, and values, in 3D. */
+var __RT_ONLY_3D = { "ADBE Orientation": true, "ADBE Rotate X": true, "ADBE Rotate Y": true };
+
+function __rtIsCamOrLight(l) {
+  return (typeof CameraLayer !== "undefined" && l instanceof CameraLayer) ||
+    (typeof LightLayer !== "undefined" && l instanceof LightLayer);
+}
+
+/**
  * Two keys closer than `tol` would merge into one in After Effects — the later
  * write silently replaces the earlier. `entries` are {time, from} with `from`
  * describing where the key came from; returns problem phrases.
@@ -408,6 +447,8 @@ OPS.retime_keyframes = function (args) {
         if (entry.propertyPaths) problems.push(__rtSeparationProblem(prop, l, names, true) || (where + " has no keyframes to retime."));
         continue;
       }
+      var unmovable = __rtUnmovable(prop, where);
+      if (unmovable) { problems.push(unmovable); continue; }
       var moved = [];
       var kept = [];
       for (var k = 1; k <= n; k++) {
@@ -464,6 +505,7 @@ OPS.retime_keyframes = function (args) {
   var verify = [];
   var out = [];
   var expressionNotes = [];
+  var done = [];
   for (var w = 0; w < plans.length; w++) {
     var pl = plans[w];
     var layerOut = { layerId: pl.layer.id, name: pl.layer.name, shift: pl.shift, properties: [] };
@@ -471,8 +513,14 @@ OPS.retime_keyframes = function (args) {
       var pr = pl.props[x];
       var idxs = [];
       for (var y = 0; y < pr.moved.length; y++) idxs.push(pr.moved[y].index);
-      __rtRemoveKeys(pr.prop, idxs);
-      var bad = __rtWriteKeys(pr.prop, pr.newKeys, pr.where);
+      var bad;
+      try {
+        __rtRemoveKeys(pr.prop, idxs);
+        bad = __rtWriteKeys(pr.prop, pr.newKeys, pr.where);
+      } catch (eW) {
+        throw __rtWriteFailure("retime_keyframes", eW, done, pr.where + " (" + pr.newKeys.length + " keys)");
+      }
+      done.push(pr.where + " (" + pr.newKeys.length + " keys retimed)");
       for (var b = 0; b < bad.length; b++) verify.push(bad[b]);
       var first = null;
       var last = null;
@@ -515,6 +563,10 @@ OPS.copy_animation = function (args) {
     var r = __rtRoute(prop);
     var n = __rtNumKeys(prop);
     var keys = [];
+    if (n > 0) {
+      var unmovable = __rtUnmovable(prop, __rtLayerLabel(sl) + ", " + r.names.join(" > "));
+      if (unmovable) { problems.push(unmovable); continue; }
+    }
     for (var k = 1; k <= n; k++) keys.push(__rtReadKey(prop, k));
     var expr = null;
     if (withExpr && __rtHasExpression(prop)) expr = { text: prop.expression, enabled: !!prop.expressionEnabled };
@@ -555,6 +607,20 @@ OPS.copy_animation = function (args) {
           "groups in the same order as the source).");
         continue;
       }
+      // The same pre-write test set_transform uses (#204): AE 26.5 has no
+      // canSetValue, and a hidden property reports canSetExpression:false.
+      if (__RT_ONLY_3D[src.matchName] && !tl.threeDLayer && !__rtIsCamOrLight(tl)) {
+        problems.push(where + " exists only on a 3D layer, and this one is 2D. Make it 3D first with set_layer " +
+          "threeDLayer:true, or leave it out of propertyPaths.");
+        continue;
+      }
+      var settable = true;
+      try { settable = tp.canSetExpression !== false; } catch (eS) { settable = false; }
+      if (!settable) {
+        problems.push(where + " is hidden on the target and cannot be set (for example a camera's Point of Interest " +
+          "in one-node mode, or a point light's Orientation). Leave it out of propertyPaths.");
+        continue;
+      }
       var sep = __rtSeparationProblem(tp, tl, src.names, src.keys.length > 0);
       if (sep) { problems.push(sep); continue; }
       if (src.keys.length) {
@@ -593,18 +659,29 @@ OPS.copy_animation = function (args) {
 
   var verify = [];
   var exprErrors = [];
+  var done = [];
   for (var j = 0; j < jobs.length; j++) {
     var job = jobs[j];
-    if (job.keys.length) {
-      var existing = [];
-      for (var e = 1; e <= __rtNumKeys(job.prop); e++) existing.push(e);
-      __rtRemoveKeys(job.prop, existing);
-      var bad = __rtWriteKeys(job.prop, job.keys, job.where);
-      for (var b = 0; b < bad.length; b++) verify.push(bad[b]);
+    var what = [];
+    if (job.keys.length) what.push(job.keys.length + " keys");
+    if (job.expr) what.push("expression");
+    try {
+      if (job.keys.length) {
+        var existing = [];
+        for (var e = 1; e <= __rtNumKeys(job.prop); e++) existing.push(e);
+        __rtRemoveKeys(job.prop, existing);
+        var bad = __rtWriteKeys(job.prop, job.keys, job.where);
+        for (var b = 0; b < bad.length; b++) verify.push(bad[b]);
+      }
+      if (job.expr) {
+        job.prop.expression = job.expr.text;
+        job.prop.expressionEnabled = job.expr.enabled;
+      }
+    } catch (eW) {
+      throw __rtWriteFailure("copy_animation", eW, done, job.where + " (" + what.join(" + ") + ")");
     }
+    done.push(job.where + " (" + what.join(" + ") + " copied)");
     if (job.expr) {
-      job.prop.expression = job.expr.text;
-      job.prop.expressionEnabled = job.expr.enabled;
       if (job.expr.enabled) {
         var err = __expressionError(job.prop);
         if (err) exprErrors.push(job.where + ": " + err);

@@ -188,6 +188,7 @@ class MockLayer extends MockGroup {
       new MockProp("Scale", "ADBE Scale", { arity: 3, value: [100, 100] }),
       new MockProp("Rotation", "ADBE Rotate Z", { value: 0 }),
       new MockProp("Opacity", "ADBE Opacity", { value: 100 }),
+      new MockProp("Orientation", "ADBE Orientation", { value: [0, 0, 0] }),
     ]);
     const marker = new MockProp("Marker", "ADBE Marker");
     const fx = new MockGroup("Effects", "ADBE Effect Parade", effects, PT.INDEXED_GROUP);
@@ -195,6 +196,7 @@ class MockLayer extends MockGroup {
     this.id = id;
     this.startTime = startTime;
     this.timeRemapEnabled = false;
+    this.threeDLayer = false;
     this.parentProperty = null;
     setDepths(this, 0);
   }
@@ -228,7 +230,7 @@ function makeWorld(comps) {
     KeyframeEase,
     KeyframeInterpolationType: KIT,
     PropertyType: PT,
-    PropertyValueType: { OneD: "OneD", TwoD: "TwoD", ThreeD: "ThreeD", TwoD_SPATIAL: "TwoD_SPATIAL", ThreeD_SPATIAL: "ThreeD_SPATIAL", COLOR: "COLOR" },
+    PropertyValueType: { OneD: "OneD", TwoD: "TwoD", ThreeD: "ThreeD", TwoD_SPATIAL: "TwoD_SPATIAL", ThreeD_SPATIAL: "ThreeD_SPATIAL", COLOR: "COLOR", CUSTOM_VALUE: "CUSTOM_VALUE", NO_VALUE: "NO_VALUE" },
     noUndo: (fn) => fn,
   };
   vm.createContext(ctx);
@@ -497,6 +499,59 @@ check("an expression that will not evaluate on the target fails the call after t
     (e) => /copied everything/.test(e.message) && /wiggle is not defined/.test(e.message) && /Rotation/.test(e.message)
   );
   assert.equal(t.p("Transform", "Position").numKeys, 3, "the copy itself landed, as the message says");
+});
+
+check("a hidden target property, or a 3D-only one on a 2D layer, is refused before anything is written", () => {
+  const s = new MockLayer(1, "Src");
+  s.threeDLayer = true;
+  s.p("Transform", "Opacity").addKey(0, 0).addKey(1, 100);
+  s.p("Transform", "Orientation").addKey(0, [0, 0, 0]).addKey(1, [0, 90, 0]);
+  const flat = new MockLayer(2, "Flat");
+  const hidden = new MockLayer(3, "Hidden");
+  hidden.threeDLayer = true;
+  hidden.p("Transform", "Orientation").canSetExpression = false;
+  const ctx = makeWorld([new CompItem(10, [s, flat, hidden])]);
+  assert.throws(
+    () => ctx.OPS.copy_animation({ compId: 10, layerId: 1, targets: [{ layerId: 2 }, { layerId: 3 }] }),
+    (e) => /nothing was changed/.test(e.message) &&
+      /'Flat'.*Orientation exists only on a 3D layer/.test(e.message) &&
+      /'Hidden'.*Orientation is hidden on the target/.test(e.message)
+  );
+  for (const l of [flat, hidden]) assert.equal(l.p("Transform", "Opacity").writes, 0, `${l.name} untouched`);
+});
+
+check("a custom-value property (Curves) is refused by name in both ops", () => {
+  const curves = new MockGroup("Curves", "ADBE CurvesCustom", [new MockProp("Curves", "ADBE CurvesCustom-0001")]);
+  const s = new MockLayer(1, "Src", { effects: [curves] });
+  const cp = s.p("Effects", 1, "Curves");
+  cp.propertyValueType = "CUSTOM_VALUE";
+  cp.addKey(0, null).addKey(1, null);
+  const t = new MockLayer(2, "T", { effects: [new MockGroup("Curves", "ADBE CurvesCustom", [new MockProp("Curves", "ADBE CurvesCustom-0001")])] });
+  const ctx = makeWorld([new CompItem(10, [s, t])]);
+  assert.throws(() => ctx.OPS.retime_keyframes({ compId: 10, layers: [{ layerId: 1 }], offset: 1 }), /Curves > Curves holds a custom value/);
+  assert.throws(() => ctx.OPS.copy_animation({ compId: 10, layerId: 1, targets: [{ layerId: 2 }] }), /Curves > Curves holds a custom value/);
+  assert.equal(cp.writes, 0);
+});
+
+check("a write that fails part-way names what already changed and the one undo", () => {
+  const s = new MockLayer(1, "Src");
+  s.p("Transform", "Opacity").addKey(0, 0).addKey(1, 100);
+  s.p("Transform", "Rotation").addKey(0, 0).addKey(1, 90);
+  const t = new MockLayer(2, "T");
+  const ctx = makeWorld([new CompItem(10, [s, t])]);
+  t.p("Transform", "Opacity").setValueAtTime = () => { throw new Error("After Effects error: something internal"); };
+  assert.throws(
+    () => ctx.OPS.copy_animation({ compId: 10, layerId: 1, targets: [{ layerId: 2 }] }),
+    (e) => /failed part-way: After Effects error: something internal/.test(e.message) &&
+      /Already changed: layer 'T' \(id 2\), Transform > Rotation \(2 keys copied\)/.test(e.message) &&
+      /In progress: layer 'T' \(id 2\), Transform > Opacity/.test(e.message) &&
+      /Edit > Undo/.test(e.message)
+  );
+  s.p("Transform", "Opacity").setValueAtTime = () => { throw new Error("boom"); };
+  assert.throws(
+    () => ctx.OPS.retime_keyframes({ compId: 10, layers: [{ layerId: 1 }], offset: 1 }),
+    (e) => /retime_keyframes failed part-way: boom/.test(e.message) && /Rotation \(2 keys retimed\)/.test(e.message) && /Edit > Undo/.test(e.message)
+  );
 });
 
 console.log(`retime-animation: ${passed} checks passed`);
