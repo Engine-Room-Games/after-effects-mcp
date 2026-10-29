@@ -9,7 +9,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { checkCallResult, resolve } from "./fixtures.mjs";
-import { assertScratchPath, forbiddenJsx } from "./safety.mjs";
+import { assertScratchPath, forbiddenInCall } from "./safety.mjs";
+
+function readFileOrNull(f) {
+  try {
+    return fs.readFileSync(f, "utf8");
+  } catch {
+    return null;
+  }
+}
 
 const jsxString = (s) => JSON.stringify(String(s));
 
@@ -25,9 +33,24 @@ export const PROJECT_STATE_JSX =
  * preflight established that the untitled project at the start was empty, and
  * from then on the only thing driving After Effects is this run.
  */
+/**
+ * Each root with exactly one trailing separator, in both spellings, so a
+ * prefix test cannot match a sibling folder that merely starts the same way
+ * (ae-mcp-live-abc vs ae-mcp-live-abc2), however the root was written.
+ */
+export function scratchPrefixes(scratchRoots) {
+  const out = new Set();
+  for (const r of scratchRoots) {
+    const bare = String(r).replace(/[\\/]+$/, "");
+    out.add(bare + "/");
+    out.add(bare + "\\");
+  }
+  return [...out];
+}
+
 export function freshProjectJsx(scratchRoots) {
   return (
-    `var roots = [${scratchRoots.map(jsxString).join(", ")}];\n` +
+    `var roots = [${scratchPrefixes(scratchRoots).map(jsxString).join(", ")}];\n` +
     "var p = app.project;\n" +
     "var f = (p && p.file) ? p.file.fsName : null;\n" +
     "var ours = (f === null);\n" +
@@ -98,10 +121,11 @@ let tokenCounter = 0;
 
 async function runCall(step, scope, ctx, label) {
   const args = resolve(step.args ?? {}, scope);
-  if (step.call === "run_jsx") {
-    const bad = forbiddenJsx(args.code);
-    if (bad.length) throw new Error(`fixture run_jsx does what only the driver may (${bad.join(", ")})`);
-  }
+  // Checked here, on the resolved arguments and the files as they are on disk
+  // now, as well as by the validator: scriptPath/libraries contents and
+  // run_batch steps only exist in their final form at run time.
+  const bad = forbiddenInCall(step.call, args, readFileOrNull);
+  if (bad.length) throw new Error(`fixture code does what only the driver may — ${bad.join("; ")}`);
   const token = step.progress ? `live-${process.pid}-${++tokenCounter}` : undefined;
   const t0 = Date.now();
   const result = await ctx.client.callTool(step.call, args, { timeoutMs: step.timeoutMs, progressToken: token });

@@ -250,7 +250,7 @@ function shapeOf(schema) {
  * caught by name too, because a non-strict schema strips them silently and the
  * live call would then pass while testing nothing.
  */
-export function validateCallArgs(tool, args, opSchemas, where, { expectsRejection = false } = {}) {
+export function validateCallArgs(tool, args, opSchemas, where, { expectsRejection = false, writtenFiles = new Map() } = {}) {
   const problems = [];
   const schema = opSchemas[tool];
   if (!schema) return [`${where}: no tool named "${tool}" in OpSchemas`];
@@ -281,12 +281,26 @@ export function validateCallArgs(tool, args, opSchemas, where, { expectsRejectio
   if (tool === "run_jsx") {
     const bad = forbiddenJsx(resolved?.code);
     if (bad.length) problems.push(`${where}: run_jsx code does what only the driver may: ${bad.join(", ")}`);
+    // A script file is checkable only if this fixture wrote it: scriptPath and
+    // libraries must each be exactly "${name}" of an earlier writeFile step,
+    // whose content is then checked like inline code.
+    const files = [args?.scriptPath, ...(Array.isArray(args?.libraries) ? args.libraries : [])].filter((f) => f !== undefined);
+    for (const f of files) {
+      const m = typeof f === "string" ? WHOLE.exec(f) : null;
+      const name = m?.[1].trim();
+      if (!name || !writtenFiles.has(name)) {
+        problems.push(`${where}: run_jsx file ${JSON.stringify(f)} must be "\${name}" of a file this fixture writes first, so its code can be checked`);
+        continue;
+      }
+      const badFile = forbiddenJsx(writtenFiles.get(name));
+      if (badFile.length) problems.push(`${where}: ${name} does what only the driver may: ${badFile.join(", ")}`);
+    }
   }
   if (tool === "run_batch" && Array.isArray(resolved?.ops)) {
     resolved.ops.forEach((o, i) => {
       if (o && typeof o.op === "string") {
         const rawOp = Array.isArray(args.ops) ? args.ops[i] : args.ops?.item;
-        problems.push(...validateCallArgs(o.op, rawOp?.args ?? o.args, opSchemas, `${where} ops[${i}]`));
+        problems.push(...validateCallArgs(o.op, rawOp?.args ?? o.args, opSchemas, `${where} ops[${i}]`, { writtenFiles }));
       }
     });
   }
@@ -314,7 +328,7 @@ function validateExpectations(list, where) {
   return problems;
 }
 
-function validateStep(step, i, opSchemas, where, nested = false) {
+function validateStep(step, i, opSchemas, where, writtenFiles, nested = false) {
   const problems = [];
   const kinds = STEP_KINDS.filter((k) => k in step);
   const at = `${where} step ${i}`;
@@ -323,7 +337,10 @@ function validateStep(step, i, opSchemas, where, nested = false) {
   if (kind === "call") {
     for (const k of Object.keys(step)) if (!CALL_KEYS.has(k)) problems.push(`${at}: unknown key "${k}"`);
     problems.push(
-      ...validateCallArgs(step.call, step.args, opSchemas, `${at} (${step.call})`, { expectsRejection: !!step.expectError })
+      ...validateCallArgs(step.call, step.args, opSchemas, `${at} (${step.call})`, {
+        expectsRejection: !!step.expectError,
+        writtenFiles,
+      })
     );
     problems.push(...validateExpectations(step.expect, at));
     if (step.expectError !== undefined && typeof step.expectError !== "boolean" && typeof step.expectError !== "string")
@@ -334,12 +351,18 @@ function validateStep(step, i, opSchemas, where, nested = false) {
     else
       step.parallel.forEach((s, j) => {
         if (!("call" in s)) problems.push(`${at}.${j}: only call steps run in parallel`);
-        problems.push(...validateStep(s, `${i}.${j}`, opSchemas, where, true));
+        problems.push(...validateStep(s, `${i}.${j}`, opSchemas, where, writtenFiles, true));
       });
   } else if (kind === "writeFile") {
     if (typeof step.writeFile !== "string" || path.isAbsolute(step.writeFile) || step.writeFile.split(/[\\/]/).includes(".."))
       problems.push(`${at}: writeFile must be a relative path inside the scratch folder`);
     if (typeof step.content !== "string") problems.push(`${at}: writeFile needs string content`);
+    else {
+      // Any written file can become a scriptPath or library, so it is held to the same rules.
+      const bad = forbiddenJsx(step.content);
+      if (bad.length) problems.push(`${at}: writeFile content does what only the driver may: ${bad.join(", ")}`);
+      writtenFiles.set(step.save ?? "file", step.content);
+    }
   } else if (kind === "saveProject") {
     if (typeof step.saveProject !== "string" || !/^[^\\/]+\.aep$/.test(step.saveProject))
       problems.push(`${at}: saveProject must be a bare file name ending .aep`);
@@ -356,7 +379,10 @@ export function validateFixture(fx, { opSchemas, recipeNumbers }) {
   else if (recipeNumbers && !recipeNumbers.has(fx.recipe)) problems.push(`${where}: recipe ${fx.recipe} is not in docs/verification-recipes.md`);
   if (typeof fx.title !== "string" || !fx.title) problems.push(`${where}: needs a title`);
   if (!Array.isArray(fx.steps) || fx.steps.length === 0) problems.push(`${where}: needs steps`);
-  else fx.steps.forEach((s, i) => problems.push(...validateStep(s, i, opSchemas, where)));
+  else {
+    const writtenFiles = new Map(); // writeFile save name -> content, in step order
+    fx.steps.forEach((s, i) => problems.push(...validateStep(s, i, opSchemas, where, writtenFiles)));
+  }
   const savesProject = (fx.steps ?? []).some((s) => "saveProject" in s);
   if (fx.needsSavedProject && !savesProject) problems.push(`${where}: needsSavedProject but never saves one`);
   return problems;

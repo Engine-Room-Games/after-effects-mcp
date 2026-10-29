@@ -29,7 +29,9 @@ import { StdioMcpClient } from "./lib/client.mjs";
 import { loadFixtures, recipeNumbersInDocs, selectFixtures, validateFixture } from "./lib/fixtures.mjs";
 import { judgeStartingProject, ProjectGuard, runFixture } from "./lib/runner.mjs";
 import {
+  aeMajorMinor,
   aePrefsRoot,
+  assertAeVersion,
   backupPrefs,
   defaultBackupRoot,
   detectAeVersion,
@@ -81,7 +83,9 @@ async function validatedFixtures() {
 function prefsVersion(values) {
   const prefsRoot = aePrefsRoot();
   if (!prefsRoot) throw new Error(`After Effects does not run on ${process.platform}.`);
-  const version = values.aeVersion ?? detectAeVersion(prefsRoot);
+  // An explicit version is checked before anything else uses it: it becomes a
+  // folder name that a --force backup deletes.
+  const version = values.aeVersion !== undefined ? assertAeVersion(values.aeVersion) : detectAeVersion(prefsRoot);
   if (!version) throw new Error(`No After Effects prefs folder under ${prefsRoot}; pass --ae-version <major.minor>.`);
   return { prefsRoot, version };
 }
@@ -148,8 +152,10 @@ async function cmdRun({ flags, values, rest }) {
 
   const isAeRunning = await aeRunningProbe();
   if (!(await isAeRunning())) throw new Error("After Effects is not running. Launch it on an empty project first (after `prefs backup`).");
+  let backupVersion = null;
   if (!flags.has("--no-prefs-backup")) {
     const { version } = prefsVersion(values);
+    backupVersion = version;
     if (!readBackup(defaultBackupRoot(), version)) {
       throw new Error(
         `No prefs backup for After Effects ${version}. Scratch projects push real entries off Open Recent.\n` +
@@ -184,12 +190,28 @@ async function cmdRun({ flags, values, rest }) {
       }
     }
     await client.close();
-    if (flags.has("--keep-scratch")) process.stdout.write(`Scratch kept at ${scratchRoot}\n`);
-    else removeScratchRoot(scratchRoot);
+    try {
+      if (flags.has("--keep-scratch")) process.stdout.write(`Scratch kept at ${scratchRoot}\n`);
+      else removeScratchRoot(scratchRoot);
+    } catch (e) {
+      process.stderr.write(`Could not remove the scratch folder: ${e.message}\n`);
+    }
   };
+  // Printed on every way out — pass, fail, error, Ctrl-C: the backup is only
+  // worth something if it is restored.
+  const restoreReminder = () =>
+    process.stdout.write(
+      "\nAfter Effects is still running — the driver never quits it.\n" +
+        (backupVersion
+          ? `When done: quit it (ask first), then \`node tests/live/run.mjs prefs restore --live\` to put back the ${backupVersion} prefs backed up before this run.\n`
+          : "No prefs backup was taken (--no-prefs-backup): check File > Open Recent by hand after quitting.\n")
+    );
   process.once("SIGINT", () => {
     process.stderr.write("\nInterrupted — cleaning up what this run created.\n");
-    cleanup().finally(() => process.exit(130));
+    cleanup().finally(() => {
+      restoreReminder();
+      process.exit(130);
+    });
   });
 
   try {
@@ -198,8 +220,20 @@ async function cmdRun({ flags, values, rest }) {
     if (!tools.has("run_jsx")) throw new Error("The server offers no run_jsx; the driver needs it to manage its scratch project.");
     const ping = await client.callTool("list_comps", { include: [] });
     if (ping.isError) throw new Error(`The server cannot drive After Effects yet:\n${ping.text}`);
-    const problem = judgeStartingProject(await guard.state());
+    const state = await guard.state();
+    const problem = judgeStartingProject(state);
     if (problem) throw new Error(problem);
+    // The backup must be of the prefs THIS After Effects writes on quit. The
+    // newest prefs folder is only a guess at that; app.version is the answer.
+    if (backupVersion) {
+      const running = aeMajorMinor(state.version);
+      if (running !== backupVersion) {
+        throw new Error(
+          `After Effects ${state.version} is running, but the prefs backup is of ${backupVersion}. ` +
+            `Its Open Recent would go unprotected. Quit it, run \`prefs backup --live --ae-version ${running ?? "<major.minor>"}\`, relaunch, and run again.`
+        );
+      }
+    }
     preflightPassed = true;
 
     for (const fx of chosen) {
@@ -218,22 +252,19 @@ async function cmdRun({ flags, values, rest }) {
       process.stdout.write(`\nThe server wrote ${client.noise.length} non-JSON-RPC line(s) to stdout — a bug (stdout is sacred):\n`);
       for (const l of client.noise.slice(0, 5)) process.stdout.write(`  ${l.slice(0, 200)}\n`);
     }
+    if (results.length) {
+      const failed = results.filter((r) => r.status !== "pass");
+      fs.writeFileSync(path.join(artifactsDir, "report.json"), JSON.stringify({ at: new Date().toISOString(), checkout: root, results }, null, 2));
+      process.stdout.write(`\n${results.length - failed.length}/${results.length} passed. Report and screenshots: ${artifactsDir}\n`);
+      const manual = results.filter((r) => r.manual);
+      if (manual.length) {
+        process.stdout.write("\nStill for a person to check in After Effects (the JSON cannot answer these):\n");
+        for (const r of manual) process.stdout.write(`  recipe ${r.recipe} (${r.id}): ${r.manual}\n`);
+      }
+      if (failed.length) process.exitCode = 1;
+    }
+    restoreReminder();
   }
-
-  const failed = results.filter((r) => r.status !== "pass");
-  const report = path.join(artifactsDir, "report.json");
-  fs.writeFileSync(report, JSON.stringify({ at: new Date().toISOString(), checkout: root, results }, null, 2));
-  process.stdout.write(`\n${results.length - failed.length}/${results.length} passed. Report and screenshots: ${artifactsDir}\n`);
-  const manual = results.filter((r) => r.manual);
-  if (manual.length) {
-    process.stdout.write("\nStill for a person to check in After Effects (the JSON cannot answer these):\n");
-    for (const r of manual) process.stdout.write(`  recipe ${r.recipe} (${r.id}): ${r.manual}\n`);
-  }
-  process.stdout.write(
-    "\nAfter Effects is still running, on an empty untitled project — the driver never quits it.\n" +
-      "When done: quit it (ask first), then `node tests/live/run.mjs prefs restore --live`.\n"
-  );
-  if (failed.length) process.exitCode = 1;
 }
 
 const USAGE = `Usage: node tests/live/run.mjs <list|validate|run [ids…]|prefs backup|prefs restore> [--live] [--force] [--ae-version X.Y] [--no-prefs-backup] [--keep-scratch]\n`;

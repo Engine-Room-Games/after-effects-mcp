@@ -149,7 +149,11 @@ export class StdioMcpClient {
     const done = await Promise.race([this.exited, new Promise((r) => setTimeout(() => r(null), 3000))]);
     if (done === null && this.child.exitCode === null) {
       this.child.kill("SIGTERM");
-      await Promise.race([this.exited, new Promise((r) => setTimeout(r, 2000))]);
+      const termed = await Promise.race([this.exited, new Promise((r) => setTimeout(() => r(null), 2000))]);
+      if (termed === null && this.child.exitCode === null && this.child.signalCode === null) {
+        this.child.kill("SIGKILL");
+        await Promise.race([this.exited, new Promise((r) => setTimeout(r, 2000))]);
+      }
     }
   }
 }

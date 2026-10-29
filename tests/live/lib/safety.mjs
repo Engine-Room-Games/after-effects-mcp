@@ -77,7 +77,8 @@ export function assertScratchPath(p, root) {
  * Removes a scratch root — and refuses anything that is not plainly one of
  * ours: a direct child of the temp dir whose name carries the prefix.
  */
-export function removeScratchRoot(root, tmp = os.tmpdir()) {
+export function removeScratchRoot(given, tmp = os.tmpdir()) {
+  const root = path.resolve(given); // with or without a trailing separator
   const tmps = [norm(tmp)];
   try {
     tmps.push(norm(fs.realpathSync(tmp)));
@@ -209,6 +210,7 @@ export function defaultBackupRoot(home = os.homedir()) {
  * good copy left from a run that did not get to restore.
  */
 export async function backupPrefs({ prefsRoot, version, backupRoot, isAeRunning, force = false, now = new Date() }) {
+  assertAeVersion(version); // before anything under backupRoot/<version> can be deleted
   if (await isAeRunning()) {
     throw new Error(
       "After Effects is running. Back up its preferences only while it is quit — it rewrites them on quit, " +
@@ -244,6 +246,7 @@ export async function backupPrefs({ prefsRoot, version, backupRoot, isAeRunning,
 }
 
 export function readBackup(backupRoot, version) {
+  assertAeVersion(version);
   const file = path.join(backupRoot, version, "manifest.json");
   if (!fs.existsSync(file)) return null;
   return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -265,6 +268,7 @@ export function foreignMruEntries(backupMru, currentMru) {
  * entries no live run made, or when it cannot be read to tell.
  */
 export async function restorePrefs({ backupRoot, version, isAeRunning, force = false, now = new Date() }) {
+  assertAeVersion(version);
   if (await isAeRunning()) {
     throw new Error(
       "After Effects is running. Restore only after it has quit: it rewrites its prefs on quit and would " +
@@ -334,9 +338,79 @@ export const FORBIDDEN_JSX = [
   /\.\s*save(?:WithDialog)?\s*\(/,
   /\bexecuteCommand\b/,
   /\bsystem\s*\.\s*callSystem\b/,
+  /\bapp\s*\.\s*scheduleTask\b/, // code that runs after the call, outside any check
+  /\bapp\s*\.\s*(?:preferences|settings)\s*\.\s*save/, // AE's own prefs: the very thing the backup protects
+  /\bapp\s*\.\s*exitAfterLaunchAndEval\b/,
+  /\$\s*\.\s*evalFile\b/, // runs a file nobody checked
+  // File/Folder renames, runs, copies and folder creation. The scratch files a
+  // fixture needs are written by the driver's own writeFile step.
+  /\.\s*(?:rename|execute|copy|create)\s*\(/,
 ];
+
+/**
+ * `.remove()` is both how a layer, mask, effect or key is deleted — ordinary
+ * work inside the scratch project — and how File and Folder delete from disk.
+ * It is allowed only in code that never mentions a file or folder at all
+ * (`File`, `Folder`, `app.project.file`, `item.file`, `mainSource.file` …).
+ */
+const REMOVE = /\.\s*remove\s*\(/;
+const TOUCHES_DISK = /\b(?:file|folder)\b/i;
 
 export function forbiddenJsx(code) {
   if (typeof code !== "string") return [];
-  return FORBIDDEN_JSX.filter((re) => re.test(code)).map((re) => re.source);
+  const bad = FORBIDDEN_JSX.filter((re) => re.test(code)).map((re) => re.source);
+  if (REMOVE.test(code) && TOUCHES_DISK.test(code)) bad.push(`${REMOVE.source} in code that touches a File or Folder`);
+  return bad;
+}
+
+/**
+ * Every piece of ExtendScript a call would run: run_jsx's `code`, the files
+ * its `scriptPath` and `libraries` name (read the way the server will read
+ * them), and the same for each run_jsx step inside a run_batch. `readFile`
+ * returns null for a file it cannot read; that is reported as a problem, since
+ * code nobody could check is code that must not run.
+ */
+export function jsxSourcesOf(tool, args, readFile) {
+  const out = [];
+  if (!args || typeof args !== "object") return out;
+  if (tool === "run_jsx") {
+    if (typeof args.code === "string") out.push({ where: "code", code: args.code });
+    const files = [args.scriptPath, ...(Array.isArray(args.libraries) ? args.libraries : [])].filter((f) => typeof f === "string");
+    for (const f of files) out.push({ where: f, code: readFile(f) });
+  }
+  if (tool === "run_batch" && Array.isArray(args.ops)) {
+    args.ops.forEach((o, i) => {
+      if (o && typeof o.op === "string") {
+        for (const s of jsxSourcesOf(o.op, o.args, readFile)) out.push({ where: `ops[${i}] ${s.where}`, code: s.code });
+      }
+    });
+  }
+  return out;
+}
+
+/** Problems with every source a call would run; empty when all of it is allowed. */
+export function forbiddenInCall(tool, args, readFile) {
+  const problems = [];
+  for (const s of jsxSourcesOf(tool, args, readFile)) {
+    if (typeof s.code !== "string") problems.push(`${s.where}: cannot be read, so cannot be checked`);
+    else {
+      const bad = forbiddenJsx(s.code);
+      if (bad.length) problems.push(`${s.where}: ${bad.join(", ")}`);
+    }
+  }
+  return problems;
+}
+
+/** A prefs version as AE names its folders. Anything else — "../x", "" — could point a delete anywhere. */
+export function assertAeVersion(v) {
+  if (typeof v !== "string" || !/^\d+\.\d+$/.test(v)) {
+    throw new Error(`"${v}" is not an After Effects version as its prefs folders are named (major.minor, e.g. 26.5).`);
+  }
+  return v;
+}
+
+/** major.minor of `app.version` ("26.5x87", "26.5.1x3"). */
+export function aeMajorMinor(appVersion) {
+  const m = /^(\d+)\.(\d+)/.exec(String(appVersion ?? ""));
+  return m ? `${m[1]}.${m[2]}` : null;
 }

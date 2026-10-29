@@ -144,6 +144,16 @@ await check("client: handshake, calls, progress ordering, server ping, noise, an
   assert.notEqual(c.child.exitCode ?? c.child.signalCode, null, "the child it spawned is gone");
 });
 
+await check("client: close escalates to SIGKILL when the server ignores stdin closing and SIGTERM", async () => {
+  if (process.platform === "win32") return; // no catchable SIGTERM there: kill() is already final
+  const stubborn = path.join(tmpBase, "stubborn.mjs");
+  fs.writeFileSync(stubborn, "process.on('SIGTERM', () => {}); process.stdin.resume(); setInterval(() => {}, 1000);");
+  const c = new StdioMcpClient({ command: process.execPath, args: [stubborn] }).start();
+  await new Promise((r) => setTimeout(r, 200));
+  await c.close();
+  assert.equal(c.child.signalCode, "SIGKILL");
+});
+
 await check("client: a request to a dead server rejects instead of hanging", async () => {
   const c = new StdioMcpClient({ command: process.execPath, args: ["-e", "process.exit(3)"], timeoutMs: 5000 }).start();
   await c.exited;
@@ -200,6 +210,17 @@ await check("removeScratchRoot deletes its own folder and refuses anything else"
   assert.ok(fs.existsSync(other));
   safety.removeScratchRoot(r, tmpBase);
   assert.equal(fs.existsSync(r), false);
+  const slashed = safety.makeScratchRoot(tmpBase);
+  assert.equal(safety.isInside(path.join(slashed, "a.aep"), slashed + path.sep), true, "a root given with a trailing separator");
+  safety.removeScratchRoot(slashed + path.sep, tmpBase);
+  assert.equal(fs.existsSync(slashed), false);
+});
+
+await check("the project guard's prefixes end in a separator, however the root was written", () => {
+  const p = runner.scratchPrefixes(["/tmp/ae-mcp-live-abc/", "/tmp/ae-mcp-live-abc", "C:\\T\\ae-mcp-live-x\\"]);
+  assert.deepEqual(p.sort(), ["/tmp/ae-mcp-live-abc/", "/tmp/ae-mcp-live-abc\\", "C:\\T\\ae-mcp-live-x/", "C:\\T\\ae-mcp-live-x\\"].sort());
+  assert.ok(!p.some((x) => "/tmp/ae-mcp-live-abc2/x.aep".startsWith(x)), "a sibling sharing the prefix is not ours");
+  assert.ok(p.some((x) => "/tmp/ae-mcp-live-abc/x.aep".startsWith(x)));
 });
 
 await check("isScratchLike recognises live-run paths in either separator", () => {
@@ -214,6 +235,31 @@ await check("fixtures may not quit AE or open, close or save projects themselves
     assert.ok(safety.forbiddenJsx(code).length > 0, code);
   }
   assert.deepEqual(safety.forbiddenJsx("var l = comp.layers.addNull(); return l.name;"), []);
+  assert.deepEqual(safety.forbiddenJsx("comp.layer(1).remove(); return comp.numLayers;"), [], "deleting a layer is ordinary work");
+  for (const code of ["new File('/x').remove()", "var f = Folder.desktop; f.remove();", "app.project.file.remove()",
+    "new Folder('/x').create()", "f.rename('y')", "new File('/x.command').execute()", "$.evalFile('/x.jsx')",
+    "app.scheduleTask('x', 1, false)", "app.preferences.savePrefAsLong('a','b',1)", "app.settings.saveSetting('a','b','c')"]) {
+    assert.ok(safety.forbiddenJsx(code).length > 0, code);
+  }
+});
+
+await check("every source a call would run is checked: scriptPath, libraries, and run_jsx inside run_batch", () => {
+  const files = { "/s/ok.jsx": "return 1;", "/s/lib.jsx": "function q(){ app.quit(); }" };
+  const read = (f) => (f in files ? files[f] : null);
+  assert.deepEqual(safety.forbiddenInCall("run_jsx", { scriptPath: "/s/ok.jsx" }, read), []);
+  assert.match(safety.forbiddenInCall("run_jsx", { scriptPath: "/s/ok.jsx", libraries: ["/s/lib.jsx"] }, read).join(), /lib\.jsx.*quit/);
+  assert.match(safety.forbiddenInCall("run_jsx", { scriptPath: "/s/missing.jsx" }, read).join(), /cannot be read/);
+  const batch = { ops: [{ op: "create_comp", args: {} }, { op: "run_jsx", args: { code: "app.project.save()" } }] };
+  assert.match(safety.forbiddenInCall("run_batch", batch, read).join(), /ops\[1\] code/);
+  assert.deepEqual(safety.forbiddenInCall("create_comp", { name: "app.quit()" }, read), [], "only ExtendScript is code");
+});
+
+await check("AE versions: a folder-name version is validated, and app.version reduces to major.minor", () => {
+  assert.equal(safety.assertAeVersion("26.5"), "26.5");
+  for (const bad of ["../..", "", "26", "26.5/..", "26.5.1", undefined]) assert.throws(() => safety.assertAeVersion(bad), /not an After Effects version/);
+  assert.equal(safety.aeMajorMinor("26.5x87"), "26.5");
+  assert.equal(safety.aeMajorMinor("26.10.1x3"), "26.10");
+  assert.equal(safety.aeMajorMinor(undefined), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -382,6 +428,16 @@ await check("the validator catches what a live run would otherwise discover the 
   assert.match(v({ needsSavedProject: true, steps: [{ call: "list_comps" }] }).join(), /never saves/);
   assert.deepEqual(one([{ call: "create_shape_layer", args: { compId: 1, position: "middle" }, expectError: true }]), [],
     "a step expecting refusal may send what the schema refuses");
+  assert.deepEqual(one([{ writeFile: "s.jsx", content: "return 1;", save: "s" }, { call: "run_jsx", args: { scriptPath: "${s}" } }]), []);
+  assert.match(one([{ call: "run_jsx", args: { scriptPath: "/Users/m/anything.jsx" } }]).join(), /file this fixture writes first/);
+  assert.match(
+    one([{ writeFile: "lib.jsx", content: "app.quit();", save: "lib" }, { call: "run_jsx", args: { code: "return 1;", libraries: ["${lib}"] } }]).join(),
+    /writeFile content does what only the driver may[\s\S]*lib does what only the driver may/
+  );
+  assert.match(
+    one([{ call: "run_batch", args: { ops: [{ op: "run_jsx", args: { code: "new File('/x').remove()" } }] } }]).join(),
+    /ops\[0\].*only the driver may/
+  );
 });
 
 await check("selectFixtures by id, prefix or recipe number", () => {
@@ -470,7 +526,7 @@ await check("the starting project: only an empty untitled one is acceptable", ()
 await check("the project guard: refuses to close a non-scratch project, and to save outside scratch", async () => {
   const scratch = safety.makeScratchRoot(tmpBase);
   const jsx = runner.freshProjectJsx([scratch]);
-  assert.ok(jsx.includes(JSON.stringify(scratch)), "the roots are embedded as string literals");
+  assert.ok(jsx.includes(JSON.stringify(scratch + "/")), "the roots are embedded as string literals, separator-terminated");
   assert.match(jsx, /refusing to close it/);
   assert.match(jsx, /DO_NOT_SAVE_CHANGES/);
   assert.doesNotMatch(jsx, /app\.quit/);
