@@ -107,8 +107,10 @@ for i in $(seq 0 $((COUNT - 1))); do
   # notarytool can exit 0 with "status": "Invalid" (issue #162). So the exit
   # code is not trusted either way — the JSON verdict is read, and anything
   # but "Accepted" stops the release here, before the tag, with Apple's log.
+  # --timeout turns a stalled scan into an "In Progress" verdict, which fails,
+  # rather than a release that hangs.
   RESULT="$DIST/$STAGE_NAME.notary.json"
-  xcrun notarytool submit "$ZIP" "${NOTARY_ARGS[@]}" --wait --output-format json >"$RESULT" \
+  xcrun notarytool submit "$ZIP" "${NOTARY_ARGS[@]}" --wait --timeout 30m --output-format json >"$RESULT" \
     || note "notarytool exited non-zero; reading its verdict"
   if ! SUBMISSION=$(node scripts/lib/release-checks.mjs notary "$RESULT"); then
     cat "$RESULT" >&2 || true

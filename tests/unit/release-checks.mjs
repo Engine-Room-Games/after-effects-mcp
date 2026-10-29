@@ -11,6 +11,7 @@
 //   node tests/unit/release-checks.mjs
 
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,7 +19,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (...p) => fs.readFileSync(path.join(root, ...p), "utf8");
-const { parseNotaryResult, checkToolList, runnableTargets, smokeServer } = await import(
+const { parseNotaryResult, checkToolList, runnableTargets, smokeServer, wsProblem } = await import(
   pathToFileURL(path.join(root, "scripts", "lib", "release-checks.mjs")).href
 );
 const { OpSchemas } = await import(pathToFileURL(path.join(root, "packages", "shared", "dist", "schemas.js")).href);
@@ -222,6 +223,75 @@ try {
       delete process.env.AE_MCP_READ_ONLY;
     }
   });
+  // -------------------------------------------------------------------------
+  // ws inside each artifact: a real directory, and ws by its contents.
+  // -------------------------------------------------------------------------
+  const { isWsModuleDir } = await import(
+    pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "setup", "paths.js")).href
+  );
+  const realWs = path.join(root, "node_modules", "ws");
+  const artifact = (label, make) => {
+    const dir = path.join(scratch, `artifact-${label}`);
+    fs.mkdirSync(path.join(dir, "node_modules"), { recursive: true });
+    if (make) make(path.join(dir, "node_modules", "ws"));
+    return dir;
+  };
+
+  await check("a complete copy of ws passes", () => {
+    const dir = artifact("good", (ws) => fs.cpSync(realWs, ws, { recursive: true }));
+    assert.equal(wsProblem(dir, isWsModuleDir), null);
+  });
+
+  await check("missing, empty, truncated, a file, or a symlink fails", () => {
+    assert.match(wsProblem(artifact("missing"), isWsModuleDir), /missing/);
+    assert.match(wsProblem(artifact("empty", (ws) => fs.mkdirSync(ws)), isWsModuleDir), /complete copy/);
+    const truncated = artifact("truncated", (ws) => {
+      fs.mkdirSync(ws);
+      fs.copyFileSync(path.join(realWs, "package.json"), path.join(ws, "package.json"));
+    });
+    assert.match(wsProblem(truncated, isWsModuleDir), /complete copy/);
+    assert.match(wsProblem(artifact("file", (ws) => fs.writeFileSync(ws, "")), isWsModuleDir), /not a directory/);
+    let linked = null;
+    try {
+      linked = artifact("symlink", (ws) => fs.symlinkSync(realWs, ws, "junction"));
+    } catch {
+      /* no symlink permission on this Windows runner */
+    }
+    if (linked) assert.match(wsProblem(linked, isWsModuleDir), /symlink/);
+  });
+
+  await check("both smoke commands check ws before starting anything", () => {
+    const src = read("scripts", "lib", "release-checks.mjs");
+    const body = (cmd) => src.slice(src.indexOf(`cmd === "${cmd}"`)).split(/\n  if \(cmd ===/)[0];
+    for (const cmd of ["smoke-mcpb", "smoke-binaries"]) {
+      const b = body(cmd);
+      assert.ok(b.includes("wsProblem("), `${cmd} does not check node_modules/ws`);
+      assert.ok(b.indexOf("wsProblem(") < b.indexOf("smokeServer("), `${cmd} checks ws after starting`);
+    }
+  });
+
+  if (process.platform === "darwin") {
+    await check("smoke-binaries fails a binary zip that lacks ws", () => {
+      const dist = path.join(scratch, "dist");
+      const stageName = "after-effects-mcp-0.0.0-test";
+      const stage = path.join(dist, stageName);
+      fs.mkdirSync(stage, { recursive: true });
+      fs.writeFileSync(path.join(stage, "after-effects-mcp"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      fs.writeFileSync(
+        path.join(dist, "binaries.json"),
+        JSON.stringify({
+          version: "0.0.0",
+          targets: [{ name: `macos-${process.arch}`, exe: "after-effects-mcp", sign: false, stageName }],
+        })
+      );
+      execFileSync("/usr/bin/ditto", ["-c", "-k", "--keepParent", stage, path.join(dist, `${stageName}.zip`)]);
+      const r = spawnSync(process.execPath, [path.join(root, "scripts", "lib", "release-checks.mjs"), "smoke-binaries", dist], {
+        encoding: "utf8",
+      });
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /node_modules\/ws is missing/);
+    });
+  }
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
@@ -235,6 +305,7 @@ await check("sign-and-notarize reads notarytool's verdict instead of trusting --
   const submit = sh.split("\n").find((l) => l.includes("notarytool submit"));
   assert.ok(submit, "notarytool submit is gone");
   assert.match(submit, /--output-format json/);
+  assert.match(submit, /--timeout \S+/, "a stalled scan must fail rather than hang the release");
   assert.match(sh, /release-checks\.mjs notary/);
   assert.match(sh, /notarytool log/, "a rejection should print Apple's log");
 });

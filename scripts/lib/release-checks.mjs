@@ -252,6 +252,33 @@ export function runnableTargets(targets, { platform = process.platform, arch = p
   return { run, skip };
 }
 
+/**
+ * Why `node_modules/ws` inside an unpacked artifact is unusable, or null when
+ * it is fine. `setup_panel` copies that folder into the CEP extension, so it
+ * must be a real directory (never a symlink, never inlined) and must be `ws`
+ * by its contents — `isWsModuleDir` is the server's own test, passed in so the
+ * two cannot drift. Validated by contents, never by `existsSync`.
+ */
+export function wsProblem(artifactDir, isWsModuleDir) {
+  const ws = path.join(artifactDir, "node_modules", "ws");
+  let stat;
+  try {
+    stat = fs.lstatSync(ws);
+  } catch {
+    return "node_modules/ws is missing";
+  }
+  if (stat.isSymbolicLink()) return "node_modules/ws is a symlink, not a real directory";
+  if (!stat.isDirectory()) return "node_modules/ws is not a directory";
+  if (!isWsModuleDir(ws)) return "node_modules/ws is not a complete copy of ws (package.json, index.js, lib/websocket.js)";
+  return null;
+}
+
+async function loadIsWsModuleDir() {
+  const p = path.join(root, "packages", "mcp-server", "dist", "setup", "paths.js");
+  if (!fs.existsSync(p)) throw new Error("packages/mcp-server is not built — run `npm run build` first");
+  return (await import(pathToFileURL(p).href)).isWsModuleDir;
+}
+
 // ------------------------------------------------------------------- CLI
 
 async function loadOpNames() {
@@ -290,12 +317,13 @@ async function cli(argv) {
 
   if (cmd === "smoke-mcpb") {
     const opNames = await loadOpNames();
+    const isWs = await loadIsWsModuleDir();
     const dir = tempDir("mcpb");
     try {
       execFileSync("unzip", ["-q", target, "-d", dir], { stdio: "inherit" });
-      const ws = path.join(dir, "node_modules", "ws");
-      if (!fs.existsSync(ws) || !fs.lstatSync(ws).isDirectory()) {
-        console.error(`    ${path.basename(target)}: FAILED — node_modules/ws is not a real directory in the bundle`);
+      const problem = wsProblem(dir, isWs);
+      if (problem) {
+        console.error(`    ${path.basename(target)}: FAILED — ${problem}`);
         return 1;
       }
       // Claude Desktop runs the bundle on its own Node; the release machine's
@@ -314,6 +342,7 @@ async function cli(argv) {
 
   if (cmd === "smoke-binaries") {
     const opNames = await loadOpNames();
+    const isWs = await loadIsWsModuleDir();
     const manifest = JSON.parse(fs.readFileSync(path.join(target, "binaries.json"), "utf8"));
     let rosetta = false;
     if (process.platform === "darwin" && process.arch === "arm64") {
@@ -346,6 +375,12 @@ async function cli(argv) {
         else execFileSync("unzip", ["-q", zip, "-d", dir], { stdio: "inherit" });
         const folder = path.join(dir, t.stageName);
         const exe = path.join(folder, t.exe);
+        const problem = wsProblem(folder, isWs);
+        if (problem) {
+          console.error(`    ${t.name}: FAILED — ${problem}`);
+          failed++;
+          continue;
+        }
         if (t.sign && process.platform === "darwin") {
           try {
             execFileSync("codesign", ["--verify", "--strict", exe], { stdio: "pipe" });
