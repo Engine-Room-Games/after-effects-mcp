@@ -449,7 +449,7 @@ saying why; the cost the other way is a switch silently not applied.
 **The `.mcpb` manifest's tool list cannot follow the switches.** Its `tools`
 array is static metadata, written at build time and shown by Claude Desktop
 before the server ever runs; `user_config` values are substituted into the
-server's environment, not into the manifest. So it lists all 84 whatever is
+server's environment, not into the manifest. So it lists all 85 whatever is
 ticked. What the model actually gets is `tools/list` from the running server,
 which does follow them.
 

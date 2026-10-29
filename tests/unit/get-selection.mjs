@@ -8,8 +8,10 @@
 //     resolves back to the same property — names where they are unambiguous,
 //     a sibling index where an earlier sibling has the same name.
 //   - Selected keyframes ride along as times.
-//   - No active comp (or footage active) answers comp:null with a reason,
-//     never a guessed comp and never an error.
+//   - The comp is the VIEWER's (app.activeViewer), not activeItem, which
+//     follows the Project panel when it has focus; activeItem is the
+//     fallback and says so. No comp answers comp:null with a reason that
+//     says what is known, never a guessed comp and never an error.
 //   - Past a cap, what was left out is counted.
 //
 //   node tests/unit/get-selection.mjs
@@ -81,15 +83,21 @@ function load(setup) {
       for (var i = 0; i < layer.kids.length; i++) walk(layer.kids[i], 1);
       return layer;
     }
-    function walkProperty(root, path) {
-      var cur = root;
-      for (var i = 0; i < path.length; i++) cur = cur.property(path[i]);
-      return cur;
+    var ViewerType = { VIEWER_COMPOSITION: 1, VIEWER_LAYER: 2, VIEWER_FOOTAGE: 3 };
+    // A viewer showing a comp. setActive() focuses it, which is when
+    // activeItem starts answering for it — as AE's does.
+    function mkViewer(type, item, refuses) {
+      return {
+        type: type,
+        setActive: function () { if (refuses) return false; app.project.activeItem = item; return true; }
+      };
     }
-    var app = { project: { activeItem: null } };
+    var app = { project: { activeItem: null, selection: [] }, activeViewer: null };
     `,
     ctx,
   );
+  // The real resolver, so the round-trip below tests what every tool uses.
+  vm.runInContext(read("ids.jsx"), ctx, { filename: "ids.jsx" });
   vm.runInContext(read("selection.jsx"), ctx, { filename: "selection.jsx" });
   vm.runInContext(setup, ctx);
   return ctx;
@@ -111,6 +119,7 @@ const SCENE = `
   comp.selectedLayers = [shape, other];
   comp.selectedProperties = [xform, position, fill2];
   app.project.activeItem = comp;
+  app.activeViewer = mkViewer(ViewerType.VIEWER_COMPOSITION, comp);
 `;
 
 const shared = await import(pathToFileURL(path.join(root, "packages", "shared", "dist", "schemas.js")).href);
@@ -168,14 +177,69 @@ check("no active comp answers comp:null with a reason", () => {
   const r = plain(ctx.OPS.get_selection({}));
   assert.equal(r.comp, null);
   assert.deepEqual(r.selectedLayers, []);
-  assert.match(r.reason, /No composition is active/);
+  assert.match(r.reason, /Could not determine the comp in the viewer \(no viewer is open\)/);
+});
+
+check("Project panel focused on a different comp: the viewer's comp wins, and the difference is said", () => {
+  const ctx = load(SCENE + `
+    var other = new CompItem(); other.id = 200; other.name = "Lower third";
+    app.project.activeItem = other;
+  `);
+  const r = plain(ctx.OPS.get_selection({}));
+  assert.equal(r.comp.id, 100, "activeItem followed the Project panel; the viewer's comp must be read");
+  assert.equal(r.source, "viewer");
+  assert.match(r.note, /Lower third/);
+  assert.match(r.note, /Main/);
+});
+
+check("the viewer's comp with nothing else in focus carries no note", () => {
+  const ctx = load(SCENE);
+  const r = plain(ctx.OPS.get_selection({}));
+  assert.equal(r.source, "viewer");
+  assert.equal(r.note, undefined);
+});
+
+check("no viewer: activeItem is the fallback, and the answer says it may be the Project panel's", () => {
+  const ctx = load(SCENE + "app.activeViewer = null;");
+  const r = plain(ctx.OPS.get_selection({}));
+  assert.equal(r.comp.id, 100);
+  assert.equal(r.source, "activeItem");
+  assert.match(r.note, /Project panel/);
+});
+
+check("a viewer that refuses focus is not read as the viewer's comp", () => {
+  const ctx = load(SCENE + `
+    var other = new CompItem(); other.id = 200; other.name = "Lower third";
+    app.activeViewer = mkViewer(ViewerType.VIEWER_COMPOSITION, comp, true);
+    app.project.activeItem = other;
+  `);
+  const r = plain(ctx.OPS.get_selection({}));
+  assert.equal(r.comp.id, 200);
+  assert.equal(r.source, "activeItem");
+  assert.match(r.note, /could not be read/);
+});
+
+check("Project panel focused with items selected: the reason says so, never 'nothing open'", () => {
+  const ctx = load("app.project.activeItem = null; app.project.selection = [{}, {}];");
+  const r = plain(ctx.OPS.get_selection({}));
+  assert.equal(r.comp, null);
+  assert.match(r.reason, /Project panel has focus with 2 items selected/);
+  assert.doesNotMatch(r.reason, /nothing is open/i);
+});
+
+check("frame counts from the comp's start frame, time stays on the keyframe clock", () => {
+  const ctx = load(SCENE + "comp.displayStartFrame = 1001;");
+  const r = plain(ctx.OPS.get_selection({}));
+  assert.equal(r.time, 1.5);
+  assert.equal(r.frame, 1037);
 });
 
 check("footage active is not a comp, and says so by name", () => {
-  const ctx = load('var f = new FootageItem(); f.id = 5; f.name = "clip.mov"; app.project.activeItem = f;');
+  const ctx = load('var f = new FootageItem(); f.id = 5; f.name = "clip.mov"; app.project.activeItem = f; app.activeViewer = mkViewer(ViewerType.VIEWER_FOOTAGE, f);');
   const r = plain(ctx.OPS.get_selection({}));
   assert.equal(r.comp, null);
   assert.match(r.reason, /clip\.mov/);
+  assert.match(r.reason, /layer or footage viewer/);
 });
 
 check("an empty selection is an empty answer, not an error", () => {

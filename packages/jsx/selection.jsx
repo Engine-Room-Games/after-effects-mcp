@@ -35,6 +35,15 @@ function __selPropertyPath(prop) {
   return path;
 }
 
+function __selDisplayStartFrame(c) {
+  var f = null;
+  try { f = c.displayStartFrame; } catch (e) { f = null; }
+  if (typeof f === "number" && isFinite(f)) return f;
+  var t = 0;
+  try { t = c.displayStartTime || 0; } catch (e2) { t = 0; }
+  return Math.round(t * c.frameRate);
+}
+
 function __selProperty(prop) {
   var layer = prop.propertyGroup(prop.propertyDepth);
   var isGroup = prop.propertyType !== PropertyType.PROPERTY;
@@ -60,26 +69,85 @@ function __selProperty(prop) {
   return out;
 }
 
-OPS.get_selection = noUndo(function (args) {
-  var active = null;
-  try { active = app.project.activeItem; } catch (e) { active = null; }
-  if (!active || !(active instanceof CompItem)) {
+// Which comp the user is looking at. app.project.activeItem follows whichever
+// panel has focus — with the Project panel focused it is the item selected
+// there, not the comp in the viewer — so the viewer is asked first:
+// app.activeViewer is the last-focused viewer even while another panel has
+// focus, and setActive() on it makes activeItem answer for that viewer. That
+// moves keyboard focus to the viewer, which changes nothing in the project.
+// activeItem is the fallback, and every way of not knowing is said as such.
+function __selProjectSelectionCount() {
+  try { return app.project.selection ? app.project.selection.length : 0; } catch (e) { return 0; }
+}
+
+function __selResolveComp() {
+  var before = null;
+  try { before = app.project.activeItem; } catch (e) { before = null; }
+  var viewer = null;
+  try { viewer = app.activeViewer; } catch (e) { viewer = null; }
+  var viewerNote = null;
+  if (viewer) {
+    var isComp = false;
+    try { isComp = viewer.type === ViewerType.VIEWER_COMPOSITION; } catch (e) { isComp = false; }
+    if (isComp) {
+      var fromViewer = null;
+      try {
+        // setActive() answers false when it could not focus the viewer; then
+        // activeItem still follows the other panel and must not be read as
+        // the viewer's comp.
+        if (viewer.setActive() !== false) fromViewer = app.project.activeItem;
+      } catch (e) { fromViewer = null; }
+      if (fromViewer && fromViewer instanceof CompItem) {
+        var res = { comp: fromViewer, source: "viewer" };
+        if (before && before instanceof CompItem && before.id !== fromViewer.id) {
+          res.note = "The Project panel had '" + before.name + "' (id " + before.id + ") active, but the comp in the viewer is '" +
+            fromViewer.name + "' (id " + fromViewer.id + "); this is the viewer's selection. If the user meant the other comp, ask.";
+        }
+        return res;
+      }
+      viewerNote = "a composition viewer is open but its comp could not be read";
+    } else {
+      viewerNote = "the active viewer is a layer or footage viewer, not a composition viewer";
+    }
+  } else {
+    viewerNote = "no viewer is open";
+  }
+  if (before && before instanceof CompItem) {
     return {
-      comp: null,
-      time: null,
-      selectedLayers: [],
-      selectedProperties: [],
-      reason: active
-        ? "The active item is '" + active.name + "' (id " + active.id + "), which is not a composition — there is no comp selection to read. Ask the user to open the comp in the viewer, or pass a compId to the tool you meant to call."
-        : "No composition is active in After Effects — nothing is open in the viewer, so there is no selection to read. Ask the user which comp they mean, or open one with set_active_comp."
+      comp: before, source: "activeItem",
+      note: "Could not read the comp from the viewer (" + viewerNote + "); this is the project's active item '" + before.name +
+        "', which may be the comp selected in the Project panel rather than the one the user is looking at."
     };
   }
+  var why = "Could not determine the comp in the viewer (" + viewerNote + ")";
+  if (before) {
+    why += "; the active item is '" + before.name + "' (id " + before.id + "), which is not a composition";
+  } else {
+    var n = __selProjectSelectionCount();
+    why += n > 0
+      ? "; the Project panel has focus with " + n + " item" + (n === 1 ? "" : "s") + " selected and none of them is an active comp"
+      : "; there is no active item either";
+  }
+  why += ". Ask the user which comp they mean (or to click in its timeline), or pass a compId to the tool you meant to call.";
+  return { comp: null, reason: why };
+}
+
+OPS.get_selection = noUndo(function (args) {
+  var found = __selResolveComp();
+  if (!found.comp) {
+    return { comp: null, time: null, selectedLayers: [], selectedProperties: [], reason: found.reason };
+  }
+  var active = found.comp;
   var c = active;
   var fr = c.frameRate;
   var out = {
     comp: { id: c.id, name: c.name },
+    source: found.source,
     time: c.time,
-    frame: Math.round(c.time * fr),
+    // As the timeline shows it: AE numbers frames from displayStartFrame
+    // (Composition Settings > Start Frame), not from 0. `time` stays on the
+    // keyframe clock, which always starts at 0.
+    frame: __selDisplayStartFrame(c) + Math.round(c.time * fr),
     selectedLayers: [],
     selectedProperties: [],
   };
@@ -102,6 +170,7 @@ OPS.get_selection = noUndo(function (args) {
     out.note = "The selection is larger than one answer carries; the first " + nl + " layers and " + np +
       " properties are listed and `omitted` counts the rest.";
   }
+  if (found.note) out.note = out.note ? found.note + " " + out.note : found.note;
   if (__cpIsCheckpoint(c)) {
     out.checkpoint = true;
     out.warning = "The active comp is a checkpoint (a restore point made by checkpoint_comp), not the user's scene — do not edit its layers.";
