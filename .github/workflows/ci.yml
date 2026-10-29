@@ -69,6 +69,8 @@ jobs:
               const missing=Object.keys(OpSchemas).filter(op=>!served.has(op));
               if(missing.length){console.error(`defined in OpSchemas but not served: ${missing.join(", ")}`);process.exit(1);}
               if(n!==defined){console.error(`tools/list served ${n} but OpSchemas defines ${defined}`);process.exit(1);}
+              const unannotated=t.result.tools.filter(x=>typeof x.annotations?.readOnlyHint!=="boolean"||typeof x.annotations?.destructiveHint!=="boolean").map(x=>x.name);
+              if(unannotated.length){console.error(`served without readOnlyHint/destructiveHint annotations: ${unannotated.join(", ")}`);process.exit(1);}
               if(n<76){console.error(`expected >=76 tools, got ${n} — a tool was removed from OpSchemas`);process.exit(1);}
               console.log(`${n} tools on ${process.platform}`);
               c.kill();process.exit(0);
@@ -378,6 +380,12 @@ jobs:
       # and a run_jsx step cannot ride in through run_batch.
       - name: The tool switches offer and refuse what they say
         run: node tests/unit/tool-policy.mjs
+
+      # Tool annotations (#165) follow OpMutation and the read-only table, so a
+      # client never auto-approves a write as a read; and every JSON result is
+      # compact (#166), because the model re-reads it on every later turn.
+      - name: Tool annotations match OpMutation and results are compact
+        run: node tests/unit/tool-annotations.mjs
 
       # Where a long batch's progress goes. A notification sent after its
       # request's response is on the wire and seen by no client — that is how

@@ -30,6 +30,7 @@ import type { CompFingerprint } from "./snapshots/store.js";
 import { descriptions } from "./tools/descriptions.js";
 import { AeError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
 import { resolveRunJsxSource, type RunJsxArgs } from "./tools/runJsxSource.js";
+import { toolAnnotations } from "./tools/annotations.js";
 import {
   disabledOps,
   disabledToolMessage,
@@ -326,6 +327,9 @@ export function createServer(opts: CreateServerOptions = {}) {
       name,
       description: descriptions[name] ?? `AE op: ${name}`,
       inputSchema: toolInputSchema(name) as any,
+      // Derived from OpMutation and the read-only policy table, never hand-kept:
+      // see tools/annotations.ts for the rule (issue #165).
+      annotations: toolAnnotations(name),
     }));
     return { tools };
   });
@@ -1091,7 +1095,11 @@ async function clientRoots(server: Server): Promise<string[] | undefined> {
  * and are never queued — so the image envelope cannot be touched by this.
  */
 function textResult(value: unknown, wait?: QueueWait | null) {
-  const json = (v: unknown) => ({ type: "text" as const, text: JSON.stringify(v, null, 2) });
+  // Compact, not pretty-printed (issue #166). The model reads JSON without the
+  // indentation, and every result is re-sent on every later turn of the
+  // session, so the whitespace was paid for many times over: 20–40% of a
+  // nested read like get_layer_full. Content is unchanged — only whitespace.
+  const json = (v: unknown) => ({ type: "text" as const, text: JSON.stringify(v) });
   if (!wait) return { content: [json(value)] };
   const merged = mergeWait(value, wait);
   if (merged) return { content: [json(merged)] };
