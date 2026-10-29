@@ -265,8 +265,14 @@ OPS.duplicate_comp = function (args) {
   var made = app.project.itemByID(newId);
   if (!made) throw new Error("duplicate_comp created comp " + newId + " but it could not be read back");
   if (folder) made.parentFolder = folder;
+  // A copy of a checkpoint (checkpoint.jsx) is how its contents are recovered
+  // once the comp it was taken of is gone. Whether or not AE carries the item
+  // comment across a duplicate, the copy must not read as a second checkpoint.
+  var wasCheckpoint = (typeof __cpIsCheckpoint === "function") && __cpIsCheckpoint(made);
+  if (wasCheckpoint) made.comment = "";
 
   var out = __compSummary(made);
+  if (wasCheckpoint) out.fromCheckpoint = true;
   out.fromCompId = srcId;
   out.fromName = srcName;
   out.deep = !!args.deep;

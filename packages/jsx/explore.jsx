@@ -510,11 +510,18 @@ OPS.find_layers = noUndo(function (args) {
   var sections = (args && args.include) ? args.include : [];
   var out = [];
   var comps = [];
+  // Checkpoints (checkpoint.jsx) are copies of real comps, so a project-wide
+  // search would match every layer twice — and an agent editing the match in
+  // a checkpoint has edited the restore point, not the scene. They are skipped
+  // unless asked for by compId, and the skip is counted, never silent.
+  var skipped = 0;
   if (args.compId) comps.push(getCompById(args.compId));
   else {
     for (var i = 1; i <= app.project.numItems; i++) {
       var it = app.project.item(i);
-      if (it instanceof CompItem) comps.push(it);
+      if (!(it instanceof CompItem)) continue;
+      if (__cpIsCheckpoint(it)) { skipped += 1; continue; }
+      comps.push(it);
     }
   }
   var pat = args.namePattern ? new RegExp(args.namePattern, "i") : null;
@@ -540,5 +547,7 @@ OPS.find_layers = noUndo(function (args) {
       out.push(s);
     }
   }
-  return { matches: out, count: out.length, compsSearched: comps.length, included: sections };
+  var res = { matches: out, count: out.length, compsSearched: comps.length, included: sections };
+  if (skipped > 0) res.checkpointsSkipped = skipped;
+  return res;
 });
