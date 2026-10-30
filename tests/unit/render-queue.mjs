@@ -28,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo, snapshotLayout, jobFolder, shadowDirs, strayFiles, relocateShadowOutputs } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo, snapshotLayout, jobFolder, shadowDirs, strayFiles, relocateShadowOutputs, stampOutputs, cancelledPartials } =
   await import(dist("render", "aerender.js"));
 const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin, stopProcessTreeSync, snapshotMarker } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
@@ -825,6 +825,86 @@ function alive(pid) {
     assert.deepEqual(report.partialFiles, [out]);
     assert.equal(fs.readFileSync(out, "utf8"), "partial");
     try { process.kill(Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8")), "SIGKILL"); } catch {}
+  });
+
+  // The live AE check of #215: aerender exits on cancel at once, while its
+  // engine — still being stopped — is what writes the partial file into the
+  // job folder. The engine here is a sleeper the test owns: the runner sees
+  // it through `findEngines`, never signals it (`confirmEngine` says no), and
+  // the test ends it once the partial file is written — the same on both hosts.
+  async function cancelWithLateEngineWrite(name, { prior }) {
+    const projDir = path.join(tmp, `cancellate-${name}`);
+    fs.mkdirSync(projDir, { recursive: true });
+    const proj = path.join(projDir, "show.aep");
+    fs.writeFileSync(proj, "aep bytes");
+    const out = path.join(projDir, "beside.mp4");
+    if (prior !== undefined) fs.writeFileSync(out, prior);
+    const priorStat = prior !== undefined ? fs.statSync(out) : null;
+    const sleeper = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { stdio: "ignore" });
+    const jobs = new JobManager();
+    const runner = runnerFor(jobs, {
+      tmpRoot: runTmp,
+      graceMs: 4000,
+      findEngines: async () => (alive(sleeper.pid) ? [sleeper.pid] : []),
+      confirmEngine: async () => false,
+    });
+    env("hang", path.join(tmp, `cancellate-${name}-elsewhere.mov`));
+    const { jobId } = runner.start({ ...plan(out, 100), projectPath: proj }, fake);
+    const shadow = path.join(path.dirname(snapshotLayout(proj, jobId, runTmp, [out]).snap), "beside.mp4");
+    for (let i = 0; i < 200 && !fs.existsSync(process.env.FAKE_SELF); i++) await sleep(20);
+    const aerenderPid = Number(fs.readFileSync(process.env.FAKE_SELF, "utf8"));
+    const cancelling = runner.cancel(jobId);
+    for (let i = 0; i < 200 && alive(aerenderPid); i++) await sleep(20);
+    await sleep(300);
+    // The engine writes its partial file after aerender has gone — into the
+    // job folder as it stands, never re-creating a folder that was removed.
+    let wrote = true;
+    try { fs.writeFileSync(shadow, "partial"); } catch { wrote = false; }
+    sleeper.kill("SIGKILL");
+    const report = await cancelling;
+    for (let i = 0; i < 200 && runner.activeJobId; i++) await sleep(20);
+    return { out, shadow, wrote, report, priorStat, jobs, jobId };
+  }
+
+  await check("cancel: a partial the engine writes after aerender exits is moved where asked and named, not deleted with the copy (#215 review)", async () => {
+    const { out, wrote, report, jobs, jobId } = await cancelWithLateEngineWrite("fresh", {});
+    assert.ok(wrote, "the job folder was removed while cancel was still stopping the engine");
+    assert.equal(report.stopped, true, report.note);
+    assert.deepEqual(report.partialFiles, [out]);
+    assert.equal(fs.readFileSync(out, "utf8"), "partial");
+    assert.match(report.note, /INCOMPLETE/);
+    assert.equal(jobs.get(jobId).status, "cancelled");
+  });
+
+  await check("cancel: a complete file from an earlier render is never reported as partial, nor replaced (#215 review)", async () => {
+    const { out, shadow, wrote, report, priorStat } = await cancelWithLateEngineWrite("prior", { prior: "old complete render" });
+    assert.ok(wrote);
+    assert.equal(report.stopped, true, report.note);
+    assert.ok(!report.partialFiles.includes(out), `the earlier render's file was named as partial: ${report.partialFiles}`);
+    assert.equal(fs.readFileSync(out, "utf8"), "old complete render", "the earlier render's file must be untouched");
+    assert.equal(fs.statSync(out).mtimeMs, priorStat.mtimeMs);
+    assert.deepEqual(report.partialFiles, [shadow], "the partial is named where it actually is");
+    assert.equal(fs.readFileSync(shadow, "utf8"), "partial", "the kept partial survives the job's end");
+    assert.ok(!fs.existsSync(path.join(path.dirname(shadow), "show.aep")), "the project copy itself is still removed");
+    assert.match(report.note, /existed before this render and is unchanged/);
+    assert.match(report.note, /NOT replaced/);
+  });
+
+  await check("cancel: an earlier render's file the cancelled render never touched is not a partial; a sequence's old frames neither", async () => {
+    const dir = path.join(tmp, "partials-pure");
+    fs.mkdirSync(dir, { recursive: true });
+    const mov = path.join(dir, "old.mov");
+    const seq = path.join(dir, "f_[####].png");
+    fs.writeFileSync(mov, "old");
+    fs.writeFileSync(path.join(dir, "f_0000.png"), "old");
+    const outputs = [{ index: 1, path: mov }, { index: 2, path: seq }];
+    const before = stampOutputs(outputs);
+    assert.deepEqual(cancelledPartials(outputs, before), [], "nothing new was written");
+    fs.writeFileSync(path.join(dir, "f_0001.png"), "new frame");
+    assert.deepEqual(cancelledPartials(outputs, before), [seq], "a new frame makes the sequence partial");
+    await sleep(20);
+    fs.writeFileSync(mov, "rewritten by aerender in place");
+    assert.deepEqual(cancelledPartials(outputs, before), [mov, seq], "a file the render rewrote in place is partial");
   });
 
   await check("a stuck engine cannot hold the job open: killed at the cap, then decided", async () => {
