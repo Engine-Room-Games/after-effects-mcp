@@ -29,6 +29,10 @@ const { findSignatureFailure, signatureWorkaroundSteps, buildNextSteps } = await
 const { BUNDLE_ID, signedInstallPresent, installedPanelDir } = await import(dist("setup", "paths.js"));
 const { installPanel } = await import(dist("setup", "install.js"));
 
+// installPanel asks whether After Effects is running; these tests pin it open
+// rather than reading the machine they run on.
+const AE_OPEN = { isAfterEffectsRunning: async () => true };
+
 let passed = 0;
 async function check(name, fn) {
   try {
@@ -245,7 +249,7 @@ await check("setup_panel warns when it is about to overwrite a signed install", 
     const target = installedPanelDir();
     assert.ok(target.startsWith(home), `installedPanelDir() escaped the fake home: ${target}`);
 
-    const first = await installPanel({ enableDebugMode: false });
+    const first = await installPanel({ prefs: AE_OPEN, enableDebugMode: false });
     assert.equal(first.ok, true);
     assert.equal(first.signedInstallOverwritten, undefined);
     assert.equal(first.notes.some((n) => /self-signed/.test(n)), false);
@@ -254,16 +258,16 @@ await check("setup_panel warns when it is about to overwrite a signed install", 
     // Issue #163: running it again over an identical install changes nothing,
     // so it must not send the user to restart After Effects.
     const marker = fs.statSync(path.join(target, "CSXS", "manifest.xml")).ino;
-    const again = await installPanel({ enableDebugMode: false });
+    const again = await installPanel({ prefs: AE_OPEN, enableDebugMode: false });
     assert.equal(again.restartAfterEffects, false, "nothing changed, yet it asked for a restart");
     assert.ok(again.actions.some((a) => /already identical/.test(a)), again.actions.join(" | "));
     assert.ok(again.notes.some((n) => /Nothing this call does needs After Effects restarted/.test(n)));
     assert.equal(fs.statSync(path.join(target, "CSXS", "manifest.xml")).ino, marker, "an identical install was rewritten");
 
     // force always replaces, and one changed byte is a change.
-    assert.equal((await installPanel({ enableDebugMode: false, force: true })).restartAfterEffects, true);
+    assert.equal((await installPanel({ prefs: AE_OPEN, enableDebugMode: false, force: true })).restartAfterEffects, true);
     fs.appendFileSync(path.join(target, "CSXS", "manifest.xml"), " ");
-    const edited = await installPanel({ enableDebugMode: false });
+    const edited = await installPanel({ prefs: AE_OPEN, enableDebugMode: false });
     assert.equal(edited.restartAfterEffects, true, "a differing install was treated as unchanged");
 
     // The user signs it in place, per the #91 workaround.
@@ -271,7 +275,7 @@ await check("setup_panel warns when it is about to overwrite a signed install", 
     fs.writeFileSync(path.join(target, "META-INF", "signatures.xml"), "<signatures/>");
     fs.writeFileSync(path.join(target, "mimetype"), "application/vnd.adobe.air-ucf-package+zip");
 
-    const second = await installPanel({ enableDebugMode: false });
+    const second = await installPanel({ prefs: AE_OPEN, enableDebugMode: false });
     assert.equal(second.signedInstallOverwritten, true);
     const note = second.notes.find((n) => /self-signed/.test(n));
     assert.ok(note, "no warning about the stripped signature");

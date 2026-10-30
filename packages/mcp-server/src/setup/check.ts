@@ -210,7 +210,25 @@ export function signatureWorkaroundSteps(installed: string, opts: { shippedSigne
  *   intact signature: the installed one if it is installed, otherwise the one
  *   setup_panel would install.
  */
-export function debugModeCheck(debugMode: { on: boolean; detail: string }, signedLoads: boolean): Check {
+export function debugModeCheck(
+  debugMode: { on: boolean; detail: string },
+  signedLoads: boolean,
+  signatureVoided = false
+): Check {
+  // A signed panel whose files changed since signing is not an unsigned panel:
+  // the flag is only the fallback that would let AE load the modified files,
+  // and the fault — with its fix — belongs to panelSignatureIntact. Failing
+  // here as well sent the user to "turn on the preference" and "restart the
+  // Mac" for a panel that only needs putting back (live test of #182).
+  if (signatureVoided) {
+    return {
+      name: "cepDebugMode",
+      ok: true,
+      detail: debugMode.on
+        ? `${debugMode.detail} — the installed panel's signature no longer matches its files, and this preference is what still lets After Effects load it; the fix is setup_panel with force:true (see panelSignatureIntact)`
+        : `${debugMode.detail} — not the fault: the installed panel is signed but its files changed since. This preference, if on, would let After Effects load the modified panel anyway; the fix is setup_panel with force:true (see panelSignatureIntact)`,
+    };
+  }
   if (signedLoads) {
     return {
       name: "cepDebugMode",
@@ -305,7 +323,13 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
   const installedSignedIntact = isInstalled && isSignedPanel(installed) && signatureIntact(installedProblems);
 
   const debugMode = opts.debugMode ?? (await isDebugModeOn());
-  checks.push(debugModeCheck(debugMode, isInstalled ? installedSignedIntact : sourceSigned));
+  checks.push(
+    debugModeCheck(
+      debugMode,
+      isInstalled ? installedSignedIntact : sourceSigned,
+      isInstalled && isSignedPanel(installed) && !installedSignedIntact
+    )
+  );
 
   checks.push({
     name: "panelInstalled",
@@ -717,7 +741,7 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
   } else if (needsInstall || by("panelRunningCurrent")?.ok === false) {
     steps.push(brokenInstall ? "Reopen After Effects." : "Quit and reopen After Effects so it picks up the panel.");
   }
-  if (needsDebug) {
+  if (needsDebug && !signatureBroken) {
     steps.push(
       process.platform === "win32"
         ? "After Effects re-reads the registry when it launches, so the preference takes effect then."

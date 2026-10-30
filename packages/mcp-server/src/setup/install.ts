@@ -10,7 +10,14 @@ import {
   wsModuleDir,
 } from "./paths.js";
 import { describeSignatureProblems, isSignedPanel, signatureIntact, signatureProblems } from "./panelSignature.js";
-import { CEP_LOG_LEVEL, debugModeLocation, enableDebugMode, ensureCepLogging, isDebugModeOn } from "./platform.js";
+import {
+  CEP_LOG_LEVEL,
+  debugModeLocation,
+  enableDebugMode,
+  ensureCepLogging,
+  isAfterEffectsRunning,
+  isDebugModeOn,
+} from "./platform.js";
 
 export interface InstallResult {
   ok: boolean;
@@ -50,6 +57,7 @@ export interface PreferenceCalls {
   isDebugModeOn: typeof isDebugModeOn;
   enableDebugMode: typeof enableDebugMode;
   ensureCepLogging: typeof ensureCepLogging;
+  isAfterEffectsRunning: typeof isAfterEffectsRunning;
 }
 
 /** Added to the action when PlayerDebugMode is turned on for a signed panel, which does not need it. */
@@ -79,7 +87,7 @@ export async function installPanel(
 ): Promise<InstallResult> {
   const actions: string[] = [];
   const notes: string[] = [];
-  const prefs: PreferenceCalls = { isDebugModeOn, enableDebugMode, ensureCepLogging, ...opts.prefs };
+  const prefs: PreferenceCalls = { isDebugModeOn, enableDebugMode, ensureCepLogging, isAfterEffectsRunning, ...opts.prefs };
 
   if (!isSupportedPlatform()) {
     throw new Error(
@@ -255,8 +263,16 @@ export async function installPanel(
   // neither did, this call gives no reason for one — but the disk is not what
   // After Effects is running, so an EARLIER install may still be waiting for
   // its restart; check_setup compares against the running panel and says so.
-  const restartAfterEffects = !unchanged || debugModeEnabledNow;
-  if (!restartAfterEffects) {
+  //
+  // And only a running After Effects can be restarted: when it is closed the
+  // panel simply loads the next time it opens, so the answer is "open it",
+  // never "restart it" (live test of #182).
+  const changed = !unchanged || debugModeEnabledNow;
+  const aeRunning = await prefs.isAfterEffectsRunning();
+  const restartAfterEffects = changed && aeRunning;
+  if (changed && !aeRunning) {
+    notes.push("After Effects is not running, so nothing needs restarting: the panel loads the next time it is opened.");
+  } else if (!changed) {
     notes.push(
       "Nothing this call does needs After Effects restarted: the installed panel was already this version. " +
         "If check_setup still reports the running panel as out of date, an earlier install has not been loaded " +

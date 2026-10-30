@@ -45,6 +45,10 @@ const { REQUIRED_PANEL_CAPABILITIES } = await import(dist("setup", "panelCapabil
 const { writeZip } = await import(dist("frames", "mogrtThumbnail.js"));
 const { crc32 } = await import(dist("frames", "pngCodec.js"));
 
+// installPanel asks whether After Effects is running; these tests pin it open
+// rather than reading the machine they run on.
+const AE_OPEN = { isAfterEffectsRunning: async () => true };
+
 let passed = 0;
 async function check(name, fn) {
   try {
@@ -376,7 +380,7 @@ function fakeHome(name) {
 await check("a signed panel is installed verbatim — signature files and its own ws — and reported current", async () => {
   try {
     const target = fakeHome("home-signed");
-    const first = await installPanel({ enableDebugMode: false, source: signedDir });
+    const first = await installPanel({ prefs: AE_OPEN, enableDebugMode: false, source: signedDir });
     assert.equal(first.signed, true);
     assert.equal(first.restartAfterEffects, true);
     assert.equal(first.signedInstallOverwritten, undefined);
@@ -417,7 +421,7 @@ await check("a signed panel is installed verbatim — signature files and its ow
     }
 
     // Running it again over the identical signed install changes nothing (#163).
-    const again = await installPanel({ enableDebugMode: false, source: signedDir });
+    const again = await installPanel({ prefs: AE_OPEN, enableDebugMode: false, source: signedDir });
     assert.equal(again.restartAfterEffects, false);
     assert.ok(again.actions.some((a) => /already identical/.test(a)), again.actions.join(" | "));
 
@@ -441,7 +445,7 @@ await check("a signed panel is installed verbatim — signature files and its ow
     assert.deepEqual(signatureProblems(target).extra, ["client/stray.js"]);
     assert.notEqual(panelClientHash(target), panelClientHash(source));
     fs.rmSync(path.join(target, "client", "stray.js"));
-    const repaired = await installPanel({ enableDebugMode: false, source: signedDir });
+    const repaired = await installPanel({ prefs: AE_OPEN, enableDebugMode: false, source: signedDir });
     assert.equal(repaired.restartAfterEffects, true);
     assert.ok(signatureIntact(signatureProblems(target)));
   } finally { restoreEnv(); }
@@ -450,10 +454,10 @@ await check("a signed panel is installed verbatim — signature files and its ow
 await check("replacing a self-signed install with the signed panel strips nothing worth warning about", async () => {
   try {
     const target = fakeHome("home-selfsigned");
-    await installPanel({ enableDebugMode: false });                // an unsigned checkout install…
+    await installPanel({ prefs: AE_OPEN, enableDebugMode: false });                // an unsigned checkout install…
     fs.mkdirSync(path.join(target, "META-INF"), { recursive: true }); // …signed in place per #91
     fs.writeFileSync(path.join(target, "META-INF", "signatures.xml"), "<signatures/>");
-    const res = await installPanel({ enableDebugMode: false, source: signedDir });
+    const res = await installPanel({ prefs: AE_OPEN, enableDebugMode: false, source: signedDir });
     assert.equal(res.signedInstallOverwritten, undefined);
     assert.equal(res.notes.some((n) => /NOT signed/.test(n)), false);
     assert.ok(signatureIntact(signatureProblems(target)));
@@ -463,12 +467,12 @@ await check("replacing a self-signed install with the signed panel strips nothin
 await check("a signed panel without its own ws is refused before the old install is touched", async () => {
   try {
     const target = fakeHome("home-nows");
-    await installPanel({ enableDebugMode: false, source: signedDir });
+    await installPanel({ prefs: AE_OPEN, enableDebugMode: false, source: signedDir });
     const broken = path.join(tmp, "signed-no-ws");
     fs.cpSync(signedDir, broken, { recursive: true });
     fs.rmSync(path.join(broken, "node_modules"), { recursive: true });
     fs.appendFileSync(path.join(broken, "client", "main.js"), "\n"); // so it would not count as identical
-    await assert.rejects(installPanel({ enableDebugMode: false, source: broken, force: true }), /does not carry a complete `ws`/);
+    await assert.rejects(installPanel({ prefs: AE_OPEN, enableDebugMode: false, source: broken, force: true }), /does not carry a complete `ws`/);
     assert.ok(signatureIntact(signatureProblems(target)), "the working signed install was damaged by a refused one");
   } finally { restoreEnv(); }
 });
@@ -599,12 +603,13 @@ const quietPrefs = (state) => ({
   isDebugModeOn: async () => (state.on ? ON : OFF),
   enableDebugMode: async () => { state.enabled = (state.enabled ?? 0) + 1; state.on = true; return [12, 11]; },
   ensureCepLogging: async () => ({ set: [], kept: [] }),
+  isAfterEffectsRunning: async () => state.aeRunning ?? true,
 });
 
 await check("check_setup: a signed install loads without PlayerDebugMode, and says so", async () => {
   try {
     fakeHome("home-check-signed");
-    await installPanel({ enableDebugMode: false, source: signedDir });
+    await installPanel({ prefs: AE_OPEN, enableDebugMode: false, source: signedDir });
     const report = await checkSetup({ source: signedDir, debugMode: OFF, afterEffectsRunning: false, candidates: [] });
     const debug = byName(report, "cepDebugMode");
     assert.equal(debug.ok, true, `cepDebugMode failed for a signed install: ${debug.detail}`);
@@ -620,22 +625,48 @@ await check("check_setup: a signed install loads without PlayerDebugMode, and sa
 await check("check_setup: the same install voided by a dev sync fails without PlayerDebugMode, passes with it", async () => {
   try {
     const target = fakeHome("home-check-voided");
-    await installPanel({ enableDebugMode: false, source: signedDir });
+    await installPanel({ prefs: AE_OPEN, enableDebugMode: false, source: signedDir });
     fs.writeFileSync(path.join(target, "client", "stray.js"), "");
-    const off = await checkSetup({ source: signedDir, debugMode: OFF, afterEffectsRunning: false, candidates: [] });
+    const off = await checkSetup({ source: signedDir, debugMode: OFF, afterEffectsRunning: true, candidates: [] });
     assert.equal(byName(off, "panelSignatureIntact").ok, false);
-    assert.equal(byName(off, "cepDebugMode").ok, false, "a voided signature needs the debug flag, and it is off");
-    assert.match(off.nextSteps.join("\n"), /setup_panel tool with force:true/);
+    // The fault is the signature, not the preference (live test of #182):
+    // cepDebugMode does not call this an unsigned panel, and does not fail too.
+    const debug = byName(off, "cepDebugMode");
+    assert.equal(debug.ok, true, "a broken signature was blamed on the debug preference");
+    assert.doesNotMatch(debug.detail, /only loads unsigned panels/);
+    assert.match(debug.detail, /files changed since/);
+    assert.match(debug.detail, /setup_panel with force:true/);
+    const text = off.nextSteps.join("\n");
+    assert.match(text, /setup_panel tool with force:true/);
+    assert.doesNotMatch(text, /restart the Mac|reboot|re-reads the registry/i, "a broken signature is not fixed by a reboot");
     const on = await checkSetup({ source: signedDir, debugMode: ON, afterEffectsRunning: false, candidates: [] });
     assert.equal(byName(on, "panelSignatureIntact").ok, true);
     assert.equal(byName(on, "panelSignatureIntact").evidence, "voided");
   } finally { restoreEnv(); }
 });
 
+await check("setup_panel with After Effects closed asks for no restart — opening it is enough", async () => {
+  try {
+    fakeHome("home-ae-closed");
+    const closed = { isAfterEffectsRunning: async () => false };
+    for (const source of [signedDir, undefined]) {
+      const res = await installPanel({ enableDebugMode: false, force: true, source, prefs: closed });
+      assert.equal(res.restartAfterEffects, false, "a closed After Effects cannot be restarted");
+      assert.ok(res.notes.some((n) => /not running.*loads the next time it is opened/.test(n)), res.notes.join(" | "));
+      const open = await installPanel({ enableDebugMode: false, force: true, source, prefs: AE_OPEN });
+      assert.equal(open.restartAfterEffects, true, "an open After Effects runs the old panel until restarted");
+    }
+    // And check_setup, with the fresh install and AE closed, says open it — never restart it.
+    await installPanel({ enableDebugMode: false, force: true, source: signedDir, prefs: closed });
+    const after = await checkSetup({ source: signedDir, debugMode: OFF, afterEffectsRunning: false, candidates: [] });
+    assert.deepEqual(after.nextSteps, ["Open After Effects."]);
+  } finally { restoreEnv(); }
+});
+
 await check("check_setup: an unsigned install still needs PlayerDebugMode", async () => {
   try {
     fakeHome("home-check-unsigned");
-    await installPanel({ enableDebugMode: false });
+    await installPanel({ prefs: AE_OPEN, enableDebugMode: false });
     const report = await checkSetup({ source: panelSrc, debugMode: OFF, afterEffectsRunning: false, candidates: [] });
     assert.equal(byName(report, "cepDebugMode").ok, false);
     assert.equal(byName(report, "panelSignatureIntact"), undefined);
@@ -645,7 +676,7 @@ await check("check_setup: an unsigned install still needs PlayerDebugMode", asyn
 await check("setup_panel with the debug preference on: signed sets it as a fallback with no restart, unsigned asks for one", async () => {
   try {
     fakeHome("home-prefs");
-    await installPanel({ enableDebugMode: false, source: signedDir });
+    await installPanel({ prefs: AE_OPEN, enableDebugMode: false, source: signedDir });
     const state = { on: false };
     const signed = await installPanel({ source: signedDir, prefs: quietPrefs(state) });
     assert.equal(state.enabled, 1, "the fallback preference was not set");
@@ -654,7 +685,7 @@ await check("setup_panel with the debug preference on: signed sets it as a fallb
     assert.ok(signed.actions.some((a) => /only as a fallback/.test(a)), signed.actions.join(" | "));
 
     fakeHome("home-prefs-unsigned");
-    await installPanel({ enableDebugMode: false });
+    await installPanel({ prefs: AE_OPEN, enableDebugMode: false });
     const state2 = { on: false };
     const unsigned = await installPanel({ prefs: quietPrefs(state2) });
     assert.equal(state2.enabled, 1);
