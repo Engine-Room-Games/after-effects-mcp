@@ -3,7 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { panelSourceDir } from "./paths.js";
 import { panelClientHash } from "./panelHash.js";
-import { missingCapabilities } from "./panelCapabilities.js";
+import {
+  CAP_PROJECT_PATH,
+  CAP_SERVER_DRIVES_JOBS,
+  CAP_SERVER_IMAGES,
+  CAP_SERVER_RUN_JSX,
+  missingCapabilities,
+} from "./panelCapabilities.js";
 
 /**
  * Is the panel currently running inside After Effects the one this server ships?
@@ -39,6 +45,12 @@ export type PanelState =
   | "update-needed"
   /** Files on disk are a mix of versions; no restart can resolve it. */
   | "partial-install"
+  /**
+   * The running panel reports that it could not hash its own folder
+   * (`clientHash: null`), so whether it is current cannot be known. A restart
+   * would hash the same unreadable folder again, so it is never the advice.
+   */
+  | "unverifiable"
   /**
    * No shipped panel to compare against, and the running one lists every
    * capability this server relies on. The only state besides "current" that
@@ -115,6 +127,35 @@ const STALE_PANEL_ADVICE =
   "understand everything they can do now. Run setup_panel, then ask them to quit and reopen After Effects. " +
   "Do not retry the failed call until they confirm it has restarted.";
 
+/** What each capability lets the server do, in words a user would recognise. */
+const CAPABILITY_WORDS: Readonly<Record<string, string>> = {
+  [CAP_PROJECT_PATH]: "finding the project's folder for the house style",
+  [CAP_SERVER_IMAGES]: "handing screenshots over to these tools",
+  [CAP_SERVER_RUN_JSX]: "running scripts these tools prepare",
+  [CAP_SERVER_DRIVES_JOBS]: "letting these tools run long batches",
+};
+
+/**
+ * A long `run_batch` the panel started and is driving itself — only a panel
+ * from before issue #220 does that, and since #243 nothing in the server
+ * follows such a job. The batch is real and running, so the message says so
+ * before it says to update; it never claims the panel did not recognise the
+ * op, which it plainly did.
+ */
+export function panelDrivenBatchMessage(jobId: string): string {
+  return (
+    `The After Effects panel started batch ${jobId} and is running it itself, so these tools cannot follow it or ` +
+    `report when it finishes. Do not send the batch again: it is still applying in After Effects. Only a panel ` +
+    `older than these tools runs a batch on its own. ${STALE_PANEL_ADVICE}`
+  );
+}
+
+const UNVERIFIABLE_ADVICE =
+  "The After Effects panel is running but could not read its own files to report its version, so these tools " +
+  "cannot tell whether it is current. Restarting After Effects will not change that — it reads the same folder " +
+  "again. Run check_setup and relay what it reports. If it names no other problem, tell the user to quit After " +
+  "Effects completely, then run setup_panel to reinstall the panel, then reopen it.";
+
 const PARTIAL_INSTALL_ADVICE =
   "The installed After Effects panel is a mix of two versions — some files were updated and others were not, which " +
   "happens when it is installed while After Effects is open and holding them. Restarting will not fix this. Tell the " +
@@ -159,7 +200,8 @@ export function assessPanel(
     return {
       state: "update-needed",
       message:
-        `The After Effects panel is out of date: it does not support ${missing.join(", ")}, which these tools need. ` +
+        `The After Effects panel is out of date: it cannot do ${missing.map((c) => CAPABILITY_WORDS[c] ?? c).join(", ")}, ` +
+        "which these tools need. " +
         STALE_PANEL_ADVICE +
         " If setup_panel says it has no panel to install, these tools are installed incompletely — reinstall them first.",
     };
@@ -181,6 +223,15 @@ export function assessPanel(
   }
 
   const installedCurrent = !!installed && sameHashes(shipped, installed);
+
+  // A panel since #243 that tried to hash its own folder and could not sends
+  // `clientHash: null` (a panel from before #243 sends no key at all). Its
+  // bundle may be current; its client code cannot be known. Telling the user
+  // to restart would loop for ever — the restarted panel reads the same folder
+  // — so the advice is the diagnosis, then a reinstall.
+  if (runningHashes.bundle && "clientHash" in r && r.clientHash === null) {
+    return { state: "unverifiable", message: UNVERIFIABLE_ADVICE };
+  }
 
   if (!runningHashes.bundle || !runningHashes.client) {
     // A panel that does not report both halves predates the one it is missing,

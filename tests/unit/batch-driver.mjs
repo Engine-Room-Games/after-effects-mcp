@@ -615,6 +615,7 @@ try {
       assert.match(rb.text, /older than these tools/);
       assert.match(rb.text, /setup_panel/);
       assert.match(rb.text, /Do not send the batch again/);
+      assert.doesNotMatch(rb.text, /does not recognise/, "the panel did recognise run_batch: it started the batch");
       const jobId = [...ae.jobs.keys()].pop();
       await sleep(300);
       assert.equal(chunksOf(jobId).length, 0, "the server sent no chunk of a job the panel drives: never two drivers");

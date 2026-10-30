@@ -117,13 +117,18 @@ check("a self-signed install is a current install", () => {
   assert.equal(assessPanel(run(disk), disk, { installComplete: true }).state, "current");
 });
 
-check("bundle.jsx, node_modules, .DS_Store and the root package.json are not the client's", () => {
+check("bundle.jsx, node_modules, .DS_Store, Thumbs.db, desktop.ini and the root package.json are not the client's", () => {
   const dir = installCopy();
   fs.appendFileSync(path.join(dir, "jsx", "bundle.jsx"), "\n// reloaded\n");
   fs.mkdirSync(path.join(dir, "node_modules", "ws"), { recursive: true });
   fs.writeFileSync(path.join(dir, "node_modules", "ws", "index.js"), "");
   fs.writeFileSync(path.join(dir, ".DS_Store"), "x");
   fs.writeFileSync(path.join(dir, "client", ".DS_Store"), "x");
+  // Windows Explorer's equivalents, at the root and below.
+  fs.writeFileSync(path.join(dir, "Thumbs.db"), "x");
+  fs.writeFileSync(path.join(dir, "client", "Thumbs.db"), "x");
+  fs.writeFileSync(path.join(dir, "desktop.ini"), "x");
+  fs.writeFileSync(path.join(dir, "jsx", "desktop.ini"), "x");
   const pkg = path.join(dir, "package.json");
   fs.writeFileSync(pkg, fs.readFileSync(pkg, "utf8").replace(/"version":\s*"[^"]+"/, '"version": "9.9.9"'));
   assert.equal(both(dir), SHIPPED.client);

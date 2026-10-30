@@ -20,7 +20,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 // pathToFileURL, not the bare path: on Windows an absolute path starts with a
 // drive letter, which the ESM loader reads as an unsupported URL scheme.
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
-const { assessPanel, sourcePanelHashes, sourceBundleHash, sourceClientHash, unknownOpMessage } = await import(
+const { assessPanel, panelDrivenBatchMessage, sourcePanelHashes, sourceBundleHash, sourceClientHash, unknownOpMessage } = await import(
   dist("setup", "panelVersion.js")
 );
 const { REQUIRED_PANEL_CAPABILITIES, missingCapabilities, panelCapabilities } = await import(
@@ -86,13 +86,31 @@ assert.match(update.message, /quit and reopen/i);
 // it through to a path it does not have.
 for (const missing of [undefined, null, ""]) {
   const tag = JSON.stringify(missing);
-  const noClient = assessPanel(run(SHIPPED.bundle, missing), OLD_DISK);
-  check(`current bundle, no clientHash (${tag}), old disk`, noClient.state, "update-needed");
-  assert.match(noClient.message, /too old to report/);
+  // An explicit null beside a bundle hash is a #243 panel that could not hash
+  // its folder — "unverifiable", pinned below — not a too-old one.
+  if (missing !== null) {
+    const noClient = assessPanel(run(SHIPPED.bundle, missing), OLD_DISK);
+    check(`current bundle, no clientHash (${tag}), old disk`, noClient.state, "update-needed");
+    assert.match(noClient.message, /too old to report/);
+  }
   check(`no hashes (${tag}), old disk`, assessPanel(run(missing, missing), OLD_DISK).state, "update-needed");
   // Disk already refreshed: a restart is the only remaining step, and we can say so.
   check(`no hashes (${tag}), fresh disk`, assessPanel(run(missing, missing), CURRENT_DISK).state, "restart-needed");
 }
+// A panel since #243 that could not hash its own folder says so with an
+// explicit null. A restart would read the same folder, so the advice must not
+// be a restart, whatever the disk says — that would loop for ever.
+for (const diskNow of [CURRENT_DISK, OLD_DISK]) {
+  const v = assessPanel(run(SHIPPED.bundle, null), diskNow);
+  check(`clientHash null (${diskNow === CURRENT_DISK ? "current" : "old"} disk)`, v.state, "unverifiable");
+  assert.match(v.message, /check_setup/);
+  assert.match(v.message, /setup_panel/);
+  assert.match(v.message, /will not change that/, "says a restart alone is not the fix");
+  assert.doesNotMatch(v.message, /^Ask the user to quit and reopen/m);
+}
+// The key absent is a pre-#243 panel, not an unreadable folder.
+check("no clientHash key, current disk", assessPanel({ ok: true, bundleHash: SHIPPED.bundle }, CURRENT_DISK).state, "restart-needed");
+
 // A pre-0.3 /health: no hash fields at all.
 check("pre-0.3 health", assessPanel({ ok: true, bundleLoaded: true }, OLD_DISK).state, "update-needed");
 check("no health at all", assessPanel(null, OLD_DISK).state, "update-needed");
@@ -143,12 +161,26 @@ for (const caps of [undefined, "server-images", [], ALL.slice(1), [1, 2, 3]]) {
   assert.match(verdict.message, /reinstall/, "says what to do when setup_panel has nothing to install");
 }
 check("no source, no health", assessPanel(null, null, { shipped: null }).state, "update-needed");
-// The message names what is missing.
-assert.match(
-  assessPanel(run(OLD, OLD, { capabilities: ["project-path"] }), null, { shipped: null }).message,
-  /server-images, server-run-jsx, server-drives-jobs/
-);
-passed++;
+// The message says what is missing in plain words, never the capability ids.
+{
+  const m = assessPanel(run(OLD, OLD, { capabilities: ["project-path"] }), null, { shipped: null }).message;
+  assert.match(m, /screenshots/);
+  assert.match(m, /long batches/);
+  for (const id of ALL) assert.ok(!m.includes(id), `message names the internal id ${id}: ${m}`);
+  passed++;
+}
+
+// A batch the panel drives itself: it did recognise run_batch, so the message
+// must not say it did not — it says the batch is running and to update.
+{
+  const m = panelDrivenBatchMessage("j_1");
+  assert.match(m, /j_1/);
+  assert.match(m, /Do not send the batch again/);
+  assert.match(m, /older than these tools/);
+  assert.match(m, /setup_panel/);
+  assert.doesNotMatch(m, /does not recognise/);
+  passed++;
+}
 
 // panelCapabilities / missingCapabilities: a malformed field lists nothing.
 assert.deepEqual(panelCapabilities({ capabilities: "server-images" }), []);

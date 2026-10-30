@@ -367,6 +367,8 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
         ? "After Effects is running the panel that ships with these tools"
         : assessment.state === "partial-install"
           ? "the installed panel files are a mix of versions — a restart cannot resolve this"
+          : assessment.state === "unverifiable"
+            ? "the running panel could not read its own files to report its version"
           : assessment.state === "restart-needed"
             ? "After Effects is still running the previous panel — the update needs a restart to take effect"
             : assessment.state === "unknown"

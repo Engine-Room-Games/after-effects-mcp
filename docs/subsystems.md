@@ -31,7 +31,8 @@ fallback paths, such a panel would have reached a call it could not answer.
 `setup/panelHash.ts` in the server; they must agree byte for byte, and
 `tests/unit/panel-hash.mjs` holds them together on the real panel and on
 fixtures. **Change both together.** Left out of it, deliberately: `bundle.jsx`
-(its own half), `node_modules/` and `.DS_Store` at any depth, the signature
+(its own half), `node_modules/` and file-browser litter (`.DS_Store`,
+`Thumbs.db`, `desktop.ini`) at any depth, the signature
 files a self-signed install adds (`META-INF/`, `mimetype` — see below), the
 root `package.json` (a version stamp nothing reads at runtime), and the two
 version attributes of `CSXS/manifest.xml`. The last two are what keep a
@@ -48,7 +49,7 @@ different panel.
 
 They diverge for the entire window between `setup_panel` and restarting AE,
 which is exactly when calls break. **Only the running hashes are worth gating
-on.** `setup/panelVersion.ts` maps them onto five states, and the distinction
+on.** `setup/panelVersion.ts` maps them onto six states, and the distinction
 that matters most to a user is `restart-needed` — telling someone to run
 `setup_panel` again there wastes their time, so the message says so explicitly.
 
@@ -63,11 +64,17 @@ compares the bytes, and also checks the hash still moves when a source does. The
 client hash is the same kind of function: sorted `/`-separated paths, file
 contents, nothing else.
 
-The fifth state, `partial-install`, is checked *before* any that could
-recommend a restart, because a half-written install can hash however it likes
-and no restart fixes it. Callers pass `installComplete` from
-`panelInstallDiff()`; it defaults to `true` so a caller that has not looked
-keeps the old behaviour rather than quietly asserting the install is sound.
+`partial-install` is checked *before* any state that could recommend a
+restart, because a half-written install can hash however it likes and no
+restart fixes it. Callers pass `installComplete` from `panelInstallDiff()`; it
+defaults to `true` so a caller that has not looked keeps the old behaviour
+rather than quietly asserting the install is sound.
+
+`unverifiable` is the same principle for the running panel: one that could
+not read its own folder reports `clientHash: null` (a pre-#243 panel sends no
+key at all). Whether it is current cannot be known, and a restart would read
+the same folder again, so the advice is never "restart" — it is `check_setup`,
+then quit, `setup_panel` and reopen.
 
 **A panel that reports no hash is out of date, and the gate enforces it.** Old
 panels predate `bundleHash`, and every panel before #243 predates `clientHash`;

@@ -15,7 +15,8 @@
 // Left out, and why:
 //   jsx/bundle.jsx          its own hash (bundleHash), which follows reloads
 //   node_modules/ (any)     `ws` is copied in beside the panel separately
-//   .DS_Store (any)         Finder litter
+//   .DS_Store, Thumbs.db,   Finder and Explorer litter
+//   desktop.ini (any)
 //   META-INF/, mimetype     what a self-signed install adds (issues #91, #182);
 //                           a signed install is a current install
 //   package.json (root)     a version stamp; nothing at runtime reads it
@@ -31,7 +32,7 @@ var fs = require("fs");
 var path = require("path");
 var crypto = require("crypto");
 
-var SKIP_ANY_DEPTH = { "node_modules": true, ".DS_Store": true };
+var SKIP_ANY_DEPTH = { "node_modules": true, ".DS_Store": true, "Thumbs.db": true, "desktop.ini": true };
 var SKIP_AT_ROOT = { "META-INF": true, "mimetype": true, "package.json": true };
 var SKIP_PATHS = { "jsx/bundle.jsx": true };
 var MANIFEST = "CSXS/manifest.xml";

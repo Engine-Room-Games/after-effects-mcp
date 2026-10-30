@@ -64,7 +64,7 @@ import { findUnsafeArgKeys, unsafeArgsMessage } from "./util/argsSafety.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
-import { unknownOpMessage } from "./setup/panelVersion.js";
+import { panelDrivenBatchMessage, unknownOpMessage } from "./setup/panelVersion.js";
 import { packageVersion } from "./setup/paths.js";
 import { renderWhatsNew } from "./tools/whatsNew.js";
 import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./generated/content.js";
@@ -1056,11 +1056,7 @@ export function createServer(opts: CreateServerOptions = {}) {
         // return a job that would never report.
         if ((result as { driver?: unknown }).driver !== "server") {
           panelGate.invalidate();
-          return errorResult(
-            `The After Effects panel started batch ${env.jobId} and is running it itself, which only a panel older than ` +
-              `these tools does; this server cannot follow or report on it. Do not send the batch again: it is ` +
-              `still applying in After Effects. ${unknownOpMessage("run_batch")}`
-          );
+          return errorResult(panelDrivenBatchMessage(env.jobId));
         }
         jobs.register(env.jobId, env.total);
         // No progress emitter is bound to this request, and that absence is

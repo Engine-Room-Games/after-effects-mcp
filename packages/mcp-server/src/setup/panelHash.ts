@@ -11,13 +11,14 @@ import path from "node:path";
  * `clientHash`. This one is computed over the panel the server ships and over
  * the installed copy. `tests/unit/panel-hash.mjs` holds the two to each other;
  * change both together. The reasoning for each exclusion is in the panel's
- * copy. In short: bundle.jsx (own hash), node_modules and .DS_Store anywhere,
+ * copy. In short: bundle.jsx (own hash), node_modules and Finder/Explorer
+ * litter (.DS_Store, Thumbs.db, desktop.ini) anywhere,
  * the signature files a self-signed install adds (`META-INF/`, `mimetype` —
  * a signed install is a current install), the root package.json (a version
  * stamp), and the two version attributes of `CSXS/manifest.xml`.
  */
 
-const SKIP_ANY_DEPTH = new Set(["node_modules", ".DS_Store"]);
+const SKIP_ANY_DEPTH = new Set(["node_modules", ".DS_Store", "Thumbs.db", "desktop.ini"]);
 const SKIP_AT_ROOT = new Set(["META-INF", "mimetype", "package.json"]);
 const SKIP_PATHS = new Set(["jsx/bundle.jsx"]);
 const MANIFEST = "CSXS/manifest.xml";
