@@ -1923,6 +1923,10 @@ export const InternalOpMutation = {
   // The .aep's path, for the house style the server reads and writes itself
   // (issue #220, stage 3). Sent only to a panel reporting `project-path`.
   _project_path: "read",
+  // The live resources' constant-time poll (issue #248): path, item count,
+  // active item and the active comp's summary. Sent only while a client is
+  // subscribed; a panel without it answers Unknown op and the poll falls back.
+  _live_probe: "read",
   // The screenshot and export ops under internal names, answered with the
   // temp paths ExtendScript wrote; the server reads, normalises and patches
   // the files itself (issue #220, stage 4). Sent only to a panel reporting

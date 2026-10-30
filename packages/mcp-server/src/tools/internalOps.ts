@@ -15,7 +15,11 @@ import { schemas } from "@engineroom/shared";
  *     A refusal is a bug in the caller, and it says so rather than sending.
  */
 export type InternalOp = keyof typeof schemas.InternalOpMutation;
-export type SendInternal = (op: InternalOp, args: unknown) => Promise<unknown>;
+/**
+ * `yieldToWrites` marks a background read (the live-resource poll, issue
+ * #248): refused unsent while a write is held — see SessionLine.runOp.
+ */
+export type SendInternal = (op: InternalOp, args: unknown, o?: { yieldToWrites?: boolean }) => Promise<unknown>;
 
 export class UnleasedInternalWriteError extends Error {
   constructor(op: string) {
@@ -28,13 +32,13 @@ export class UnleasedInternalWriteError extends Error {
 }
 
 export function internalSender(
-  runOp: (op: string, args: unknown, write: boolean) => Promise<unknown>,
+  runOp: (op: string, args: unknown, write: boolean, o?: { yieldToWrites?: boolean }) => Promise<unknown>,
   writes: { readonly held: string | null }
 ): SendInternal {
-  return async (op, args) => {
+  return async (op, args, o) => {
     const effect = (schemas.InternalOpMutation as Record<string, string | undefined>)[op];
     if (effect === undefined) throw new Error(`Internal error: ${op} is not a classified internal op; nothing was sent.`);
     if (effect === "write" && writes.held === null) throw new UnleasedInternalWriteError(op);
-    return runOp(op, args, effect === "write");
+    return runOp(op, args, effect === "write", effect === "read" && o?.yieldToWrites ? { yieldToWrites: true } : undefined);
   };
 }

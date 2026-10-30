@@ -731,3 +731,25 @@ export class DeskPlaceLostError extends WriteQueueWaitError {
     ].join("\n");
   }
 }
+
+/**
+ * A background read that asked to yield to writes found one in progress, in
+ * this session or — through the front desk — in any session, and was not sent
+ * (issue #248). Never shown to an agent: the live-resource poll that sends
+ * such reads skips the tick and tries again later.
+ */
+export class BridgeBusyError extends Error {
+  /**
+   * `otherSession`: the write in the way is another session's, seen at the
+   * front desk — the one sign this session gets that someone else is editing
+   * the project (the poll walks the summary once afterwards).
+   */
+  constructor(public op: string, public holder?: string, why?: string, public otherSession = false) {
+    super(
+      why
+        ? `\`${op}\` was not sent: ${why}.`
+        : `\`${op}\` was not sent: ${holder ? `\`${holder}\`` : "a write"} holds the After Effects write lock, and this read yields to writes.`
+    );
+    this.name = "BridgeBusyError";
+  }
+}

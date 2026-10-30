@@ -3,9 +3,9 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { HttpClient } from "../bridge/httpClient.js";
 import { opTimeoutMs } from "../bridge/httpClient.js";
 import type { QueueWait, WriteLease, WriteQueue } from "../bridge/writeQueue.js";
-import { BridgeTimeoutError, DeskPlaceLostError, FrontDeskLostError, WriteQueueCancelledError } from "../util/errors.js";
+import { BridgeBusyError, BridgeTimeoutError, DeskPlaceLostError, FrontDeskLostError, WriteQueueCancelledError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
-import { DESK_ID, DESK_NONCE_HEADER, DESK_PROTOCOL, DESK_TOKEN_HEADER, STALL_BEATS, bodyAllowanceMs, monoMs, readDeskFile, sweepStaleDeskFiles, type FrontDeskOptions } from "./config.js";
+import { DESK_ID, DESK_NONCE_HEADER, DESK_PROTOCOL, FEATURE_YIELD_READS, DESK_TOKEN_HEADER, STALL_BEATS, bodyAllowanceMs, monoMs, readDeskFile, sweepStaleDeskFiles, type FrontDeskOptions } from "./config.js";
 import { DeadlinePassedError, FrontDesk, LeaseNotHeldError, deskProof, type DeskForwarder } from "./desk.js";
 import { DeskClosedError } from "./lock.js";
 import { describeAhead, describeLockWait, fromWire, type DeskAhead, type GrantWait, type LockLine, type OpLine } from "./protocol.js";
@@ -53,7 +53,7 @@ type Mode =
   | { kind: "off" }
   | { kind: "none" }
   | { kind: "leader"; desk: FrontDesk; port: number }
-  | { kind: "follower"; port: number; token: string; pid: number; idleMs: number }
+  | { kind: "follower"; port: number; token: string; pid: number; idleMs: number; features: readonly string[] }
   | { kind: "direct"; retryAt: number };
 
 type Follower = Extract<Mode, { kind: "follower" }>;
@@ -75,6 +75,7 @@ export class SessionLine {
   /** The desk lease this session holds now. At most one: the session's own queue is in front of it. */
   private holding: HeldDesk | null = null;
   private closed = false;
+  private warnedNoYield = false;
   private readonly forwarder: DeskForwarder;
 
   constructor(
@@ -248,9 +249,24 @@ export class SessionLine {
 
   // ------------------------------------------------------------ forwarding
 
-  runOp(op: string, args: unknown, o: { write?: boolean; onWait?: OnWait } = {}): Promise<unknown> {
+  /**
+   * `yieldToWrites` marks a background read (the live-resource poll, issue
+   * #248): refused unsent, as `BridgeBusyError`, while this session holds or
+   * waits on its write lease, and — through the desk — while any session holds
+   * the shared write lock. Never set on a read an agent asked for.
+   */
+  runOp(op: string, args: unknown, o: { write?: boolean; onWait?: OnWait; yieldToWrites?: boolean } = {}): Promise<unknown> {
+    const yieldToWrites = o.yieldToWrites === true && o.write !== true;
+    if (yieldToWrites && (this.local.held !== null || this.local.depth > 0)) {
+      return Promise.reject(new BridgeBusyError(op, this.local.held ?? undefined));
+    }
     if (this.mode.kind === "off") return this.bridge.runOp(op, args);
-    return this.send({ kind: "op", op, args, timeoutMs: opTimeoutMs(op) }, o.write === true, o.onWait, () => this.bridge.runOp(op, args));
+    return this.send(
+      { kind: "op", op, args, timeoutMs: opTimeoutMs(op), ...(yieldToWrites ? { yieldToWrites: true } : {}) },
+      o.write === true,
+      o.onWait,
+      () => this.bridge.runOp(op, args)
+    );
   }
 
   async cancel(jobId: string): Promise<{ known: boolean; error?: string }> {
@@ -279,7 +295,7 @@ export class SessionLine {
    * refused before it goes anywhere (`DeskPlaceLostError`, nothing ran).
    */
   private async send(
-    body: { kind: "op" | "cancel"; op: string; args?: unknown; jobId?: string; timeoutMs: number },
+    body: { kind: "op" | "cancel"; op: string; args?: unknown; jobId?: string; timeoutMs: number; yieldToWrites?: boolean },
     write: boolean,
     onWait: OnWait | undefined,
     direct: () => Promise<unknown>
@@ -306,6 +322,11 @@ export class SessionLine {
           await slot.closed;
           continue;
         }
+        // A desk is configured but this session is not on one (not elected
+        // yet, or gone direct): other sessions' writes are invisible from
+        // here, so a background read could land inside one of their batches.
+        // Not sent; the poll skips the tick, without a word.
+        if (body.yieldToWrites) throw new BridgeBusyError(op, undefined, "this session is not on the shared front desk, so other sessions' writes cannot be seen");
         return direct();
       }
       if (mode.kind === "leader") {
@@ -340,6 +361,20 @@ export class SessionLine {
           }
           throw e;
         }
+      }
+      if (body.yieldToWrites && !mode.features.includes(FEATURE_YIELD_READS)) {
+        // The desk is an older server's: it would forward this background read
+        // into the middle of another session's batch. Not sent; the poll skips
+        // the tick. Every other call still goes through this desk, so the
+        // sessions stay serialized against each other.
+        if (!this.warnedNoYield) {
+          this.warnedNoYield = true;
+          logger.info(
+            "Front desk: the desk is run by an older server that cannot hold background reads back for other sessions' " +
+              "writes, so live-resource change notifications are paused while this session shares it."
+          );
+        }
+        throw new BridgeBusyError(op, undefined, "the shared front desk is run by an older server, which cannot hold a background read back for other sessions' writes");
       }
       if (slot?.kind === "local") {
         // A lease from a desk this server ran and no longer does; it is gone.
@@ -405,6 +440,9 @@ export class SessionLine {
           : `the front desk changed hands ${MAX_HANDOVERS} times before this call could be sent.`
       );
     }
+    // Out of handovers: a read an agent asked for goes direct, as ever; a
+    // background read does not, for the reason above.
+    if (body.yieldToWrites) throw new BridgeBusyError(op, undefined, "the front desk kept changing hands, so other sessions' writes cannot be seen");
     return direct();
   }
 
@@ -517,7 +555,7 @@ export class SessionLine {
         }
         this.everJoined = true;
         logger.info(`Front desk: joined the desk on 127.0.0.1:${port}, run by pid ${hello.pid}.`);
-        return { kind: "follower", port, token: info.token, pid: hello.pid, idleMs: hello.beatMs * STALL_BEATS };
+        return { kind: "follower", port, token: info.token, pid: hello.pid, idleMs: hello.beatMs * STALL_BEATS, features: hello.features };
       }
       if (hello.kind === "foreign") {
         return direct(`port ${port} is held by something that is not a front desk. Set AE_MCP_FRONT_DESK_PORT to a free port in every session to share one.`, 60_000);
@@ -891,7 +929,7 @@ function remoteOp(mode: Follower, body: { timeoutMs: number } & Record<string, u
 }
 
 type Hello =
-  | { kind: "desk"; protocol: number; pid: number; beatMs: number }
+  | { kind: "desk"; protocol: number; pid: number; beatMs: number; features: string[] }
   | { kind: "starting" }
   | { kind: "foreign" }
   | { kind: "refused" }
@@ -919,14 +957,17 @@ function deskHello(port: number, token: string | null): Promise<Hello> {
         res.setEncoding("utf8");
         res.on("data", (c: string) => { if (text.length < 4096) text += c; });
         res.on("end", () => {
-          let b: { desk?: string; protocol?: number; pid?: number; beatMs?: number; proof?: string } | null = null;
+          let b: { desk?: string; protocol?: number; pid?: number; beatMs?: number; proof?: string; features?: unknown } | null = null;
           try { b = JSON.parse(text); } catch {}
           if (!b || b.desk !== DESK_ID) return resolve({ kind: "foreign" });
           // A desk refusing this token: its file is being written, or is a dead desk's.
           if (res.statusCode !== 200 || !token) return resolve({ kind: "starting" });
           if (b.proof !== deskProof(token, nonce)) return resolve({ kind: "foreign" });
           const beatMs = Number(b.beatMs);
-          resolve({ kind: "desk", protocol: Number(b.protocol), pid: Number(b.pid), beatMs: Number.isFinite(beatMs) && beatMs > 0 ? beatMs : 2000 });
+          // A desk older than feature negotiation lists none: it is still
+          // joined (same protocol), and simply offered nothing beyond it.
+          const features = Array.isArray(b.features) ? b.features.filter((f): f is string => typeof f === "string") : [];
+          resolve({ kind: "desk", protocol: Number(b.protocol), pid: Number(b.pid), beatMs: Number.isFinite(beatMs) && beatMs > 0 ? beatMs : 2000, features });
         });
         res.on("error", () => resolve({ kind: "timeout" }));
       }

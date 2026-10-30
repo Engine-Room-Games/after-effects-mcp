@@ -52,6 +52,7 @@ Numbered recipes referenced below are in [verification-recipes.md](verification-
 | `packages/mcp-server/src/snapshots/diff.ts` | `diff_comp`'s diff — a line-for-line port of `snapshot.jsx`'s, kept byte-for-byte identical to it by a parity sweep in `tests/unit/comp-snapshot.mjs` until `diff:true` moves too (#220). Change one, change both. |
 | `packages/mcp-server/src/snapshots/store.ts` | In-memory comp fingerprints for `snapshot_comp` / `diff_comp`. Bounded ring; `missingMessage()` is the whole reason it is a class rather than a `Map`. |
 | `packages/mcp-server/src/apps/compTimeline.ts` | The one MCP Apps view (issue #246): a `ui://` comp timeline for `snapshot_comp` / `diff_comp`, its HTML inline, and the capability check that keeps it invisible to every client that did not declare the extension. See "MCP Apps view" below. |
+| `packages/mcp-server/src/resources/live.ts` | The live project resources `ae://project/summary` and `ae://project/active-comp`, and the poll behind `resources/subscribe` (issue #248). See "Live resources" below. |
 | `packages/mcp-server/src/issues/journal.ts` | The cross-session issue journal — two of them: `<project>/.ae-mcp/issues/` and the user-level `~/.ae-mcp/issues/`. Backs `log_issue` / `list_known_issues` / `mark_issue_reported` / `archive_issue`. The project folder is `process.cwd()`; a client that gives no usable one (Claude Desktop starts servers at `/`) falls back to `~/.after-effects-mcp`, reported as `scope: "home"` so the fallback is never silent. `AE_MCP_HOME` overrides both roots (used by the CI check). Also holds the error-text normaliser and matcher (`normalizeErrorText`, `errorTextsMatch`, `entryMatchesFailure`), the version stamps, and `archiveReason` — the one place that decides whether an entry is hidden. See "The issue journal" in [subsystems.md](subsystems.md). |
 | `packages/mcp-server/src/issues/failures.ts` | The push half of the journal: `annotateFailure` appends `Known from earlier sessions: <scope:id> — <title>` lines to a failed tool call's error text, from a per-file mtime+size cache (`JournalCache`). Never throws, never masks the error, never clears an `archive_issue` retirement — it only moves `lastSeen`/`lastVersion` on a match. Every failure-path `errorResult` in `server.ts` goes through it via `fail()`. |
 | `packages/mcp-server/src/setup/{check,install,paths}.ts` | Backs `check_setup` / `setup_panel`. Never touches the bridge client — it exists for the case where the panel isn't installed yet — but `check.ts` probes every candidate port itself and reports the one that *answers* (`bridgeReachable`), whether that is the port ops go to (`portAgreement`; the server passes `opPort`), and what CEP's own log says about the panel's signature (`panelSignature`, issue #91; `findSignatureFailure` reads the last 256KB only). `install.ts` warns when it overwrites a self-signed install and turns CEP's LogLevel on where it was never set. `panelInstallDiff` in `paths.ts` walks the *source* tree only, which is what lets a signed install's `META-INF/` and `mimetype` pass as current. |
@@ -292,6 +293,163 @@ checks in handlers) stay: a hand-rolled `POST /op` still reaches them.
 - **Downsampled screenshots**: handled entirely in `vision.jsx`. `saveFrameToPng` *does* respect `CompItem.resolutionFactor` (measured: a 3840×2160 comp yields 1920×1080 at factor 2, 960×540 at factor 4), so `__saveFrameAt` sets the factor, renders, and restores it in a `finally`. That restore is not optional — a throw mid-render would otherwise leave the user's comp at reduced resolution. **Every factor is set, factor 1 included**, and that is the fix for issue #72 rather than an implementation detail: `resolutionFactor` is also the Resolution dropdown in the viewer, so treating 1 as "nothing to do" rendered at whatever the designer had left the comp on. A comp parked at Quarter — routine on anything heavy — answered `downsample: 1` with a quarter-size frame and `downsample: 2` with one four times **larger**. The panel reads the true dimensions out of the PNG's IHDR chunk rather than computing them, so reported size can never disagree with the image sent; that is what kept this invisible, because the response stayed honest while the *picture* was not the one asked for, and an agent that can see a frame believes the frame. An earlier version shelled out to `sips`; it was replaced because rendering smaller is faster than resampling and needs no external tool, which is what makes downsampling work on Windows. The factor is *derived* from the comp when the caller omits one (`__autoDownsample`, aiming at a ~1280px long edge) — which is why `ScreenshotFrame`/`ScreenshotLayer` must not carry a zod `.default(1)`: a default there would reach the panel as an explicit 1 and the derivation would never run. `tests/unit/screenshot-resolution.mjs` holds all three — the explicit factor, the restore (on a throw as well, at 1 as well) and the derivation — against a mock comp whose viewer starts at Quarter.
 
 - **Every JSON result is compact** (`textResult`, issue #166). `JSON.stringify(v)`, never `(v, null, 2)`: the model does not need the indentation, and every result is re-sent on every later turn, so pretty-printing cost 20–56% of each one many times over. Prose (`ae_guide`) and image blocks are unaffected; the files `init_project` writes are for people and stay indented. `tests/unit/tool-annotations.mjs` fails on a result with indentation in it.
+
+## Live resources (issue #248)
+
+`ae://project/summary` and `ae://project/active-comp` are listed beside the
+guides. The summary is `get_project_summary`'s answer without `activeItemId`.
+The active comp is `{compId, comp}`, where `comp` is `get_comp`'s answer for
+the comp last active in a viewer. The server declares `resources.subscribe`. A guide can be
+subscribed to, but it never notifies, because it cannot change while the
+process runs. Live reads go through the panel version gate like a tool call
+does. A client's own read that fails is thrown with the tool path's sentence,
+so an unreachable panel says to call `check_setup`.
+
+**The panel says nothing when the project changes.** Its event socket carries
+job events only, so change detection is a poll. The poll's cost model is the
+whole design.
+
+**No subscriber, no traffic.** The timer exists only while the subscription
+set is non-empty. Listing costs nothing, and a client's read is one ordinary
+read. `tests/unit/live-resources.mjs` fails if any op reaches the stub panel
+while nobody is subscribed.
+
+**A tick is constant time.** `_live_probe` (explore.jsx) returns the project
+path, the item count, the active item and the active comp's `__compSummary`,
+plus the summary of the comp named by `compId` (the sticky one, below). It
+does no walk. It is an internal op, sent through the same `internalSender` as
+every other one.
+
+**Focus is not a change.** After Effects' `activeItem` goes null, or becomes a
+folder or footage item, whenever the Project panel takes focus. Tracked as-is,
+every click in that panel would flip both resources and cost a walk. So:
+
+- the active comp is **sticky**. It changes only when another comp becomes
+  active. While focus is elsewhere, the probe reads the sticky comp by id, so
+  its settings are still tracked.
+- a sticky comp is remembered **with its project**, because item ids are
+  small numbers per .aep. The next project often has a different comp under
+  the same id. The probe returns the project's path and, when asked for
+  `identity`, its XMP `DocumentID` (`xmpMM:DocumentID` exactly, never
+  `OriginalDocumentID`). The packet is read only when the path cannot decide
+  alone: the project is unsaved, no comp is remembered yet, or the path is not
+  the remembered one (`knownPath`). A saved project the server already knows
+  costs no packet read, which matters because the packet grows with every
+  save.
+
+  The decision, in `sameProject`:
+  - **Unchanged path, or a first save** (no path, then a path): the same
+    project, unless two known DocumentIDs differ. One unsaved project replaced
+    by another is caught that way. A first save keeps the DocumentID
+    (measured on AE 26.5).
+  - **Any other path change**: Save As gives the project a *new* DocumentID
+    (measured on AE 26.5), so the IDs cannot tell a Save As from opening
+    another project. Equal IDs still mean the same document. Otherwise the
+    comp itself decides: it is kept only if a comp still exists under the
+    remembered id with the remembered signature (name, width, height,
+    duration, frame rate, refreshed every time the comp is served). A
+    same-id comp in another project with a different signature is dropped.
+    Two projects whose same-id comps match on all five fields cannot be told
+    apart; that is the accepted residue. Without the probe (an old panel)
+    there is no cheap check, so any path change drops the comp.
+  - The comp is also dropped when it no longer exists. The reason it was dropped is kept until a comp
+  becomes active, so the tick after a drop does not notify a second time. Two
+  unsaved projects that both lack a DocumentID can be told apart only by the
+  id lookup failing. Whether After Effects writes a DocumentID into an unsaved
+  project's packet, and what reading `xmpPacket` costs, are listed for live
+  verification.
+- the active item is **kept out of the summary**, from both the body and the
+  key that decides whether to walk.
+
+- `ae://project/active-comp` is answered from the probe outright.
+- `ae://project/summary` needs the `get_project_summary` walk, which is linear
+  in project items. It walks only when one of these holds:
+  - the probe's path or item count moved;
+  - this session ran a write that can rename an item while leaving the count
+    alone (`RENAMING_OPS`: `set_comp`, `run_jsx`, `run_batch`, the checkpoint
+    ops);
+  - the sweep fell due (60 s), which is what catches a rename made by hand.
+
+  So the writes an agent makes most often (keyframes, transforms, effects)
+  never cause a walk. An op missing from `RENAMING_OPS` delays a rename
+  notification to the sweep; it never causes a wrong answer.
+- A panel without `_live_probe` answers `Unknown op`. The poll then falls back
+  to the full reads for that process. The version gate normally refuses such a
+  panel first.
+- Ticks run every `AE_MCP_RESOURCE_POLL_MS` (default 5 s, floor 1 s), one at a
+  time, on a chained `unref`'d timer. The timer never keeps an orphaned server
+  alive (#163).
+
+**Writes go first.** The poll yields to writes three ways.
+
+- **This session's writes.** No tick runs while this session holds or waits on
+  its write lease. No tick runs until none of its writes has finished for a
+  quiet period (2 s), and each write restarts that period. A steadily writing
+  agent therefore costs nothing until it stops.
+- **Any session's writes.** Every poll read is sent with `yieldToWrites`. The
+  `SessionLine` refuses it unsent, as `BridgeBusyError`, while the local lease
+  is held or queued. Through the front desk, the desk refuses it while *any*
+  session holds the shared write lock. A `run_batch` holds that lock between
+  its chunks, so no poll read lands in the middle of another session's batch.
+  The refusal crosses the wire as `{kind: "busy"}`. The tick is skipped, which
+  is not a failure and causes no backoff. A read an agent asked for never
+  carries the flag. The flag is a negotiated feature (`yield-reads` in the
+  desk's hello, `DESK_FEATURES`), **not** a protocol bump. A protocol mismatch
+  sends every call of the session direct, unserialized against the other
+  sessions, which would have been a regression for anyone mid-upgrade with
+  several sessions. Both mixed-version directions still share one desk:
+  - A new session behind an older desk joins it, and sends that desk no
+    yielding read at all. The poll's ticks are refused locally as busy, so
+    live notifications pause, with one log line, while every other call stays
+    serialized.
+  - An older session behind a new desk never sends the flag. The desk reads an
+    absent flag as an agent's read and forwards it as before.
+
+  `tests/unit/front-desk.mjs` pins both directions.
+- **The remaining exposure** is one tick's reads already queued in the panel's
+  evalScript chain when a write arrives. That write waits behind them. With the
+  probe, that wait is one constant-time eval. It is a full walk only on the
+  rare tick where a walk is due. The test stub runs ops serially, as the panel
+  does, and asserts that no write waits behind a poll read in either a burst
+  or a paced run of writes.
+
+**Off the desk, a poll read is not sent at all.** When a desk is configured
+but this session is not on it, `SessionLine.send` refuses a yielding read as
+busy, without a word, rather than sending it straight to the panel. That
+covers a session not elected yet, one gone direct, and one whose call ran out
+of handovers. From there, other sessions' writes are invisible, and a direct
+read could land inside another session's batch. An agent's own reads still go
+direct in those modes, as before. With the desk switched off
+(`AE_MCP_FRONT_DESK=off`), there is no shared queue to respect, and polls go
+direct like everything else.
+
+**Another session's renames.** The probe cannot see a rename. This session
+knows its own renaming writes, but not other sessions'. When a tick is refused
+because *another* session holds the desk lock (`BridgeBusyError.otherSession`),
+the next tick that runs walks the summary once. Another session's write that no
+tick happened to run into still waits for the 60 s sweep. The desk could send a
+"write finished" signal to followers, but followers have no channel from the
+desk except the answers to their own calls, so the sweep was judged enough.
+
+**Baselines are sequenced.** Every read takes a generation number. A result
+older than the stored baseline is dropped, so a slow tick answering after a
+client's fresher read cannot overwrite it. Before that fix, the late answer
+cost two spurious notifications.
+
+**Failures are quiet.** A tick that fails keeps the last value and notifies
+nobody. It logs once when the bridge goes and once when it comes back, and
+backs off to a minute.
+
+**One poller per subscribing session, not per After Effects.** The poll lives
+in each server process. Two sessions subscribed against one After Effects
+therefore probe twice per interval. The desk could host a shared poller, but
+then it would also have to route notifications to followers' clients. That
+protocol was not worth adding for the cost: one constant-time eval per
+subscribing session every 5 s, which yields to every write.
+
+**What it does not track: edits inside a layer.** A per-layer fingerprint would
+be `_comp_fingerprint` on every tick, which is the cost the issue ruled out.
+`snapshot_comp` / `diff_comp` remain the tool for that.
 
 ## Tool annotations (issue #165)
 

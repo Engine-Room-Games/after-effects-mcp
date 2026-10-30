@@ -500,6 +500,60 @@ OPS.get_project_summary = noUndo(function (args) {
   };
 });
 
+// The live resources' every-tick read (issue #248). Constant time — no walk
+// of the project's items — so a subscriber's poll costs After Effects almost
+// nothing: the item count, the path and the active item decide whether the
+// full get_project_summary walk is worth running, and the active comp's
+// summary is get_comp's own answer, so ae://project/active-comp never walks.
+//
+// `compId` names the comp the server last saw active. activeItem goes null or
+// non-comp whenever the Project panel takes focus, so the server keeps the
+// last active comp "sticky" and needs its summary even then: `comp` is that
+// comp's summary, or null when it no longer exists. Constant time too.
+//
+// Item ids are small numbers per .aep, so an id alone does not say which
+// project it belongs to. `docId` is the project's XMP DocumentID, asked for
+// with `identity`: with the path, it is how the server tells that another
+// project — saved or not — is open, and drops the remembered comp. Null when
+// the packet has none; the server then has only the path to go on.
+//
+// The packet is read only when the path cannot answer on its own — the
+// project is unsaved, nothing is remembered yet (`compId` absent: the id is
+// being taken), or the path is not the one remembered (`knownPath`: a Save As
+// or a first save keeps the document). A saved project the server already
+// knows costs no packet read: the packet grows with every save.
+OPS._live_probe = noUndo(function (args) {
+  var p = app.project;
+  var a = null;
+  try { a = p.activeItem; } catch (e) {}
+  var docId = null;
+  var path = p.file ? p.file.fsName : null;
+  if (args && args.identity && (path === null || !args.compId || path !== args.knownPath)) {
+    try {
+      var x = p.xmpPacket;
+      // xmpMM:DocumentID exactly: OriginalDocumentID and the history's
+      // stEvt entries name other documents.
+      var m = x ? /xmpMM:DocumentID(?:="|>)([^"<]+)/.exec(x) : null;
+      if (m) docId = m[1];
+    } catch (e3) {}
+  }
+  var sticky = null;
+  if (args && args.compId) {
+    var c = null;
+    try { c = p.itemByID(args.compId); } catch (e2) {}
+    if (c && c instanceof CompItem) sticky = __compSummary(c);
+  }
+  return {
+    path: path,
+    numItems: p.numItems,
+    activeItemId: a ? a.id : null,
+    activeType: a ? __itemKind(a) : null,
+    activeComp: a && a instanceof CompItem ? __compSummary(a) : null,
+    comp: sticky,
+    docId: docId
+  };
+});
+
 // A search, so the default is the opposite of list_layers: absent `include`
 // means the core alone — id/index/name/sourceType plus the comp — because the
 // reason to call this is to learn which layers exist and what to address them

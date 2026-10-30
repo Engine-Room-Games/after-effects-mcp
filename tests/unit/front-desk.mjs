@@ -266,7 +266,7 @@ process.env.USERPROFILE = home;
 const { SessionLine } = await import(dist("frontdesk", "line.js"));
 const { WriteQueue } = await import(dist("bridge", "writeQueue.js"));
 const { deskProof, FrontDesk } = await import(dist("frontdesk", "desk.js"));
-const { monoMs } = await import(dist("frontdesk", "config.js"));
+const { monoMs, DESK_PROTOCOL } = await import(dist("frontdesk", "config.js"));
 const { HttpClient } = await import(dist("bridge", "httpClient.js"));
 const { execFileSync } = await import("node:child_process");
 
@@ -359,12 +359,12 @@ await check("a desk that cannot forward within the window, four times running, s
   const port = await freePort();
   const token = "fake-desk-expired";
   fs.mkdirSync(deskDir, { recursive: true });
-  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: process.pid, port, token, startedAt: 1 }));
   let ops = 0;
   const fake = http.createServer((q, r) => {
     if (q.url === "/desk/hello") {
       r.setHeader("content-type", "application/json");
-      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4245, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: 4245, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
     }
     q.resume();
     q.on("end", () => {
@@ -399,12 +399,12 @@ await check("a stall is never declared before the call's deadline, however large
   const port = await freePort();
   const token = "fake-desk-silent";
   fs.mkdirSync(deskDir, { recursive: true });
-  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: process.pid, port, token, startedAt: 1 }));
   let deadline = null;
   const fake = http.createServer((q, r) => {
     if (q.url === "/desk/hello") {
       r.setHeader("content-type", "application/json");
-      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4246, beatMs: 200, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: 4246, beatMs: 200, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
     }
     let body = "";
     q.on("data", (c) => (body += c));
@@ -446,8 +446,8 @@ await check("a server sweeps away desk files left by servers that are gone, and 
   const deadPort = await freePort();
   const livePort = await freePort();
   fs.mkdirSync(deskDir, { recursive: true });
-  fs.writeFileSync(deskFile(deadPort), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 999_999, port: deadPort, token: "dead", startedAt: 1 }));
-  fs.writeFileSync(deskFile(livePort), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port: livePort, token: "live", startedAt: 1 }));
+  fs.writeFileSync(deskFile(deadPort), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: 999_999, port: deadPort, token: "dead", startedAt: 1 }));
+  fs.writeFileSync(deskFile(livePort), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: process.pid, port: livePort, token: "live", startedAt: 1 }));
   const L = line(await freePort(), "L");
   assert.equal(await L.ready(), "leader");
   assert.equal(readDesk(deadPort), null, "a SIGKILLed server's file is removed");
@@ -513,7 +513,7 @@ await check("a batch whose lock cannot be re-taken after a handover says so, and
 await check("a leftover desk file costs a lone session nothing; one left by a running batch is a reported grace", async () => {
   const quiet = await freePort();
   fs.mkdirSync(deskDir, { recursive: true });
-  fs.writeFileSync(deskFile(quiet), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 999_999, port: quiet, token: "old", startedAt: 1 }));
+  fs.writeFileSync(deskFile(quiet), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: 999_999, port: quiet, token: "old", startedAt: 1 }));
   const L = line(quiet, "L", { graceMs: 600 });
   assert.equal(await L.ready(), "leader");
   const t0 = Date.now();
@@ -522,7 +522,7 @@ await check("a leftover desk file costs a lone session nothing; one left by a ru
   await L.close();
 
   const busy = await freePort();
-  fs.writeFileSync(deskFile(busy), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 999_999, port: busy, token: "old", startedAt: 1, batchHeld: true }));
+  fs.writeFileSync(deskFile(busy), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: 999_999, port: busy, token: "old", startedAt: 1, batchHeld: true }));
   const M = line(busy, "M", { graceMs: 600 });
   assert.equal(await M.ready(), "leader");
   const said = [];
@@ -533,15 +533,121 @@ await check("a leftover desk file costs a lone session nothing; one left by a ru
   await M.close();
 });
 
+// Issue #248: background reads that yield to writes are a negotiated feature,
+// not a protocol bump — a protocol mismatch would send every call of a
+// mixed-version pair direct, unserialized. Both directions stay on one desk.
+const { BridgeBusyError } = await import(dist("util", "errors.js"));
+
+await check("mixed versions, new session + older desk: joined and serialized; yielding reads are not sent there", async () => {
+  const port = await freePort();
+  const token = "fake-old-desk";
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
+  const posted = [];
+  const fake = http.createServer((q, r) => {
+    if (q.url === "/desk/hello") {
+      r.setHeader("content-type", "application/json");
+      // An older desk: protocol 1, and no `features` at all.
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4247, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+    }
+    let body = "";
+    q.on("data", (c) => (body += c));
+    q.on("end", () => {
+      const b = JSON.parse(body || "{}");
+      posted.push(b);
+      r.setHeader("content-type", "application/x-ndjson");
+      r.end(JSON.stringify({ t: "start", ahead: [] }) + "\n" + JSON.stringify({ t: "ok", result: { ok: true, op: b.op }, panelPort: 1 }) + "\n");
+    });
+  });
+  await new Promise((r) => fake.listen(port, "127.0.0.1", r));
+  const L = line(port, "L");
+  assert.equal(await L.ready(), "follower", "a new server must still join an older desk");
+  await assert.rejects(L.runOp("_live_probe", {}, { yieldToWrites: true }), (e) => e instanceof BridgeBusyError);
+  assert.deepEqual(posted, [], "a yielding read went to a desk that would forward it into another session's batch");
+  await L.runOp("list_comps", {});
+  assert.deepEqual(posted.map((b) => b.op), ["list_comps"], "every other call still goes through the shared desk");
+  assert.equal("yieldToWrites" in posted[0], false);
+  assert.deepEqual(L.bridge_.calls, [], "nothing went direct");
+  await L.close();
+  await new Promise((r) => fake.close(r));
+});
+
+await check("mixed versions, older session + new desk: the desk still speaks protocol 1, and an absent flag is an agent read", async () => {
+  const port = await freePort();
+  const L = line(port, "L");
+  assert.equal(await L.ready(), "leader");
+  const token = readDesk(port).token;
+  const hello = await new Promise((resolve, reject) => {
+    http.get({ host: "127.0.0.1", port, path: "/desk/hello", headers: { "x-ae-mcp-desk-token": token, "x-ae-mcp-desk-nonce": "n" } }, (res) => {
+      let t = "";
+      res.on("data", (c) => (t += c));
+      res.on("end", () => resolve(JSON.parse(t)));
+    }).on("error", reject);
+  });
+  // An older follower joins only a desk whose protocol equals its own, 1.
+  assert.equal(hello.protocol, 1, "the protocol moved: every older session would go direct, unserialized");
+  assert.ok(hello.features.includes("yield-reads"));
+  const lease = await L.acquire("run_batch");
+  try {
+    // An older follower's read, sent while another session holds the lock: forwarded as ever.
+    const old = await postDesk(port, token, "/desk/op", { kind: "op", op: "list_comps", sessionId: "old", session: "old, pid 2" });
+    assert.equal(old.at(-1).t, "ok", JSON.stringify(old));
+    // A new follower's yielding read is held back, and says whose write it met.
+    const fresh = await postDesk(port, token, "/desk/op", { kind: "op", op: "_live_probe", sessionId: "new", session: "new, pid 3", yieldToWrites: true });
+    assert.equal(fresh.at(-1).error?.kind, "busy", JSON.stringify(fresh));
+    assert.equal(fresh.at(-1).error.otherSession, true);
+  } finally {
+    lease.release();
+  }
+  await L.close();
+});
+
+await check("off the desk (gone direct), a background read is refused unsent; an agent's read still goes direct", async () => {
+  const port = await freePort();
+  const foreign = http.createServer((_q, r) => { r.statusCode = 404; r.end(); });
+  await new Promise((r) => foreign.listen(port, "127.0.0.1", r));
+  const L = line(port, "L", { electionDeadlineMs: 400 });
+  assert.equal(await L.ready(), "direct");
+  await assert.rejects(L.runOp("_live_probe", {}, { yieldToWrites: true }), (e) => e instanceof BridgeBusyError);
+  assert.deepEqual(L.bridge_.calls, [], "a background read went straight to the panel, past every other session's writes");
+  await L.runOp("list_comps", {});
+  assert.deepEqual(L.bridge_.calls, ["list_comps"]);
+  await L.close();
+  await new Promise((r) => foreign.close(r));
+});
+
+await check("out of handovers, a background read is refused unsent; an agent's read still goes direct", async () => {
+  const port = await freePort();
+  const token = "fake-expiring-desk";
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
+  const fake = http.createServer((q, r) => {
+    if (q.url === "/desk/hello") {
+      r.setHeader("content-type", "application/json");
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, features: ["yield-reads"], pid: 4248, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+    }
+    q.resume();
+    // Every call: the desk did not get to it in time. Never forwarded.
+    q.on("end", () => r.end(JSON.stringify({ t: "expired" }) + "\n"));
+  });
+  await new Promise((r) => fake.listen(port, "127.0.0.1", r));
+  const L = line(port, "L");
+  assert.equal(await L.ready(), "follower");
+  await assert.rejects(L.runOp("_live_probe", {}, { yieldToWrites: true }), (e) => e instanceof BridgeBusyError);
+  assert.deepEqual(L.bridge_.calls, [], "a background read went direct after the desk failed to forward it");
+  await L.runOp("list_comps", {});
+  assert.deepEqual(L.bridge_.calls, ["list_comps"]);
+  await L.close();
+  await new Promise((r) => fake.close(r));
+});
+
 await check("a request too large for the desk is its own error, not four handovers", async () => {
   const port = await freePort();
   const token = "fake-desk-413";
-  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: process.pid, port, token, startedAt: 1 }));
   let posts = 0;
   const fake = http.createServer((q, r) => {
     if (q.url === "/desk/hello") {
       r.setHeader("content-type", "application/json");
-      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4244, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: 4244, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
     }
     posts++;
     q.resume();
@@ -581,11 +687,11 @@ await check("a desk that cannot prove it knows the token is never joined, and ne
     const port = await freePort();
     const fake = http.createServer((_q, r) => {
       r.setHeader("content-type", "application/json");
-      r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4242, beatMs: 2000 }));
+      r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: 4242, beatMs: 2000 }));
     });
     await new Promise((r) => fake.listen(port, "127.0.0.1", r));
     if (withFile) {
-      fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token: "t", startedAt: 1 }));
+      fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: process.pid, port, token: "t", startedAt: 1 }));
     }
     const L = line(port, "L", { electionDeadlineMs: 600 });
     assert.equal(await L.ready(), "direct", `withFile=${withFile}`);
@@ -601,12 +707,12 @@ await check("a write the desk may have forwarded is never re-sent: no answer is 
   // with the `start` line lost on the way, looks like from here.
   const port = await freePort();
   const token = "fake-desk-token";
-  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: process.pid, port, token, startedAt: 1 }));
   const ops = [];
   const fake = http.createServer((q, r) => {
     if (q.url === "/desk/hello") {
       r.setHeader("content-type", "application/json");
-      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4243, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: 4243, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
     }
     let body = "";
     q.on("data", (c) => (body += c));
@@ -916,7 +1022,7 @@ try {
   fs.mkdirSync(deskDir, { recursive: true });
   fs.writeFileSync(
     deskFile(desk2),
-    JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 999_999, port: desk2, token: "stale-token", startedAt: 1 })
+    JSON.stringify({ desk: "ae-mcp-front-desk", protocol: DESK_PROTOCOL, pid: 999_999, port: desk2, token: "stale-token", startedAt: 1 })
   );
 
   await check("a stale leader file is overwritten by the server that binds the port", async () => {
