@@ -1914,6 +1914,9 @@ export const InternalOpMutation = {
   _screenshot_frame: "read",
   _screenshot_layer: "read",
   _export_mogrt: "write",
+  // run_jsx with the script assembled by the server (issue #220, stage 6).
+  // Sent only to a panel reporting `server-run-jsx`, under run_jsx's own lease.
+  _run_jsx: "write",
 } as const satisfies Record<`_${string}`, "write" | "read">;
 
 type ServerOpName = { [K in OpName]: (typeof OpMutation)[K] extends "server" ? K : never }[OpName];

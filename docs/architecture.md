@@ -23,7 +23,8 @@ Numbered recipes referenced below are in [verification-recipes.md](verification-
 | `packages/jsx/mogrt.jsx` | `export_mogrt`. Checks every precondition it can before touching anything, saves, suppresses dialogs, exports outside the undo group, and re-fetches everything afterwards. `__exportFailureMessage` is where a failure AE will not explain is reported as unknown rather than as a dialog. `add_essential_property` lives here too: it reads the Essential Graphics panel back rather than trusting the add's boolean. |
 | `packages/jsx/render.jsx` | `add_to_render_queue` / `list_render_queue` / `remove_render_item`, and the two halves of `render_queue` that need After Effects: `_render_prepare` (read-only — which items, which files, how many frames, which footage each reads (`__rqFootageUse`, issue #144), where AE is installed) and `_render_save`. The render itself is deliberately not here; see the render-queue entries in [fragile-areas-ae.md](fragile-areas-ae.md). |
 | `packages/mcp-server/src/render/aerender.ts` | `render_queue`'s job. `RenderRunner` spawns one `aerender` per item, counts `PROGRESS:` frame lines into `JobManager`, verifies every output on disk before calling an item rendered, and on cancel stops the process tree and reports `stopped` only once it has exited. Pure helpers (`parseAerenderLine`, `LineSplitter`, `aerenderArgs`, `verifyOutputs`, `resolveAerender`) are what the unit test exercises; aerender's location and the tree kill are in `setup/platform.ts`. |
-| `packages/jsx/raw.jsx` | `run_jsx` — the result serializer, and the wrapper that inlines any `libraries` ahead of the caller's script and maps a failure back onto whichever of those files it landed in. |
+| `packages/jsx/raw.jsx` | `run_jsx` — the result serializer, and the wrapper that inlines any `libraries` ahead of the caller's script and maps a failure back onto whichever of those files it landed in. `_run_jsx` runs a wrapper the server built and leaves the mapping to it (stage 6, below); `OPS.run_jsx` keeps both for older servers and `run_batch` steps. |
+| `packages/mcp-server/src/tools/runJsxAssembly.ts` | The server's port of raw.jsx's assembly and line mapping, used on a `server-run-jsx` panel. Byte-identical by test (`run-jsx-assembly.mjs`); see "`run_jsx` assembled on the server" below. |
 | `packages/jsx/values.jsx` | `__setValue`, which every first-class `setValue` goes through: on AE's spurious `invalid numeric result` throw (issue #129) it reads the property back and drops the throw only if the value landed. See [fragile-areas-ae](fragile-areas-ae.md#shapes). |
 | `packages/jsx/helpers.jsx` | The helper scope a `run_jsx` script runs in: `compById`, `layerById`, `ease`, `addKeys`, `shape`, `setValueChecked`. Top-level functions on purpose: in the bundle they are locals of its closure, which `run_jsx`'s direct `eval` sees — never globals, since the ExtendScript engine is shared with other scripts (issue #185). Every one is listed by signature in the `run_jsx` description — change both together, since that is the only place a caller sees them. |
 | `packages/ae-panel/CSXS/manifest.xml` | CEP manifest. Auto-start on AE activate. Node enabled. |
@@ -114,6 +115,52 @@ Two rules, and they are the whole of it:
   passes over the field it does not understand is the failure it exists to catch.
 
 [Verification recipe 29](verification-recipes.md) is the live half.
+
+### `run_jsx` assembled on the server (issue #220, stage 6)
+
+On a panel listing `server-run-jsx`, the resolved args take one more step:
+`tools/runJsxAssembly.ts` builds the evaluated source (wrapper, inlined
+libraries, the #221 undo rewrite and its fast path, the eval/Function/
+`$.evalFile` caution scan) and sends `_run_jsx` with `built` in place of
+`code`/`scriptPath`/`libraries`. Everything else in the args rides through by
+spread, as above. A failure comes back carrying `rawLine` and `wrapperLine` (or
+`libraryIndex` for a library that did not parse), forwarded by name in
+`client/main.js`, and the server maps it onto the caller's script or library.
+
+It is a **port**, and has to stay byte-identical to raw.jsx's functions: each
+TS function names the jsx one it copies, and `tests/unit/run-jsx-assembly.mjs`
+runs both on fixtures and on generated sources, then runs whole calls through
+`OPS.run_jsx` and through build + `_run_jsx` + mapping and compares the result,
+the error text and every undo call. Three things stay in ExtendScript because
+they need it: each library's **parse check** (the parser decides what a syntax
+error is and its line; a library is parsed as written, its text sent again only
+when the rewrite changed it), the **`Error.source`/`start`/`end` reading** (the
+error object never leaves AE, and `source` can be text the server never saw),
+and the execution with its undo-guard counting, dialog shadows, `diff` and
+result serializer.
+
+`OPS.run_jsx` keeps its own assembly and mapping, for three callers: an older
+server, a direct `/op`, and every `run_batch` step — `batch.jsx` dispatches
+steps to `OPS[step.op]` and reports their failures itself, so moving them would
+mean changing the batch code. `_run_jsx` answering `Unknown op` (refused before
+any handler, so it carries no source mapping) withdraws the capability and
+re-sends as `run_jsx`; a script's own error always carries one, which is what
+stops a failure inside the script being read as that and run twice. A call the
+server cannot build (a blank library; the tool path never produces one) goes
+down the old path rather than inventing an error raw.jsx would have worded
+with its own line number.
+
+**One difference, accepted:** the script is `eval`'d in the handler's own
+scope, so a name it uses without declaring resolves to the handler's locals
+first. Those locals differ between the two handlers. In `_run_jsx`,
+`args.code`, `args.scriptPath` and `args.libraries` are gone and `args.built`
+is there instead. `code` is declared but `undefined` (raw.jsx, `OPS._run_jsx`),
+where in `OPS.run_jsx` it held the script's own text. `built` holds the wire
+form (`wrapper`, `undoRewrites`, `undoMentions`, `opaqueRoutes`, `libraries`)
+rather than raw.jsx's layout (`preambleLines`, `segments`, …). `code` is still
+declared so that an undeclared `code = …` in a script stays local rather than
+writing a global into the shared engine (#185). No documented contract
+exposes any of these, and the parity fixtures do not read them.
 
 ### Cross-field rules ("pass exactly one of these")
 

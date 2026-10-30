@@ -209,7 +209,12 @@
             sourceText: parsed.sourceText,
             sourceName: parsed.sourceName,
             rawLine: parsed.rawLine,
-            lineCount: parsed.lineCount
+            lineCount: parsed.lineCount,
+            // `_run_jsx` (stage 6) leaves the mapping to the server and sends
+            // these instead. Absent on every other failure, and JSON drops an
+            // undefined, so they never reach the server unless they were set.
+            wrapperLine: parsed.wrapperLine,
+            libraryIndex: parsed.libraryIndex
           };
         }
         throw err;
@@ -227,9 +232,12 @@
   //                  `_export_mogrt` reach the bundle untouched (handleOp only
   //                  intercepts the public names), so the server reads the PNGs
   //                  and patches the .mogrt itself (stage 4).
+  //   server-run-jsx — `_run_jsx` runs a script the server assembled, and a
+  //                  failure carries `wrapperLine`/`libraryIndex` (forwarded
+  //                  above) for the server to map onto the caller's file (stage 6).
   // The panel and its bundle.jsx install together, so a name here may stand for
   // an op in the bundle. The server still falls back on `Unknown op:`.
-  var PANEL_CAPABILITIES = ["project-path", "server-images"];
+  var PANEL_CAPABILITIES = ["project-path", "server-images", "server-run-jsx"];
 
   // ---------- Load bundle.jsx ----------
   // Hash of the bundle *actually evaluated into ExtendScript*, reported on
