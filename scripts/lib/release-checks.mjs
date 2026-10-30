@@ -18,6 +18,7 @@
 //
 //   node scripts/lib/release-checks.mjs notary <notarytool-json-file>
 //       exit 0 and print the submission id when Accepted; exit 1 otherwise.
+//   node scripts/lib/release-checks.mjs smoke-npm <file.tgz>
 //   node scripts/lib/release-checks.mjs smoke-mcpb <file.mcpb>
 //   node scripts/lib/release-checks.mjs smoke-binaries <dist-release-dir>
 //       smoke-runs every artifact this host can execute, from the archive that
@@ -293,6 +294,18 @@ export function wsProblem(artifactDir, isWsModuleDir) {
   return null;
 }
 
+/**
+ * When the release requires a signed panel (issue #182), why the panel inside
+ * an unpacked artifact is not one, or null. Read from the archive that will be
+ * uploaded, so a signature an archiver broke shows here and not on a user's
+ * machine; the real `ZXPSignCmd -verify` runs on it.
+ */
+async function signedPanelProblem(panelDir) {
+  if ((process.env.AE_MCP_PANEL_SIGN ?? "").toLowerCase() !== "required") return null;
+  const { panelSignatureProblem, obtainZxpSignCmd } = await import("./panel-signing.mjs");
+  return panelSignatureProblem(panelDir, { tool: await obtainZxpSignCmd() });
+}
+
 async function loadIsWsModuleDir() {
   const p = path.join(root, "packages", "mcp-server", "dist", "setup", "paths.js");
   if (!fs.existsSync(p)) throw new Error("packages/mcp-server is not built — run `npm run build` first");
@@ -335,13 +348,39 @@ async function cli(argv) {
     return 1;
   }
 
+  if (cmd === "smoke-npm") {
+    // The tarball release.yml will publish, installed the way a user's npx
+    // would: into an empty project, dependencies from the registry. Before
+    // #182 this ran in CI, after the tag; the tarball is now built here.
+    const opNames = await loadOpNames();
+    const dir = tempDir("npm");
+    try {
+      execFileSync("npm", ["init", "-y"], { cwd: dir, stdio: "ignore", shell: process.platform === "win32" });
+      execFileSync("npm", ["install", "--no-audit", "--no-fund", path.resolve(target)], {
+        cwd: dir,
+        stdio: ["ignore", "ignore", "inherit"],
+        shell: process.platform === "win32",
+      });
+      const pkg = path.join(dir, "node_modules", "@engine-room", "after-effects-mcp");
+      const problem = await signedPanelProblem(path.join(pkg, "panel"));
+      if (problem) {
+        console.error(`    ${path.basename(target)}: FAILED — ${problem}`);
+        return 1;
+      }
+      const res = await smokeServer({ command: process.execPath, args: [path.join(pkg, "bin", "server.js")], cwd: dir, opNames });
+      return report(path.basename(target), res) ? 0 : 1;
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   if (cmd === "smoke-mcpb") {
     const opNames = await loadOpNames();
     const isWs = await loadIsWsModuleDir();
     const dir = tempDir("mcpb");
     try {
       execFileSync("unzip", ["-q", target, "-d", dir], { stdio: "inherit" });
-      const problem = wsProblem(dir, isWs);
+      const problem = wsProblem(dir, isWs) ?? (await signedPanelProblem(path.join(dir, "panel")));
       if (problem) {
         console.error(`    ${path.basename(target)}: FAILED — ${problem}`);
         return 1;
@@ -400,7 +439,7 @@ async function cli(argv) {
           failed++;
           continue;
         }
-        const problem = wsProblem(folder, isWs);
+        const problem = wsProblem(folder, isWs) ?? (await signedPanelProblem(path.join(folder, "panel")));
         if (problem) {
           console.error(`    ${t.name}: FAILED — ${problem}`);
           failed++;
@@ -428,7 +467,7 @@ async function cli(argv) {
     return failed ? 1 : 0;
   }
 
-  console.error("usage: release-checks.mjs notary <json-file> | smoke-mcpb <file.mcpb> | smoke-binaries <dist-dir>");
+  console.error("usage: release-checks.mjs notary <json-file> | smoke-npm <file.tgz> | smoke-mcpb <file.mcpb> | smoke-binaries <dist-dir>");
   return 2;
 }
 

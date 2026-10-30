@@ -28,8 +28,8 @@ for one, which is why this step comes first.
 - **Everything green** — say so in one line and move on.
 - **Anything red** — explain what `setup_panel` is about to do before calling
   it: it copies a small panel into their Adobe extensions folder and switches on
-  the Adobe setting that allows unsigned panels. Both are user-level and
-  reversible. Call it, then:
+  the Adobe setting that allows unsigned panels (a released panel is signed and
+  needs it only as a fallback). Both are user-level and reversible. Call it, then:
   - if `afterEffectsRunning` was false, ask them to **open** After Effects;
   - if it was true, ask them to **quit and reopen** it.
 

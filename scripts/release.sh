@@ -3,7 +3,9 @@
 # Cuts a release. Three artifacts go out, because there are three ways to
 # install this and only one of them assumes the user has Node:
 #
-#   npm            the tag push triggers .github/workflows/release.yml (OIDC)
+#   npm            packed here, attached to the GitHub release; publishing the
+#                  release triggers .github/workflows/release.yml, which
+#                  publishes that exact tarball over OIDC
 #   .mcpb          one-click bundle for Claude Desktop, runs on its own Node
 #   binaries       standalone, signed and notarized on macOS
 #
@@ -21,6 +23,16 @@
 #
 # Notarization credentials are read from the environment by
 # scripts/sign-and-notarize.sh — see the header there.
+#
+# Every artifact's After Effects panel is signed with a self-signed certificate
+# (issue #182) so it loads without Adobe's PlayerDebugMode. The panel is signed
+# ONCE, here, before the tag, and every artifact — npm tarball, .mcpb, binaries —
+# carries that same signed folder, so all of them hold identical signatures. CI
+# never signs: that would put Rosetta, a download and a timestamp server after
+# the tag. That needs no setup: with AE_MCP_PANEL_CERT unset the signing uses a
+# throwaway certificate. To sign with one persistent certificate instead, set
+# AE_MCP_PANEL_CERT (a .p12 from `ZXPSignCmd -selfSignedCert`) and
+# AE_MCP_PANEL_CERT_PASSWORD — see scripts/lib/panel-signing.mjs.
 #
 # Normally invoked as `make release` / `make release 1.1.0`.
 
@@ -51,6 +63,19 @@ if [ "${SKIP_BINARIES:-}" != "1" ]; then
   fi
   security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application" \
     || die "no Developer ID Application certificate in the keychain"
+fi
+
+# The panel is signed in every artifact this script builds. `required` turns a
+# missing certificate or a failed signing into a failed build here, before the
+# tag. AE_MCP_SIGNED_PANEL is set once the panel has been signed (below).
+export AE_MCP_PANEL_SIGN=required
+export AE_MCP_PANEL_CERT="${AE_MCP_PANEL_CERT:-ephemeral}"
+unset AE_MCP_SIGNED_PANEL
+node scripts/lib/panel-signing.mjs plan || die "the panel signing configuration is not usable — see scripts/lib/panel-signing.mjs"
+# Adobe ships ZXPSignCmd for macOS as an x86_64 binary only.
+if [ "$(uname -m)" = "arm64" ]; then
+  arch -x86_64 /usr/bin/true 2>/dev/null \
+    || die "ZXPSignCmd (which signs the panel) is an Intel binary and needs Rosetta: sudo softwareupdate --install-rosetta --agree-to-license"
 fi
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -118,21 +143,40 @@ npm run build >/dev/null
 step "Running the tests"
 npm test >/dev/null || die "tests failed — nothing has been tagged or pushed"
 
-step "Verifying the package"
 node scripts/sync-version.mjs --check
-# Same guard the release workflow applies: npm silently rewriting the manifest
-# (a dropped bin, for instance) must block the release, not warn about it.
-OUT=$(npm publish --workspace "$PKG" --dry-run 2>&1)
-if grep -qE "invalid and removed|auto-corrected" <<<"$OUT"; then
-  echo "$OUT" >&2
-  die "npm would rewrite the manifest on publish — fix $MANIFEST first"
-fi
-grep -q "$PKG@$VERSION" <<<"$OUT" || die "dry-run did not report $PKG@$VERSION"
 
 # --------------------------------------------------------------- artifacts
 # Everything that can fail happens here, before anything is published. A failed
 # notarization at this point costs a `git checkout -- .` and nothing else.
 rm -rf "$DIST"
+mkdir -p "$DIST"
+
+# One signing for the whole release (issue #182): every packaging step below
+# copies this folder verbatim, so the npm, .mcpb and binary panels are
+# byte-identical, signature included. The work folder (and with it nothing
+# secret — an ephemeral certificate is deleted inside the signing) goes when
+# the script exits.
+SIGN_WORK=$(mktemp -d)
+trap 'rm -rf "$SIGN_WORK"' EXIT
+step "Signing the After Effects panel"
+node scripts/lib/panel-signing.mjs sign "$SIGN_WORK/panel" || die "signing the panel failed — nothing has been tagged or pushed"
+export AE_MCP_SIGNED_PANEL="$SIGN_WORK/panel"
+
+# The npm tarball is packed HERE, not in CI, so the panel inside it is the one
+# just signed and CI has nothing to sign or build. It is attached to the GitHub
+# release, and release.yml publishes that exact file.
+step "Packing the npm tarball"
+npm pack --workspace "$PKG" --pack-destination "$DIST" >/dev/null
+TARBALL="$DIST/engine-room-after-effects-mcp-$VERSION.tgz"
+[ -f "$TARBALL" ] || die "npm pack did not produce $TARBALL"
+# Same guard the release workflow applies: npm silently rewriting the manifest
+# (a dropped bin, for instance) must block the release, not warn about it.
+OUT=$(npm publish "$TARBALL" --dry-run --ignore-scripts 2>&1)
+if grep -qE "invalid and removed|auto-corrected" <<<"$OUT"; then
+  echo "$OUT" >&2
+  die "npm would rewrite the manifest on publish — fix $MANIFEST first"
+fi
+grep -q "$PKG@$VERSION" <<<"$OUT" || die "dry-run did not report $PKG@$VERSION"
 
 step "Building the Claude Desktop bundle"
 node scripts/build-mcpb.mjs --out "$DIST"
@@ -151,6 +195,8 @@ fi
 # bundle or binary that does not start costs a `git checkout -- .`, not a
 # public release that has to be pulled.
 step "Smoke-running the artifacts"
+node scripts/lib/release-checks.mjs smoke-npm "$TARBALL" \
+  || die "the npm tarball did not install and start cleanly — nothing has been tagged or pushed"
 node scripts/lib/release-checks.mjs smoke-mcpb "$DIST/after-effects-mcp-$VERSION.mcpb" \
   || die "the .mcpb bundle did not start cleanly — nothing has been tagged or pushed"
 if [ "${SKIP_BINARIES:-}" != "1" ]; then
@@ -160,7 +206,7 @@ fi
 
 # The staging folders are inputs to the zips; only the archives get uploaded.
 ASSETS=()
-while IFS= read -r f; do ASSETS+=("$f"); done < <(find "$DIST" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.mcpb' \) | sort)
+while IFS= read -r f; do ASSETS+=("$f"); done < <(find "$DIST" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.mcpb' -o -name '*.tgz' \) | sort)
 [ ${#ASSETS[@]} -gt 0 ] || die "no release assets were produced in $DIST"
 step "Release assets"
 for a in "${ASSETS[@]}"; do printf '    %s\n' "$a"; done
@@ -178,8 +224,9 @@ git push --quiet origin "$TAG"
 REPO=$(git remote get-url origin | sed -E 's#.*github\.com[:/]([^/]+/[^/.]+)(\.git)?#\1#')
 
 # ----------------------------------------------------------------- release
-# Created after the tag is pushed so it attaches to a ref that exists. The npm
-# publish is running in parallel in Actions; the two are independent.
+# Created after the tag is pushed so it attaches to a ref that exists.
+# Publishing it is what starts release.yml, which downloads the .tgz attached
+# here and publishes it to npm over OIDC — no build, no signing in CI.
 step "Creating the GitHub release"
 NOTES=$(cat <<EOF
 ## Install
@@ -212,6 +259,7 @@ Released $TAG.
   Actions   https://github.com/$REPO/actions
   Package   https://www.npmjs.com/package/$PKG
 
-The GitHub release is up with its assets. The npm publish runs in Actions via
-OIDC and takes a few minutes; watch it with:  gh run watch
+The GitHub release is up with its assets. Publishing it started the npm
+publish in Actions, which uploads the attached tarball via OIDC and takes a
+few minutes; watch it with:  gh run watch
 EOF

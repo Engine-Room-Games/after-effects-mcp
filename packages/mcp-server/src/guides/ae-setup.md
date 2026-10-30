@@ -107,7 +107,7 @@ are in before you say anything.
 ## The repair path
 
 1. **`check_setup`** — find out what is actually wrong.
-2. **`setup_panel`** — if the panel is missing or out of date. Tell the user what it will do *before* you call it: it copies the panel into their Adobe extensions folder and switches on two Adobe preferences — the one that permits unsigned panels, and CEP's own log (only where it was never set), so that if AE ever refuses to load the panel the reason is recorded. All of it is user-level and reversible. One caution: if `check_setup` showed the install as **self-signed**, `setup_panel` replaces it with an unsigned copy and the signing has to be done again — say so before calling it.
+2. **`setup_panel`** — if the panel is missing or out of date. Tell the user what it will do *before* you call it: it copies the panel into their Adobe extensions folder and switches on two Adobe preferences — the one that permits unsigned panels, and CEP's own log (only where it was never set), so that if AE ever refuses to load the panel the reason is recorded. All of it is user-level and reversible. A released server ships the panel **signed** (the result says `signed: true`): After Effects loads it without the first preference, which is set only as a fallback, and no reboot is ever needed for it. One caution, for an **unsigned** panel only (a development build): if `check_setup` showed the install as **self-signed**, `setup_panel` replaces it with an unsigned copy and the signing has to be done again — the result's notes say so; tell the user before calling it.
 3. **Get the panel loaded.** If AE was closed, ask them to open it. If it was already open, ask them to quit and reopen it. You cannot do either for them.
 4. **`check_setup`** again to confirm.
 
@@ -117,19 +117,20 @@ are in before you say anything.
 |---|---|
 | `platform` | Not macOS or Windows. After Effects only runs on those two, so there is nothing to fix. |
 | `panelAssetsPresent` | The server package is incomplete — it needs reinstalling. |
-| `cepDebugMode` | Adobe refuses to load unsigned panels until this preference is on. `setup_panel` sets it. |
-| `panelInstalled` | The panel is not in the Adobe extensions folder yet. `setup_panel` installs it. When it passes, the detail also says whether the install is **self-signed** — see the last section. |
-| `panelUpToDate` | The files on disk are older than this server. Run `setup_panel`. A self-signed install's extra files (`META-INF/`, `mimetype`) do not count as differences. |
+| `cepDebugMode` | Adobe refuses to load unsigned panels until this preference is on. `setup_panel` sets it. For a **signed** panel it always passes — the detail says the preference is not required. |
+| `panelInstalled` | The panel is not in the Adobe extensions folder yet. `setup_panel` installs it. When it passes, the detail says whether the install is **signed** — as a release ships it, or self-signed on this machine (see the last section); which certificate signed it does not matter, only whether the files still match (`panelSignatureIntact`). |
+| `panelUpToDate` | The files on disk are older than this server. Run `setup_panel`. The signature's own files (`META-INF/signatures.xml`, `mimetype`) do not count as differences. |
+| `panelSignatureIntact` | Present only for a signed install. Its files changed after it was signed — usually a developer's edit — and After Effects refuses such a panel. With After Effects closed, run `setup_panel` with `force: true`. It passes with a note when the debug preference is on, because then the panel still loads. |
 | `panelRunningCurrent` | AE is *running* an older panel than these tools ship. This is the one that predicts whether calls will actually work — `panelUpToDate` can pass while this fails, for the whole window between installing an update and restarting AE. |
 | `afterEffectsRunning` | AE is closed. If the panel also needs installing, install it now and then ask them to open AE — that saves a restart. |
 | `bridgeReachable` | Everything is installed but the panel isn't answering **on any port** — it asks the default port and the port file's port both, and reports whichever answers. Read the detail: if a port **timed out**, After Effects is busy and you should wait, not restart. If nothing is listening anywhere, one restart of AE is reasonable, because the panel loads only at launch; if that has already been tried, read `panelSignature` and `nextSteps` before suggesting a second. |
 | `bridgeToken` | The panel answers but requires a token this server cannot produce, so every call is refused before it reaches After Effects. The panel is fine: do not restart it and do not run `setup_panel`. The detail names the file the token should be in; `nextSteps` says what to do when it is not there. |
 | `portAgreement` | The panel answers, but on a different port from the one tool calls go to. The server is stale, the panel is fine. Retry the call, or reconnect the MCP server. Never restart After Effects for this. |
-| `panelSignature` | CEP's own log says it refused to load the panel because its signature failed verification — even with `cepDebugMode` on. An Adobe CEP 12 bug, seen on Windows. No restart and no reinstall helps; `nextSteps` carries the self-signing fix. When it *passes* on a silent bridge, its `evidence` says whether the log was clean or there was no log to read. |
+| `panelSignature` | CEP's own log says it refused to load the panel because its signature failed verification — even with `cepDebugMode` on. An Adobe CEP 12 bug, seen on Windows. No restart and no reinstall helps; `nextSteps` carries the self-signing fix. If the panel was already signed and intact (`evidence: "failure-logged-signed"`), `nextSteps` also asks for a `log_issue` report. When it *passes* on a silent bridge, its `evidence` says whether the log was clean or there was no log to read. |
 
 ## The reboot case
 
-`cepDebugMode` is an Adobe preference that, on some macOS builds, only takes effect after a **restart of the Mac** — not just of After Effects. If `setup_panel` reports `rebootRecommended: true` and restarting AE alone did not fix it, ask the user to reboot once. This is a one-time cost, never needed again.
+`cepDebugMode` is an Adobe preference that, on some macOS builds, only takes effect after a **restart of the Mac** — not just of After Effects. If `setup_panel` reports `rebootRecommended: true` and restarting AE alone did not fix it, ask the user to reboot once. This is a one-time cost, never needed again. A signed panel never asks for it.
 
 ## When a tool says the panel is out of date
 
@@ -187,12 +188,14 @@ logging on (one command, which it spells out; `setup_panel` sets it on new
 installs), after which one relaunch of AE and one more `check_setup` gives
 a definite answer.
 
-The fix is to sign the installed panel folder with Adobe's own `ZXPSignCmd`
-and unzip the result back over the folder in place. `nextSteps` carries the
-exact commands. Two things to tell the user: the signing survives updates to
-the server but **not** a reinstall — `setup_panel` puts an unsigned copy back
-and warns when it does — and `check_setup` keeps reporting a signed install as
-up to date, so the extra files it adds are nothing to worry about.
+A released server ships the panel already signed, which avoids this on most
+machines. Where it still happens, the fix is to sign the installed panel folder
+with Adobe's own `ZXPSignCmd` and unzip the result back over the folder in
+place. `nextSteps` carries the exact commands. Two things to tell the user: the
+signing survives updates to the server but **not** a reinstall — `setup_panel`
+puts back the copy these tools ship — and `check_setup` keeps reporting a
+signed install as up to date, so the extra files it adds are nothing to worry
+about.
 
 ## If it still will not connect
 

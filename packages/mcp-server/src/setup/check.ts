@@ -21,6 +21,14 @@ import {
 } from "./paths.js";
 import { assessPanel, installedPanelHashes, sourcePanelHashes } from "./panelVersion.js";
 import {
+  SIGNATURE_FILE,
+  describeSignatureProblems,
+  isSignedPanel,
+  signatureIntact,
+  signatureProblems,
+  type SignatureProblems,
+} from "./panelSignature.js";
+import {
   CSXS_VERSIONS,
   cepLogDir,
   cepLogLevel,
@@ -167,18 +175,91 @@ export function findSignatureFailure(logs: string[], bundleId: string = BUNDLE_I
  * `nextSteps` can hand it over one line at a time; the commands are exact
  * because the person following them may never have signed anything.
  */
-export function signatureWorkaroundSteps(installed: string): string[] {
-  return [
-    "After Effects is refusing to load the panel because CEP's signature check is running even though PlayerDebugMode is on. " +
+export function signatureWorkaroundSteps(installed: string, opts: { shippedSigned?: boolean } = {}): string[] {
+  const lead = opts.shippedSigned
+    ? "After Effects is refusing to load the panel because CEP rejected its signature — and this panel is already signed, with every installed file still matching that signature. " +
+      "Nothing here needs reinstalling, and restarting After Effects again will not change it. Please report it with log_issue, quoting the panelSignature line. " +
+      "What has worked on such machines is signing the installed folder again locally, with Adobe's own tool (Adobe advises signing on the platform the panel runs on):"
+    : "After Effects is refusing to load the panel because CEP's signature check is running even though PlayerDebugMode is on. " +
       "That is an Adobe CEP 12 bug, not a broken install — nothing here needs reinstalling, and restarting After Effects again will not change it. " +
-      "The fix is to sign the installed panel folder yourself, with Adobe's own tool, so it passes the check.",
+      "The fix is to sign the installed panel folder yourself, with Adobe's own tool, so it passes the check.";
+  return [
+    lead,
     "1. Download ZXPSignCmd from Adobe's CEP-Resources repository on GitHub (folder `ZXPSignCMD/4.1.3`, the build for this platform). It is a single command-line program.",
     '2. Make a self-signed certificate: `ZXPSignCmd -selfSignedCert US CA "AE MCP" "AE MCP Bridge" password cert.p12` (the country, state and names are free text; keep the password).',
     `3. Sign the installed panel folder into a zip: \`ZXPSignCmd -sign "${installed}" signed.zxp cert.p12 password -tsa http://timestamp.digicert.com\``,
     `4. Unzip signed.zxp back into that same folder, overwriting in place. That adds \`META-INF/signatures.xml\` and a \`mimetype\` file next to the panel's own files and changes nothing else. check_setup keeps reporting the panel as up to date with those extra files present.`,
     "5. Then restart After Effects — the signed panel loads on launch. Run check_setup to confirm.",
-    "Caveat: setup_panel installs a fresh, unsigned copy. After any reinstall on this machine, steps 3-5 have to be done again.",
+    "Caveat: setup_panel replaces the folder with the copy these tools ship, which drops a signature made on this machine. After any reinstall here, steps 3-5 have to be done again.",
   ];
+}
+
+/**
+ * The `cepDebugMode` check. PlayerDebugMode is what lets CEP load an
+ * *unsigned* panel; a signed one loads without it (issue #182), so for a signed
+ * panel the flag being off is not a fault and must not fail the check — that
+ * would send the user to setup_panel and a reboot for nothing.
+ *
+ * @param signedLoads true when the panel After Effects will load carries an
+ *   intact signature: the installed one if it is installed, otherwise the one
+ *   setup_panel would install.
+ */
+export function debugModeCheck(debugMode: { on: boolean; detail: string }, signedLoads: boolean): Check {
+  if (signedLoads) {
+    return {
+      name: "cepDebugMode",
+      ok: true,
+      detail: `${debugMode.detail} — not required: the panel is signed, so After Effects loads it without this preference`,
+    };
+  }
+  return {
+    name: "cepDebugMode",
+    ok: debugMode.on,
+    detail: debugMode.detail,
+    fix: debugMode.on
+      ? undefined
+      : `Run the setup_panel tool. After Effects only loads unsigned panels when ${debugModeLocation()} is set.`,
+  };
+}
+
+/**
+ * The `panelSignatureIntact` check, for an installed folder that carries a
+ * signature. A signature over files that have since changed is worse than none:
+ * CEP refuses the panel outright unless PlayerDebugMode is on and honoured.
+ * The usual cause is development — `AE_MCP_SYNC_PANEL=1`, `/reload-jsx` edits,
+ * or a hand copy into a signed install — and there the flag is on, so it still
+ * loads. That case passes, with the detail saying why.
+ */
+export function signatureIntactCheck(
+  problems: SignatureProblems | null,
+  debugModeOn: boolean,
+  sourceSigned = true
+): Check {
+  if (signatureIntact(problems)) {
+    return { name: "panelSignatureIntact", ok: true, detail: "every installed file matches the panel's signature" };
+  }
+  const what = problems
+    ? describeSignatureProblems(problems)
+    : `${SIGNATURE_FILE} lists no files, so nothing it covers can be checked`;
+  if (debugModeOn) {
+    return {
+      name: "panelSignatureIntact",
+      ok: true,
+      detail:
+        `the installed files no longer match the panel's signature — ${what}. It loads only because PlayerDebugMode is on; ` +
+        "a development sync or reload into a signed install does this",
+    };
+  }
+  return {
+    name: "panelSignatureIntact",
+    ok: false,
+    detail: `the installed files no longer match the panel's signature — ${what}`,
+    fix: sourceSigned
+      ? "After Effects refuses a panel whose files changed after it was signed. Quit After Effects completely, then run setup_panel " +
+        "with force:true to put the signed panel back exactly as shipped, then reopen it."
+      : "After Effects refuses a panel whose files changed after it was signed. Quit After Effects completely, then run setup_panel " +
+        "with force:true: these tools ship an unsigned panel, which replaces this one and loads through the Adobe preference setup_panel turns on. Then reopen it.",
+  };
 }
 
 export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupReport> {
@@ -200,25 +281,40 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     fix: source ? undefined : "The package is missing its CEP panel assets — reinstall the server.",
   });
 
-  const debugMode = await isDebugModeOn();
-  checks.push({
-    name: "cepDebugMode",
-    ok: debugMode.on,
-    detail: debugMode.detail,
-    fix: debugMode.on
-      ? undefined
-      : `Run the setup_panel tool. After Effects only loads unsigned panels when ${debugModeLocation()} is set.`,
-  });
-
   const installed = installedPanelDir();
   const isInstalled = fs.existsSync(path.join(installed, "CSXS", "manifest.xml"));
   const signed = isInstalled && signedInstallPresent(installed);
+  // Issue #182: a release ships the panel signed. Whether the installed copy's
+  // signature still covers its files decides whether PlayerDebugMode matters.
+  const sourceSigned = source !== null && isSignedPanel(source);
+  const installedProblems = isInstalled && isSignedPanel(installed) ? signatureProblems(installed) : null;
+  // Integrity only, never which certificate: every artifact of a release
+  // carries the same signature, but a self-signed (#91) install or one signed
+  // by an earlier release is just as loadable, so the question is only whether
+  // the files still match the signature they carry.
+  const installedSignedIntact = isInstalled && isSignedPanel(installed) && signatureIntact(installedProblems);
+
+  const debugMode = await isDebugModeOn();
+  checks.push(debugModeCheck(debugMode, isInstalled ? installedSignedIntact : sourceSigned));
+
   checks.push({
     name: "panelInstalled",
     ok: isInstalled,
-    detail: isInstalled ? `${installed}${signed ? " (self-signed: META-INF present)" : ""}` : `not present at ${installed}`,
+    detail: isInstalled
+      ? `${installed}${
+          !signed
+            ? ""
+            : isSignedPanel(installed)
+              ? " (signed: META-INF/signatures.xml present)"
+              : " (self-signed: META-INF present)"
+        }`
+      : `not present at ${installed}`,
     fix: isInstalled ? undefined : "Run the setup_panel tool to install it.",
   });
+
+  if (isInstalled && isSignedPanel(installed)) {
+    checks.push(signatureIntactCheck(installedProblems, debugMode.on, sourceSigned));
+  }
 
   // Every shipped file, not just bundle.jsx. Checking the bundle alone passed a
   // half-updated install as current, which sent the user round a restart loop
@@ -411,17 +507,35 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     const logs = cepLogPaths();
     const finding = findSignatureFailure(logs);
     if (finding) {
-      checks.push({
-        name: "panelSignature",
-        ok: false,
-        evidence: "failure-logged",
-        detail:
-          `the CEP log ${finding.file} (last written ${finding.mtime.toISOString()}) records: "${finding.line}" — ` +
-          "CEP is enforcing signature verification on this panel even though PlayerDebugMode is on",
-        fix:
-          "CEP is refusing the unsigned panel's signature despite PlayerDebugMode — an Adobe CEP 12 bug, not a broken install. " +
-          "No reinstall and no restart changes that; the panel folder has to be self-signed with Adobe's ZXPSignCmd. nextSteps carries the exact steps.",
-      });
+      // A signed panel whose files still match its signature was refused for
+      // the signature itself, not for being unsigned — a different sentence,
+      // and the evidence value lets nextSteps say it. Which certificate signed
+      // it does not enter into it.
+      checks.push(
+        installedSignedIntact
+          ? {
+              name: "panelSignature",
+              ok: false,
+              evidence: "failure-logged-signed",
+              detail:
+                `the CEP log ${finding.file} (last written ${finding.mtime.toISOString()}) records: "${finding.line}" — ` +
+                "CEP rejected the signature on this panel, although every installed file still matches it",
+              fix:
+                "CEP is refusing the panel's signature even though the files are exactly as signed. No reinstall and no restart changes that; " +
+                "nextSteps carries the steps to sign it again on this machine with Adobe's ZXPSignCmd. Please also report it with log_issue.",
+            }
+          : {
+              name: "panelSignature",
+              ok: false,
+              evidence: "failure-logged",
+              detail:
+                `the CEP log ${finding.file} (last written ${finding.mtime.toISOString()}) records: "${finding.line}" — ` +
+                "CEP is enforcing signature verification on this panel even though PlayerDebugMode is on",
+              fix:
+                "CEP is refusing the unsigned panel's signature despite PlayerDebugMode — an Adobe CEP 12 bug, not a broken install. " +
+                "No reinstall and no restart changes that; the panel folder has to be self-signed with Adobe's ZXPSignCmd. nextSteps carries the exact steps.",
+            }
+      );
     } else if (logs.length > 0) {
       const level = await cepLogLevel(CSXS_VERSIONS[0]);
       checks.push({
@@ -506,6 +620,7 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
     by("panelInstalled")?.ok !== false &&
     by("panelUpToDate")?.ok !== false &&
     by("panelDependencies")?.ok !== false &&
+    by("panelSignatureIntact")?.ok !== false &&
     by("cepDebugMode")?.ok !== false;
   if (bridgeTimedOut && installSound) {
     const out = [
@@ -524,19 +639,26 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
   // CEP has said, in its own log, that it refused this panel's signature. No
   // reinstall and no restart changes that; only signing does. The steps are
   // the whole workaround, and they come before anything that says "reopen".
+  //
+  // Unless the installed files no longer match a signature they carry: then the
+  // refusal is explained, and putting the signed files back is the fix — so
+  // that case falls through to the reinstall below instead.
   const signature = by("panelSignature");
-  if (signature && signature.ok === false) {
-    return signatureWorkaroundSteps(installedPanelDir());
+  const signatureBroken = by("panelSignatureIntact")?.ok === false;
+  if (signature && signature.ok === false && !signatureBroken) {
+    return signatureWorkaroundSteps(installedPanelDir(), { shippedSigned: signature.evidence === "failure-logged-signed" });
   }
 
-  // A half-updated install or a missing dependency is not fixed by restarting;
-  // both are fixed by reinstalling, and reinstalling only works with AE closed.
-  // An unverifiable running panel (it could not hash its own folder) is the
-  // same: a restart re-reads the same folder, so the remedy is a reinstall.
+  // A half-updated install, a missing dependency or files that no longer match
+  // their signature are not fixed by restarting; all are fixed by reinstalling,
+  // and reinstalling only works with AE closed. An unverifiable running panel
+  // (it could not hash its own folder) is the same: a restart re-reads the same
+  // folder, so the remedy is a reinstall.
   const brokenInstall =
     by("panelUpToDate")?.ok === false ||
     by("panelDependencies")?.ok === false ||
-    by("panelRunningCurrent")?.detail === UNVERIFIABLE_DETAIL;
+    by("panelRunningCurrent")?.detail === UNVERIFIABLE_DETAIL ||
+    signatureBroken;
   const needsInstall = by("panelInstalled")?.ok === false || brokenInstall;
   const needsDebug = by("cepDebugMode")?.ok === false;
   const aeRunning = by("afterEffectsRunning")?.ok === true;
@@ -544,9 +666,15 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
   // Closing AE first is part of the remedy, not an afterthought: installing
   // while it holds the panel's files open is what produces this state.
   if (brokenInstall && aeRunning) {
-    steps.push("Quit After Effects completely — installing while it is open can leave the panel half-updated.");
+    steps.push(
+      signatureBroken && by("panelUpToDate")?.ok !== false && by("panelDependencies")?.ok !== false
+        ? "Quit After Effects completely — the panel's files have to be replaced while it is closed."
+        : "Quit After Effects completely — installing while it is open can leave the panel half-updated."
+    );
   }
-  if (needsDebug || needsInstall) {
+  if (signatureBroken) {
+    steps.push("Run the setup_panel tool with force:true — the installed files no longer match the panel's signature, and a forced install puts back exactly what these tools ship.");
+  } else if (needsDebug || needsInstall) {
     steps.push("Run the setup_panel tool — it installs the After Effects panel and enables the Adobe preference that lets AE load it.");
   }
   const identity = by("panelIdentity");

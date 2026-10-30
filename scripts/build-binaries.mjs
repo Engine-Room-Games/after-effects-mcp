@@ -21,6 +21,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { vendorPanel } from "./lib/panel-signing.mjs";
 import { loadPackagingCopy } from "./lib/setup.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -125,7 +126,10 @@ for (const target of TARGETS) {
     path.join(stage, "package.json"),
     JSON.stringify({ name: "@engine-room/after-effects-mcp", version, private: true, builtWith }, null, 2) + "\n"
   );
-  copy(panelSrc, path.join(stage, "panel"));
+  // Signed when the environment asks for it (a release, issue #182). The ws
+  // beside the binary stays either way: an unsigned panel is given that copy at
+  // install, a signed one carries its own inside the signature.
+  await vendorPanel({ panelSrc, wsSrc, dest: path.join(stage, "panel"), copy });
   copy(wsSrc, path.join(stage, "node_modules", "ws"));
   fs.writeFileSync(path.join(stage, "README.txt"), README(target));
 

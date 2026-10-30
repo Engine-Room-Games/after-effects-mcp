@@ -162,7 +162,7 @@ await check("a logged signature failure replaces the restart advice with the sig
   assert.match(text, /-tsa http:\/\/timestamp\.digicert\.com/);
   assert.match(text, /META-INF\/signatures\.xml/);
   assert.match(text, /mimetype/);
-  assert.match(text, /Caveat: setup_panel installs a fresh, unsigned copy/);
+  assert.match(text, /Caveat: setup_panel replaces the folder with the copy these tools ship/);
   assert.doesNotMatch(text, /Run the setup_panel tool/, "reinstalling is exactly what must not be suggested");
   // The one restart is the last step, after signing — the panel loads at launch.
   const restartIdx = steps.findIndex((s) => /restart After Effects/i.test(s) && !/will not/.test(s));

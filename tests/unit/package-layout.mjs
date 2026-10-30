@@ -143,12 +143,22 @@ for (const script of packagingScripts) {
   const source = read("scripts", script);
 
   check(`${script} copies the panel directory wholesale`, () => {
+    // Directly, or through vendorPanel (scripts/lib/panel-signing.mjs), which
+    // copies the directory the same way and then signs it (issue #182).
     assert.match(
       source,
-      /copy\(\s*panelSrc/,
+      /copy\(\s*panelSrc|vendorPanel\(\{\s*panelSrc\b/,
       `${script} no longer copies panelSrc as a directory — a per-file list drops new panel files silently`,
     );
   });
+}
+
+check("vendorPanel copies the panel directory wholesale", () => {
+  assert.match(read("scripts", "lib", "panel-signing.mjs"), /copy\(\s*panelSrc,\s*dest\s*\)/);
+});
+
+for (const script of packagingScripts) {
+  const source = read("scripts", script);
 
   check(`${script} names no individual panel client file`, () => {
     const named = clientFiles.filter((f) => f !== "index.html" && source.includes(f));

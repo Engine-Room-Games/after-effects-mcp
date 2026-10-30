@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { vendorPanel } from "./lib/panel-signing.mjs";
 import { loadPackagingCopy } from "./lib/setup.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -76,10 +77,11 @@ for (const [name, target] of Object.entries(manifest.bin ?? {})) {
 }
 console.log(`Bundled ${path.relative(root, outFile)} (${(fs.statSync(outFile).size / 1024).toFixed(1)} KB)`);
 
-// Vendor the panel. node_modules is excluded: setup_panel re-vendors `ws` from
-// the server's own dependency tree at install time.
-fs.rmSync(panelDst, { recursive: true, force: true });
-copy(panelSrc, panelDst);
+// Vendor the panel. Unsigned (the default), node_modules is excluded and
+// setup_panel re-vendors `ws` from the server's own dependency tree at install
+// time. Signed (a release, issue #182), `ws` goes inside the panel before
+// signing, since nothing may be added after — see scripts/lib/panel-signing.mjs.
+await vendorPanel({ panelSrc, wsSrc: path.join(root, "node_modules", "ws"), dest: panelDst, copy });
 console.log(`Vendored panel -> ${path.relative(root, panelDst)}`);
 
 // npm renders the package README on the registry page, and `files` only picks

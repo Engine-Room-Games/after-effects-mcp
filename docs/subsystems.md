@@ -183,6 +183,41 @@ installed — so a signed panel reports the shipped `clientHash` and is
 step adds to the folder has to be left out of both copies of the hash, or
 every signed install will be told to update.
 
+**A release ships the panel signed, and the signature is not part of the
+version** (issue #182). Since then the *source* can carry `META-INF/signatures.xml`
+and `mimetype` too, so `panelInstallDiff` skips those two paths outright rather
+than relying on the source-only walk: a signature made on the user's machine
+differs byte for byte from the shipped one while the panel is the same version.
+Whether a signature still covers the installed files is a separate question with
+its own check (`panelSignatureIntact`, `setup/panelSignature.ts`), never the
+gate's. The gate's hash (issue #243) must ignore the same two files for the same
+reason: a signed and an unsigned copy of one version are one panel.
+
+**A signed panel is installed verbatim.** The signature lists every file in the
+folder with its digest, and CEP refuses the panel for one extra, missing or
+changed file — so the signed panel carries its own `node_modules/ws` (vendored
+*before* signing), and `installPanel` copies the whole folder and adds nothing:
+no `ws` from the server's tree, no fix-ups. It then checks the copy against the
+signature it carries and throws if they differ. `installMatches` compares
+verbatim for a signed source (`{ verbatim: true }`), so a second `setup_panel`
+over an identical signed install is still "nothing to replace" (#163).
+
+**PlayerDebugMode is still set for a signed panel, as a fallback.** It is not
+needed — `check_setup`'s `cepDebugMode` passes with it off when the panel that
+loads is signed and intact — but the signed panel has not yet been seen loading
+on every machine (recipe 76), and with the flag on CEP skips the check entirely,
+so a refused signature degrades to the pre-#182 behaviour instead of a panel
+that never loads. It therefore asks for no restart and no reboot. Drop it once
+recipe 76 has passed on both platforms; the cost of keeping it is that the flag
+is account-wide (README, Limitations).
+
+**The dev flow stays unsigned.** A checkout installs `packages/ae-panel`, which
+is never signed; `/reload-jsx`, `--symlink` and `AE_MCP_SYNC_PANEL=1` all edit
+installed files in place and would void a signature. Dev needs PlayerDebugMode,
+as before. `bundle-jsx.mjs` warns when a sync writes into a signed install, and
+`check_setup` then reports `panelSignatureIntact` with a note rather than a
+failure while PlayerDebugMode is on, since the panel still loads.
+
 ## The project scaffold
 
 `init_project` and `npx … init` both call `scaffold()` in `setup/scaffold.ts`.

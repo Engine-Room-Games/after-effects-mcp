@@ -192,6 +192,14 @@ jobs:
       - name: CEP signature refusals are diagnosed from the CEP log
         run: node tests/unit/cep-signature.mjs
 
+      # Issue #182: a release ships the panel signed so it loads without
+      # PlayerDebugMode. The signature covers every file, so packaging puts ws
+      # inside before signing, setup_panel copies it verbatim, the dev path stays
+      # unsigned, and check_setup stops demanding the debug flag for it. A stub
+      # plays ZXPSignCmd; the real tool runs only in a release.
+      - name: The signed panel is packaged, installed and checked intact
+        run: node tests/unit/panel-signing.mjs
+
       # render_queue renders in an aerender process the server owns: progress
       # off its stdout, outputs verified on disk, and a cancel that stops the
       # whole process tree — against a fake aerender, on both hosts (#173):

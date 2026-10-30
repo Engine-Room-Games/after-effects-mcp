@@ -214,9 +214,16 @@ function sameContents(a: string, b: string): boolean {
  * call every signed install partial — sending the user to reinstall, which
  * strips the signature, which is the one thing making the panel load.
  * `tests/unit/panel-install.mjs` pins this.
+ *
+ * The same two files are skipped when the *source* has them (issue #182: a
+ * release ships the panel signed). A signature made on this machine differs
+ * byte for byte from the shipped one while the panel is the same version, and
+ * whether the signature still holds is `panelSignatureIntact`'s question, not
+ * this one's.
  */
 export function panelInstallDiff(source: string, installed: string): string[] {
   return listPanelFiles(source)
+    .filter((rel) => rel !== "META-INF/signatures.xml" && rel !== "mimetype")
     .filter((rel) => !sameContents(path.join(source, rel), path.join(installed, rel)))
     .sort();
 }
