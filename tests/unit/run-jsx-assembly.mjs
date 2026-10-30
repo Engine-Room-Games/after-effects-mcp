@@ -57,7 +57,7 @@ async function check(name, fn) {
 }
 
 /** A fresh ExtendScript context, logging every undo call made on `app`. */
-function es() {
+function es(opts = {}) {
   const log = [];
   const ctx = {
     app: {
@@ -66,6 +66,23 @@ function es() {
     },
   };
   vm.createContext(ctx);
+  if (opts.parseLines) {
+    // Node's SyntaxError carries no `line`, so a library parse failure would
+    // always map from rawLine null. This stands in for ExtendScript's parser:
+    // a library parse check (an uncalled `(function(){ … })`) whose text
+    // contains `PARSE_FAIL` throws as AE does, with the line of the marker.
+    // Replacing `eval` makes every eval indirect (global scope), which the
+    // fixtures that use it are written not to need.
+    const realEval = vm.runInContext("eval", ctx);
+    ctx.eval = (src) => {
+      const s = String(src);
+      if (s.startsWith("(function(){ ") && s.endsWith("})") && s.includes("PARSE_FAIL")) {
+        const line = s.slice(0, s.indexOf("PARSE_FAIL")).split("\n").length;
+        throw { message: "Syntax error", line };
+      }
+      return realEval(s);
+    };
+  }
   vm.runInContext(core, ctx, { filename: "core.jsx" });
   vm.runInContext(snapshot, ctx, { filename: "snapshot.jsx" });
   vm.runInContext(raw, ctx, { filename: "raw.jsx" });
@@ -253,15 +270,15 @@ await check("an unbuildable library goes down the old path, never an invented er
 // ---------- 2. the whole call, old path against new ----------
 
 /** OPS.run_jsx as every panel before stage 6 runs it. */
-function runOld(args) {
-  const e = es();
+function runOld(args, opts) {
+  const e = es(opts);
   const body = overTheBridge(e.dispatch("run_jsx", args));
   return { body, log: e.log };
 }
 
 /** The server's build, OPS._run_jsx, the server's map — through runJsxViaServer itself. */
-async function runNew(args) {
-  const e = es();
+async function runNew(args, opts) {
+  const e = es(opts);
   const sent = [];
   const send = async (op, a) => {
     sent.push(op);
@@ -353,6 +370,42 @@ for (const [name, args] of callFixtures) {
     assert.deepEqual(after.log, before.log, "the same undo calls reach After Effects, in the same order");
   });
 }
+
+// A library parse failure AT A KNOWN LINE. The harness's own syntax errors
+// carry no line, so without the stub the mapping branch for a library that
+// does not parse (rawLine within the library) never runs.
+const parseFixtures = [
+  ["line 1 of a one-line library", [lib("/t/p.jsx", "var PARSE_FAIL = 1;")], 0, 1, "var PARSE_FAIL = 1;"],
+  ["line 3 of a library", [lib("/t/p.jsx", "function a(){}\nfunction b(){}\n  var x = PARSE_FAIL;  \nfunction c(){}")], 0, 3, "var x = PARSE_FAIL;"],
+  ["the last line of the second library", [lib("/t/ok.jsx", "function ok(){}\nfunction ok2(){}"), lib("/t/p.jsx", "var a = 1;\r\nvar PARSE_FAIL;")], 1, 2, "var PARSE_FAIL;"],
+  ["a rewritten library", [lib("/t/u.jsx", "app.beginUndoGroup('x');\nvar q;\napp.endUndoGroup(); PARSE_FAIL")], 0, 3, "app.endUndoGroup(); PARSE_FAIL"],
+];
+for (const [name, libraries, which, line, text] of parseFixtures) {
+  await check(`call parity, library parse failure at a known line: ${name}`, async () => {
+    const args = { code: "return 1;", libraries };
+    const before = runOld(structuredClone(args), { parseLines: true });
+    const after = await runNew(structuredClone(args), { parseLines: true });
+    const o = oldOutcome(before.body);
+    assert.deepEqual(newOutcome(after), o);
+    // Pinned, not only compared: an off-by-one on either side must fail.
+    assert.equal(o.ok, false);
+    assert.equal(o.source.sourceName, libraries[which].path);
+    assert.equal(o.source.rawLine, line);
+    assert.equal(o.source.sourceLine, line);
+    assert.equal(o.source.sourceText, text);
+    assert.equal(after.err.source.sourceLine, line);
+    assert.equal(after.err.source.sourceText, text);
+    assert.match(o.text, new RegExp(`at line ${line} of ${libraries[which].path.replace(/\./g, "\\.")}`));
+  });
+}
+
+await check("library parse failure: a line past the library's end is unmapped, not clamped", async () => {
+  const built = asm.buildRunJsxSource("return 1;", [lib("/t/p.jsx", "var a;\nvar b;")]);
+  const m = asm.mapRunJsxFailure({ rawLine: 3, libraryIndex: 0 }, "return 1;", undefined, built);
+  assert.deepEqual(plain(m), { lineCount: 2, rawLine: 3, sourceLine: null, sourceText: null, sourceName: "/t/p.jsx" });
+  const first = asm.mapRunJsxFailure({ rawLine: 1, libraryIndex: 0 }, "return 1;", undefined, built);
+  assert.equal(first.sourceText, "var a;");
+});
 
 await check("the fixtures reach the branches they are named for", async () => {
   const pick = (n) => callFixtures.find(([k]) => k === n)[1];

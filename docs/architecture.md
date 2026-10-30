@@ -149,6 +149,18 @@ server cannot build (a blank library; the tool path never produces one) goes
 down the old path rather than inventing an error raw.jsx would have worded
 with its own line number.
 
+**One difference, accepted:** the script is `eval`'d in the handler's own
+scope, so a name it uses without declaring resolves to the handler's locals
+first. Those locals differ between the two handlers. In `_run_jsx`,
+`args.code`, `args.scriptPath` and `args.libraries` are gone and `args.built`
+is there instead. `code` is declared but `undefined` (raw.jsx, `OPS._run_jsx`),
+where in `OPS.run_jsx` it held the script's own text. `built` holds the wire
+form (`wrapper`, `undoRewrites`, `undoMentions`, `opaqueRoutes`, `libraries`)
+rather than raw.jsx's layout (`preambleLines`, `segments`, …). `code` is still
+declared so that an undeclared `code = …` in a script stays local rather than
+writing a global into the shared engine (#185). No documented contract
+exposes any of these, and the parity fixtures do not read them.
+
 ### Cross-field rules ("pass exactly one of these")
 
 **A `.refine()` is invisible to the model.** The JSON Schema converter drops
