@@ -45,6 +45,13 @@ export const SIGNED_INSTALL_OVERWRITTEN_NOTE =
   "After Effects will not load it until it is signed again: repeat the ZXPSignCmd steps from check_setup's " +
   "panelSignature nextSteps on the newly installed folder, then restart After Effects.";
 
+/** The Adobe preference calls installPanel makes; replaceable in tests. */
+export interface PreferenceCalls {
+  isDebugModeOn: typeof isDebugModeOn;
+  enableDebugMode: typeof enableDebugMode;
+  ensureCepLogging: typeof ensureCepLogging;
+}
+
 /** Added to the action when PlayerDebugMode is turned on for a signed panel, which does not need it. */
 export const DEBUG_MODE_FALLBACK_NOTE =
   "The panel is signed, so After Effects loads it without that preference; it is set only as a fallback, " +
@@ -63,13 +70,16 @@ export const DEBUG_MODE_FALLBACK_NOTE =
  * Writes to the user's Adobe CEP extensions directory and to Adobe's
  * preference domains — both are user-scoped and reversible.
  *
- * `source` is for tests: the panel to install instead of the one this server ships.
+ * `source` and `prefs` are for tests: the panel to install instead of the one
+ * this server ships, and stand-ins for the Adobe preference calls so a test
+ * never writes the real ones.
  */
 export async function installPanel(
-  opts: { enableDebugMode?: boolean; force?: boolean; source?: string } = {}
+  opts: { enableDebugMode?: boolean; force?: boolean; source?: string; prefs?: Partial<PreferenceCalls> } = {}
 ): Promise<InstallResult> {
   const actions: string[] = [];
   const notes: string[] = [];
+  const prefs: PreferenceCalls = { isDebugModeOn, enableDebugMode, ensureCepLogging, ...opts.prefs };
 
   if (!isSupportedPlatform()) {
     throw new Error(
@@ -199,11 +209,11 @@ export async function installPanel(
   let rebootRecommended = false;
   let debugModeEnabledNow = false;
   if (opts.enableDebugMode !== false) {
-    const existing = await isDebugModeOn();
+    const existing = await prefs.isDebugModeOn();
     if (existing.on) {
       actions.push(`PlayerDebugMode was already enabled — ${existing.detail}.`);
     } else {
-      const versions = await enableDebugMode();
+      const versions = await prefs.enableDebugMode();
       if (versions.length === 0) {
         notes.push(
           signed
@@ -232,7 +242,7 @@ export async function installPanel(
   // on now, while everything works, is what lets check_setup diagnose the day
   // it does not. Same opt-out as the debug flag: both are Adobe preferences.
   if (opts.enableDebugMode !== false) {
-    const logging = await ensureCepLogging();
+    const logging = await prefs.ensureCepLogging();
     if (logging.set.length > 0) {
       actions.push(
         `Set CEP's LogLevel to ${CEP_LOG_LEVEL} for CSXS ${logging.set.join(", ")} so that, if After Effects ever refuses to load the panel, its CEP log says why.`

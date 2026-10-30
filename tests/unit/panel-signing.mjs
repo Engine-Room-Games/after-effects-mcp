@@ -36,7 +36,7 @@ const { loadPackagingCopy } = await import(pathToFileURL(path.join(root, "script
 const { isSignedPanel, signatureProblems, signatureIntact } = await import(dist("setup", "panelSignature.js"));
 const { installPanel } = await import(dist("setup", "install.js"));
 const { installedPanelDir, panelInstallDiff, panelSourceDir, wsModuleDir } = await import(dist("setup", "paths.js"));
-const { buildNextSteps, debugModeCheck, signatureIntactCheck } = await import(dist("setup", "check.js"));
+const { buildNextSteps, checkSetup, debugModeCheck, signatureIntactCheck } = await import(dist("setup", "check.js"));
 const { panelClientHash } = await import(dist("setup", "panelHash.js"));
 const { assessPanel, installedPanelHashes } = await import(dist("setup", "panelVersion.js"));
 const { REQUIRED_PANEL_CAPABILITIES } = await import(dist("setup", "panelCapabilities.js"));
@@ -530,6 +530,137 @@ await check("an intact signature (any certificate) that CEP still refuses gets i
   assert.match(steps[0], /already signed, with every installed file still matching that signature/);
   assert.match(steps[0], /log_issue/);
   assert.match(steps.join("\n"), /-selfSignedCert/);
+});
+
+await check("on a #91 machine, a voided signature with PlayerDebugMode on gets a forced reinstall, not a hand signing", () => {
+  const steps = buildNextSteps(
+    [
+      ...installedFine,
+      signatureIntactCheck({ modified: ["jsx/bundle.jsx"], missing: [], extra: [] }, true),
+      { name: "panelSignature", ok: false, evidence: "failure-logged-voided", detail: LINE, fix: "…" },
+    ],
+    false
+  );
+  const text = steps.join("\n");
+  assert.match(text, /setup_panel tool with force:true/);
+  assert.doesNotMatch(text, /ZXPSignCmd|-selfSignedCert/);
+  assert.doesNotMatch(text, /unsigned/);
+});
+
+// ---------------------------------------------------------------------------
+// The release's ws is the lockfile's, and its tarball is the one npm publishes
+// ---------------------------------------------------------------------------
+
+await check("the signed panel's ws is pinned by the lockfile and checked against its integrity", () => {
+  const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
+  const pinned = signing.lockedWs(lock);
+  assert.match(pinned.version, /^\d+\.\d+\.\d+/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(wsSrc, "package.json"), "utf8")).version, pinned.version,
+    "node_modules/ws is not the version the lockfile pins — run npm ci");
+  assert.throws(() => signing.lockedWs({ packages: {} }), /pins no node_modules\/ws/);
+
+  const bytes = Buffer.from("a tarball");
+  const sri = `sha512-${crypto.createHash("sha512").update(bytes).digest("base64")}`;
+  signing.checkIntegrity(bytes, sri);
+  assert.throws(() => signing.checkIntegrity(Buffer.from("another tarball"), sri, "ws@x"), /ws@x does not match the lockfile's integrity/);
+  assert.throws(() => signing.checkIntegrity(bytes, "md5-nope"), /does not match/);
+  // `sign` takes ws from fetchLockedWs, never from node_modules.
+  const src = fs.readFileSync(path.join(root, "scripts", "lib", "panel-signing.mjs"), "utf8");
+  const signBlock = src.slice(src.indexOf('if (cmd === "sign"'), src.indexOf('if (cmd === "tool"'));
+  assert.match(signBlock, /wsSrc: fetchLockedWs\(/);
+});
+
+await check("the tarball's digest travels in the tag, and CI refuses an asset that does not match it", () => {
+  const sh = fs.readFileSync(path.join(root, "scripts", "release.sh"), "utf8");
+  const yml = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
+  assert.match(sh, /git tag -a "\$TAG" -m "\$VERSION" -m "npm-tarball-sha256: \$TARBALL_SHA"/);
+  assert.match(yml, /npm-tarball-sha256:/);
+  const compare = yml.indexOf('if [ "$ACTUAL" != "$EXPECTED" ]');
+  assert.ok(compare > 0, "release.yml no longer compares the asset with the tag's digest");
+  assert.ok(compare < yml.indexOf("npm publish \"${{ steps.tarball.outputs.path }}\" --ignore-scripts --provenance"),
+    "the digest check must come before the publish");
+  // The draft is made, assets and all, before anything is pushed.
+  assert.ok(sh.indexOf("--draft") < sh.indexOf('git push --quiet origin "$TAG"'), "the release must be drafted before the tag is pushed");
+  assert.ok(sh.indexOf('git push --quiet origin "$TAG"') < sh.indexOf("--draft=false"));
+  // CI signs and builds nothing.
+  const steps = yml.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+  assert.doesNotMatch(steps, /AE_MCP_PANEL_CERT|ZXPSignCmd|npm ci|npm pack|install-rosetta|panel-signing/);
+});
+
+// ---------------------------------------------------------------------------
+// check_setup end to end, against a fake home — the Adobe preference and the
+// AE process are stand-ins, so no real setting is read or written
+// ---------------------------------------------------------------------------
+
+const OFF = { on: false, detail: "not enabled for any CSXS version" };
+const ON = { on: true, detail: "enabled (CSXS.12)" };
+const byName = (report, name) => report.checks.find((c) => c.name === name);
+const quietPrefs = (state) => ({
+  isDebugModeOn: async () => (state.on ? ON : OFF),
+  enableDebugMode: async () => { state.enabled = (state.enabled ?? 0) + 1; state.on = true; return [12, 11]; },
+  ensureCepLogging: async () => ({ set: [], kept: [] }),
+});
+
+await check("check_setup: a signed install loads without PlayerDebugMode, and says so", async () => {
+  try {
+    fakeHome("home-check-signed");
+    await installPanel({ enableDebugMode: false, source: signedDir });
+    const report = await checkSetup({ source: signedDir, debugMode: OFF, afterEffectsRunning: false, candidates: [] });
+    const debug = byName(report, "cepDebugMode");
+    assert.equal(debug.ok, true, `cepDebugMode failed for a signed install: ${debug.detail}`);
+    assert.match(debug.detail, /not required: the panel is signed/);
+    assert.equal(byName(report, "panelSignatureIntact").ok, true);
+    assert.match(byName(report, "panelInstalled").detail, /\(signed: META-INF\/signatures\.xml present\)/);
+    assert.doesNotMatch(byName(report, "panelInstalled").detail, /not the signature/);
+    assert.equal(byName(report, "panelUpToDate").ok, true);
+    assert.doesNotMatch(report.nextSteps.join("\n"), /setup_panel|reboot|restart the Mac/i);
+  } finally { restoreEnv(); }
+});
+
+await check("check_setup: the same install voided by a dev sync fails without PlayerDebugMode, passes with it", async () => {
+  try {
+    const target = fakeHome("home-check-voided");
+    await installPanel({ enableDebugMode: false, source: signedDir });
+    fs.writeFileSync(path.join(target, "client", "stray.js"), "");
+    const off = await checkSetup({ source: signedDir, debugMode: OFF, afterEffectsRunning: false, candidates: [] });
+    assert.equal(byName(off, "panelSignatureIntact").ok, false);
+    assert.equal(byName(off, "cepDebugMode").ok, false, "a voided signature needs the debug flag, and it is off");
+    assert.match(off.nextSteps.join("\n"), /setup_panel tool with force:true/);
+    const on = await checkSetup({ source: signedDir, debugMode: ON, afterEffectsRunning: false, candidates: [] });
+    assert.equal(byName(on, "panelSignatureIntact").ok, true);
+    assert.equal(byName(on, "panelSignatureIntact").evidence, "voided");
+  } finally { restoreEnv(); }
+});
+
+await check("check_setup: an unsigned install still needs PlayerDebugMode", async () => {
+  try {
+    fakeHome("home-check-unsigned");
+    await installPanel({ enableDebugMode: false });
+    const report = await checkSetup({ source: panelSrc, debugMode: OFF, afterEffectsRunning: false, candidates: [] });
+    assert.equal(byName(report, "cepDebugMode").ok, false);
+    assert.equal(byName(report, "panelSignatureIntact"), undefined);
+  } finally { restoreEnv(); }
+});
+
+await check("setup_panel with the debug preference on: signed sets it as a fallback with no restart, unsigned asks for one", async () => {
+  try {
+    fakeHome("home-prefs");
+    await installPanel({ enableDebugMode: false, source: signedDir });
+    const state = { on: false };
+    const signed = await installPanel({ source: signedDir, prefs: quietPrefs(state) });
+    assert.equal(state.enabled, 1, "the fallback preference was not set");
+    assert.equal(signed.restartAfterEffects, false, "turning on a preference the signed panel does not need asked for a restart");
+    assert.equal(signed.rebootRecommended, false);
+    assert.ok(signed.actions.some((a) => /only as a fallback/.test(a)), signed.actions.join(" | "));
+
+    fakeHome("home-prefs-unsigned");
+    await installPanel({ enableDebugMode: false });
+    const state2 = { on: false };
+    const unsigned = await installPanel({ prefs: quietPrefs(state2) });
+    assert.equal(state2.enabled, 1);
+    assert.equal(unsigned.restartAfterEffects, true, "an unsigned panel needs the restart that picks the preference up");
+    assert.equal(unsigned.rebootRecommended, process.platform === "darwin");
+  } finally { restoreEnv(); }
 });
 
 restoreEnv();

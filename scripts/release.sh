@@ -211,23 +211,27 @@ while IFS= read -r f; do ASSETS+=("$f"); done < <(find "$DIST" -maxdepth 1 -type
 step "Release assets"
 for a in "${ASSETS[@]}"; do printf '    %s\n' "$a"; done
 
+REPO=$(git remote get-url origin | sed -E 's#.*github\.com[:/]([^/]+/[^/.]+)(\.git)?#\1#')
+
+# The tarball's digest goes into the annotated tag. release.yml reads it back
+# from the tag and refuses to publish a downloaded asset that does not match
+# it, so what reaches npm is provably the file smoke-run above — not whatever
+# happens to be attached to the release by then.
+TARBALL_SHA=$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)
+
 # ------------------------------------------------------------------ commit
 step "Committing and tagging"
 git add -A
 git commit --quiet -m "release: $VERSION"
-git tag -a "$TAG" -m "$VERSION"
-
-step "Pushing"
-git push --quiet origin main
-git push --quiet origin "$TAG"
-
-REPO=$(git remote get-url origin | sed -E 's#.*github\.com[:/]([^/]+/[^/.]+)(\.git)?#\1#')
+git tag -a "$TAG" -m "$VERSION" -m "npm-tarball-sha256: $TARBALL_SHA"
 
 # ----------------------------------------------------------------- release
-# Created after the tag is pushed so it attaches to a ref that exists.
-# Publishing it is what starts release.yml, which downloads the .tgz attached
-# here and publishes it to npm over OIDC — no build, no signing in CI.
-step "Creating the GitHub release"
+# The release is created as a DRAFT before anything is pushed, with every asset
+# uploaded: the upload is the slowest, flakiest step left, and as a draft it can
+# fail with nothing public and nothing to undo but the draft itself. Publishing
+# the draft after the push is what starts release.yml, which downloads the .tgz
+# and publishes it to npm over OIDC — no build, no signing in CI.
+step "Creating the GitHub release as a draft"
 NOTES=$(cat <<EOF
 ## Install
 
@@ -246,10 +250,35 @@ Keep each downloaded folder together: the After Effects panel ships alongside th
 Full changelog: https://github.com/$REPO/compare/v$CURRENT...$TAG
 EOF
 )
-gh release create "$TAG" "${ASSETS[@]}" \
+if ! gh release create "$TAG" "${ASSETS[@]}" \
   --repo "$REPO" \
   --title "$TAG" \
-  --notes "$NOTES"
+  --notes "$NOTES" \
+  --draft; then
+  gh release delete "$TAG" --repo "$REPO" --yes >/dev/null 2>&1 || true
+  git tag -d "$TAG" >/dev/null
+  git reset --quiet --soft HEAD~1
+  die "creating the draft release failed — nothing has been pushed; the release commit and tag were undone locally"
+fi
+
+step "Pushing"
+git push --quiet origin main
+git push --quiet origin "$TAG"
+
+step "Publishing the release"
+if ! gh release edit "$TAG" --repo "$REPO" --draft=false; then
+  cat >&2 <<EOF
+
+The tag $TAG is pushed and the draft release holds every asset, but publishing
+the draft failed, so npm has not been published yet. To finish, run:
+
+  gh release edit $TAG --repo $REPO --draft=false
+
+Publishing the draft starts release.yml, which publishes the attached tarball
+(sha256 $TARBALL_SHA) to npm. Nothing needs rebuilding.
+EOF
+  exit 1
+fi
 
 cat <<EOF
 

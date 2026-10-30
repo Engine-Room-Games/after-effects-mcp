@@ -97,11 +97,24 @@ jobs:
             echo "::error::Tag $TAG does not match the tarball's version $PKG" >&2
             exit 1
           fi
+          # The digest release.sh recorded in the annotated tag, before anything
+          # was pushed, for the very file it smoke-ran. A missing line or a
+          # different file refuses the publish: the asset is not what was tested.
+          REF=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")
+          [ "$(jq -r .object.type <<<"$REF")" = "tag" ] || { echo "::error::$TAG is not an annotated tag; it carries no tarball digest" >&2; exit 1; }
+          MESSAGE=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(jq -r .object.sha <<<"$REF")" --jq .message)
+          EXPECTED=$(sed -n 's/^npm-tarball-sha256: *\([0-9a-f]\{64\}\) *$/\1/p' <<<"$MESSAGE" | head -1)
+          [ -n "$EXPECTED" ] || { echo "::error::the $TAG tag message records no npm-tarball-sha256" >&2; exit 1; }
+          ACTUAL=$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::the attached tarball's sha256 is $ACTUAL, but the $TAG tag records $EXPECTED — refusing to publish" >&2
+            exit 1
+          fi
           # The panel inside must be the signed one; release.sh verified it with
           # Adobe's tool, this only confirms the right file was attached.
           tar -tzf "$TARBALL" | grep -qx 'package/panel/META-INF/signatures.xml' \
             || { echo "::error::the tarball's panel is not signed" >&2; exit 1; }
-          echo "Publishing $(basename "$TARBALL") ($PKG), sha256 $(shasum -a 256 "$TARBALL" | cut -d' ' -f1)"
+          echo "Publishing $(basename "$TARBALL") ($PKG), sha256 $ACTUAL, as recorded in the $TAG tag"
           echo "path=$TARBALL" >> "$GITHUB_OUTPUT"
 
       # npm only *warns* when it rewrites the manifest at publish time, and a

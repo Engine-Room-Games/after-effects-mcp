@@ -66,7 +66,7 @@
 //
 // CLI:
 //   node scripts/lib/panel-signing.mjs plan                 say what the environment asks for; exit 1 if unusable
-//   node scripts/lib/panel-signing.mjs sign <out-dir>       vendor the checkout's panel + ws into <out-dir> and sign it
+//   node scripts/lib/panel-signing.mjs sign <out-dir>       vendor the checkout's panel + the lockfile's ws into <out-dir>, sign it
 //   node scripts/lib/panel-signing.mjs tool                 print the path of a checked ZXPSignCmd
 //   node scripts/lib/panel-signing.mjs verify <panel-dir>   exit 0 when signed and intact
 
@@ -367,6 +367,48 @@ export async function panelSignatureProblem(dir, { run = runTool, tool } = {}) {
   return null;
 }
 
+/**
+ * The `ws` the lockfile pins, as `{version, integrity}`. The signed panel
+ * carries `ws` inside its signature for as long as that release is installed,
+ * so it is taken from the lockfile, not from whatever `node_modules` holds.
+ */
+export function lockedWs(lock) {
+  const entry = lock?.packages?.["node_modules/ws"];
+  if (!entry?.version || !entry?.integrity) throw new Error("package-lock.json pins no node_modules/ws with an integrity hash.");
+  return { version: entry.version, integrity: entry.integrity };
+}
+
+/** Throws unless `tarballBytes` is exactly the tarball an SRI `integrity` string names. */
+export function checkIntegrity(tarballBytes, integrity, label = "tarball") {
+  const ok = integrity
+    .trim()
+    .split(/\s+/)
+    .some((sri) => {
+      const m = /^(sha512|sha384|sha256|sha1)-(.+)$/.exec(sri);
+      return !!m && crypto.createHash(m[1]).update(tarballBytes).digest("base64") === m[2];
+    });
+  if (!ok) throw new Error(`${label} does not match the lockfile's integrity ${integrity}.`);
+}
+
+/**
+ * `ws` exactly as the lockfile pins it: fetched by version from the registry,
+ * its tarball checked against the lockfile's integrity hash, and unpacked into
+ * `stagingDir`. Returns the unpacked module's directory.
+ */
+export function fetchLockedWs(stagingDir, { lockPath = path.join(root, "package-lock.json") } = {}) {
+  const { version, integrity } = lockedWs(JSON.parse(fs.readFileSync(lockPath, "utf8")));
+  fs.mkdirSync(stagingDir, { recursive: true });
+  const out = execFileSync("npm", ["pack", `ws@${version}`, "--pack-destination", stagingDir, "--json"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "inherit"],
+    shell: process.platform === "win32",
+  });
+  const file = path.join(stagingDir, JSON.parse(out)[0].filename);
+  checkIntegrity(fs.readFileSync(file), integrity, `ws@${version} from the registry`);
+  execFileSync("tar", ["-xzf", file, "-C", stagingDir]);
+  return path.join(stagingDir, "package");
+}
+
 async function cli(argv) {
   const [cmd, target] = argv;
   if (cmd === "plan") {
@@ -385,13 +427,22 @@ async function cli(argv) {
     // Never from AE_MCP_SIGNED_PANEL: this is what makes one.
     const env = { ...process.env, AE_MCP_SIGNED_PANEL: "", AE_MCP_PANEL_SIGN: "required" };
     const { loadPackagingCopy } = await import("./setup.mjs");
-    await vendorPanel({
-      panelSrc: path.join(root, "packages", "ae-panel"),
-      wsSrc: path.join(root, "node_modules", "ws"),
-      dest: path.resolve(target),
-      copy: await loadPackagingCopy(),
-      env,
-    });
+    // `ws` from the lockfile, integrity-checked — never node_modules, which
+    // could hold anything a local `npm install` left there. The packaging
+    // steps then compare their own node_modules/ws against this copy
+    // (prebuiltMismatch), so a drifted install fails the release too.
+    const staging = fs.mkdtempSync(path.join(os.tmpdir(), "ae-mcp-ws-"));
+    try {
+      await vendorPanel({
+        panelSrc: path.join(root, "packages", "ae-panel"),
+        wsSrc: fetchLockedWs(staging),
+        dest: path.resolve(target),
+        copy: await loadPackagingCopy(),
+        env,
+      });
+    } finally {
+      fs.rmSync(staging, { recursive: true, force: true });
+    }
     return 0;
   }
   if (cmd === "tool") {

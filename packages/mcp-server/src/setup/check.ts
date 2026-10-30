@@ -76,6 +76,12 @@ export interface CheckSetupOptions {
   opPort?: number;
   /** Ports to ask, in order. Defaults to the same list the bridge client uses. */
   candidates?: number[];
+  /** Tests only: the panel these tools ship, instead of `panelSourceDir()`. */
+  source?: string | null;
+  /** Tests only: the PlayerDebugMode reading, instead of asking Adobe's preferences. */
+  debugMode?: { on: boolean; detail: string };
+  /** Tests only: whether After Effects is running, instead of asking the OS. */
+  afterEffectsRunning?: boolean;
 }
 
 export interface BridgeProbe {
@@ -242,9 +248,13 @@ export function signatureIntactCheck(
     ? describeSignatureProblems(problems)
     : `${SIGNATURE_FILE} lists no files, so nothing it covers can be checked`;
   if (debugModeOn) {
+    // `evidence: "voided"` lets nextSteps tell this apart from an intact
+    // signature: on a #91 machine CEP checks signatures despite the flag, and
+    // then the fix is to put the signed files back, not to sign by hand.
     return {
       name: "panelSignatureIntact",
       ok: true,
+      evidence: "voided",
       detail:
         `the installed files no longer match the panel's signature — ${what}. It loads only because PlayerDebugMode is on; ` +
         "a development sync or reload into a signed install does this",
@@ -273,7 +283,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     fix: supported ? undefined : "After Effects runs only on macOS and Windows, so this server supports only those two.",
   });
 
-  const source = panelSourceDir();
+  const source = opts.source !== undefined ? opts.source : panelSourceDir();
   checks.push({
     name: "panelAssetsPresent",
     ok: source !== null,
@@ -294,7 +304,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
   // the files still match the signature they carry.
   const installedSignedIntact = isInstalled && isSignedPanel(installed) && signatureIntact(installedProblems);
 
-  const debugMode = await isDebugModeOn();
+  const debugMode = opts.debugMode ?? (await isDebugModeOn());
   checks.push(debugModeCheck(debugMode, isInstalled ? installedSignedIntact : sourceSigned));
 
   checks.push({
@@ -327,7 +337,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     const shown = differing.slice(0, 4).join(", ");
     // A cleanly installed older panel differs too — in both halves. Only one
     // half current is a mix (panelVersion.ts), and only that is worded as one.
-    const shipped = sourcePanelHashes();
+    const shipped = opts.source !== undefined ? (source ? installedPanelHashes(source) : null) : sourcePanelHashes();
     const onDisk = installedPanelHashes(installed);
     const olderVersion =
       !installComplete && !!shipped && onDisk.bundle !== shipped.bundle && onDisk.client !== shipped.client;
@@ -363,7 +373,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     });
   }
 
-  const running = await isAfterEffectsRunning();
+  const running = opts.afterEffectsRunning ?? (await isAfterEffectsRunning());
   checks.push({
     name: "afterEffectsRunning",
     ok: running,
@@ -524,6 +534,20 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
                 "CEP is refusing the panel's signature even though the files are exactly as signed. No reinstall and no restart changes that; " +
                 "nextSteps carries the steps to sign it again on this machine with Adobe's ZXPSignCmd. Please also report it with log_issue.",
             }
+          : isInstalled && isSignedPanel(installed)
+            ? {
+                // Signed, but the files changed since: the refusal is explained
+                // by that, even with PlayerDebugMode on (the #91 machine checks
+                // signatures anyway). Putting the signed files back fixes it.
+                name: "panelSignature",
+                ok: false,
+                evidence: "failure-logged-voided",
+                detail:
+                  `the CEP log ${finding.file} (last written ${finding.mtime.toISOString()}) records: "${finding.line}" — ` +
+                  "the installed files no longer match the signature they carry",
+                fix:
+                  "Quit After Effects completely, then run setup_panel with force:true to put back the panel exactly as these tools ship it, then reopen it.",
+              }
           : {
               name: "panelSignature",
               ok: false,
@@ -644,7 +668,12 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
   // refusal is explained, and putting the signed files back is the fix — so
   // that case falls through to the reinstall below instead.
   const signature = by("panelSignature");
-  const signatureBroken = by("panelSignatureIntact")?.ok === false;
+  // Voided counts as broken once CEP has said it refused the panel: the
+  // PlayerDebugMode that was meant to let the voided signature through is
+  // being ignored (#91), so the fix is the signed files, not a hand signing.
+  const intact = by("panelSignatureIntact");
+  const signatureBroken =
+    intact?.ok === false || (intact?.evidence === "voided" && signature?.ok === false);
   if (signature && signature.ok === false && !signatureBroken) {
     return signatureWorkaroundSteps(installedPanelDir(), { shippedSigned: signature.evidence === "failure-logged-signed" });
   }
