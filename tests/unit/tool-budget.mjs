@@ -56,18 +56,25 @@ function fieldDescriptions(schema) {
 
 // Characters of prose per tool: its description plus every field description
 // in its emitted input schema. Most tools fit the default with room to spare;
-// the ones listed carry contracts that genuinely need the words.
+// the ones listed carry contracts that genuinely need the words. Each cap sits
+// ~20% above the size when it was set, so one new field or guide topic does
+// not fail CI — the whole-list ceiling below is what holds the total.
 const DEFAULT_BUDGET = 1500;
 const BUDGETS = {
-  run_jsx: 3300, // helper signatures are listed in full, by contract
-  place_audio_cues: 2600,
-  log_issue: 2200,
-  run_batch: 2100,
-  render_queue: 2000,
-  retime_keyframes: 2000,
-  copy_animation: 2000,
-  get_layer_full: 1900,
-  list_known_issues: 1700,
+  run_jsx: 3800, // helper signatures are listed in full, by contract
+  place_audio_cues: 3000,
+  log_issue: 2500,
+  run_batch: 2300,
+  render_queue: 2300,
+  retime_keyframes: 2200,
+  copy_animation: 2200,
+  get_layer_full: 2200,
+  list_known_issues: 1900,
+  revert_comp: 1800,
+  ae_guide: 1800, // grows by a line per guide topic
+  add_shape_content: 1600,
+  export_mogrt: 1600,
+  add_to_render_queue: 1600,
 };
 // The whole list as a client receives it, name + description + input schema,
 // in characters (tokens are roughly a quarter of this).
