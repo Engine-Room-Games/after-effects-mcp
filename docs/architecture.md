@@ -390,6 +390,54 @@ fixes all three (issue #223). The details are under "Two MCP clients, one panel"
 600s) rather than unbounded, because an agent looping writes at a stuck bridge
 would otherwise grow it without limit.
 
+## Confirmations through elicitation (issue #245)
+
+`delete_comp`, `purge_unused_footage` and `revert_comp` ask the person before
+they run — through MCP elicitation, and only when the client's capabilities
+carry `elicitation.form` (the SDK normalises a bare `elicitation: {}` to that).
+Everything is in `tools/confirm.ts`; `server.ts` calls it after the panel gate
+and **before** the write lease. `tests/unit/elicitation.mjs` holds every rule
+below against the real server and an SDK client with and without the
+capability.
+
+- **A client without the capability is unchanged, byte for byte.** No prompt,
+  no pre-read, no extra argument, no wait. A client that advertised it and then
+  fails to show the prompt (anything but a timeout) also gets today's
+  behaviour, logged to stderr: refusing there would make the tool unusable on
+  that client for good, and running is what every other client gets.
+- **No answer is never a yes.** Decline, cancel, ten minutes without an answer
+  (`CONFIRM_TIMEOUT_MS`; the SDK's 60s default is a timeout for machines) and
+  the tool call being cancelled all return `isError` with "was not run …
+  Nothing in the After Effects project was changed". Not routed through
+  `fail()`: it is the person's answer, and no journal entry applies to it.
+- **No lease while a person decides — the choice, and its price.** Holding the
+  lease would stall every write in this session and, through the front desk,
+  every other session on the same After Effects for as long as a dialog sits
+  unread; writers queued behind it would hit `AE_MCP_WRITE_QUEUE_WAIT_MS` and
+  fail for a bridge that was fine. So the lease is taken after the answer. The
+  price is that the project can change between the answer and the write, and
+  that a write the same agent issued *concurrently* can run first. The three
+  ops re-check what they need when they run — a comp that is gone is refused,
+  a purge reports what it actually removed — so a stale prompt costs a
+  refusal, never a wrong success.
+- **The prompt names its subject.** A pre-read (`get_comp`,
+  `list_checkpoints`, a `dryRun` purge) is a read: no lease, no undo step. A
+  pre-read that fails is answered like the forward would be (`bridgeFailure`);
+  nothing has changed. Nothing is asked when there is nothing to ask — a dry
+  run, a purge that would remove nothing, a checkpoint id the list does not
+  know (the tool's own refusal is the better answer).
+- **Why only three.** Every call is one undo step, and a prompt on every
+  `delete_layer` trains a person to click through the one on `delete_comp`.
+  Tools take ids, so there is no ambiguous target to ask about. `run_batch`
+  steps are not asked about: this is a convenience for the person, not a
+  security boundary, and the client's own tool approval covers the batch.
+- **The one choice offered** is `revert_comp`'s `saveCurrent`, defaulting to
+  what the agent passed and folded into the args on accept.
+- **Request-scoped.** `elicitInput` is sent with `relatedRequestId` and the
+  call's own signal, so a Streamable HTTP transport delivers it on the tool
+  call's stream and a cancelled call withdraws the question — the same reason
+  `await_job` uses `extra.sendNotification`.
+
 ## The front desk: one queue for every session (issue #223)
 
 Measured on AE 26.5: while ExtendScript runs, the panel answers nothing, not

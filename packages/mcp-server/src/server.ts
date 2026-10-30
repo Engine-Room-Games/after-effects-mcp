@@ -47,6 +47,7 @@ import { AeError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, 
 import { resolveRunJsxSource, type ResolvedRunJsxArgs, type RunJsxArgs } from "./tools/runJsxSource.js";
 import { runJsxViaServer } from "./tools/runJsxAssembly.js";
 import { toolAnnotations } from "./tools/annotations.js";
+import { CONFIRMED_OPS, CONFIRM_TIMEOUT_MS, buildPrompt, clientCanElicit, confirmWithUser, type ConfirmPrompt } from "./tools/confirm.js";
 import {
   disabledOps,
   disabledToolMessage,
@@ -762,6 +763,40 @@ export function createServer(opts: CreateServerOptions = {}) {
     const gateMs = Date.now() - calledAt;
     if (staleness) return errorResult(staleness);
 
+    // How a failed bridge call is answered, for the forward below and for the
+    // confirmation's pre-read, which meets the same bridge before any lease.
+    const bridgeFailure = (e: unknown, queueMs: number) => {
+      // Checked before BridgeUnreachableError because the remedies are
+      // opposites: one says restart After Effects, the other says do not.
+      // Every branch below goes through `fail`, so a failure the journal already
+      // knows about arrives with its pointer attached — that is the push half of
+      // the journal, and the error path is the only place it can live.
+      if (e instanceof BridgeTimeoutError) {
+        e.withTiming({ totalMs: Date.now() - calledAt, gateMs, queueMs });
+        return fail(name, e.message);
+      }
+      if (e instanceof BridgeUnreachableError) return fail(name, e.message);
+      if (e instanceof BridgeResetError) return fail(name, e.message);
+      if (e instanceof AeError) {
+        // A failure the panel diagnosed itself — a stale render buffer, so far.
+        // Those messages are already a complete instruction to the agent, and
+        // "AE:" in front of one would read as After Effects having raised it.
+        if (e.code) return fail(name, e.message);
+        // The gate above should have caught this, but it depends on /health
+        // reporting a hash. On a panel too old to do that, this is the backstop
+        // — and it is unambiguous, since unknown tool names never get this far.
+        if (/^Unknown op: /.test(e.message)) {
+          panelGate.invalidate();
+          return errorResult(unknownOpMessage(name));
+        }
+        // The line number on its own counts from something the caller cannot
+        // see, so this prints the failing line's text where the handler could
+        // map it, and says so plainly where it could not (issue #46).
+        return fail(name, aeErrorText(e));
+      }
+      return fail(name, (e as Error).message);
+    };
+
     // Serialize writes. Acquiring *before* runOp is what keeps the op timeout
     // honest: `AbortSignal.timeout` is created inside `runOp`, so the clock
     // starts when the call executes and not when it entered the queue. A queued
@@ -779,6 +814,33 @@ export function createServer(opts: CreateServerOptions = {}) {
             .sendNotification({ method: "notifications/progress", params: { progressToken, progress: ++progressStep, message } })
             .catch(() => {});
         };
+    // Ask the person first, for the few tools that throw work away, when — and
+    // only when — the client can show a prompt (issue #245; tools/confirm.ts).
+    // Before the lease, on purpose: a person reading a dialog must not hold
+    // every other write, in this session or (through the front desk) any
+    // other. The pre-read is a read and takes no lease either.
+    if (CONFIRMED_OPS.has(name) && clientCanElicit(server.getClientCapabilities())) {
+      let prompt: ConfirmPrompt | null;
+      try {
+        prompt = await buildPrompt(name, args as Record<string, unknown>, (op, a) => line.runOp(op, a, { write: false, onWait }));
+      } catch (e) {
+        return bridgeFailure(e, 0);
+      }
+      if (prompt) {
+        const outcome = await confirmWithUser(
+          name,
+          args as Record<string, unknown>,
+          prompt,
+          (params) =>
+            server.elicitInput(params, { relatedRequestId: extra.requestId, signal: extra.signal, timeout: CONFIRM_TIMEOUT_MS }),
+          extra.signal,
+          (m) => logger.warn(m)
+        );
+        if (!outcome.proceed) return errorResult(outcome.message);
+        args = outcome.args;
+      }
+    }
+
     let lease: WriteLease | null = null;
     if (isWriteOp(name)) {
       try {
@@ -998,35 +1060,7 @@ export function createServer(opts: CreateServerOptions = {}) {
 
       return withAeWarnings(textResult(result, wait), lifted.envelopeWarnings);
     } catch (e) {
-      // Checked before BridgeUnreachableError because the remedies are
-      // opposites: one says restart After Effects, the other says do not.
-      // Every branch below goes through `fail`, so a failure the journal already
-      // knows about arrives with its pointer attached — that is the push half of
-      // the journal, and the error path is the only place it can live.
-      if (e instanceof BridgeTimeoutError) {
-        e.withTiming({ totalMs: Date.now() - calledAt, gateMs, queueMs: wait?.waitedMs ?? 0 });
-        return fail(name, e.message);
-      }
-      if (e instanceof BridgeUnreachableError) return fail(name, e.message);
-      if (e instanceof BridgeResetError) return fail(name, e.message);
-      if (e instanceof AeError) {
-        // A failure the panel diagnosed itself — a stale render buffer, so far.
-        // Those messages are already a complete instruction to the agent, and
-        // "AE:" in front of one would read as After Effects having raised it.
-        if (e.code) return fail(name, e.message);
-        // The gate above should have caught this, but it depends on /health
-        // reporting a hash. On a panel too old to do that, this is the backstop
-        // — and it is unambiguous, since unknown tool names never get this far.
-        if (/^Unknown op: /.test(e.message)) {
-          panelGate.invalidate();
-          return errorResult(unknownOpMessage(name));
-        }
-        // The line number on its own counts from something the caller cannot
-        // see, so this prints the failing line's text where the handler could
-        // map it, and says so plainly where it could not (issue #46).
-        return fail(name, aeErrorText(e));
-      }
-      return fail(name, (e as Error).message);
+      return bridgeFailure(e, wait?.waitedMs ?? 0);
     } finally {
       // No-op unless a lease was taken, and deferred by `extendUntil` when a
       // long batch is still running behind the envelope we just returned.

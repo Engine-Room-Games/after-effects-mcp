@@ -162,6 +162,15 @@ keyframe or effect values (`checked` lists it). A
 checkpoint is shallow — edits inside a nested precomp are not undone. Each one
 is a full comp in the user's project: `delete_checkpoints` when you are done.
 
+**Three calls may ask the user first.** On a client that can show a
+confirmation prompt, `delete_comp`, `purge_unused_footage` and `revert_comp`
+put the question to the person before anything changes — `revert_comp` also
+offers to save the current state first. A declined, dismissed or unanswered
+prompt comes back as an error saying the tool **was not run** and nothing was
+changed: that is the user's answer, not a failure to work around. Tell them it
+was not done and do not call it again unless they ask. On other clients nothing
+is asked and the calls run as before.
+
 ## Screenshots are a diagnostic, not a feedback loop
 
 `screenshot_frame` and `screenshot_layer` are **one-off checks**. Do not
