@@ -445,14 +445,22 @@ export function aeErrorText(e: AeError): string {
  * bridge that is answering perfectly well.
  */
 export class WriteQueueWaitError extends Error {
-  constructor(public op: string, public waitedMs: number, public behind: string) {
-    super(WriteQueueWaitError.message(op, waitedMs, behind));
+  constructor(public op: string, public waitedMs: number, public behind: string, public confirmation?: string) {
+    super(WriteQueueWaitError.message(op, waitedMs, behind, confirmation));
     this.name = "WriteQueueWaitError";
   }
-  static message(op: string, waitedMs: number, behind: string): string {
+  static message(op: string, waitedMs: number, behind: string, confirmation?: string): string {
     const secs = Math.round(waitedMs / 1000);
     return [
       `\`${op}\` waited ${secs}s behind \`${behind}\` for the After Effects write queue and was dropped without running.`,
+      // Its clock was stopped while that op waited on a person (issue #245),
+      // so the seconds above are all spent on work, never on the dialog.
+      ...(confirmation
+        ? [
+            `It also waited while \`${confirmation}\` waited for the user to answer a confirmation prompt; that time is not`,
+            "counted in the figure above.",
+          ]
+        : []),
       "",
       "This is neither a lost connection nor a busy bridge. The panel is fine and this",
       "call never reached After Effects, so nothing in the project was changed.",
@@ -477,16 +485,18 @@ export class WriteQueueWaitError extends Error {
 
 /** Backpressure, so a client that fires writes in a loop cannot grow the queue without bound. */
 export class WriteQueueFullError extends Error {
-  constructor(public op: string, public maxDepth: number, public behind: string) {
-    super(WriteQueueFullError.message(op, maxDepth, behind));
+  constructor(public op: string, public maxDepth: number, public behind: string, public confirmation?: string) {
+    super(WriteQueueFullError.message(op, maxDepth, behind, confirmation));
     this.name = "WriteQueueFullError";
   }
-  static message(op: string, maxDepth: number, behind: string): string {
+  static message(op: string, maxDepth: number, behind: string, confirmation?: string): string {
     return [
       `The After Effects write queue is full — ${maxDepth} calls are already waiting, so \`${op}\` was refused.`,
       "",
       `Nothing was written. Writes are serialized so they land in the order you sent them,`,
-      `and \`${behind}\` is holding the queue up.`,
+      confirmation
+        ? `and \`${confirmation}\` is holding the queue up while it waits for the user to answer a confirmation prompt — ask them to answer it.`
+        : `and \`${behind}\` is holding the queue up.`,
       "",
       "Stop issuing writes and let it drain — reads are not queued, so list_/get_ calls",
       "still work. If you have this much independent work to do, send it as one",

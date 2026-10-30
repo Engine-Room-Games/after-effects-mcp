@@ -454,6 +454,11 @@ jobs:
           node tests/unit/write-queue.mjs
           node tests/unit/write-queue-server.mjs
 
+      # Confirmations through MCP elicitation (#245): asked only when the client
+      # can answer, never a yes without one, no write lease while waiting.
+      - name: Destructive calls ask the user only when the client can
+        run: node tests/unit/elicitation.mjs
+
       # The front desk (#223): real server processes sharing one fake panel —
       # cross-session order, truthful waits, a batch's lock across sessions,
       # a leader killed mid-request and mid-batch, a stale leader file.

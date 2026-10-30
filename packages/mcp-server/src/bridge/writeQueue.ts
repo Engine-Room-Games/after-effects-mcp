@@ -57,6 +57,16 @@ export interface WriteLease {
    * front-desk lease can (issue #223). Absent on this queue's own leases.
    */
   onLost?(listener: (why: string) => void): void;
+  /**
+   * Stop the clocks of every write queued behind this lease, until the
+   * returned function is called or the lease is released (issue #245). For a
+   * holder that is waiting on a *person* — a confirmation prompt — rather than
+   * on After Effects: a write queued behind it must neither time out because
+   * someone took a minute to read a dialog, nor blame the op in front for it.
+   * Writes queued meanwhile are told what they waited for. Absent on a
+   * front-desk lease; the confirmation holds only this session's queue.
+   */
+  pauseWaiters?(): () => void;
 }
 
 const DEFAULT_MAX_WAIT_MS = 600_000;
@@ -90,6 +100,13 @@ interface Waiter {
   op: string;
   enqueuedAt: number;
   behind: string;
+  /** The queue clock's budget left, and when the running timer (if any) started. */
+  remainingMs: number;
+  timerStartedAt: number;
+  timer: ReturnType<typeof setTimeout> | null;
+  startTimer: () => void;
+  /** Set when the holder in front waited on a person while this one queued. */
+  behindConfirmation?: string;
   settle: (lease: WriteLease) => void;
   fail: (err: Error) => void;
   /** Set once the waiter has been resolved, rejected, cancelled or timed out. */
@@ -100,6 +117,10 @@ interface Waiter {
 export class WriteQueue {
   private holder: string | null = null;
   private waiting: Waiter[] = [];
+  /** The holder waiting on a person, while it does; queue clocks are stopped. */
+  private paused: string | null = null;
+  /** Whose pause it is: a resume ends only the pause it started. */
+  private pauseToken: object | null = null;
   /** Public for the front desk, which applies this session's limits to its cross-session wait. */
   readonly maxWaitMs: number;
   private readonly maxDepth: number;
@@ -142,7 +163,7 @@ export class WriteQueue {
       return Promise.resolve(this.makeLease(null));
     }
     if (this.depth >= this.maxDepth) {
-      return Promise.reject(new WriteQueueFullError(op, this.maxDepth, this.holder ?? "another write"));
+      return Promise.reject(new WriteQueueFullError(op, this.maxDepth, this.holder ?? "another write", this.paused ?? undefined));
     }
 
     const behind = this.holder ?? this.waiting.find((w) => !w.done)?.op ?? "another write";
@@ -151,23 +172,34 @@ export class WriteQueue {
         op,
         enqueuedAt: Date.now(),
         behind,
+        remainingMs: this.maxWaitMs,
+        timerStartedAt: 0,
+        timer: null,
+        startTimer: () => {},
+        behindConfirmation: this.paused ?? undefined,
         done: false,
         settle: resolve,
         fail: reject,
         cleanup: () => {},
       };
 
-      const timer = setTimeout(() => {
+      const onTimeout = () => {
         if (waiter.done) return;
         waiter.done = true;
         waiter.cleanup();
         // Timing out in the queue frees nothing: whoever is in front still holds
         // the lock. Just stop waiting.
-        reject(new WriteQueueWaitError(op, this.maxWaitMs, waiter.behind));
+        reject(new WriteQueueWaitError(op, this.maxWaitMs, waiter.behind, waiter.behindConfirmation));
         this.pump();
-      }, this.maxWaitMs);
-      // A queued write must never be the reason the process stays alive.
-      timer.unref?.();
+      };
+      waiter.startTimer = () => {
+        waiter.timerStartedAt = Date.now();
+        waiter.timer = setTimeout(onTimeout, Math.max(0, waiter.remainingMs));
+        // A queued write must never be the reason the process stays alive.
+        waiter.timer.unref?.();
+      };
+      // Behind a holder waiting on a person, the clock starts when it stops.
+      if (this.paused === null) waiter.startTimer();
 
       const onAbort = () => {
         if (waiter.done) return;
@@ -180,7 +212,8 @@ export class WriteQueue {
       };
 
       waiter.cleanup = () => {
-        clearTimeout(timer);
+        if (waiter.timer) clearTimeout(waiter.timer);
+        waiter.timer = null;
         signal?.removeEventListener("abort", onAbort);
       };
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -204,6 +237,11 @@ export class WriteQueue {
         released = true;
         if (hold) settleHold();
         else queue.handOff();
+      },
+      pauseWaiters() {
+        if (released) return () => {};
+        const token = queue.pause();
+        return () => { if (token) queue.resume(token); };
       },
     };
 
@@ -232,7 +270,35 @@ export class WriteQueue {
 
   private handOff(): void {
     this.holder = null;
+    // The holder is gone, so whatever it paused ends with it.
+    if (this.pauseToken) this.resume(this.pauseToken);
     this.pump();
+  }
+
+  /** Null when a pause is already running or nothing holds the queue: there is then nothing for this caller to end. */
+  private pause(): object | null {
+    if (this.paused !== null || this.holder === null) return null;
+    const token = {};
+    this.pauseToken = token;
+    this.paused = this.holder;
+    const now = Date.now();
+    for (const w of this.waiting) {
+      if (w.done) continue;
+      w.behindConfirmation = this.paused;
+      if (w.timer) {
+        clearTimeout(w.timer);
+        w.timer = null;
+        w.remainingMs -= now - w.timerStartedAt;
+      }
+    }
+    return token;
+  }
+
+  private resume(token: object): void {
+    if (this.pauseToken !== token) return;
+    this.pauseToken = null;
+    this.paused = null;
+    for (const w of this.waiting) if (!w.done && w.timer === null) w.startTimer();
   }
 
   private pump(): void {
@@ -243,7 +309,10 @@ export class WriteQueue {
       next.done = true;
       next.cleanup();
       this.holder = next.op;
-      next.settle(this.makeLease({ queuedBehind: next.behind, waitedMs: Date.now() - next.enqueuedAt }));
+      const queuedBehind = next.behindConfirmation
+        ? `${next.behind}${next.behind === next.behindConfirmation ? "" : ` and ${next.behindConfirmation}`}, while ${next.behindConfirmation} waited for the user to answer a confirmation`
+        : next.behind;
+      next.settle(this.makeLease({ queuedBehind, waitedMs: Date.now() - next.enqueuedAt }));
       return;
     }
   }

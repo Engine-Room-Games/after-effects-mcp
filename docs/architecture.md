@@ -390,6 +390,103 @@ fixes all three (issue #223). The details are under "Two MCP clients, one panel"
 600s) rather than unbounded, because an agent looping writes at a stuck bridge
 would otherwise grow it without limit.
 
+## Confirmations through elicitation (issue #245)
+
+`delete_comp`, `purge_unused_footage` and `revert_comp` ask the person before
+they run — through MCP elicitation, and only when the client's capabilities
+carry `elicitation.form` (the SDK normalises a bare `elicitation: {}` to that).
+Everything is in `tools/confirm.ts`; `server.ts` calls it after the panel gate.
+`tests/unit/elicitation.mjs` holds every rule below against the real server
+and an SDK client with and without the capability.
+
+- **A client without the capability is unchanged, byte for byte.** No prompt,
+  no pre-read, no extra argument, no wait, the plain `acquire`. A client that
+  advertised it but answers "method not found" (or the SDK refuses for want of
+  the capability) also gets today's behaviour, logged to stderr: refusing
+  there would make the tool unusable on that client for good. That is the
+  *only* fallback (`cannotElicit`) — any other prompt failure may be a person
+  who said no (an accept whose content failed the SDK's schema check, a client
+  signalling dismissal as an error) and is refused. From the wire only the
+  JSON-RPC code is trusted (`McpError` with `MethodNotFound`); the SDK's own
+  local refusal is recognised as a plain `Error`, which nothing a client sends
+  can become. Matching message text let a client error reading "does not
+  support elicitation" run `delete_comp` unasked.
+- **No answer is never a yes.** Decline, cancel, no answer in time
+  (`confirmTimeoutMs`, below; the SDK's 60s default is a timeout for
+  machines — measured by `confirmWithUser`'s own timer, with the SDK's request
+  timeout set a minute above it, so a client that answers with the
+  request-timeout code is a failed prompt, never "nobody answered"), a failed prompt and the tool call being cancelled all return
+  `isError` with "was not run … Nothing in the After Effects project was
+  changed". Not routed through `fail()`: it is the person's answer, and no
+  journal entry applies to it.
+- **The lease is taken in two halves, and that is the choice.** Before the
+  prompt the call takes only this session's own place in line
+  (`SessionLine.reserve` — the per-session `WriteQueue`); after the answer it
+  takes the front desk's lock on top (`withDesk`); `acquire` is now just those
+  two in a row. So the order the agent issued writes in is kept — a write
+  issued after a `revert_comp` cannot land before it and then be wiped by it —
+  while no *other* session on the same After Effects waits on a dialog. The
+  cost falls only on this session: its later writes wait for the answer.
+  While the person decides, the queue clocks of this session's writes queued
+  behind the confirmation are stopped (`WriteLease.pauseWaiters`): a write
+  that queued *before* the prompt began — behind an earlier write, alongside
+  the confirmation — must not time out because someone took a minute to read
+  a dialog, nor blame the op in front for it. A write that waited through a
+  prompt says so, in `queuedBehind` or in its queue-timeout message. On top of
+  that, the prompt's limit is derived from this session's queue wait
+  (`AE_MCP_WRITE_QUEUE_WAIT_MS`, 600s by default): at most 5 minutes, and at
+  most 90% of that wait minus the time already spent since the reservation,
+  so the prompt always gives up before a write queued behind it would — a
+  queued write timing out first would blame the queue for a dialog.
+  Reads take no lease and are never held. With no front desk, the per-session
+  queue *is* the whole lock, and the one held is this process's.
+- **What was approved is what runs.** Another session (or the person in After
+  Effects) can still change the project during the prompt. `delete_comp` and
+  `revert_comp` re-resolve their target when they run, so a stale prompt costs
+  a refusal. `purge_unused_footage` removes whatever is unused at the time, not
+  a list — so the prompt's `verify` re-reads the dry run under the full lease
+  and refuses, nothing changed, unless it is the same item ids. That holds
+  when the first dry run found nothing too: nobody is asked (`ask: false`),
+  but the empty set is still re-checked, or whatever became unused meanwhile
+  would be purged unasked. Done on the
+  server, not as a new panel argument, because the panel does not update
+  itself.
+- **The prompt names its subject.** A pre-read (`get_comp`,
+  `list_checkpoints`, a `dryRun` purge) is a read: no undo step. A pre-read
+  that fails is answered like the forward would be (`bridgeFailure`), except a
+  timeout: the bridge's sentence says the op may still land, true of a write
+  and false here, so `preReadFailureMessage` says no change was sent. Nothing
+  is asked when there is nothing to ask — a dry run, a purge that would remove
+  nothing (still re-checked, above), a checkpoint id the list does not know (the tool's own refusal is
+  the better answer).
+- **Why only three.** Every call is one undo step, and a prompt on every
+  `delete_layer` trains a person to click through the one on `delete_comp`.
+  Tools take ids, so there is no ambiguous target to ask about.
+- **A batch asks once, up front.** Otherwise wrapping `delete_comp` in a
+  `run_batch` would be a way round the prompt. When any step, at any depth, is
+  one of the three (a dry-run purge excepted), `run_batch` asks once before
+  anything runs, listing those steps by path; decline runs none of it. No
+  pre-read — a step can name a comp an earlier step creates — so the steps are
+  named by id, and a purge step says it removes whatever is unused when it
+  runs, since no list can be approved in advance. `run_jsx`, in or out of a
+  batch, can do anything and is not asked about: this is a convenience for the
+  person, not a security boundary, and the client's own tool approval is the
+  gate for raw scripts.
+- **One session's prompt never holds another's writes.** Pinned with the
+  front desk on and two sessions: session B's write goes through while
+  session A's prompt is open, which fails the moment the desk lock is taken
+  before the prompt.
+- **A timeout does not bill the person's reading time.** The timeout message
+  says how much of a call went on "earlier steps"; the span the prompt was
+  open is subtracted (`promptMs`), so a person who took a minute to answer
+  does not read as a minute After Effects spent busy.
+- **The one choice offered** is `revert_comp`'s `saveCurrent`, defaulting to
+  what the agent passed and folded into the args on accept.
+- **Request-scoped.** `elicitInput` is sent with `relatedRequestId` and the
+  call's own signal, so a Streamable HTTP transport delivers it on the tool
+  call's stream and a cancelled call withdraws the question — the same reason
+  `await_job` uses `extra.sendNotification`.
+
 ## The front desk: one queue for every session (issue #223)
 
 Measured on AE 26.5: while ExtendScript runs, the panel answers nothing, not
