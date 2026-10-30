@@ -42,9 +42,10 @@ export const SETTLE_PING_TIMEOUT_MS = 500;
  * when the answer arrives the notification has been handled, and the response
  * can no longer overtake it. A request that sent no progress pays nothing; one
  * that did pays one round trip, or SETTLE_PING_TIMEOUT_MS at worst from a
- * client that ignores pings. A ping that fails for any reason (a client that
- * refuses it, a cancelled request, a closed transport) falls back to one turn
- * of the event loop and the response goes out as before.
+ * client that ignores pings. A ping that fails (a client that refuses it, a
+ * closed transport) falls back to one turn of the event loop and the response
+ * goes out as before; a request cancelled while the ping is out stops waiting
+ * at once, since no response will be sent for it.
  *
  * Both go through the SDK's request-scoped senders on purpose: they tag each
  * message with the request id, so a Streamable HTTP transport delivers them on
@@ -85,9 +86,18 @@ export class RequestProgress {
     while (this.inFlight.size > 0) await Promise.all([...this.inFlight]);
     if (!this.sentAny || this.extra.signal?.aborted) return;
     try {
-      await this.extra.sendRequest({ method: "ping" }, EmptyResultSchema, { timeout: SETTLE_PING_TIMEOUT_MS });
+      // The request's own signal: a client that cancels this call while the
+      // ping is out ends the wait at once. Its response will not be sent.
+      await this.extra.sendRequest({ method: "ping" }, EmptyResultSchema, {
+        timeout: SETTLE_PING_TIMEOUT_MS,
+        signal: this.extra.signal,
+      });
     } catch (e) {
-      logger.debug(`progress settle ping went unanswered: ${(e as Error).message}`);
+      if (this.extra.signal?.aborted) {
+        logger.debug("progress settle: request cancelled during the ping; not waiting for it");
+        return;
+      }
+      logger.debug(`progress settle: ping not answered (${(e as Error).message}); answering anyway`);
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }

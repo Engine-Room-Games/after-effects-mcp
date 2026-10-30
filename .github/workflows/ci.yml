@@ -537,8 +537,11 @@ jobs:
 
       # The SDK client handles a notification a microtask late but a response
       # at once, so a final progress read together with the response was lost
-      # to onprogress (#261). Real server over stdio, real SDK client: the last
-      # progress must reach onprogress every run, with no client error.
+      # to onprogress (#261). Real server over stdio, real SDK client, with
+      # each progress read together with the next message (deterministic: all
+      # runs fail without the server's settle ping). Also: one ping per call
+      # with progress, none without; a client that ignores or refuses the
+      # ping; a call cancelled during it.
       - name: The last progress reaches the client before the response
         run: node tests/unit/progress-delivery.mjs
 
