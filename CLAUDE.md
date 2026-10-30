@@ -97,7 +97,7 @@ One line each. The annotated version — why each file is the way it is — is i
 | `packages/jsx/raw.jsx` | `run_jsx` — assembly, library inlining, failure attribution, the undo-group guard, the result serializer — kept for older servers and `run_batch` steps; `_run_jsx` runs a script the server built and sends back the raw line for it to map. |
 | `packages/jsx/values.jsx` | `__setValue` — every op's `setValue`; drops AE's false `invalid numeric result` throw only when the value read back landed (#129). |
 | `packages/jsx/helpers.jsx` | The helper scope a `run_jsx` script runs in. Listed by signature in the tool description — change both together. |
-| `packages/jsx/style.jsx` | `_project_path` — the .aep's path. The server reads and writes `house-style.md` itself. |
+| `packages/jsx/style.jsx` | `_project_path` — the .aep's path, so the server can read and write `house-style.md` itself; `get_house_style` / `set_house_style` are its fallback when it cannot reach the folder (macOS privacy). |
 | `packages/ae-panel/CSXS/manifest.xml` | CEP manifest. Auto-start on AE activate, Node enabled. |
 | `packages/ae-panel/client/main.js` | HTTP+WS server, the `evalScript` mutex, the `__AEMCP` check, port binding and the port file, `capabilities` on `/health`. |
 | `packages/ae-panel/client/panelhash.js` | Hashes the panel's own files for `clientHash` on `/health`. Must agree byte for byte with `setup/panelHash.ts`. |
