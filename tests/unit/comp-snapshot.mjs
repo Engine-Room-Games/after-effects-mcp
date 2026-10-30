@@ -168,7 +168,22 @@ const plain = (v) => JSON.parse(JSON.stringify(v));
 // Rebuilds a host-realm object inside the VM, so the code under test only ever
 // sees objects from its own realm.
 const intoVm = (v) => vm.runInContext("JSON.parse", ctx)(JSON.stringify(v));
-const diff = (a, b) => plain(call("__diffFingerprints")(intoVm(a), intoVm(b)));
+const jsxDiff = (a, b) => plain(call("__diffFingerprints")(intoVm(a), intoVm(b)));
+
+// Issue #220: diff_comp diffs on the server now, while diff:true on run_jsx /
+// run_batch still diffs in ExtendScript. Two copies, one contract — so every
+// diff case below runs against both, and a parity sweep at the end compares
+// their serialized output byte for byte.
+// pathToFileURL, not the bare path: on Windows an absolute path starts with a
+// drive letter, which the ESM loader reads as an unsupported URL scheme.
+const serverDiff = await import(
+  pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "snapshots", "diff.js")).href
+);
+const tsDiff = (a, b) => plain(serverDiff.diffFingerprints(plain(a), plain(b)));
+const IMPLS = [
+  ["snapshot.jsx", jsxDiff, (ids) => call("__diffIdList")(intoVm(ids))],
+  ["snapshots/diff.ts", tsDiff, (ids) => serverDiff.diffIdList(ids)],
+];
 
 // ---------------------------------------------------------------------------
 // The fingerprint
@@ -249,158 +264,232 @@ const comp = (layers, over = {}) => ({
   ...over,
 });
 
-// ---------- nothing changed ----------
-{
-  const base = comp([layer({ id: 100 }), layer({ id: 101, index: 2 })]);
-  const d = diff(base, base);
-  eq(d.changeCount, 0, "an unchanged comp has no changes");
-  eq(d.added, undefined, "empty buckets are omitted, not sent as []");
-  eq(d.removed, undefined);
-  eq(d.changed, undefined);
-  eq(d.reordered, undefined);
-  eq(d.unchangedLayers, 2, "unchanged layers are counted, never listed");
-  ok(/No differences in the recorded fields/.test(d.summary), "the summary has to say so in words");
-  ok(/not compared/.test(d.summary), '"no differences" must never read as "identical"');
-  ok(/not property values/.test(d.covers), "every diff carries what it does not cover");
-}
-
-// ---------- layers added ----------
-{
-  const before = comp([layer({ id: 498 })]);
-  const after = comp([
-    layer({ id: 498 }),
-    layer({ id: 512, name: "a", index: 2 }),
-    layer({ id: 513, name: "b", index: 3 }),
-    layer({ id: 514, name: "c", index: 4 }),
-  ]);
-  const d = diff(before, after);
-  eq(d.added.map((a) => a.id), [512, 513, 514], "the new ids are named");
-  eq(d.added[0].name, "a", "…with their names, so a copyToComp result is identifiable");
-  eq(d.changed, undefined, "adding a layer changes nothing about the others");
-  ok(/3 layers added: ids 512-514/.test(d.summary), `consecutive ids collapse to a range: ${d.summary}`);
-}
-
-// ---------- layers removed ----------
-{
-  const before = comp([layer({ id: 1 }), layer({ id: 2, index: 2 }), layer({ id: 3, index: 3 })]);
-  const after = comp([layer({ id: 1 }), layer({ id: 3, index: 2 })]);
-  const d = diff(before, after);
-  eq(d.removed.map((r) => r.id), [2], "the removed layer is named");
-  eq(d.added, undefined);
-  eq(d.reordered, undefined, "removing a layer is not a reorder of the survivors");
-  ok(/1 layer removed: ids 2/.test(d.summary), d.summary);
-}
-
-// ---------- the per-layer fields ----------
-{
-  const cases = [
-    ["renamed", { name: "after" }, (c) => eq(c.name, { from: "L", to: "after" }), /renamed "L" -> "after"/],
-    ["retimed in", { inPoint: 1.5 }, (c) => eq(c.inPoint, { from: 0, to: 1.5 }), /retimed \(in 0 -> 1\.5\)/],
-    ["retimed out", { outPoint: 9 }, (c) => eq(c.outPoint, { from: 5, to: 9 }), /retimed \(out 5 -> 9\)/],
-    ["slipped", { startTime: 2 }, (c) => eq(c.startTime, { from: 0, to: 2 }), /retimed \(start 0 -> 2\)/],
-    ["re-parented", { parentId: 12 }, (c) => eq(c.parentId, { from: null, to: 12 }), /re-parented none -> 12/],
-    ["disabled", { enabled: false }, (c) => eq(c.enabled, { from: true, to: false }), /layer 100 disabled/],
-    ["effects added", { effectCount: 2 }, (c) => eq(c.effectCount, { from: 0, to: 2 }), /effects 0 -> 2/],
-    ["expression added", { expressionCount: 1 }, (c) => eq(c.expressionCount, { from: 0, to: 1 }), /expressions 0 -> 1/],
-  ];
-  for (const [label, over, check, phrase] of cases) {
-    const d = diff(comp([layer()]), comp([layer(over)]));
-    eq(d.changeCount, 1, `${label}: exactly one change`);
-    eq(d.changed.length, 1, `${label}: one layer changed`);
-    eq(d.changed[0].id, 100, `${label}: identified by id`);
-    check(d.changed[0].changes);
-    ok(phrase.test(d.summary), `${label}: the summary should read "${phrase}", got "${d.summary}"`);
+for (const [IMPL, diff, idList] of IMPLS) {
+try {
+  // ---------- nothing changed ----------
+  {
+    const base = comp([layer({ id: 100 }), layer({ id: 101, index: 2 })]);
+    const d = diff(base, base);
+    eq(d.changeCount, 0, "an unchanged comp has no changes");
+    eq(d.added, undefined, "empty buckets are omitted, not sent as []");
+    eq(d.removed, undefined);
+    eq(d.changed, undefined);
+    eq(d.reordered, undefined);
+    eq(d.unchangedLayers, 2, "unchanged layers are counted, never listed");
+    ok(/No differences in the recorded fields/.test(d.summary), "the summary has to say so in words");
+    ok(/not compared/.test(d.summary), '"no differences" must never read as "identical"');
+    ok(/not property values/.test(d.covers), "every diff carries what it does not cover");
   }
-}
 
-// ---------- keyframe counts ----------
-{
-  const d = diff(
-    comp([layer({ id: 498, keyCounts: { Position: 2 } })]),
-    comp([layer({ id: 498, keyCounts: { Position: 2, Opacity: 4 } })]),
-  );
-  eq(d.changed[0].changes.keyCounts, { Opacity: { from: 0, to: 4 } }, "a property that gained keys reads 0 -> n");
-  ok(/layer 498 Opacity keys 0 -> 4/.test(d.summary), `the issue's own example line: ${d.summary}`);
-
-  // And the other direction: a property whose keys were all deleted drops out
-  // of keyCounts entirely, which must still read as a change to zero.
-  const gone = diff(
-    comp([layer({ keyCounts: { Position: 3 } })]),
-    comp([layer({ keyCounts: {} })]),
-  );
-  eq(gone.changed[0].changes.keyCounts, { Position: { from: 3, to: 0 } }, "deleted keyframes are a change to 0");
-}
-
-// ---------- float noise is not a change ----------
-{
-  const d = diff(comp([layer()]), comp([layer({ inPoint: 1e-9, outPoint: 5 + 1e-9 })]));
-  eq(d.changeCount, 0, "a difference below a millionth of a second is float noise, not a retime");
-}
-
-// ---------- reorder ----------
-{
-  // Two layers swapped: a genuine reorder.
-  const before = comp([layer({ id: 1 }), layer({ id: 2, index: 2 }), layer({ id: 3, index: 3 })]);
-  const after = comp([layer({ id: 2, index: 1 }), layer({ id: 1, index: 2 }), layer({ id: 3, index: 3 })]);
-  const d = diff(before, after);
-  ok(d.reordered, "swapping two layers is a reorder");
-  eq(d.reordered.map((r) => r.id).sort(), [1, 2], "…of exactly those two");
-  eq(d.reordered[0].fromIndex !== d.reordered[0].toIndex, true, "with both indices reported");
-  ok(/moved in the stack/.test(d.summary), d.summary);
-
-  // Inserting at the top shifts every index below it. That is not a reorder,
-  // and reporting it as twenty changed layers would destroy the whole point.
-  const grown = comp([
-    layer({ id: 9, name: "new", index: 1 }),
-    layer({ id: 1, index: 2 }),
-    layer({ id: 2, index: 3 }),
-    layer({ id: 3, index: 4 }),
-  ]);
-  const ins = diff(before, grown);
-  eq(ins.reordered, undefined, "an index shifted by an insertion is not a move");
-  eq(ins.changed, undefined, "and nothing about the existing layers changed");
-  eq(ins.unchangedLayers, 3, "they are counted as unchanged");
-  eq(ins.added.length, 1);
-}
-
-// ---------- comp-level fields ----------
-{
-  const d = diff(comp([]), comp([], { duration: 20, name: "Renamed" }));
-  eq(d.comp.duration, { from: 10, to: 20 });
-  eq(d.comp.name, { from: "Main", to: "Renamed" });
-  ok(/comp duration 10 -> 20/.test(d.summary), d.summary);
-
-  const sized = diff(comp([]), comp([], { width: 1080, height: 1920 }));
-  eq(sized.comp.size, { from: [1920, 1080], to: [1080, 1920] });
-
-  const markers = diff(comp([], { markers: ["0|a|0"] }), comp([], { markers: ["0|a|0", "1|b|0"] }));
-  eq(markers.comp.markers, { from: 1, to: 2 }, "a marker count change is reported");
-  const edited = diff(comp([], { markers: ["0|a|0"] }), comp([], { markers: ["0|b|0"] }));
-  eq(edited.comp.markers, { count: 1, edited: true }, "the same count with different content still counts");
-}
-
-// ---------- the summary stays one readable line ----------
-{
-  const many = [];
-  const changed = [];
-  for (let i = 0; i < 20; i++) {
-    many.push(layer({ id: 200 + i, index: i + 1 }));
-    changed.push(layer({ id: 200 + i, index: i + 1, name: "renamed " + i }));
+  // ---------- layers added ----------
+  {
+    const before = comp([layer({ id: 498 })]);
+    const after = comp([
+      layer({ id: 498 }),
+      layer({ id: 512, name: "a", index: 2 }),
+      layer({ id: 513, name: "b", index: 3 }),
+      layer({ id: 514, name: "c", index: 4 }),
+    ]);
+    const d = diff(before, after);
+    eq(d.added.map((a) => a.id), [512, 513, 514], "the new ids are named");
+    eq(d.added[0].name, "a", "…with their names, so a copyToComp result is identifiable");
+    eq(d.changed, undefined, "adding a layer changes nothing about the others");
+    ok(/3 layers added: ids 512-514/.test(d.summary), `consecutive ids collapse to a range: ${d.summary}`);
   }
-  const d = diff(comp(many), comp(changed));
-  eq(d.changed.length, 20, "every change is still in the structured fields");
-  ok(/and 12 more changes \(see the fields below\)/.test(d.summary), `the prose is capped: ${d.summary}`);
-  ok(d.summary.length < 700, `and stays short: ${d.summary.length} chars`);
+
+  // ---------- layers removed ----------
+  {
+    const before = comp([layer({ id: 1 }), layer({ id: 2, index: 2 }), layer({ id: 3, index: 3 })]);
+    const after = comp([layer({ id: 1 }), layer({ id: 3, index: 2 })]);
+    const d = diff(before, after);
+    eq(d.removed.map((r) => r.id), [2], "the removed layer is named");
+    eq(d.added, undefined);
+    eq(d.reordered, undefined, "removing a layer is not a reorder of the survivors");
+    ok(/1 layer removed: ids 2/.test(d.summary), d.summary);
+  }
+
+  // ---------- the per-layer fields ----------
+  {
+    const cases = [
+      ["renamed", { name: "after" }, (c) => eq(c.name, { from: "L", to: "after" }), /renamed "L" -> "after"/],
+      ["retimed in", { inPoint: 1.5 }, (c) => eq(c.inPoint, { from: 0, to: 1.5 }), /retimed \(in 0 -> 1\.5\)/],
+      ["retimed out", { outPoint: 9 }, (c) => eq(c.outPoint, { from: 5, to: 9 }), /retimed \(out 5 -> 9\)/],
+      ["slipped", { startTime: 2 }, (c) => eq(c.startTime, { from: 0, to: 2 }), /retimed \(start 0 -> 2\)/],
+      ["re-parented", { parentId: 12 }, (c) => eq(c.parentId, { from: null, to: 12 }), /re-parented none -> 12/],
+      ["disabled", { enabled: false }, (c) => eq(c.enabled, { from: true, to: false }), /layer 100 disabled/],
+      ["effects added", { effectCount: 2 }, (c) => eq(c.effectCount, { from: 0, to: 2 }), /effects 0 -> 2/],
+      ["expression added", { expressionCount: 1 }, (c) => eq(c.expressionCount, { from: 0, to: 1 }), /expressions 0 -> 1/],
+    ];
+    for (const [label, over, check, phrase] of cases) {
+      const d = diff(comp([layer()]), comp([layer(over)]));
+      eq(d.changeCount, 1, `${label}: exactly one change`);
+      eq(d.changed.length, 1, `${label}: one layer changed`);
+      eq(d.changed[0].id, 100, `${label}: identified by id`);
+      check(d.changed[0].changes);
+      ok(phrase.test(d.summary), `${label}: the summary should read "${phrase}", got "${d.summary}"`);
+    }
+  }
+
+  // ---------- keyframe counts ----------
+  {
+    const d = diff(
+      comp([layer({ id: 498, keyCounts: { Position: 2 } })]),
+      comp([layer({ id: 498, keyCounts: { Position: 2, Opacity: 4 } })]),
+    );
+    eq(d.changed[0].changes.keyCounts, { Opacity: { from: 0, to: 4 } }, "a property that gained keys reads 0 -> n");
+    ok(/layer 498 Opacity keys 0 -> 4/.test(d.summary), `the issue's own example line: ${d.summary}`);
+
+    // And the other direction: a property whose keys were all deleted drops out
+    // of keyCounts entirely, which must still read as a change to zero.
+    const gone = diff(
+      comp([layer({ keyCounts: { Position: 3 } })]),
+      comp([layer({ keyCounts: {} })]),
+    );
+    eq(gone.changed[0].changes.keyCounts, { Position: { from: 3, to: 0 } }, "deleted keyframes are a change to 0");
+  }
+
+  // ---------- float noise is not a change ----------
+  {
+    const d = diff(comp([layer()]), comp([layer({ inPoint: 1e-9, outPoint: 5 + 1e-9 })]));
+    eq(d.changeCount, 0, "a difference below a millionth of a second is float noise, not a retime");
+  }
+
+  // ---------- reorder ----------
+  {
+    // Two layers swapped: a genuine reorder.
+    const before = comp([layer({ id: 1 }), layer({ id: 2, index: 2 }), layer({ id: 3, index: 3 })]);
+    const after = comp([layer({ id: 2, index: 1 }), layer({ id: 1, index: 2 }), layer({ id: 3, index: 3 })]);
+    const d = diff(before, after);
+    ok(d.reordered, "swapping two layers is a reorder");
+    eq(d.reordered.map((r) => r.id).sort(), [1, 2], "…of exactly those two");
+    eq(d.reordered[0].fromIndex !== d.reordered[0].toIndex, true, "with both indices reported");
+    ok(/moved in the stack/.test(d.summary), d.summary);
+
+    // Inserting at the top shifts every index below it. That is not a reorder,
+    // and reporting it as twenty changed layers would destroy the whole point.
+    const grown = comp([
+      layer({ id: 9, name: "new", index: 1 }),
+      layer({ id: 1, index: 2 }),
+      layer({ id: 2, index: 3 }),
+      layer({ id: 3, index: 4 }),
+    ]);
+    const ins = diff(before, grown);
+    eq(ins.reordered, undefined, "an index shifted by an insertion is not a move");
+    eq(ins.changed, undefined, "and nothing about the existing layers changed");
+    eq(ins.unchangedLayers, 3, "they are counted as unchanged");
+    eq(ins.added.length, 1);
+  }
+
+  // ---------- comp-level fields ----------
+  {
+    const d = diff(comp([]), comp([], { duration: 20, name: "Renamed" }));
+    eq(d.comp.duration, { from: 10, to: 20 });
+    eq(d.comp.name, { from: "Main", to: "Renamed" });
+    ok(/comp duration 10 -> 20/.test(d.summary), d.summary);
+
+    const sized = diff(comp([]), comp([], { width: 1080, height: 1920 }));
+    eq(sized.comp.size, { from: [1920, 1080], to: [1080, 1920] });
+
+    const markers = diff(comp([], { markers: ["0|a|0"] }), comp([], { markers: ["0|a|0", "1|b|0"] }));
+    eq(markers.comp.markers, { from: 1, to: 2 }, "a marker count change is reported");
+    const edited = diff(comp([], { markers: ["0|a|0"] }), comp([], { markers: ["0|b|0"] }));
+    eq(edited.comp.markers, { count: 1, edited: true }, "the same count with different content still counts");
+  }
+
+  // ---------- the summary stays one readable line ----------
+  {
+    const many = [];
+    const changed = [];
+    for (let i = 0; i < 20; i++) {
+      many.push(layer({ id: 200 + i, index: i + 1 }));
+      changed.push(layer({ id: 200 + i, index: i + 1, name: "renamed " + i }));
+    }
+    const d = diff(comp(many), comp(changed));
+    eq(d.changed.length, 20, "every change is still in the structured fields");
+    ok(/and 12 more changes \(see the fields below\)/.test(d.summary), `the prose is capped: ${d.summary}`);
+    ok(d.summary.length < 700, `and stays short: ${d.summary.length} chars`);
+  }
+
+  // ---------- id ranges ----------
+  {
+    eq(idList([512, 513, 514]), "512-514", "a run collapses");
+    eq(idList([514, 512, 513]), "512-514", "…whatever order they arrive in");
+    eq(idList([1, 2]), "1, 2", "two consecutive ids are clearer spelled out");
+    eq(idList([1, 5, 6, 7, 20]), "1, 5-7, 20", "runs and singletons mix");
+    eq(idList([42]), "42");
+  }
+} catch (e) {
+  e.message = `[${IMPL}] ${e.message}`;
+  throw e;
+}
 }
 
-// ---------- id ranges ----------
+// ---------- parity: the server diff against the ExtendScript diff ----------
+// Generated fixtures, seeded so a failure reproduces. Each pair is a random
+// fingerprint and a random mutation of it — layers added, removed, reordered,
+// renamed, retimed (including below-epsilon noise), re-parented, keys gained
+// and lost, comp fields and markers — and the two serialized diffs must be
+// the same string, key order included.
 {
-  const idList = call("__diffIdList");
-  eq(idList([512, 513, 514]), "512-514", "a run collapses");
-  eq(idList([514, 512, 513]), "512-514", "…whatever order they arrive in");
-  eq(idList([1, 2]), "1, 2", "two consecutive ids are clearer spelled out");
-  eq(idList([1, 5, 6, 7, 20]), "1, 5-7, 20", "runs and singletons mix");
-  eq(idList([42]), "42");
+  let seed = 220;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+  const KEYS = ["Position", "Opacity", "Scale", "Rotation", "Marker", "Source Text"];
+  const TYPES = ["shape", "text", "av", "null", "camera"];
+  const mkFixtureLayer = (id, index) => {
+    const keyCounts = {};
+    for (const k of KEYS) if (rnd() < 0.3) keyCounts[k] = 1 + Math.floor(rnd() * 5);
+    return {
+      id, name: "layer " + id, index, type: pick(TYPES),
+      inPoint: Math.round(rnd() * 40) / 8, outPoint: 5 + Math.round(rnd() * 40) / 8,
+      startTime: rnd() < 0.8 ? 0 : 1.25, parentId: rnd() < 0.2 ? 1000 : null,
+      enabled: rnd() < 0.9, keyCounts,
+      expressionCount: Math.floor(rnd() * 2), effectCount: Math.floor(rnd() * 3),
+    };
+  };
+  const mutate = (fp) => {
+    const out = JSON.parse(JSON.stringify(fp));
+    let nextId = 900;
+    const ops = 1 + Math.floor(rnd() * 6);
+    for (let n = 0; n < ops; n++) {
+      const l = out.layers.length ? pick(out.layers) : null;
+      switch (Math.floor(rnd() * 14)) {
+        case 0: out.layers.splice(Math.floor(rnd() * (out.layers.length + 1)), 0, mkFixtureLayer(nextId++, 0)); break;
+        case 1: if (l) out.layers.splice(out.layers.indexOf(l), 1); break;
+        case 2: if (out.layers.length > 1) out.layers.reverse(); break;
+        case 3: if (l) l.name = "renamed " + n; break;
+        case 4: if (l) l.inPoint += rnd() < 0.5 ? 1e-9 : 0.5; break;
+        case 5: if (l) l.outPoint = 9; break;
+        case 6: if (l) l.parentId = l.parentId === null ? 1000 + n : null; break;
+        case 7: if (l) { const k = pick(KEYS); if (l.keyCounts[k]) delete l.keyCounts[k]; else l.keyCounts[k] = 3; } break;
+        case 8: if (l) { l.enabled = !l.enabled; l.effectCount += 1; l.expressionCount += 1; } break;
+        case 9: if (l) l.type = pick(TYPES); break;
+        case 10: out.duration = 20; out.frameRate = rnd() < 0.5 ? 29.97 : 30 + 1e-9; break;
+        case 11: out.width = 1080; out.height = 1920; out.name = "Comp B"; break;
+        case 12: out.workAreaStart = 1; out.markers = rnd() < 0.5 ? ["0|x|0"] : ["0|b|0", "2|c|1"]; break;
+        case 13: if (l) l.startTime = 2; break;
+      }
+    }
+    out.layers.forEach((x, i) => { x.index = i + 1; });
+    out.numLayers = out.layers.length;
+    return out;
+  };
+  let compared = 0;
+  for (let n = 0; n < 400; n++) {
+    const size = Math.floor(rnd() * 25);
+    const layers = [];
+    for (let i = 0; i < size; i++) layers.push(mkFixtureLayer(100 + i * (rnd() < 0.8 ? 1 : 3), i + 1));
+    const before = comp(layers, { markers: rnd() < 0.5 ? [] : ["0|a|0", "1|b|0"] });
+    const after = mutate(before);
+    for (const [a, b] of [[before, after], [after, before], [before, before]]) {
+      const fromJsx = JSON.stringify(jsxDiff(a, b));
+      const fromTs = JSON.stringify(tsDiff(a, b));
+      assert.equal(fromTs, fromJsx, `parity fixture ${n}: the server diff must serialize exactly as the jsx diff`);
+      compared++;
+    }
+  }
+  passed++;
+  ok(compared === 1200, `parity compared ${compared} fixture pairs`);
 }
 
 // ---------------------------------------------------------------------------
