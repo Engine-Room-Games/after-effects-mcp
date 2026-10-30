@@ -28,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo, snapshotLayout, jobFolder, shadowDirs, strayFiles, relocateShadowOutputs, stampOutputs, cancelledPartials } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, duplicateOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo, snapshotLayout, jobFolder, shadowDirs, strayFiles, relocateShadowOutputs, stampOutputs, cancelledPartials } =
   await import(dist("render", "aerender.js"));
 const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin, stopProcessTreeSync, snapshotMarker } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
@@ -543,6 +543,12 @@ if (mode === "lateengine") {
 console.log("PROGRESS:  10/29/2026 10:00:00 AM: Starting composition “Comp”.");
 console.log("PROGRESS:  Duration: 0:00:00:04");
 if (mode === "fail") { console.log("aerender ERROR: Unable to find comp"); process.exit(3); }
+if (mode === "inuse") {
+  // #228, measured on 26.5: aerender will not render an item whose output
+  // another item shares, writes nothing, and still exits 0.
+  console.log("Unable to render: output module name already in use");
+  process.exit(0);
+}
 if (mode === "realmissing") {
   // The measured 26.5 output for missing footage, then exit 0.
   console.log("PROGRESS:  0:00:00:00 (1): 0 Seconds");
@@ -694,6 +700,28 @@ function alive(pid) {
     const frames = seen.filter((s) => /frame \d+ of 4/.test(s.message ?? "")).map((s) => s.progress);
     assert.deepEqual(frames, [1, 2, 3, 4]);
     assert.equal(runner.activeJobId, null);
+  });
+
+  await check("an item aerender refuses while exiting 0 fails, never reports rendered (#228)", async () => {
+    const jobs = new JobManager();
+    const hooked = [];
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, onRendered: async (items) => { hooked.push(items.map((i) => i.index)); return []; } });
+    // No file at all.
+    const out = path.join(tmp, "inuse.mov");
+    env("inuse", out);
+    const first = runner.start(plan(out), fake);
+    await assert.rejects(jobs.waitFor(first.jobId, 10_000), /does not exist/);
+    // A file from an earlier render (overwrite:true): left as it was, so not this render's.
+    const old = path.join(tmp, "inuse-old.mov");
+    fs.writeFileSync(old, "an earlier render");
+    const past = new Date(Date.now() - 60_000);
+    fs.utimesSync(old, past, past);
+    env("inuse", old);
+    const second = runner.start(plan(old), fake);
+    await assert.rejects(jobs.waitFor(second.jobId, 10_000));
+    assert.equal(jobs.get(first.jobId).status, "failed");
+    assert.equal(jobs.get(second.jobId).status, "failed");
+    assert.deepEqual(hooked.flat(), [], "nothing is unticked as rendered");
   });
 
   await check("no readable frame lines: a movie with the right duration is judged rendered", async () => {
@@ -1379,9 +1407,13 @@ function makeAe(opts = {}) {
   const dirs = new Set(opts.dirs ?? ["/renders"]);
   const log = [];
   const RQItemStatus = { QUEUED: 3013, UNQUEUED: 3012, NEEDS_OUTPUT: 3011, RENDERING: 3015, WILL_CONTINUE: 3014, USER_STOPPED: 3016, ERR_STOPPED: 3017, DONE: 3018 };
+  // A symlinked or aliased folder: path -> where it leads.
+  const links = opts.links ?? {};
   class MockFolder {
     constructor(p) { this.fsName = p; }
     get exists() { return dirs.has(this.fsName); }
+    get alias() { return Object.prototype.hasOwnProperty.call(links, this.fsName); }
+    resolve() { return this.alias ? new MockFolder(links[this.fsName]) : null; }
   }
   let mtime = 1000;
   class MockFile {
@@ -1405,8 +1437,11 @@ function makeAe(opts = {}) {
   }
   const items = [];
   function makeItem(c, status) {
+    let omFile = null;
     const om = {
-      file: null,
+      // With `forceExt`, After Effects changes the extension to match the format.
+      get file() { return omFile; },
+      set file(f) { omFile = f && opts.forceExt ? new MockFile(f.fsName.replace(/\.[^./]+$/, opts.forceExt)) : f; },
       name: "High Quality",
       templates: ["High Quality", "High Quality with Alpha"],
       applyTemplate(n) { this.name = n; log.push("om:" + n); },
@@ -1429,11 +1464,11 @@ function makeAe(opts = {}) {
     };
     return item;
   }
-  for (const s of opts.existing ?? []) {
+  (opts.existing ?? []).forEach((s, i) => {
     const it = makeItem(comp, RQItemStatus[s]);
-    it.outputModule().file = new MockFile("/renders/existing.mov");
+    it.outputModule().file = new MockFile(opts.existingPaths?.[i] ?? "/renders/existing.mov");
     items.push(it);
-  }
+  });
   const project = {
     file: opts.unsaved ? null : new MockFile("/proj/show.aep"),
     dirty: opts.dirty !== false,
@@ -1511,6 +1546,141 @@ await check("path problems are refused before the queue is touched", () => {
   assert.match(throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/taken.mov" })), /overwrite:true/);
   assert.deepEqual(log, []);
   ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/taken.mov", overwrite: true });
+});
+// Issue #228: aerender will not render an item whose output another item has
+// ("output module name already in use") — any item but a DONE one, UNQUEUED
+// included, and [####] patterns too (measured on 26.5) — and exits 0.
+await check("add_to_render_queue refuses a path another QUEUED item writes, naming it, and queues nothing (#228)", () => {
+  const { ctx, items, log } = makeAe({ existing: ["QUEUED"] });
+  const msg = throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/existing.mov" }));
+  assert.match(msg, /item 1 \(comp "Lower Third", compId 7\) already has the output \/renders\/existing\.mov/);
+  assert.match(msg, /output module name already in use/);
+  assert.match(msg, /remove_render_item/);
+  assert.equal(items.length, 1);
+  assert.deepEqual(log, [], "refused before the queue is touched");
+  // overwrite:true is about a file on disk; it does not lift this.
+  assert.match(throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/existing.mov", overwrite: true })), /already has the output/);
+});
+await check("the same file in another spelling is the same file: case, NFD, a linked folder (#228)", () => {
+  const { ctx, items } = makeAe({
+    existing: ["QUEUED", "QUEUED"],
+    existingPaths: ["/renders/Caf\u00e9.mov", "/private/tmp/out.mov"],
+    dirs: ["/renders", "/RENDERS", "/tmp", "/private/tmp"], // the mock is case-sensitive; the volume is not
+    links: { "/tmp": "/private/tmp" },
+  });
+  assert.match(throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/RENDERS/cafe\u0301.MOV" })), /item 1 .*Caf\u00e9\.mov, the same file as/);
+  assert.match(throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/tmp/out.mov" })), /item 2 .*\/private\/tmp\/out\.mov/);
+  assert.equal(items.length, 2);
+  // A different file is still fine.
+  ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/cafe.mov" });
+  assert.equal(items.length, 3);
+});
+await check("an UNQUEUED item still counts and is named as such; a DONE one does not (#228, measured)", () => {
+  const un = makeAe({ existing: ["UNQUEUED"], files: ["/renders/existing.mov"] });
+  const msg = throwsMsg(() => un.ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/existing.mov", overwrite: true }));
+  assert.match(msg, /item 1 \(comp "Lower Third", compId 7\), UNQUEUED \(already rendered, or switched off\), already has the output/);
+  assert.match(msg, /even an unticked one/);
+  assert.match(msg, /Remove it first with remove_render_item\(\{index: 1, compId: 7\}\) \(a file it rendered stays on disk\)/);
+  assert.equal(un.items.length, 1);
+  const done = makeAe({ existing: ["DONE"], files: ["/renders/existing.mov"] });
+  done.ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/existing.mov", overwrite: true });
+  assert.equal(done.items.length, 2);
+});
+await check("a /tmp-style link ExtendScript resolves against /Volumes still matches /private/tmp (#228, measured)", () => {
+  const { ctx } = makeAe({
+    existing: ["QUEUED"],
+    existingPaths: ["/private/tmp/out.mov"],
+    dirs: ["/renders", "/tmp", "/private/tmp"],
+    links: { "/tmp": "/Volumes/private/tmp" }, // what Folder("/tmp").resolve() answered on 26.5
+  });
+  assert.match(throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/tmp/out.mov" })), /item 1 .*\/private\/tmp\/out\.mov/);
+  const key = (q) => vm.runInContext(`__rqPathKey(${JSON.stringify(q)})`, ctx);
+  assert.equal(key("/tmp/a.mov"), key("/private/tmp/a.mov"));
+  // An answer that leads nowhere is not used: the path is kept as written.
+  const odd = makeAe({ dirs: ["/x"], links: { "/x": "/Volumes/nowhere" } });
+  assert.equal(vm.runInContext(`__rqPathKey("/x/a.mov")`, odd.ctx), "/x/a.mov");
+});
+await check("a clash that appears only once After Effects changes the extension is refused, and the item removed (#228)", () => {
+  const { ctx, items, log } = makeAe({ existing: ["QUEUED"], existingPaths: ["/renders/lt.mp4"], forceExt: ".mp4" });
+  const msg = throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/lt.mov" }));
+  assert.match(msg, /item 1 .*\/renders\/lt\.mp4/);
+  assert.equal(items.length, 1);
+  assert.deepEqual(log, ["add", "remove"]);
+});
+await check("the NFC table composes exactly as Node does (#228)", () => {
+  const { ctx } = makeAe();
+  const table = vm.runInContext("__RQ_NFC_PAIRS", ctx);
+  assert.equal(table.length % 3, 0);
+  for (let i = 0; i < table.length; i += 3) {
+    assert.equal((table[i] + table[i + 1]).normalize("NFC"), table[i + 2], `entry ${i / 3}`);
+  }
+  const nfc = (s) => vm.runInContext(`__rqNfc(${JSON.stringify(s)})`, ctx);
+  for (const word of ["Caf\u00e9", "\u1EC7", "\u00c5ngstr\u00f6m", "\u30ac\u30d1", "\ud55c\uae00", "\u0419", "\u1F04", "plain"]) {
+    assert.equal(nfc(word.normalize("NFD")), word.normalize("NFC"), word);
+  }
+});
+await check("_render_prepare lists every item but DONE ones it leaves alone, for the duplicate check (#228)", () => {
+  const { ctx } = makeAe({ existing: ["QUEUED", "DONE", "QUEUED", "UNQUEUED"], existingPaths: ["/r/a.mov", "/r/b.mov", "/r/c.mov", "/r/d.mov"] });
+  const plan = ctx.OPS._render_prepare({ indices: [1] });
+  assert.deepEqual(JSON.parse(JSON.stringify(plan.otherQueued)), [
+    { index: 3, compId: 7, compName: "Lower Third", status: "QUEUED", outputs: [{ index: 1, path: "/r/c.mov", template: "High Quality" }] },
+    { index: 4, compId: 7, compName: "Lower Third", status: "UNQUEUED", outputs: [{ index: 1, path: "/r/d.mov", template: "High Quality" }] },
+  ]);
+});
+await check("render_queue's plan check: one file written by two QUEUED items is named, rendered or not (#228)", () => {
+  const item = (index, p, compName = "A") => ({ index, compId: 1, compName, status: "QUEUED", frames: 1, outputs: [{ index: 1, path: p }] });
+  const dir = fs.mkdtempSync(path.join(tmp, "dup-"));
+  const link = path.join(tmp, "dup-link");
+  fs.symlinkSync(dir, link);
+  const base = { projectPath: "/p.aep", appPackage: null };
+  // Two rendered items, one file.
+  assert.deepEqual(duplicateOutputs({ ...base, items: [item(1, path.join(dir, "x.mov")), item(2, path.join(dir, "x.mov"), "B")] }), [
+    `${path.join(dir, "x.mov")} is written by item 1 ("A", compId 1) and item 2 ("B", compId 1)`,
+  ]);
+  // A rendered item and one left in the queue, through a symlinked folder.
+  const viaLink = duplicateOutputs({ ...base, items: [item(2, path.join(link, "y.mov"))], otherQueued: [item(1, path.join(dir, "y.mov"), "B")] });
+  assert.equal(viaLink.length, 1);
+  assert.match(viaLink[0], /item 1 \("B", compId 1\) and item 2 \("A", compId 1\) as .*dup-link/);
+  // Unicode spelling and case, as on macOS and Windows.
+  assert.equal(duplicateOutputs({ ...base, items: [item(1, "/r/Caf\u00e9.mov"), item(2, "/r/cafe\u0301.MOV")] }, "darwin").length, 1);
+  assert.equal(duplicateOutputs({ ...base, items: [item(1, "C:\\r\\A.mov"), item(2, "c:/r/a.mov")] }, "win32").length, 1);
+  assert.equal(duplicateOutputs({ ...base, items: [item(1, "/r/A.mov"), item(2, "/r/a.mov")] }, "linux").length, 0);
+  // Two items left alone that clash with each other are not this render's business; distinct files are fine.
+  assert.deepEqual(duplicateOutputs({ ...base, items: [item(1, "/r/a.mov")], otherQueued: [item(2, "/r/b.mov"), item(3, "/r/b.mov")] }), []);
+  // Two output modules of one item writing one file.
+  const twoOms = { ...item(1, "/r/a.mov"), outputs: [{ index: 1, path: "/r/a.mov" }, { index: 2, path: "/r/a.mov" }] };
+  assert.equal(duplicateOutputs({ ...base, items: [twoOms] }).length, 1);
+  // One item named twice is one item.
+  assert.deepEqual(duplicateOutputs({ ...base, items: [item(2, "/r/a.mov"), item(2, "/r/a.mov")] }), []);
+  // A shared [####] pattern is refused too: aerender refuses it whatever the frame ranges (measured).
+  assert.equal(duplicateOutputs({ ...base, items: [item(1, "/r/s_[####].png"), item(2, "/r/s_[####].png")] }).length, 1);
+  // An UNQUEUED item left alone counts, and is named as such; a DONE one does not.
+  const un = { ...item(1, "/r/z.mov", "Old"), status: "UNQUEUED" };
+  assert.deepEqual(duplicateOutputs({ ...base, items: [item(2, "/r/z.mov")], otherQueued: [un] }), [
+    `/r/z.mov is written by item 1 ("Old", compId 1), UNQUEUED, and item 2 ("A", compId 1)`,
+  ]);
+  assert.deepEqual(duplicateOutputs({ ...base, items: [item(2, "/r/z.mov")], otherQueued: [{ ...un, status: "DONE" }] }), []);
+});
+await check("_render_prepare renders an index named twice once (#228 review)", () => {
+  const { ctx } = makeAe({ existing: ["QUEUED", "QUEUED"], existingPaths: ["/r/a.mov", "/r/b.mov"] });
+  const plan = ctx.OPS._render_prepare({ indices: [2, 2] });
+  assert.deepEqual(Array.from(plan.items, (i) => i.index), [2]);
+  assert.deepEqual(Array.from(plan.otherQueued, (i) => i.index), [1]);
+});
+await check("add_to_render_queue refuses a shared image-sequence pattern (#228, measured)", () => {
+  const { ctx, items } = makeAe({ existing: ["QUEUED"], existingPaths: ["/renders/s_[####].png"] });
+  assert.match(throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/s_[####].png" })), /item 1 .*s_\[####\]\.png/);
+  assert.equal(items.length, 1);
+});
+await check("the path key keeps a UNC double slash and every folder however deep (#228 review)", () => {
+  const { ctx } = makeAe();
+  const key = (p) => vm.runInContext(`__rqPathKey(${JSON.stringify(p)})`, ctx);
+  assert.equal(key("\\\\Server\\Share\\out.mov"), "//server/share/out.mov");
+  assert.notEqual(key("//server/share/out.mov"), key("/server/share/out.mov"));
+  assert.equal(key("C:\\R\\Out.mov"), "c:/r/out.mov");
+  const deep = (leaf) => "/" + Array.from({ length: 80 }, (_, i) => `d${i}`).join("/") + `/${leaf}/out.mov`;
+  assert.notEqual(key(deep("x")), key(deep("y")), "folders past 64 levels still count");
+  assert.equal(key(deep("x")), deep("x"));
 });
 await check("remove_render_item refuses an index that now renders another comp", () => {
   const { ctx, items } = makeAe({ existing: ["QUEUED"] });

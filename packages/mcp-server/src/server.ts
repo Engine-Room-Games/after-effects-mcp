@@ -23,6 +23,7 @@ import {
   saveAndCheckFootage,
   logRenderStart,
   occupiedOutputs,
+  duplicateOutputs,
   resolveAerender,
   type RenderPlan,
 } from "./render/aerender.js";
@@ -1024,6 +1025,18 @@ async function runRender(
   const plan = (await renderStep("prepare", send("_render_prepare", { indices: args.indices, all: args.all }))) as RenderPlan & {
     readOnly?: boolean | null;
   };
+  // An item whose output another item also has: aerender will not render it,
+  // exits 0 and writes nothing (issue #228, measured on 26.5). An unticked
+  // (UNQUEUED) item counts; a DONE one does not. overwrite:true does not lift it.
+  const duplicates = duplicateOutputs(plan);
+  if (duplicates.length) {
+    throw new Error(
+      `Nothing was saved or rendered: an item to render shares its output with another render queue item, and ` +
+        `aerender will not render it ("output module name already in use") — an unticked item still counts: ` +
+        `${duplicates.join("; ")}. Remove the extra items with remove_render_item({index, compId}) using the index and compId named (an already-rendered item's ` +
+        `file stays on disk) or point them elsewhere, then call render_queue again. list_render_queue shows the queue.`
+    );
+  }
   // Items the user queued by hand never passed add_to_render_queue's guard.
   if (!args.overwrite) {
     const occupied = occupiedOutputs(plan);
