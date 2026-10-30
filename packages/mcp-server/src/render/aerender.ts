@@ -75,6 +75,8 @@ export interface RenderPlan {
   version?: string;
   dirty?: boolean;
   items: RenderItemPlan[];
+  /** Every item but DONE ones that this render does not render, by output path — for `duplicateOutputs` (#228). */
+  otherQueued?: { index: number; compId?: number | null; compName: string | null; status?: string; outputs: RenderOutputPlan[] }[];
 }
 
 /**
@@ -1397,6 +1399,63 @@ export function footageList(refs: FootageRef[], cap = 10): string {
 export function occupiedOutputs(plan: RenderPlan): string[] {
   const out: string[] = [];
   for (const item of plan.items) out.push(...existingOutputs(item.outputs));
+  return out;
+}
+
+/**
+ * The key two output paths are compared by (issue #228): the folder through
+ * `realpath` (the file itself may not exist yet), then `canonicalFootagePath`'s
+ * NFC and slashes, and case folded on macOS as well as Windows — both default
+ * to case-insensitive volumes, and on a case-sensitive one the cost is a
+ * refusal naming both paths, never a broken render.
+ */
+export function outputPathKey(p: string, platform: NodeJS.Platform = process.platform): string {
+  const pathMod = platform === "win32" ? path.win32 : path.posix;
+  const dir = pathMod.dirname(p);
+  const real = platform === process.platform ? realOrSelf(dir) : dir;
+  const key = canonicalFootagePath(pathMod.join(real, pathMod.basename(p)), platform);
+  return platform === "darwin" || platform === "win32" ? key.toLowerCase() : key;
+}
+
+/**
+ * Output files that more than one item has, where at least one of them is
+ * being rendered. Measured on 26.5 (#235 live check): aerender will not render
+ * an item when any other item in the project, DONE ones aside and UNQUEUED
+ * included, has the same output path — and it exits 0 having written nothing.
+ * The same holds for two items sharing a [####] sequence pattern, even over
+ * frame ranges that do not overlap. add_to_render_queue refuses the clash when
+ * it is made; this catches items queued by hand and spellings ExtendScript
+ * cannot resolve. One line per file, naming every item and output module.
+ */
+export function duplicateOutputs(plan: RenderPlan, platform: NodeJS.Platform = process.platform): string[] {
+  type Writer = { item: number; compId?: number | null; comp: string | null; status?: string; output: number; path: string; rendered: boolean };
+  const byKey = new Map<string, Writer[]>();
+  const seen = new Set<number>();
+  const add = (item: { index: number; compId?: number | null; compName: string | null; status?: string; outputs: RenderOutputPlan[] }, rendered: boolean) => {
+    // An item named twice is one item, never a clash with itself.
+    if (seen.has(item.index)) return;
+    seen.add(item.index);
+    for (const o of item.outputs) {
+      if (!o.path) continue;
+      const key = outputPathKey(o.path, platform);
+      const list = byKey.get(key) ?? [];
+      list.push({ item: item.index, compId: item.compId, comp: item.compName, status: item.status, output: o.index, path: o.path, rendered });
+      byKey.set(key, list);
+    }
+  };
+  for (const item of plan.items) add(item, true);
+  for (const item of plan.otherQueued ?? []) if (item.status !== "DONE") add(item, false);
+  const out: string[] = [];
+  for (const list of byKey.values()) {
+    if (list.length < 2 || !list.some((w) => w.rendered)) continue;
+    list.sort((a, b) => a.item - b.item || a.output - b.output);
+    const who = list.map(
+      (w) =>
+        `item ${w.item} ("${w.comp}"${w.compId != null ? `, compId ${w.compId}` : ""})${!w.rendered && w.status && w.status !== "QUEUED" ? `, ${w.status},` : ""}` +
+        `${w.output > 1 ? ` output module ${w.output}` : ""}${w.path !== list[0].path ? ` as ${w.path}` : ""}`
+    );
+    out.push(`${list[0].path} is written by ${who.join(" and ")}`);
+  }
   return out;
 }
 

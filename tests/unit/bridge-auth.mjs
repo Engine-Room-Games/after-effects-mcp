@@ -368,8 +368,9 @@ await check("the two auth remedies point in opposite directions", () => {
   assert.match(badToken, /CEPHtmlEngine/);
 });
 
-await check("the fourth bridge failure does not borrow the other three's remedies", () => {
-  // The CLAUDE.md rule: four failures, four remedies, no shared sentences.
+await check("the auth failure does not borrow the other bridge failures' remedies", () => {
+  // The CLAUDE.md rule: five failures, five remedies, no shared sentences.
+  // (Auth against reset is held in tests/unit/hardening-163.mjs.)
   const msg = BridgeAuthError.message(PORT, false);
   assert.match(msg, /not a lost connection and not a busy bridge/);
   assert.match(msg, /nothing in the project changed/);

@@ -178,6 +178,30 @@ function __rjClip(s, max) {
   return t.substring(0, max) + " ...";
 }
 
+// The `Error.source` + `start`/`end` reading __rjSourceInfo describes below:
+// the line of the evaluated source the offsets point at, or null when they do
+// not count (0/0 is After Effects declining to say) or the source is not our
+// wrapper. Shared with OPS._run_jsx, which sends this number to the server
+// rather than the error object, which never leaves After Effects.
+function __rjOffsetsLine(e) {
+  try {
+    var src = null;
+    if (e && typeof e.source === "string") src = e.source;
+    var start = null;
+    if (e && typeof e.start === "number" && isFinite(e.start)) start = e.start;
+    var end = null;
+    if (e && typeof e.end === "number" && isFinite(e.end)) end = e.end;
+    var offsetsUsable = false;
+    if (start !== null && start > 0) offsetsUsable = true;
+    if (start === 0 && end !== null && end > 0) offsetsUsable = true;
+    if (offsetsUsable && src !== null &&
+        src.substring(0, __RJ_WRAP_PREFIX.length) === __RJ_WRAP_PREFIX) {
+      return __rjLines(src.substring(0, start)).length;
+    }
+  } catch (e2) {}
+  return null;
+}
+
 // What After Effects reported, mapped onto the source the caller submitted.
 // Nothing here is fabricated: when the number does not land inside the script,
 // sourceLine stays null and the server says the number could not be mapped.
@@ -229,21 +253,7 @@ function __rjSourceInfo(e, code, scriptPath, layout) {
   // So the branch survives only for offsets that could actually be real: 0/0 is
   // After Effects declining to say, not After Effects pointing at the first
   // character. Do not restore this from the documentation.
-  try {
-    var src = null;
-    if (e && typeof e.source === "string") src = e.source;
-    var start = null;
-    if (e && typeof e.start === "number" && isFinite(e.start)) start = e.start;
-    var end = null;
-    if (e && typeof e.end === "number" && isFinite(e.end)) end = e.end;
-    var offsetsUsable = false;
-    if (start !== null && start > 0) offsetsUsable = true;
-    if (start === 0 && end !== null && end > 0) offsetsUsable = true;
-    if (offsetsUsable && src !== null &&
-        src.substring(0, __RJ_WRAP_PREFIX.length) === __RJ_WRAP_PREFIX) {
-      wrapperLine = __rjLines(src.substring(0, start)).length;
-    }
-  } catch (e2) {}
+  wrapperLine = __rjOffsetsLine(e);
   if (wrapperLine === null) wrapperLine = raw;
   if (wrapperLine === null) return info;
 
@@ -893,3 +903,134 @@ function __rjIsNullEnvelope(out) {
   return !!(out && typeof out === "object" && !(out instanceof Array) &&
     out.ok === true && out.returned === null && out.note);
 }
+
+// ---------- A script the server already built (issue #220, stage 6) ----------
+// A server that sees `server-run-jsx` on /health assembles the wrapper itself
+// — libraries inlined, the #221 undo rewrite and its fast path, the
+// eval/Function/$.evalFile scan — and maps a failure back onto the caller's
+// file (mcp-server/src/tools/runJsxAssembly.ts, a port of the functions
+// above). What is left here is what needs ExtendScript:
+//
+//  * each library's parse check: it is this parser that decides what a syntax
+//    error is and on which line. The library is parsed as written: `text`
+//    travels only when the rewrite changed it; otherwise it is the slice of
+//    the wrapper it sits in, which is the same string;
+//  * the Error.source/start/end reading (__rjOffsetsLine), because the error
+//    object never leaves After Effects. The line it arrives at goes back as
+//    `wrapperLine`, AE's own as `rawLine`, and the server maps them;
+//  * the execution itself, the undo guard's counting, the dialog shadows,
+//    `diff`, and the result serializer.
+//
+// The body below is OPS.run_jsx's with the assembly and the mapping taken
+// out, and must stay that way: a change to one is a change to both, and
+// tests/unit/run-jsx-assembly.mjs runs the two side by side. OPS.run_jsx
+// stays for older servers, for run_batch steps (which batch.jsx dispatches
+// straight to it) and for direct /op posts.
+
+// A library that does not parse, reported as __rjCheckLibraryParses reports
+// it, with the line detail left to the server: `libraryIndex` says which.
+function __rjCheckBuiltLibraryParses(path, text, k) {
+  try {
+    eval("(function(){ " + text + "})");
+  } catch (e) {
+    var m = "";
+    try { m = (e && e.message) ? String(e.message) : String(e); } catch (e1) { m = "unknown error"; }
+    var ln = null;
+    try { if (e && typeof e.line === "number" && isFinite(e.line)) ln = e.line; } catch (e2) {}
+    throw {
+      message: "run_jsx library failed to parse: " + path + " — " + m,
+      stack: "",
+      line: ln,
+      aeDetail: { rawLine: ln, libraryIndex: k }
+    };
+  }
+}
+
+function __rjCheckBuiltLibraries(built) {
+  var libs = built.libraries ? built.libraries : [];
+  for (var k = 0; k < libs.length; k++) {
+    var t = (typeof libs[k].text === "string") ? libs[k].text : built.wrapper.substring(libs[k].start, libs[k].end);
+    __rjCheckBuiltLibraryParses(String(libs[k].path), t, k);
+  }
+}
+
+// __rjThrowWithSource with the mapping left to the server.
+function __rjThrowRaw(e, suffix) {
+  var raw = null;
+  try {
+    if (e && typeof e.line === "number" && isFinite(e.line)) raw = e.line;
+  } catch (e0) {}
+  var wrapperLine = __rjOffsetsLine(e);
+  if (wrapperLine === null) wrapperLine = raw;
+  var msg = "";
+  try { if (e && e.message) msg = String(e.message); } catch (e1) {}
+  if (!msg) {
+    try { msg = String(e); } catch (e2) { msg = "ExtendScript error"; }
+  }
+  if (suffix) msg += suffix;
+  var stack = "";
+  try { if (e && e.stack) stack = String(e.stack); } catch (e3) {}
+  throw { message: msg, stack: stack, line: raw, aeDetail: { rawLine: raw, wrapperLine: wrapperLine } };
+}
+
+// Internal: the server's name for it, so an older bundle answers `Unknown op`
+// before running anything and the server falls back on OPS.run_jsx. The undo
+// group keeps run_jsx's name, since it is the step the user looks for in Edit.
+OPS._run_jsx = function (args) {
+  var built = args.built;
+  if (!built || typeof built.wrapper !== "string" || built.wrapper.length === 0) {
+    throw new Error("_run_jsx needs `built`, the script the server assembled. Nothing ran.");
+  }
+  // The script is eval'd in this function's scope, so a name it uses without
+  // declaring resolves to this function's locals first. OPS.run_jsx has a
+  // `code`; declaring one here keeps an undeclared `code = …` in a script
+  // local, as it always was, rather than writing a global into the engine
+  // every other script in After Effects shares (#185). Locals beyond that are
+  // kept to the ones OPS.run_jsx has, which is why the library loop is a
+  // function of its own.
+  var code;
+  var __g = __rjUndoGuardStart();
+  __RJ_UNDO_GUARD = __g;
+  try {
+    __rjCheckBuiltLibraries(built);
+    __g.rewrites = built.undoRewrites;
+    __g.mentions = built.undoMentions;
+    __g.opaque = built.opaqueRoutes ? built.opaqueRoutes : [];
+    var undoGroupName = (args.undoGroup === false) ? false : "AE MCP: run_jsx";
+    var __d = __diffStart(args, null);
+    var __shown = [];
+    var alert = function (m) { __shown.push("alert: " + String(m)); };
+    var confirm = function (m) { __shown.push("confirm (answered No): " + String(m)); return false; };
+    var prompt = function (m) { __shown.push("prompt (answered Cancel): " + String(m)); return null; };
+    var __value;
+    try {
+      __value = eval(built.wrapper);
+    } catch (e) {
+      __rjUndoGuardFinish(__g);
+      var __gr = __rjUndoGuardReport(__g);
+      __diffAnnotateError(e, __d);
+      __rjThrowRaw(e,
+        (__gr ? " || undo: " + __gr.note : "") +
+        (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : ""));
+    }
+    __rjUndoGuardFinish(__g);
+    var __report = __rjUndoGuardReport(__g);
+    var __out = __rjResult(__value, undoGroupName);
+    if (__d) __out = __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
+    if (__report || __shown.length) {
+      if (!__d && !__rjIsNullEnvelope(__out)) {
+        __out = { ok: true, returned: __out, undoGroup: undoGroupName };
+      }
+      if (__report) __out.undoGuard = __report;
+      if (__shown.length) __out.suppressedDialogs = __shown;
+    }
+    return __out;
+  } finally {
+    __rjUndoGuardFinish(__g);
+    __RJ_UNDO_GUARD = __g.previous;
+  }
+};
+OPS._run_jsx.__meta = {
+  noUndo: function (args) { return args.undoGroup === false; },
+  undoName: "AE MCP: run_jsx"
+};

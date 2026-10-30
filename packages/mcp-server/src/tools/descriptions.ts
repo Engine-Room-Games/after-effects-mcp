@@ -39,7 +39,7 @@ export const descriptions: Record<string, string> = {
   create_text_layer:
     "Text layer with optional font/size/color/position/tracking. `anchorAlign` (default 'left') aligns by paragraph justification with the anchor left at [0,0], so `position` is the start of the baseline and stays right when the text changes later. Tracking is 0 unless passed. Justification is read back: the result's `justification` is what AE holds (`justificationReasserted` when a second write was needed), and if it still disagrees the layer is removed and the call throws. `boxSize` makes wrapping box text.",
   create_shape_layer: "Creates an EMPTY shape layer (no fill, stroke or shapes) — draw into it with add_shape_content: a group, then a rect/ellipse/path, then a fill or stroke inside the group. Position and Anchor Point default to [0,0], so the layer's space IS the comp's and every coordinate you add is in comp pixels; `position:'center'` gives AE's own default, which offsets a comp-space drawing by half a frame. The result echoes the position and anchor point.",
-  create_solid_layer: "Solid-color layer. color is RGB 0..1.",
+  create_solid_layer: "Solid-color layer. color is RGB 0..1 or hex.",
   create_null_layer: "Null parent layer.",
   create_adjustment_layer: "Adjustment layer — effects on it apply to layers below.",
   create_precomp_layer: "Insert an existing comp into another as a pre-comp layer.",
@@ -94,7 +94,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- shapes ----------
   set_shape_path: "Replace a shape path with new vertices/tangents/closed. `shapePath` names a path node (e.g. [\"Contents\", \"Group 1\", \"Contents\", \"Path 1\"]) or its Path property; anything else (a rect, a group) is refused. Tangents not given are straight corners; a tangent array must have one entry per vertex.",
-  add_shape_content: "Add shape content under Contents or a sub-group. `content.type` picks the node (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group); its other keys set the node's properties. Unknown or unsettable keys are NOT ignored — the node is rolled back and the error lists them, so trust a success. ORDER MATTERS: index 1 renders in FRONT and each call appends behind the last, so add front-to-back (details first, background rects last) rather than reaching for `zOrder`. A reference to one node goes stale once a sibling is added ('Object is invalid'): add every node first, then address them by name. More in ae_guide topic 'shapes'.",
+  add_shape_content: "Add shape content under Contents or a sub-group. `content.type` picks the node (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group); its other keys set the node's properties. No gradient fill/stroke: a script cannot set its colour stops. Unknown or unsettable keys are NOT ignored — the node is rolled back and the error lists them, so trust a success. ORDER MATTERS: index 1 renders in FRONT and each call appends behind the last, so add front-to-back (details first, background rects last) rather than reaching for `zOrder`. A reference to one node goes stale once a sibling is added ('Object is invalid'): add every node first, then address them by name. More in ae_guide topic 'shapes'.",
   set_shape_property: "Set a property on a shape content node. `keyframe:true` requires `time` and writes a keyframe there; otherwise it sets the static value.",
 
   // ---------- masks ----------
@@ -113,7 +113,7 @@ export const descriptions: Record<string, string> = {
   // ---------- batch ----------
   run_batch:
     "Many ops in one ExtendScript pass — far faster, and far fewer undo steps, than separate calls. " +
-    "**Up to 500 ops it is exactly one undo step.** Over 500 it is chunked into a background job: this call returns a jobId at once; finish with await_job (a progressToken goes on THAT call; get_job polls) — and it lands as **one undo step per chunk of 25**, since AE discards an undo group that spans two script calls. Read `undoSteps` and its `note` before telling anyone how to undo the work; never say \"one Cmd-Z\" for a chunked batch. " +
+    "**Up to 500 ops it is exactly one undo step.** Over 500 it is chunked into a background job: this call returns a jobId at once; finish with await_job (a progressToken goes on THAT call; get_job polls) — and it lands as **one undo step per chunk of 25**, since AE discards an undo group that spans two script calls. Read `undoSteps` and its `note` before telling anyone how to undo the work; never say \"one Cmd-Z\" for a chunked batch. This server sends the chunks, so if it stops mid-batch (client quit or restarted) the batch stops at a chunk boundary: read the comp back, never re-send it whole. " +
     "`singleUndo:true` forces one undo step up to 2000 ops, freezing AE with no progress until done; over 2000 is refused. " +
     "Each step's `args` are checked as that tool's own; a batch with any bad step is refused whole before anything runs. Not allowed as steps: screenshot_frame, screenshot_layer, snapshot_comp, diff_comp, export_mogrt, render_queue, get_house_style and the server-side tools (ae_guide, await_job, log_issue, …). " +
     "transactional:true (default) stops at the first error; nothing rolls back either way — read the state back rather than re-running. " +
@@ -168,14 +168,14 @@ export const descriptions: Record<string, string> = {
   // ---------- render queue ----------
   add_to_render_queue:
     "Queue a comp to render to `outputPath` (absolute; its folder must exist; [####] for an image sequence). Choose the format by TEMPLATE NAME — `outputModuleTemplate`, `renderSettingsTemplate`. Scripts cannot set codec, bit depth or alpha directly, so if no template fits, ask the user to save one in AE (Edit > Templates > Output Module) and pass its name. An unknown name is refused with the list that exists. " +
-    "The result reads back what AE will write — `outputs[0].settings` (format/channels/depth/color) and the final path, which AE may change to match the format; check alpha there, not by a template's name. An existing file is refused unless `overwrite:true`. A refused call queues nothing. This only queues — render_queue renders.",
+    "The result reads back what AE will write — `outputs[0].settings` (format/channels/depth/color) and the final path, which AE may change to match the format; check alpha there, not by a template's name. An existing file is refused unless `overwrite:true`; a path any other item in the queue has (an already-rendered, unticked one too — remove it first to render there again) is refused outright, naming that item. A refused call queues nothing. This only queues — render_queue renders.",
   list_render_queue:
     "The render queue: per item its 1-based `index`, comp, status (QUEUED, DONE, NEEDS_OUTPUT, …), frame count, output paths and template names. `includeSettings:true` adds each output's format/channels/depth/color; `includeTemplates:true` every template name (needs one item queued). Items have no stable id — re-read before acting on an index.",
   remove_render_item:
     "Remove one render queue item by its current `index`, checked against `compId` so a shifted index is refused instead of deleting the wrong item.",
   render_queue:
     "Render render-queue items to their output files. Pass exactly one of `indices` (the items you added — the normal call) or `all:true`, which renders EVERY QUEUED item including ones the user queued by hand; use it only when the user asked for the whole queue. Returns a jobId at once; a background `aerender` process renders a private copy of the saved project, so AE stays responsive and later edits do not change the render. " +
-    "Unsaved changes are refused unless `saveProject:true` — tell the user it will be saved first. Missing footage the render draws is refused before anything renders; missing footage it does not draw comes back in `missingFootageNotRendered` (or `footageWarnings`) — mention it. Never-saved, read-only or converted-from-older projects are refused with what to do. Existing output files are refused unless `overwrite:true`. " +
+    "Unsaved changes are refused unless `saveProject:true` — tell the user it will be saved first. Missing footage the render draws is refused before anything renders; missing footage it does not draw comes back in `missingFootageNotRendered` (or `footageWarnings`) — mention it. Never-saved, read-only or converted-from-older projects are refused with what to do. Existing output files are refused unless `overwrite:true`; an item sharing its output path with any other item (unticked ones too) is refused outright. " +
     "Then await_job (generous `timeoutMs`; a progressToken for per-frame progress). Outputs are checked on disk — a missing or stale file is a failure, never done. Rendered items are then unticked in the queue, which adds ONE undo step, \"AE MCP: mark rendered\", to the user's history — mention it. cancel_job kills the process and names any incomplete file. One render at a time. More in ae_guide topic 'rendering'.",
 
   // ---------- house style ----------
@@ -190,7 +190,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- jobs ----------
   await_job:
-    "Block until a job is done — a chunked run_batch, or a render_queue render — and return the tool's payload, `undoSteps` included. Default 10min timeout; a timeout stops only the wait, never the job — call await_job again rather than re-sending the work. An unknown jobId (mistyped, or from before a server restart) fails at once. " +
+    "Block until a job is done — a chunked run_batch, or a render_queue render — and return the tool's payload, `undoSteps` included. Default 10min timeout; a timeout stops only the wait, never the job — call await_job again rather than re-sending the work. An unknown jobId (mistyped, or from before a server restart) fails at once — for a batch After Effects still knows, saying how far it got. " +
     "**This is the call that carries progress**: send the progressToken here, since run_batch answers before its first chunk runs.",
   get_job:
     "Non-blocking job status: progress/total/state/error. `status` is running, cancelling (cancel_job accepted; not stopped yet), completed, failed or cancelled — the last three are final. Poll this when you cannot keep an await_job open; it sends no progress notifications. An id this server process does not know is an error, never an empty result.",

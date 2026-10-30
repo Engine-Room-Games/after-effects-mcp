@@ -235,6 +235,11 @@ jobs:
       - name: Capability gaps reach After Effects and are read back
         run: node tests/unit/capability-gaps.mjs
 
+      # #170: every colour field takes hex (a `value` only on a colour
+      # property), and a propertyPath that misses lists what is there, capped.
+      - name: Hex colours convert, and a missed path lists its children
+        run: node tests/unit/hex-colour.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.
@@ -265,6 +270,18 @@ jobs:
       # be caught. Boots the real client/main.js against a stub CEP host.
       - name: The screenshot pipeline holds end to end
         run: node tests/unit/screenshot-pipeline.mjs
+
+      # Stage 4 of #220 moved the image work to the server and left the panel
+      # its copy for older servers. Both must give the same bytes and the same
+      # refusals on the same renders — module by module, and end to end through
+      # the real client/main.js.
+      - name: The server's image code matches the panel's byte for byte
+        run: node tests/unit/image-parity.mjs
+
+      # The stale-frame window is one per After Effects, shared by every server
+      # process on a panel port: B must refuse a buffer AE rendered for A.
+      - name: Server processes on one After Effects share the stale-frame window
+        run: node tests/unit/frame-cache-shared.mjs
 
       # Rendering smaller is how downsampling works at all on Windows, and the
       # factor is derived when the caller omits one. A default of 1 in the zod
@@ -326,6 +343,7 @@ jobs:
         run: |
           node tests/unit/run-jsx-lines.mjs
           node tests/unit/run-jsx-source.mjs
+          node tests/unit/run-jsx-assembly.mjs
           node tests/unit/run-jsx-args.mjs
           node tests/unit/run-jsx-helpers.mjs
 
@@ -440,6 +458,13 @@ jobs:
       # a leader killed mid-request and mid-batch, a stale leader file.
       - name: Sessions on one After Effects share one front desk
         run: node tests/unit/front-desk.mjs
+
+      # A long run_batch driven by the server (#220, stage 5): progress exact,
+      # cancel between chunks, warnings from every chunk, a chunk's lost answer
+      # recovered from After Effects' own cursor with nothing run twice, the
+      # desk killed with a chunk at the panel, the batch's own server killed.
+      - name: The server drives a long batch, and stops it truthfully
+        run: node tests/unit/batch-driver.mjs
 
       # Read-only mode and the run_jsx switch (#135): no write is listed or
       # callable in read-only mode, every server op has a deliberate decision,

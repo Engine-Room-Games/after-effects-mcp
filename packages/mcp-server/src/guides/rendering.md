@@ -66,6 +66,21 @@ ProRes 4444 with alpha is an **output module template** that already says so.
   the output and look before calling it done.
 - **Existing files are refused** unless `overwrite: true` — that includes an
   item the user queued by hand that points at last week's render.
+- **One output path, one item.** aerender will not render an item whose
+  output another item in the queue also has — and it fails silently, writing
+  nothing. Every item counts except a *Done* one, including one already
+  rendered by `render_queue` (*Unqueued*), and two image sequences with the
+  same `[####]` pattern count even over separate frame ranges. So
+  `add_to_render_queue` refuses such a path, and `render_queue` refuses before
+  rendering; `overwrite: true` does not lift either. The refusal names the other
+  item with the exact `remove_render_item({index, compId})` call that clears it.
+  **To render a comp again to the file its last render wrote**: the old item
+  cannot be re-queued — `render_queue` renders only QUEUED items, no tool ticks
+  an item back on, and `render_queue` leaves what it rendered *Unqueued* — so
+  remove the old item with `remove_render_item` (its file stays on disk), then
+  `add_to_render_queue` again with `overwrite: true` and render the new index.
+  Paths are compared as the same file, so a different case or a symlinked
+  folder still counts.
 - **Edits made while it renders are not in the render.** The render reads a
   private copy in the system temp folder taken at its start, so neither your
   later edits nor a save by the user mid-render change it. After Effects stays

@@ -326,6 +326,62 @@ await check("a batch lost to a bundle reload fails saying what was already appli
   } finally { booted.host.answer = null; }
 });
 
+// Issue #220, stage 5: a server that asks drives the batch itself. The panel
+// answers the envelope, sends no chunk of its own, keeps the flag away from
+// ExtendScript, and still refuses a reload while the batch runs.
+await check("a run_batch the server asked to drive: no panel loop, no flag in ExtendScript, a reload still refused", async () => {
+  const port = Number(booted.dom.nodes.port.textContent);
+  const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
+  const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
+  assert.ok(health.capabilities.includes("server-drives-jobs"), "the panel must report server-drives-jobs");
+  const seenArgs = [];
+  let continued = 0;
+  booted.host.answer = (op, args) => {
+    if (op === "run_batch") {
+      seenArgs.push(args);
+      return { async: true, jobId: "j_5_1", total: 50, chunkSize: 25, undoStepsEstimate: 2, undoGroupName: "B", note: "n" };
+    }
+    if (op === "_continue_job") {
+      continued += 1;
+      return continued === 1
+        ? { done: false, jobId: "j_5_1", progress: 25, total: 50, undoSteps: 1 }
+        : { done: true, jobId: "j_5_1", results: [], errors: [], total: 50, undoSteps: 2 };
+    }
+    return {};
+  };
+  const post = (route, body) => fetch(`http://127.0.0.1:${port}${route}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-ae-mcp-token": token },
+    body: JSON.stringify(body),
+  });
+  try {
+    const env = await (await post("/op", { op: "run_batch", args: { ops: [], __driver: "server" } })).json();
+    assert.equal(env.ok, true, env.error);
+    assert.equal(env.result.driver, "server", "the envelope says the server drives");
+    assert.equal(env.result.chunkSize, 25);
+    assert.equal(seenArgs[0].__driver, undefined, "the flag never reaches ExtendScript");
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(continued, 0, "the panel sent no chunk of its own");
+
+    const refused = await post("/reload-jsx", {});
+    assert.equal(refused.status, 409);
+    assert.match((await refused.json()).error, /j_5_1 \(0 of 50 ops attempted, driven by the MCP server\)/);
+
+    const c1 = await (await post("/op", { op: "_continue_job", args: { jobId: "j_5_1", chunkSize: 25 } })).json();
+    assert.equal(c1.result.progress, 25);
+    assert.match((await (await post("/reload-jsx", {})).json()).error, /25 of 50 ops attempted/);
+    await post("/op", { op: "_continue_job", args: { jobId: "j_5_1", chunkSize: 25 } });
+    const ok = await post("/reload-jsx", {});
+    assert.equal(ok.status, 200, "a finished batch no longer blocks a reload");
+
+    // A server that does not ask still gets the panel's own loop.
+    continued = 0;
+    await post("/op", { op: "run_batch", args: { ops: [] } });
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(continued, 2, "an older server's batch is still driven by the panel");
+  } finally { booted.host.answer = null; }
+});
+
 await check("a batch whose heal is refused mid-run says what landed, never that nothing ran", async () => {
   const port = Number(booted.dom.nodes.port.textContent);
   const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();

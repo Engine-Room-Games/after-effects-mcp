@@ -206,7 +206,7 @@ await check("a refusal with nothing better found stays a refusal, and says what 
     assert.ok(e instanceof BridgeUnreachableError, `expected BridgeUnreachableError, got ${e?.constructor?.name}: ${e?.message}`);
     assert.match(e.message, new RegExp(`Cannot reach the After Effects panel at http://127\\.0\\.0\\.1:${stale}`));
     assert.match(e.message, /Also looked for the panel on port/);
-    // The three bridge diagnoses share no sentence (tests/unit/write-queue.mjs
+    // The bridge diagnoses share no sentence (tests/unit/write-queue.mjs
     // holds the other direction). The probe summary must not smuggle one in.
     assert.doesNotMatch(e.message, /did not answer within/i);
     assert.doesNotMatch(e.message, /write queue/i);

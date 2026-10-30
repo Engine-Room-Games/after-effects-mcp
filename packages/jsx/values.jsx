@@ -160,7 +160,43 @@ function __requireKeyTime(keyframe, time, op) {
 // caller checks that itself first, with its own op name; this is the backstop.
 function __setOrKeyAtTime(prop, value, time, keyframe, op) {
   __requireKeyTime(keyframe, time, op || "__setOrKeyAtTime");
+  value = __hexValue(prop, value, op || "__setOrKeyAtTime");
   var hasTime = time !== undefined && time !== null;
   if (hasTime && (keyframe || prop.numKeys > 0)) prop.setValueAtTime(time, value);
   else __setValue(prop, value);
+}
+
+// Hex colours (issue #170). The schema lets a `value` be a hex string, checked
+// for form only: whether it may be a colour depends on the property, and only
+// After Effects knows that. A colour property gets [r,g,b] 0..1 (AE fills in
+// an alpha of 1) and anything else is refused, rather than a hex aimed at
+// Position landing there as three small numbers. No alpha form: AE 26.5 stores
+// a colour's alpha and renders it as 1 regardless (see HEX_RGB in schemas.ts).
+// The arithmetic is hexToRgb's in schemas.ts; tests/unit/hex-colour.mjs holds
+// the two to the same answers.
+var __HEX_COLOUR = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+function __hexToRgb(hex) {
+  var h = String(hex).replace(/^#/, "");
+  if (h.length === 3) h = h.charAt(0) + h.charAt(0) + h.charAt(1) + h.charAt(1) + h.charAt(2) + h.charAt(2);
+  return [parseInt(h.substr(0, 2), 16) / 255, parseInt(h.substr(2, 2), 16) / 255, parseInt(h.substr(4, 2), 16) / 255];
+}
+
+// `value` unchanged unless it is a string; a hex string becomes its channels
+// when `prop` is a colour property, and is refused otherwise. Nothing is
+// written here, so a refusal leaves the property as it was.
+function __hexValue(prop, value, op) {
+  if (typeof value !== "string") return value;
+  if (!__HEX_COLOUR.test(value)) {
+    throw new Error(op + ": value '" + value + "' is a string but not a hex colour ('#ff8800' or '#f80'; a colour's alpha is ignored by After Effects, so no '#ff8800cc'). Nothing was changed.");
+  }
+  var isColour = false;
+  try { isColour = prop.propertyValueType === PropertyValueType.COLOR; } catch (e) { isColour = false; }
+  if (!isColour) {
+    var label = "this property";
+    try { label = "'" + prop.name + "' (" + prop.matchName + ")"; } catch (e2) { label = "this property"; }
+    throw new Error(op + ": value '" + value + "' is a hex colour, but " + label +
+      " is not a colour property. Nothing was changed. Pass a number or an array of numbers.");
+  }
+  return __hexToRgb(value);
 }

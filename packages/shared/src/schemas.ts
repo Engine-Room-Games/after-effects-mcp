@@ -7,11 +7,44 @@ import { z } from "zod";
  */
 
 // ---------- primitives ----------
-export const Color = z.tuple([z.number(), z.number(), z.number()]).describe("RGB 0..1");
-export const ColorRGBA = z.tuple([z.number(), z.number(), z.number(), z.number()]);
 export const Vec2 = z.tuple([z.number(), z.number()]);
 export const Vec3 = z.tuple([z.number(), z.number(), z.number()]);
 export const VecAny = z.union([z.number(), Vec2, Vec3, z.array(z.number())]);
+/**
+ * Hex colours (issue #170). A house style's palette is written in hex, and an
+ * agent converting `#FF8800` to `[1, 0.533, 0]` by hand is a place to get it
+ * wrong. `#` is optional; 3 or 6 digits.
+ *
+ * No alpha form (`#rrggbbaa`, `#rgba`). Measured on AE 26.5: a shape Fill
+ * Color, an effect's Color and a text animator's Fill Color all STORE an alpha
+ * of 0 and render exactly as with 1 — so accepting it would answer ok:true for
+ * transparency that never shows. The refusal says where transparency lives.
+ */
+export const HEX_RGB = /^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const HEX_MESSAGE =
+  "Hex colour is '#rrggbb' or '#rgb'. After Effects ignores a colour's alpha, so '#rrggbbaa' is refused: " +
+  "set transparency with Opacity (the layer's, or a shape fill's/stroke's).";
+const Hex = z.string().regex(HEX_RGB, HEX_MESSAGE);
+/**
+ * `#f80` -> [1, 0x88/255, 0]. Channels 0..1, unrounded. `__hexToRgb` in
+ * values.jsx is the same arithmetic, and tests/unit/hex-colour.mjs holds the
+ * two to the same answers.
+ */
+export function hexToRgb(hex: string): [number, number, number] {
+  let h = hex.replace(/^#/, "");
+  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255) as [number, number, number];
+}
+const RGB = z.tuple([z.number(), z.number(), z.number()]);
+export const Color = z.union([RGB, Hex.transform(hexToRgb)]).describe("RGB 0..1, or hex '#ff8800'.");
+export const ColorRGBA = z.tuple([z.number(), z.number(), z.number(), z.number()]);
+/**
+ * The `value` of a write aimed at any property. A hex string is checked for
+ * form here and converted in After Effects (`__hexValue`, values.jsx), where
+ * the property's type is known: only a colour property takes it, so a hex
+ * aimed at Position is refused instead of landing as three small numbers.
+ */
+const PropertyValue = z.union([VecAny, Hex]).describe("A colour property also takes hex '#ff8800'.");
 
 /**
  * A closed set of names, matched without regard to case and forwarded in the
@@ -720,7 +753,7 @@ export const AddKeyframe = z.object({
   layerId: z.number(),
   propertyPath: PropertyPath,
   time: z.number().describe("Comp seconds."),
-  value: VecAny,
+  value: PropertyValue,
   interpolation: Interpolation.optional(),
 });
 export const RemoveKeyframe = z.object({
@@ -882,7 +915,7 @@ const SetEffectParamBase = crossField(
       .describe("The parameter's display name as list_effects reports it, in After Effects' UI language — 'Blurriness' on an English install, not on a localised one. Prefer paramMatchName."),
     paramMatchName: z.string().optional()
       .describe("Preferred. The parameter's matchName, e.g. 'ADBE Gaussian Blur 2-0001' — the same in every UI language. Tried before paramName when both are given."),
-    value: VecAny,
+    value: PropertyValue,
     time: z.number().optional().describe("Comp seconds."),
     keyframe: z.boolean().optional().meta({ default: false }),
   }),
@@ -954,8 +987,16 @@ export const SetShapePath = z.object({
  * as a silently-missing property and produce an empty shape that still reports
  * success.
  */
-const ShapeColor = z.union([Color, ColorRGBA]);
+const ShapeColor = z.union([RGB, ColorRGBA, Hex.transform(hexToRgb)]).describe("RGB 0..1, or hex '#ff8800'.");
 
+/** Matches a content type that names a gradient fill or stroke. Kept in step with shapes.jsx. */
+export const GRADIENT_TYPE = /grad|^g-?(fill|stroke)$/i;
+/** Why add_shape_content offers no gradient: measured on AE 26.5 (issue #181). */
+export const GRADIENT_REFUSAL =
+  "add_shape_content does not offer gradient fills or strokes: their colour stops cannot be set from a script " +
+  "(After Effects gives 'ADBE Vector Grad Colors' no value and refuses an expression on it). Nothing was changed. " +
+  "Use the Gradient Ramp effect instead (add_effect 'ADBE Ramp'; its colours are ordinary parameters), or build " +
+  "the gradient with run_jsx and ask the user to set the stops in the Gradient Editor.";
 export const ShapeContent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("rect"),
@@ -1022,6 +1063,8 @@ export const ShapeContent = z.discriminatedUnion("type", [
     name: z.string().optional(),
     copies: z.number().optional(),
     offset: z.number().optional(),
+    composite: z.union([namedEnum(["below", "above"]), z.literal(1), z.literal(2)]).optional()
+      .describe("below (After Effects' 1, the default: each copy behind the one before) or above (2)."),
     // The Repeater's own Transform group (issue #181): what each copy adds to
     // the one before it.
     transform: z.object({
@@ -1042,7 +1085,15 @@ export const ShapeContent = z.discriminatedUnion("type", [
     type: z.literal("group"),
     name: z.string().optional(),
   }).strict(),
-]);
+], {
+  // A gradient type fails the discriminator before the handler can explain
+  // why it is not offered, so the measured reason goes in the error itself
+  // (issue #181). Error text only: nothing is added to the emitted schema.
+  error: (iss) => {
+    const type = (iss.input as { type?: unknown } | undefined)?.type;
+    return typeof type === "string" && GRADIENT_TYPE.test(type) ? GRADIENT_REFUSAL : undefined;
+  },
+});
 
 export const AddShapeContent = z.object({
   compId: z.number(),
@@ -1057,7 +1108,7 @@ export const SetShapeProperty = crossField(z.object({
   layerId: z.number(),
   contentPath: PropertyPath,
   property: z.string(),
-  value: VecAny,
+  value: PropertyValue,
   time: z.number().optional().describe("Comp seconds."),
   keyframe: z.boolean().optional().meta({ default: false }),
 }), keyframeNeedsTime);
@@ -1839,6 +1890,13 @@ export type OpEffect = (typeof OpMutation)[OpName];
  * handler in the bundle.
  */
 export const InternalOpMutation = {
+  // A chunked run_batch driven by the server (issue #220, stage 5): one chunk
+  // per call, under the batch's lease; and After Effects' own record of how
+  // far a job got, which is what a lost chunk's answer is recovered from.
+  // Sent only to a panel reporting `server-drives-jobs`, except `_get_job`,
+  // which every panel has and which reports a job this process never started.
+  _continue_job: "write",
+  _get_job: "read",
   // render_queue's halves. Prepare reads; save saves the project; mark-done
   // unticks rendered items as one named undo step.
   _render_prepare: "read",
@@ -1849,6 +1907,16 @@ export const InternalOpMutation = {
   // The .aep's path, for the house style the server reads and writes itself
   // (issue #220, stage 3). Sent only to a panel reporting `project-path`.
   _project_path: "read",
+  // The screenshot and export ops under internal names, answered with the
+  // temp paths ExtendScript wrote; the server reads, normalises and patches
+  // the files itself (issue #220, stage 4). Sent only to a panel reporting
+  // `server-images`. The export is the tool's own write and runs under its lease.
+  _screenshot_frame: "read",
+  _screenshot_layer: "read",
+  _export_mogrt: "write",
+  // run_jsx with the script assembled by the server (issue #220, stage 6).
+  // Sent only to a panel reporting `server-run-jsx`, under run_jsx's own lease.
+  _run_jsx: "write",
 } as const satisfies Record<`_${string}`, "write" | "read">;
 
 type ServerOpName = { [K in OpName]: (typeof OpMutation)[K] extends "server" ? K : never }[OpName];
