@@ -23,14 +23,75 @@ const dist = (...p) =>
 
 const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 
+// Watch the write queue from outside. This is the module instance the server
+// imports (same URL), so every write the server queues passes through here: the
+// moment a write *joins* the queue is something a check can wait on instead of
+// guessing at with a sleep.
+const { WriteQueue } = await import(dist("bridge", "writeQueue.js"));
+/** Every op that asked the write queue for the lock, in order. */
+const queued = [];
+const queueWaiters = new Map();
+const realAcquire = WriteQueue.prototype.acquire;
+WriteQueue.prototype.acquire = function (op, ...rest) {
+  const p = realAcquire.call(this, op, ...rest);
+  queued.push(op);
+  const ws = queueWaiters.get(op);
+  if (ws) { queueWaiters.delete(op); for (const w of ws) w(); }
+  return p;
+};
+/** Settles once `op` has asked the write queue for the lock (since `queued` was cleared). */
+function whenQueued(op) {
+  if (queued.includes(op)) return Promise.resolve();
+  return new Promise((r) => queueWaiters.set(op, [...(queueWaiters.get(op) ?? []), r]));
+}
+/** `p`, or a failure naming what never happened — a regression fails the check instead of hanging the suite. */
+function within(p, ms, what) {
+  let t;
+  return Promise.race([
+    p,
+    new Promise((_, reject) => { t = setTimeout(() => reject(new Error(what)), ms); }),
+  ]).finally(() => clearTimeout(t));
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // ---------------------------------------------------------------------------
 // Stub bridge. Never port 7777 — a real panel may hold that on this machine.
 // ---------------------------------------------------------------------------
 
-/** op -> how long the stub takes, and what it answers. */
+/**
+ * op -> how long the stub takes, and what it answers.
+ *
+ * `hold` is a promise the test controls: the stub answers only once it settles.
+ * A check that asserts an *ordering* — this ran while that was in flight, this
+ * waited behind that — holds the slow op on one and releases it only after it
+ * has observed what it asserts about. A fixed `ms` alone only makes the
+ * ordering likely: on a loaded CI runner the second call can take longer than
+ * `ms` to get through the server, and the check fails with nothing wrong
+ * (issue #253).
+ */
 const behaviour = new Map();
 /** Every op the stub saw, with the moment it entered and left. */
 const seen = [];
+/** "enter:<op>" / "leave:<op>" -> callbacks waiting for it. */
+const stubWaiters = new Map();
+function emit(key) {
+  const ws = stubWaiters.get(key);
+  if (!ws) return;
+  stubWaiters.delete(key);
+  for (const w of ws) w();
+}
+/** Settles when the stub sees `op` enter (or leave) — at once if it already has since `seen` was cleared. */
+function stubEvent(phase, op) {
+  if (seen.some((s) => s.op === op && (phase === "enter" || s.leftAt !== undefined))) return Promise.resolve();
+  const key = `${phase}:${op}`;
+  return new Promise((r) => stubWaiters.set(key, [...(stubWaiters.get(key) ?? []), r]));
+}
+/** A promise the test opens by hand. */
+function gate() {
+  let open;
+  const p = new Promise((r) => (open = r));
+  return { p, open };
+}
 
 /** How long the stub's /health takes to answer — a busy After Effects blocks it too. */
 let healthDelayMs = 0;
@@ -61,8 +122,11 @@ const bridge = http.createServer(async (req, res) => {
     const b = behaviour.get(op) ?? { ms: 5, result: { ok: true, op } };
     const entry = { op, enteredAt: Date.now() };
     seen.push(entry);
-    await new Promise((r) => setTimeout(r, b.ms));
+    emit(`enter:${op}`);
+    await new Promise((r) => setTimeout(r, b.ms ?? 0));
+    if (b.hold) await b.hold;
     entry.leftAt = Date.now();
+    emit(`leave:${op}`);
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ ok: true, result: b.result }));
   });
@@ -124,13 +188,24 @@ const overlapped = (a, b) => {
 
 await check("two concurrent writes reach the bridge one at a time", async () => {
   seen.length = 0;
-  behaviour.set("set_transform", { ms: 120, result: { ok: true, which: "set_transform" } });
+  queued.length = 0;
+  const held = gate();
+  behaviour.set("set_transform", { hold: held.p, result: { ok: true, which: "set_transform" } });
   behaviour.set("add_keyframe", { ms: 5, result: { ok: true, which: "add_keyframe" } });
 
-  const [first, second] = await Promise.all([
+  const both = Promise.all([
     call("set_transform", { compId: 1, layerId: 1, properties: { opacity: 50 } }),
     call("add_keyframe", { compId: 1, layerId: 1, propertyPath: ["Position"], time: 0, value: [0, 0] }),
   ]);
+  // The first write is at the bridge and the second has joined the queue behind
+  // it. Keep the first in flight a known time past that point, so waitedMs has a
+  // floor this check can state rather than hope for.
+  await within(Promise.all([stubEvent("enter", "set_transform"), whenQueued("add_keyframe")]), 10_000,
+    "set_transform never reached the bridge, or add_keyframe never reached the write queue");
+  await sleep(100);
+  assert.equal(seen.some((s) => s.op === "add_keyframe"), false, "a write reached the bridge while another was in flight");
+  held.open();
+  const [first, second] = await both;
 
   assert.deepEqual(seen.map((s) => s.op), ["set_transform", "add_keyframe"]);
   assert.equal(overlapped("set_transform", "add_keyframe"), false, "the two writes overlapped at the bridge");
@@ -147,16 +222,28 @@ await check("two concurrent writes reach the bridge one at a time", async () => 
 });
 
 await check("a read issued behind a slow write is not made to wait for it", async () => {
+  // The write is held at the bridge until the read has been answered. Were reads
+  // queued behind writes, the read could never reach the bridge while the write
+  // is held, and this fails instead of hanging. No sleep decides the outcome.
   seen.length = 0;
-  behaviour.set("run_jsx", { ms: 150, result: { ok: true } });
+  queued.length = 0;
+  const held = gate();
+  behaviour.set("run_jsx", { hold: held.p, result: { ok: true } });
   behaviour.set("list_comps", { ms: 5, result: [] });
 
-  const [, read] = await Promise.all([
-    call("run_jsx", { code: "return 1" }),
-    call("list_comps", {}),
-  ]);
+  const write = call("run_jsx", { code: "return 1" });
+  let read;
+  try {
+    await within(stubEvent("enter", "run_jsx"), 10_000, "run_jsx never reached the bridge");
+    read = await within(call("list_comps", {}), 10_000,
+      "the read did not answer while a write was in flight: it was made to wait for the write");
+  } finally {
+    held.open();
+    await write;
+  }
 
   assert.equal(overlapped("run_jsx", "list_comps"), true, "the read should have run during the write");
+  assert.equal(queued.includes("list_comps"), false, "a read asked the write queue for the lock");
   // A read never queues, so it never carries a queue note.
   assert.equal(read.content.length, 1);
   assert.deepEqual(payload(read), []);
@@ -167,13 +254,20 @@ await check("a run_jsx result that is not an object keeps its shape", async () =
   // cannot absorb the queue note, so it arrives as a second content block and
   // the first block is byte-for-byte what it would have been.
   seen.length = 0;
-  behaviour.set("set_text", { ms: 120, result: { ok: true } });
+  queued.length = 0;
+  const held = gate();
+  behaviour.set("set_text", { hold: held.p, result: { ok: true } });
   behaviour.set("run_jsx", { ms: 5, result: ["a", "b"] });
 
-  const [, jsx] = await Promise.all([
+  const both = Promise.all([
     call("set_text", { compId: 1, layerId: 1, text: "x" }),
     call("run_jsx", { code: "return ['a','b']" }),
   ]);
+  // There is a queue note only if run_jsx really queued behind set_text.
+  await within(Promise.all([stubEvent("enter", "set_text"), whenQueued("run_jsx")]), 10_000,
+    "set_text never reached the bridge, or run_jsx never reached the write queue");
+  held.open();
+  const [, jsx] = await both;
 
   assert.equal(jsx.content.length, 2, "the note must not be folded into an array");
   assert.deepEqual(payload(jsx, 0), ["a", "b"]);
@@ -272,16 +366,22 @@ await check("a long batch holds the queue until the job finishes", async () => {
   assert.ok(note.startsWith("about 24 undo steps, NOT one "), note);
 
   let landed = false;
-  const queued = call("set_layer", { compId: 1, layerId: 1, name: "n" }).then((r) => { landed = true; return r; });
+  queued.length = 0;
+  const pending = call("set_layer", { compId: 1, layerId: 1, name: "n" }).then((r) => { landed = true; return r; });
 
-  await new Promise((r) => setTimeout(r, 120));
+  // Once set_layer has joined the queue, give it every chance to slip through
+  // before the batch finishes. This sleep only bounds how hard the check looks:
+  // a slow runner can make it less searching, never make it fail — and it is
+  // also the floor under waitedMs below.
+  await within(whenQueued("set_layer"), 10_000, "set_layer never reached the write queue");
+  await sleep(120);
   assert.equal(landed, false, "a write reached the bridge while the batch was still running");
   assert.equal(seen.some((s) => s.op === "set_layer"), false);
 
   // The batch's last chunk reports done.
   finishJob("j_test_1", { results: [] });
 
-  const res = await queued;
+  const res = await pending;
   assert.equal(payload(res).queuedBehind, "run_batch");
   assert.ok(payload(res).waitedMs >= 100);
 });
