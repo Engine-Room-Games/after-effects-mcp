@@ -528,7 +528,27 @@ async function startSession(name, deskPort) {
   });
   const client = new Client({ name, version: "0" }, { capabilities: {} });
   await client.connect(transport);
-  const s = { name, client, pid: transport.pid, log: () => log, alive: true };
+  // The wire as it arrived, before the SDK client handles any of it. The client
+  // dispatches a notification a microtask later but a response at once, and
+  // drops a request's progress handler with its response — so a notification
+  // that reached the same read as the response is lost to `onprogress`, though
+  // the server sent it first (seen under CPU load: issue #253). Whether the
+  // server put its last notification ahead of the response is a fact about
+  // this log, and is checked here.
+  const wire = [];
+  const calls = new Map();
+  const deliver = transport.onmessage;
+  transport.onmessage = (m, extra) => {
+    if (m.method === "notifications/progress") wire.push({ kind: "progress", token: m.params.progressToken, ...m.params });
+    else if (m.id !== undefined && m.method === undefined) wire.push({ kind: "response", id: m.id });
+    deliver?.(m, extra);
+  };
+  const sendRaw = transport.send.bind(transport);
+  transport.send = (m, o) => {
+    if (m.method === "tools/call") calls.set(m.id, m.params);
+    return sendRaw(m, o);
+  };
+  const s = { name, client, pid: transport.pid, log: () => log, alive: true, wire, calls };
   sessions.push(s);
   return s;
 }
@@ -577,8 +597,16 @@ try {
     assert.equal(chunksOf(env.jobId).length, 12);
     ae.assertOnce(env.jobId, 300);
     assert.ok(aw.progress.length >= 1, "await_job carried the batch's progress");
-    assert.equal(aw.progress.at(-1).progress, 300, "the last notification on await_job is the full count, not one chunk short");
-    assert.equal(aw.progress.at(-1).total, 300);
+    // Read off the wire, not off `onprogress`: see startSession.
+    const id = [...A.calls].find(([, p]) => p.name === "await_job" && p.arguments?.jobId === env.jobId)?.[0];
+    assert.notEqual(id, undefined, "the await_job request was not seen going out");
+    const responseAt = A.wire.findIndex((w) => w.kind === "response" && w.id === id);
+    assert.ok(responseAt >= 0, "the await_job response was not seen on the wire");
+    const before = A.wire.slice(0, responseAt).filter((w) => w.kind === "progress" && w.token === id);
+    const after = A.wire.slice(responseAt).filter((w) => w.kind === "progress" && w.token === id);
+    assert.equal(after.length, 0, "a progress notification on await_job's token came after its response");
+    assert.equal(before.at(-1).progress, 300, "the last notification on await_job is the full count, not one chunk short");
+    assert.equal(before.at(-1).total, 300);
   });
 
   await check("another session's write waits for the whole server-driven batch, never between its chunks", async () => {

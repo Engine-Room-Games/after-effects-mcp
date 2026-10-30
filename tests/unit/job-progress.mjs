@@ -139,6 +139,39 @@ function emit(evt) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Which JobManager holds each job — for the server's jobs, the server's own
+// manager (the same module instance it imports: same URL). The server drives a
+// batch by fetching each chunk the stub has queued over HTTP, so how soon an
+// `emit()` shows up in the job's state depends on the machine. A check waits on
+// that state, never on a fixed sleep (issue #253: a 30 ms sleep before reading
+// a failed job back read "running" on a loaded CI runner).
+const owners = new Map();
+{
+  const realRegister = JobManager.prototype.register;
+  JobManager.prototype.register = function (jobId, ...a) {
+    owners.set(jobId, this);
+    return realRegister.call(this, jobId, ...a);
+  };
+}
+/** Polls `cond` until it holds; fails naming `what` if it never does. */
+async function until(what, cond, ms = 10_000) {
+  const deadline = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await sleep(2);
+  }
+}
+const jobState = (jobId) => owners.get(jobId)?.get(jobId);
+/** The job's state has absorbed every `emit()` so far: it reached `status` (and `progress`, if given). */
+const reached = (jobId, status, progress) =>
+  until(`${jobId} to be ${status}${progress === undefined ? "" : ` at ${progress}`}`, () => {
+    const s = jobState(jobId);
+    return s?.status === status && (progress === undefined || s.progress === progress);
+  });
+/** await_job has bound its emitter(s): anything the job reports from here reaches them. */
+const bound = (jobId, n = 1) =>
+  until(`${n} await_job emitter(s) on ${jobId}`, () => (owners.get(jobId)?.progressEmitterCount(jobId) ?? 0) >= n);
+
 // Imported only after AE_MCP_PORT is set: HttpClient resolves the port in its
 // constructor, which runs inside createServer().
 const { createServer } = await import(dist("server.js"));
@@ -263,7 +296,7 @@ await check("run_batch sends no progress on its own token after its response", a
   // The batch runs and reports progress — after the envelope, as it
   // always will, because the envelope is returned before the first chunk runs.
   for (let i = 1; i <= 4; i++) emit({ type: "progress", jobId: "j_p1", progress: 25 * i, total: 600, message: "running" });
-  await sleep(80);
+  await reached("j_p1", "running", 100);
 
   // The guard. Against the 0.4.0 server this is the line that fails: four
   // notifications on this token, all after the response, none correlated.
@@ -278,7 +311,7 @@ await check("run_batch sends no progress on its own token after its response", a
   assert.match(env.note, /get_job\(\{jobId: "j_p1"\}\)/, "and the poll without one");
 
   emit({ type: "complete", jobId: "j_p1", result: { results: [], undoSteps: 24 } });
-  await sleep(20);
+  await reached("j_p1", "completed");
 });
 
 await check("await_job with a progressToken receives every progress event, all before its response", async () => {
@@ -289,7 +322,7 @@ await check("await_job with a progressToken receives every progress event, all b
 
   const { done, received } = callWithProgress("await_job", { jobId: "j_p2", timeoutMs: 5000 });
   // Let the request reach the handler and bind before the panel reports.
-  await sleep(30);
+  await bound("j_p2");
   const awaitId = requestId("await_job", "j_p2");
 
   const expected = [];
@@ -326,9 +359,9 @@ await check("await_job without a progressToken sends none, and neither does get_
 
   const before = allProgress().length;
   const done = client.callTool({ name: "await_job", arguments: { jobId: "j_p3", timeoutMs: 5000 } });
-  await sleep(30);
+  await until("await_job on j_p3 to reach the server", () => requests.some((q) => q.name === "await_job" && q.args.jobId === "j_p3"));
   for (let i = 1; i <= 3; i++) emit({ type: "progress", jobId: "j_p3", progress: 25 * i, total: 600, message: "running" });
-  await sleep(30);
+  await reached("j_p3", "running", 75);
 
   // get_job is the poll: it reads the state the progress events wrote and
   // never turns into a notification, even when it is sent with a token.
@@ -351,14 +384,17 @@ await check("an await_job that times out unbinds: nothing follows its error resp
   behaviour.set("run_batch", batchEnvelope("j_p4"));
   await client.callTool({ name: "run_batch", arguments: batchArgs });
 
-  const { done, received } = callWithProgress("await_job", { jobId: "j_p4", timeoutMs: 120 });
-  await sleep(30);
+  // The one timing this check cannot take off the clock is the server's own
+  // wait: the event has to be pulled and forwarded inside it. 1.5 s is that
+  // margin for one local HTTP round trip — it was 90 ms before issue #253.
+  const { done, received } = callWithProgress("await_job", { jobId: "j_p4", timeoutMs: 1500 });
+  await bound("j_p4");
   const awaitId = requestId("await_job", "j_p4");
   emit({ type: "progress", jobId: "j_p4", progress: 25, total: 600, message: "running" });
 
   const res = await done;
   assert.equal(res.isError, true, "the call should have timed out");
-  assert.match(res.content[0].text, /stopped waiting after 120ms; the job is STILL RUNNING/);
+  assert.match(res.content[0].text, /stopped waiting after 1500ms; the job is STILL RUNNING/);
   assert.equal(received.length, 1, "the one event before the timeout should have been delivered");
 
   const responseAt = responseIndex(awaitId);
@@ -366,7 +402,9 @@ await check("an await_job that times out unbinds: nothing follows its error resp
   // The job carries on after the caller gave up on it.
   emit({ type: "progress", jobId: "j_p4", progress: 50, total: 600, message: "running" });
   emit({ type: "progress", jobId: "j_p4", progress: 75, total: 600, message: "running" });
-  await sleep(60);
+  // Both events are in the job's state, so any notification they caused has
+  // already been handed to the transport (it sends synchronously).
+  await reached("j_p4", "running", 75);
 
   assert.equal(received.length, 1, "onprogress fired after the call had already failed");
   assert.deepEqual(
@@ -377,7 +415,7 @@ await check("an await_job that times out unbinds: nothing follows its error resp
   assert.equal(wire.length, wireBefore, "nothing should reach the client for a call that has ended");
 
   emit({ type: "complete", jobId: "j_p4", result: { results: [], undoSteps: 24 } });
-  await sleep(20);
+  await reached("j_p4", "completed");
 });
 
 await check("two waiters on one job each get the events on their own token, each before their own response", async () => {
@@ -386,7 +424,7 @@ await check("two waiters on one job each get the events on their own token, each
 
   const a = callWithProgress("await_job", { jobId: "j_p5", timeoutMs: 5000 });
   const b = callWithProgress("await_job", { jobId: "j_p5", timeoutMs: 5000 });
-  await sleep(30);
+  await bound("j_p5", 2);
   const ids = requests.filter((q) => q.name === "await_job" && q.args.jobId === "j_p5").map((q) => q.id);
   assert.equal(ids.length, 2);
 
@@ -442,7 +480,7 @@ await check("a failed batch reports how far it got, from the panel's error event
   await client.callTool({ name: "run_batch", arguments: batchArgs });
   for (let p = 25; p <= 300; p += 25) emit({ type: "progress", jobId: "j_t2", progress: p, total: 600, message: "running" });
   emit({ type: "error", jobId: "j_t2", error: "op 312 failed", progress: 313 });
-  await sleep(30);
+  await reached("j_t2", "failed");
   const st = payload(await client.callTool({ name: "get_job", arguments: { jobId: "j_t2" } }));
   assert.equal(st.status, "failed");
   assert.equal(st.progress, 313, "a failed job must report where it stopped");
@@ -469,7 +507,7 @@ await check("a chunk that failed outright reports a lower bound, never a stop po
   await client.callTool({ name: "run_batch", arguments: batchArgs });
   emit({ type: "progress", jobId: "j_t4", progress: 575, total: 600, message: "running" });
   emit({ type: "error", jobId: "j_t4", error: "Bad JSON", progress: 575, unsureThrough: 600 });
-  await sleep(30);
+  await reached("j_t4", "failed");
   const st = payload(await client.callTool({ name: "get_job", arguments: { jobId: "j_t4" } }));
   assert.equal(st.status, "failed");
   assert.equal(st.progress, 575);

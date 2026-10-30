@@ -126,11 +126,12 @@ function tracer() {
   const log = [];
   return {
     log,
-    async run(queue, op, ms, opts = {}) {
+    /** `work` is how long the op takes in ms, or a promise it runs until. */
+    async run(queue, op, work, opts = {}) {
       const lease = queue ? await queue.acquire(op, opts.signal) : null;
       log.push(`+${op}`);
       try {
-        await sleep(ms);
+        await (typeof work === "number" ? sleep(work) : work);
         return lease?.wait ?? null;
       } finally {
         log.push(`-${op}`);
@@ -158,12 +159,17 @@ await check("reads overlap writes freely", async () => {
   const q = new WriteQueue();
   const t = tracer();
   // Reads pass `null` for the queue, exactly as the server does: it only calls
-  // acquire() when isWriteOp() says so.
+  // acquire() when isWriteOp() says so. The write runs until both reads have
+  // finished, so the outcome depends on the queue and not on which timer fires
+  // first (issue #253).
+  let finishWrite;
+  const write = t.run(q, "run_jsx", new Promise((r) => (finishWrite = r)));
   await Promise.all([
-    t.run(q, "run_jsx", 40),
     t.run(null, "screenshot_frame", 10),
     t.run(null, "get_layer_full", 5),
   ]);
+  finishWrite();
+  await write;
   // Both reads finished while the write was still running.
   assert.equal(t.log.indexOf("-get_layer_full") < t.log.indexOf("-run_jsx"), true);
   assert.equal(t.log.indexOf("-screenshot_frame") < t.log.indexOf("-run_jsx"), true);
