@@ -130,7 +130,11 @@ await check("every classified internal op has a handler in the bundle; reads are
   for (const [op, effect] of Object.entries(InternalOpMutation)) {
     assert.match(jsxSources, new RegExp(`OPS\\.${op}\\s*=`), `${op} has no handler in packages/jsx`);
     if (effect === "read") {
-      assert.match(jsxSources, new RegExp(`OPS\\.${op}\\s*=\\s*noUndo\\(`), `${op} is a read and must be noUndo`);
+      // An alias of a public op (`OPS._screenshot_frame = OPS.screenshot_frame`,
+      // stage 4) is the same function object, so the public op must be noUndo.
+      const alias = jsxSources.match(new RegExp(`OPS\\.${op}\\s*=\\s*OPS\\.(\\w+)\\s*;`));
+      const handler = alias ? alias[1] : op;
+      assert.match(jsxSources, new RegExp(`OPS\\.${handler}\\s*=\\s*noUndo\\(`), `${op} is a read and must be noUndo`);
     }
   }
   assert.equal(InternalOpMutation._project_path, "read");
@@ -307,7 +311,7 @@ async function session(health) {
   const client = new Client({ name: "panel-capabilities-test", version: "0" }, { capabilities: {} });
   const [c, sv] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(sv), client.connect(c)]);
-  servers.push({ bridge, wss });
+  servers.push({ bridge, wss, port });
   s.call = async (name, args) => {
     s.seen.length = 0;
     const res = await client.callTool({ name, arguments: args });
@@ -441,10 +445,81 @@ if (canChmod) {
   });
 }
 
+// ---------- server-images (issue #220, stage 4) ----------
+// Which side finishes a screenshot or a .mogrt thumbnail. The bytes are held
+// equal by tests/unit/image-parity.mjs; this is only who is asked for what.
+const { encodePng8 } = await import(dist("frames", "pngCodec.js"));
+const shotDir = fs.mkdtempSync(path.join(os.tmpdir(), "ae-caps-shot-"));
+let shotSeq = 0;
+function rawFrame(args) {
+  const px = Buffer.alloc(4 * 3 * 4, 0);
+  for (let i = 0; i < px.length; i += 4) { px[i] = 200; px[i + 1] = shotSeq * 9; px[i + 2] = 9; px[i + 3] = 255; }
+  const file = path.join(shotDir, `f-${shotSeq++}.png`);
+  fs.writeFileSync(file, encodePng8(4, 3, 6, px));
+  return { ok: true, result: { path: file, width: 16, height: 12, downsample: 4, time: args.time ?? 0, compId: 3 } };
+}
+const panelShot = { ok: true, result: { width: 4, height: 3, downsample: 4, time: 0, compId: 3, mimeType: "image/png", base64: "aGk=", bytes: 2 } };
+
+await check("legacy panel: a screenshot goes to the panel's own op, as before", async () => {
+  legacy.answers.screenshot_frame = panelShot;
+  const r = await legacy.call("screenshot_frame", { compId: 3, time: 0 });
+  assert.equal(r.isError, false, r.text);
+  assert.deepEqual(legacy.seen, ["screenshot_frame"], "no raw op to a panel that did not offer it");
+  assert.equal(JSON.parse(r.text).bytes, 2);
+});
+
+await check("server-images panel: the raw op is sent and the server reads the file", async () => {
+  const shots = await session({ capabilities: ["project-path", "server-images"] });
+  shots.answers._screenshot_frame = (a) => rawFrame(a);
+  const r = await shots.call("screenshot_frame", { compId: 3, time: 1 });
+  assert.equal(r.isError, false, r.text);
+  assert.deepEqual(shots.seen, ["_screenshot_frame"]);
+  const meta = JSON.parse(r.text);
+  assert.equal(meta.width, 4);
+  assert.equal(meta.height, 3);
+  assert.deepEqual(fs.readdirSync(shotDir), [], "the server removes the temp frame it read");
+
+  // A corrupt file is re-rendered once, through a second raw op.
+  let first = true;
+  shots.answers._screenshot_frame = (a) => {
+    const out = rawFrame(a);
+    if (first) { first = false; fs.writeFileSync(out.result.path, "not a png"); }
+    return out;
+  };
+  const again = await shots.call("screenshot_frame", { compId: 3, time: 2 });
+  assert.equal(again.isError, false, again.text);
+  assert.deepEqual(shots.seen, ["_screenshot_frame", "_screenshot_frame"]);
+});
+
+await check("server-images panel that does not know the raw op: falls back once, then stays on the panel's op", async () => {
+  const forgetful = await session({ capabilities: ["server-images"] });
+  forgetful.answers.screenshot_frame = panelShot;
+  const r = await forgetful.call("screenshot_frame", { compId: 3, time: 0 });
+  assert.equal(r.isError, false, r.text);
+  assert.deepEqual(forgetful.seen, ["_screenshot_frame", "screenshot_frame"]);
+  await forgetful.call("screenshot_frame", { compId: 3, time: 0 });
+  assert.deepEqual(forgetful.seen, ["screenshot_frame"], "the capability is withdrawn");
+});
+
+await check("server-images panel: export_mogrt is sent raw and never carries posterPngPath back", async () => {
+  const shots = await session({ capabilities: ["server-images"] });
+  shots.answers._export_mogrt = { ok: true, result: { ok: true, path: path.join(shotDir, "none.mogrt"), bytes: 5, compId: 3 } };
+  const r = await shots.call("export_mogrt", { compId: 3 });
+  assert.equal(r.isError, false, r.text);
+  assert.deepEqual(shots.seen, ["_export_mogrt"]);
+  assert.equal(JSON.parse(r.text).bytes, 5);
+});
+fs.rmSync(shotDir, { recursive: true, force: true });
+
 console.log(`panel-capabilities: ${passed} checks passed`);
 resetDir(dir);
 fs.rmSync(dir, { recursive: true, force: true });
-for (const { bridge, wss } of servers) { wss.close(); bridge.close(); }
+for (const { bridge, wss, port } of servers) {
+  wss.close();
+  bridge.close();
+  // The shared stale-frame window these sessions wrote (frames/sharedFrameCache.ts).
+  fs.rmSync(path.join(os.homedir(), ".engineroom-ae-mcp", `frames-${port}.jsonl`), { force: true });
+}
 // Settle before exiting: `process.exit()` straight after a `fetch` crashes
 // Node 24 on Windows with a libuv assertion (nodejs/node#56645).
 await new Promise((r) => setTimeout(r, 200));

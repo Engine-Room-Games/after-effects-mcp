@@ -1900,6 +1900,13 @@ export const InternalOpMutation = {
   // The .aep's path, for the house style the server reads and writes itself
   // (issue #220, stage 3). Sent only to a panel reporting `project-path`.
   _project_path: "read",
+  // The screenshot and export ops under internal names, answered with the
+  // temp paths ExtendScript wrote; the server reads, normalises and patches
+  // the files itself (issue #220, stage 4). Sent only to a panel reporting
+  // `server-images`. The export is the tool's own write and runs under its lease.
+  _screenshot_frame: "read",
+  _screenshot_layer: "read",
+  _export_mogrt: "write",
 } as const satisfies Record<`_${string}`, "write" | "read">;
 
 type ServerOpName = { [K in OpName]: (typeof OpMutation)[K] extends "server" ? K : never }[OpName];

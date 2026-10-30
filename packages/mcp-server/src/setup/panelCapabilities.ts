@@ -17,6 +17,13 @@
 /** `_project_path` answers the .aep's path cheaply; the server does house-style I/O itself. */
 export const CAP_PROJECT_PATH = "project-path";
 
+/**
+ * `_screenshot_frame`, `_screenshot_layer` and `_export_mogrt` answer with file
+ * paths; the server waits for, normalises, tiles and patches the images itself
+ * (issue #220, stage 4; frames/pipeline.ts).
+ */
+export const CAP_SERVER_IMAGES = "server-images";
+
 export interface PanelCapabilities {
   /** True when the panel sent no usable `capabilities` field. */
   legacy: boolean;

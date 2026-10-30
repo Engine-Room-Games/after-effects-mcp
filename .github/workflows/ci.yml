@@ -271,6 +271,18 @@ jobs:
       - name: The screenshot pipeline holds end to end
         run: node tests/unit/screenshot-pipeline.mjs
 
+      # Stage 4 of #220 moved the image work to the server and left the panel
+      # its copy for older servers. Both must give the same bytes and the same
+      # refusals on the same renders — module by module, and end to end through
+      # the real client/main.js.
+      - name: The server's image code matches the panel's byte for byte
+        run: node tests/unit/image-parity.mjs
+
+      # The stale-frame window is one per After Effects, shared by every server
+      # process on a panel port: B must refuse a buffer AE rendered for A.
+      - name: Server processes on one After Effects share the stale-frame window
+        run: node tests/unit/frame-cache-shared.mjs
+
       # Rendering smaller is how downsampling works at all on Windows, and the
       # factor is derived when the caller omits one. A default of 1 in the zod
       # schema would reach the panel as an explicit 1 and silently disable it.

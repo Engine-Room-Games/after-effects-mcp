@@ -1,5 +1,5 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { diagnosticPortCandidates } from "./bridge/discovery.js";
+import { diagnosticPortCandidates, panelToken } from "./bridge/discovery.js";
 import {
   CallToolRequestSchema,
   GetPromptRequestSchema,
@@ -58,7 +58,9 @@ import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
 import { houseStyleOnServer } from "./style/houseStyleFile.js";
 import { internalSender, type SendInternal } from "./tools/internalOps.js";
-import { CAP_PROJECT_PATH } from "./setup/panelCapabilities.js";
+import { CAP_PROJECT_PATH, CAP_SERVER_IMAGES } from "./setup/panelCapabilities.js";
+import { createSharedFrameCache, panelInstanceId, sharedFrameCacheFile } from "./frames/sharedFrameCache.js";
+import { createFramePipeline, RAW_IMAGE_OPS, type ImageTool, type FramePipeline } from "./frames/pipeline.js";
 import {
   checkFootageExists,
   checkRenderOutput,
@@ -210,6 +212,20 @@ export function createServer(opts: CreateServerOptions = {}) {
     onRendered: (items) => markRendered(line, internalVia(() => false), items),
   });
   const snapshots = new SnapshotStore();
+  // Screenshots, contact sheets and .mogrt thumbnails, finished here on a
+  // panel that hands back paths (issue #220, stage 4). The stale-frame window
+  // is one per After Effects: a file per panel port, shared with every other
+  // server on it, because AE re-serves buffers across sessions (#29).
+  const frames = createFramePipeline({
+    // Keyed by port and by the running panel (its session token), so a
+    // restarted After Effects starts with an empty window.
+    frameCache: createSharedFrameCache(() => {
+      const port = (bridge as { port?: unknown }).port;
+      if (typeof port !== "number" || port <= 0) return null;
+      const instance = panelInstanceId(panelToken(port));
+      return instance ? { file: sharedFrameCacheFile(port), instance } : null;
+    }),
+  });
   // Follows the bridge's port rather than copying it: see wsClient.ts.
   const ws = new WsClient(bridge, jobs);
   const panelGate = createPanelGate(bridge);
@@ -729,12 +745,20 @@ export function createServer(opts: CreateServerOptions = {}) {
       // file itself, as before. See style/houseStyleFile.ts.
       const viaServer =
         (name === "get_house_style" || name === "set_house_style") && panelGate.capabilities().has(CAP_PROJECT_PATH);
+      // Screenshots and the .mogrt thumbnail are the server's on a panel that
+      // answers with paths (issue #220, stage 4); every other panel reads the
+      // files and sends base64, as before. Either way the result has one shape.
+      const imagesOnServer = name in RAW_IMAGE_OPS && panelGate.capabilities().has(CAP_SERVER_IMAGES);
       const lifted = liftAeWarnings(
         viaServer
           ? await houseStyleOnServer(name, args, sendInternal, (op, a) => runner.runOp(op, a), () =>
               panelGate.withdraw(CAP_PROJECT_PATH)
             )
-          : await runner.runOp(name, args)
+          : imagesOnServer
+            ? await imagesViaServer(frames, name as ImageTool, args, sendInternal, (op, a) => runner.runOp(op, a), () =>
+                panelGate.withdraw(CAP_SERVER_IMAGES)
+              )
+            : await runner.runOp(name, args)
       );
       const result = lifted.value;
 
@@ -1383,6 +1407,32 @@ export function toolInputSchema(opName: string): Record<string, unknown> {
     },
   });
   return withCrossFieldConstraints(schema, toDraft2020(jsonSchema), opName);
+}
+
+/**
+ * An image tool through the raw op, finished on the server. A panel that
+ * listed `server-images` and then did not know the op (`Unknown op:`) has the
+ * capability withdrawn and the call re-sent under the public name — which is
+ * safe, since nothing ran: an unknown op is refused before any handler.
+ */
+async function imagesViaServer(
+  frames: FramePipeline,
+  tool: ImageTool,
+  args: unknown,
+  send: SendInternal,
+  runOp: (op: string, args: unknown) => Promise<unknown>,
+  onUnknownOp: () => void
+): Promise<unknown> {
+  const raw = RAW_IMAGE_OPS[tool];
+  try {
+    return await frames.run(tool, args, (op, a) => send(op, a));
+  } catch (e) {
+    if (e instanceof AeError && new RegExp(`^Unknown op: ${raw}\\b`).test(e.message)) {
+      onUnknownOp();
+      return runOp(tool, args);
+    }
+    throw e;
+  }
 }
 
 function isAsyncEnvelope(v: unknown): boolean {

@@ -223,9 +223,13 @@
   // something a server may use only when it is listed:
   //   project-path — `_project_path` answers the .aep's path with no project
   //                  walk, so the server reads and writes house-style.md itself.
+  //   server-images — `_screenshot_frame`, `_screenshot_layer` and
+  //                  `_export_mogrt` reach the bundle untouched (handleOp only
+  //                  intercepts the public names), so the server reads the PNGs
+  //                  and patches the .mogrt itself (stage 4).
   // The panel and its bundle.jsx install together, so a name here may stand for
   // an op in the bundle. The server still falls back on `Unknown op:`.
-  var PANEL_CAPABILITIES = ["project-path"];
+  var PANEL_CAPABILITIES = ["project-path", "server-images"];
 
   // ---------- Load bundle.jsx ----------
   // Hash of the bundle *actually evaluated into ExtendScript*, reported on
