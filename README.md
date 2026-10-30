@@ -16,7 +16,7 @@ Describe the animation you want — a lower third, a logo reveal, an animated co
 [![MCP](https://img.shields.io/badge/MCP-server-000000)](https://modelcontextprotocol.io)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/migus88)
 
-Works with **Claude**, **Cursor**, **VS Code**, **Codex**, **Windsurf** and any other MCP client.
+Works with **Claude Desktop**, **Claude Code**, **Cursor**, **VS Code**, **Codex**, **Windsurf** and any other local MCP client.
 
 </div>
 
@@ -66,6 +66,8 @@ Six scenes from one quarterly-report sequence, each in a different visual style.
 Three steps, and you only do the first two once.
 
 **You'll need:** After Effects on macOS or Windows. It has been tested on After Effects 2026. The scripting it relies on has been in After Effects since 2022, and the panel is set to accept 2022 or later, but those older versions haven't been tested yet.
+
+**Your AI app has to start the tools on the same computer as After Effects.** The tools talk to After Effects directly on your machine, so they work in any app that can run an MCP server locally: Claude Desktop, Claude Code, Cursor, VS Code, Codex, Windsurf and the like. ChatGPT, on the web or in its app, and Claude in a web browser (claude.ai) can't use them — they connect only to tools hosted on the internet, which have no way to reach the After Effects on your computer.
 
 ### 1️⃣ Install
 
