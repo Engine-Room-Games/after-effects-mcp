@@ -54,7 +54,8 @@ OPS.list_layers = noUndo(function (args) {
 
 OPS.create_text_layer = function (args) {
   var c = getCompById(args.compId);
-  var l = c.layers.addText(args.text || "");
+  // A box size makes paragraph text (issue #181): it wraps inside the box.
+  var l = args.boxSize ? c.layers.addBoxText([args.boxSize[0], args.boxSize[1]], args.text || "") : c.layers.addText(args.text || "");
   if (args.name) l.name = args.name;
   // `anchorAlign` is paragraph justification, not geometry. Offsetting the
   // anchor to the measured bbox edge (what this did before) looks right at
@@ -112,6 +113,16 @@ OPS.create_text_layer = function (args) {
   if (verified) {
     out.justification = __justificationName(verified.justification);
     out.justificationReasserted = verified.reasserted;
+  }
+  if (args.boxSize) {
+    var boxSrc = l.property("Source Text");
+    try {
+      out.boxSize = __verifyBoxSize(boxSrc, args.boxSize, "create_text_layer", "");
+    } catch (eBox) {
+      try { l.remove(); } catch (eRm) {}
+      eBox.message = String(eBox.message) + "The new layer was removed, so nothing was created.";
+      throw eBox;
+    }
   }
   return out;
 };
@@ -361,12 +372,82 @@ OPS.set_layer = function (args) {
     }
   }
 
+  // The switch enumerations (issue #181), resolved by name like blendingMode.
+  var switchEnums = {};
+  for (var ei = 0; ei < __LAYER_SWITCH_ENUMS.length; ei++) {
+    var ef = __LAYER_SWITCH_ENUMS[ei][0];
+    if (args[ef] === undefined) continue;
+    var en = __LAYER_SWITCH_ENUMS[ei][1];
+    var table = __layerSwitchEnum(en);
+    var ev = table ? table[args[ef]] : undefined;
+    if (ev === undefined) {
+      throw new Error("set_layer: " + ef + " '" + args[ef] + "' is not one of After Effects' " + en + " names. Nothing was changed.");
+    }
+    switchEnums[ef] = ev;
+  }
+
   // What can be known to fail without writing anything is refused here too.
   var camOrLight = __isCamOrLight(l);
-  var pixelOnly = ["blendingMode", "threeDLayer", "preserveTransparency"];
+  var pixelOnly = ["blendingMode", "threeDLayer", "preserveTransparency", "motionBlur", "collapseTransformation",
+    "adjustmentLayer", "guideLayer", "effectsActive", "audioEnabled", "quality", "samplingQuality", "frameBlendingType"];
   for (var pi = 0; pi < pixelOnly.length; pi++) {
     if (camOrLight && args[pixelOnly[pi]] !== undefined) {
       throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") is a " + __layerKind(l) + ", which has no " + pixelOnly[pi] + ". Nothing was changed.");
+    }
+  }
+  if (args.collapseTransformation !== undefined && l.canSetCollapseTransformation === false) {
+    throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") has no collapse-transformations / continuous-rasterize switch " +
+      "(After Effects offers it on precomp, shape, text and vector-footage layers). Nothing was changed.");
+  }
+  if (args.audioEnabled !== undefined && l.hasAudio === false) {
+    throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") has no audio, so it has no audio switch. Nothing was changed.");
+  }
+  if (args.autoOrient === "CHARACTERS_TOWARD_CAMERA" && !(l instanceof TextLayer)) {
+    throw new Error("set_layer: autoOrient CHARACTERS_TOWARD_CAMERA applies only to a 3D text layer with per-character 3D; layer " + l.id +
+      " (\"" + l.name + "\") is a " + __layerKind(l) + ". Nothing was changed.");
+  }
+  // Orienting toward the camera is 3D-only, and After Effects answers it on a
+  // 2D layer with a modal warning rather than a throw: the call blocks until
+  // someone clicks OK (measured on AE 2026, PR #216 live pass). So it is
+  // refused here, judged by the 3D switch as it will be once this call's own
+  // threeDLayer — written before autoOrient when it turns 3D on — has landed. Cameras and lights
+  // are always 3D.
+  if ((args.autoOrient === "CAMERA_OR_POINT_OF_INTEREST" || args.autoOrient === "CHARACTERS_TOWARD_CAMERA") && !camOrLight) {
+    var threeDAfter = args.threeDLayer !== undefined ? !!args.threeDLayer : !!l.threeDLayer;
+    if (!threeDAfter) {
+      throw new Error("set_layer: autoOrient " + args.autoOrient + " needs a 3D layer, and layer " + l.id + " (\"" + l.name + "\") " +
+        (args.threeDLayer === false ? "is made 2D by this call" : "is 2D") +
+        " — set threeDLayer:true first (the same call will do). Nothing was changed.");
+    }
+    if (args.autoOrient === "CHARACTERS_TOWARD_CAMERA" && l.threeDPerChar !== true) {
+      throw new Error("set_layer: autoOrient CHARACTERS_TOWARD_CAMERA needs per-character 3D, which text layer " + l.id + " (\"" + l.name +
+        "\") does not have enabled (Animate > Enable Per-character 3D). Nothing was changed.");
+    }
+  }
+  // The same modal from the other side: turning 3D off under a toward-camera
+  // orient leaves a 2D layer oriented at the camera. With no autoOrient in the
+  // call that would be the end state, so it is refused; with one (which, by
+  // the check above, is not toward-camera) autoOrient is written before
+  // threeDLayer below, so the 2D-and-oriented state never exists, even briefly.
+  var orientFirst = args.threeDLayer === false && args.autoOrient !== undefined;
+  if (args.threeDLayer === false && args.autoOrient === undefined && !camOrLight) {
+    var AO = __layerSwitchEnum("AutoOrientType");
+    var curOrient = null, orientUnread = false;
+    try { curOrient = l.autoOrient; } catch (eAO) { orientUnread = true; }
+    // Fail closed: an orient that cannot be named could be the modal one, so a
+    // 3D layer is not turned 2D on a guess.
+    if ((!AO || orientUnread) && l.threeDLayer) {
+      throw new Error("set_layer: cannot tell whether layer " + l.id + " (\"" + l.name + "\") is auto-oriented toward the camera " +
+        "(" + (AO ? "its autoOrient cannot be read" : "this After Effects has no AutoOrientType") + "), and threeDLayer:false on such a " +
+        "layer blocks After Effects with a warning dialog. Nothing was changed. Clear its auto-orient by hand first.");
+    }
+    var curName = null;
+    if (AO && curOrient === AO.CAMERA_OR_POINT_OF_INTEREST) curName = "CAMERA_OR_POINT_OF_INTEREST";
+    else if (AO && curOrient === AO.CHARACTERS_TOWARD_CAMERA) curName = "CHARACTERS_TOWARD_CAMERA";
+    if (curName !== null) {
+      throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") is auto-oriented " + curName + ", which needs a 3D layer, so " +
+        "threeDLayer:false alone would leave it oriented at the camera in 2D. Pass autoOrient:\"NO_AUTO_ORIENT\" (or ALONG_PATH) " +
+        "in the same call. Nothing was changed.");
     }
   }
   if (args.stretch !== undefined && args.stretch === 0) {
@@ -384,15 +465,29 @@ OPS.set_layer = function (args) {
   // Order: an unlock first and a lock last, so the call's own locked switch
   // never stands between it and its other fields. The matte next: it is the
   // write whose result is read back, so its failure comes as early as it can.
+  //
+  // A toward-camera orient with threeDLayer:true writes the 3D switch first,
+  // read back like the switches: should After Effects ignore it (a layer that
+  // cannot be 3D), the call stops there with nothing else written, rather
+  // than going on to orient a 2D layer — the modal.
+  var towardCam = !camOrLight && (args.autoOrient === "CAMERA_OR_POINT_OF_INTEREST" || args.autoOrient === "CHARACTERS_TOWARD_CAMERA");
+  var threeDFirst = towardCam && args.threeDLayer === true;
   var applied = [];
   var steps = [];
   if (args.locked === false) steps.push(["locked", false]);
+  if (threeDFirst) steps.push(["threeDLayer", true]);
   if (tm) steps.push(["trackMatte", tm]);
   steps.push(
     ["name", args.name], ["enabled", args.enabled], ["shy", args.shy],
-    ["solo", args.solo], ["threeDLayer", args.threeDLayer], ["blendingMode", blend], ["label", args.label],
+    ["solo", args.solo], ["autoOrient", orientFirst ? switchEnums.autoOrient : undefined],
+    ["threeDLayer", threeDFirst ? undefined : args.threeDLayer], ["blendingMode", blend], ["label", args.label],
     ["inPoint", args.inPoint], ["outPoint", args.outPoint], ["startTime", args.startTime],
-    ["stretch", args.stretch], ["preserveTransparency", args.preserveTransparency]
+    ["stretch", args.stretch], ["preserveTransparency", args.preserveTransparency],
+    ["motionBlur", args.motionBlur], ["collapseTransformation", args.collapseTransformation],
+    ["adjustmentLayer", args.adjustmentLayer], ["guideLayer", args.guideLayer],
+    ["effectsActive", args.effectsActive], ["audioEnabled", args.audioEnabled],
+    ["quality", switchEnums.quality], ["samplingQuality", switchEnums.samplingQuality],
+    ["frameBlendingType", switchEnums.frameBlendingType], ["autoOrient", orientFirst ? undefined : switchEnums.autoOrient]
   );
   if (args.locked === true) steps.push(["locked", true]);
 
@@ -401,8 +496,19 @@ OPS.set_layer = function (args) {
     var field = steps[si][0];
     if (steps[si][1] === undefined) continue;
     try {
+      // Last line before the modal: whatever the checks above assumed, a
+      // toward-camera orient is never written onto a layer that reads 2D.
+      if (field === "autoOrient" && towardCam && !l.threeDLayer) {
+        throw new Error("set_layer: autoOrient " + args.autoOrient + " needs a 3D layer, and this layer reads 2D, so it was not written.");
+      }
       if (field === "trackMatte") out = __setTrackMatte(l, tm, tmType, tmLayer);
       else l[field] = steps[si][1];
+      // The switches are read back (issue #181): After Effects can take an
+      // assignment it does not apply (frame blending on a still) and say nothing.
+      if (__LAYER_READBACK[field] && l[field] !== steps[si][1]) {
+        throw new Error("set_layer: After Effects took " + field + " but reads " + String(l[field]) + " afterwards, not " +
+          String(steps[si][1]) + "; this layer does not hold that setting.");
+      }
     } catch (eW) {
       var notReached = [];
       for (var sj = si + 1; sj < steps.length; sj++) if (steps[sj][1] !== undefined) notReached.push(steps[sj][0]);
@@ -418,8 +524,38 @@ OPS.set_layer = function (args) {
   }
   var summary = __layerSummary(l);
   if (out) summary.trackMatte = out;
+  // The switches this call set, as After Effects now holds them.
+  var switches = null;
+  for (var ri = 0; ri < __LAYER_SWITCHES.length; ri++) {
+    var rf = __LAYER_SWITCHES[ri];
+    if (args[rf] === undefined) continue;
+    if (!switches) switches = {};
+    switches[rf] = switchEnums[rf] !== undefined ? args[rf] : l[rf];
+  }
+  if (switches) summary.switches = switches;
   return summary;
 };
+
+// set_layer's timeline switches (issue #181). Booleans and enum-valued ones;
+// the enum names are keys into the After Effects enumeration named beside them.
+var __LAYER_SWITCHES = ["motionBlur", "collapseTransformation", "adjustmentLayer", "guideLayer", "effectsActive",
+  "audioEnabled", "quality", "samplingQuality", "frameBlendingType", "autoOrient"];
+var __LAYER_SWITCH_ENUMS = [
+  ["quality", "LayerQuality"], ["samplingQuality", "LayerSamplingQuality"],
+  ["frameBlendingType", "FrameBlendingType"], ["autoOrient", "AutoOrientType"]
+];
+// Named one by one: an enumeration a build lacks reads undefined, not a throw.
+function __layerSwitchEnum(name) {
+  if (name === "LayerQuality") return typeof LayerQuality !== "undefined" ? LayerQuality : undefined;
+  if (name === "LayerSamplingQuality") return typeof LayerSamplingQuality !== "undefined" ? LayerSamplingQuality : undefined;
+  if (name === "FrameBlendingType") return typeof FrameBlendingType !== "undefined" ? FrameBlendingType : undefined;
+  if (name === "AutoOrientType") return typeof AutoOrientType !== "undefined" ? AutoOrientType : undefined;
+  return undefined;
+}
+var __LAYER_READBACK = {};
+(function () { for (var i = 0; i < __LAYER_SWITCHES.length; i++) __LAYER_READBACK[__LAYER_SWITCHES[i]] = true; })();
+// The 3D switch too: a toward-camera orient is only safe once it has landed.
+__LAYER_READBACK.threeDLayer = true;
 
 /**
  * Apply a resolved track matte and read it back (issue #149). The 2023+ API is

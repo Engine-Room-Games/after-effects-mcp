@@ -1,7 +1,7 @@
 ---
 name: extendscript-gotchas
 reference: after-effects
-description: The run_jsx reference — when to script instead of calling a tool, how much one call can do before the timeout, scriptPath and libraries as the normal way to build, the helpers already in scope, and the ExtendScript facts that abort a script while naming something else (property lookups that return null, a `.value` read at the playhead rather than at a time, effects addressed by a name that is not unique, a track matte that switches its matte's video off, ease arrays sized per property, a TextDocument that stores the wrong justification, output-module settings that are read-only, the reserved words that stop a script before its first line). Read it before writing raw ExtendScript, not after it fails.
+description: The run_jsx reference — when to script instead of calling a tool, how much one call can do before the timeout, scriptPath and libraries as the normal way to build, the helpers already in scope, and the ExtendScript facts that abort a script while naming something else (property lookups that return null, a `.value` read at the playhead rather than at a time, effects addressed by a name that is not unique, a track matte that switches its matte's video off, ease arrays sized per property, a TextDocument that stores the wrong justification, output-module settings that are read-only, the reserved words that stop a script before its first line). Also the recipes for precomposing, applying a preset, setting a font by name and replacing footage. Read it before writing raw ExtendScript, not after it fails.
 ---
 
 # Scripting After Effects with run_jsx
@@ -344,6 +344,35 @@ output modules anyway.
   grouping it by hand.
 - **`copyToComp` needs the group closed**, which is the opposite problem — see
   "Layers and comps".
+
+## Recipes for what no tool does
+
+Four everyday operations have no tool on purpose or not yet; each is a few
+lines of script with one trap.
+
+- **Precompose.** `comp.layers.precompose(indices, name, true)` takes 1-based
+  layer *indices* — resolve them from ids immediately before the call, never
+  from an earlier read — and returns the new comp. `false` (leave attributes
+  in the original comp) is legal only for a single layer. The precomp layer
+  replaces the topmost moved layer in the original comp; find it by
+  `layer.source.id === newComp.id` rather than by index, and read the moved
+  layers' ids afresh with `list_layers` on the new comp.
+- **Applying an animation preset.** `layer.applyPreset(new File(path))` with
+  an absolute path to an `.ffx`; a missing file throws. Make the layer the
+  only one selected first (`layer.selected = true` and the others false) in
+  case the preset follows the selection — not measured here — then read what
+  it added back with `list_effects` or `get_layer_full`.
+- **Fonts.** `TextDocument.font` is the PostScript name, and a name After
+  Effects does not have is accepted without a word. Look the name up on AE 24
+  and later with `app.fonts.getFontsByFamilyNameAndStyleName(family, style)`
+  (each result has `postScriptName`), set it through `OPS.set_text({compId,
+  layerId, font})`, and read `font` back.
+- **Replacing footage.** `footageItem.replace(new File(path))` swaps the file
+  under *every* layer that uses the item; `layer.replaceSource(item, false)`
+  swaps one layer's source and keeps its old timing (see Layers and comps
+  above). Neither is a tool: replacing and relinking footage are outside what
+  the tools cover, so do it only when the user asks for it, and say which
+  layers it reached (`item.usedIn`).
 
 ## The language itself
 

@@ -806,7 +806,8 @@ check("a part of the arguments carried in an object literal and a return value i
       return [args.compId, args.layerId, args.propertyPath, args.keyIndex, args.easeOut];
     };
   `);
-  assert.deepEqual(paths, ["easeOut.influence", "easeOut.speed"]);
+  // easeOut is one pair or a per-dimension list of them (issue #181).
+  assert.deepEqual(paths, ["easeOut|0.influence", "easeOut|0.speed", "easeOut|1[].influence", "easeOut|1[].speed"]);
 });
 
 check("a field read by a key from a table of names is credited, and only off the arguments", () => {
