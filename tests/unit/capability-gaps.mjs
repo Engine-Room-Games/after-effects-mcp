@@ -391,7 +391,7 @@ check("a per-dimension ease of a length the property does not take is refused, n
   const before = ok(ae.call("get_keyframes", { compId: 100, layerId: 2, propertyPath: SCALE }), "before");
   refused(ae.call("set_temporal_ease", {
     compId: 100, layerId: 2, propertyPath: SCALE, keyIndex: 1, easeIn: [{ influence: 80, speed: 0 }, { influence: 20, speed: 0 }],
-  }), /the ease was not changed.*2 per-dimension eases passed cannot be written at another count/, "wrong length");
+  }), /the ease was not changed.*2 per-dimension eases passed as easeIn cannot be written at another count/, "wrong length");
   // A count is either rejected (sent, refused) or not tried (never sent) —
   // never both, which is what the message used to say.
   const msg = ae.call("set_temporal_ease", {
@@ -409,9 +409,22 @@ check("a per-dimension ease of a length the property does not take is refused, n
     easeOut: [{ influence: 80, speed: 0 }, { influence: 20, speed: 0 }],
   }).error;
   assert.doesNotMatch(both, /kept side|null/, both);
-  assert.match(both, /the 2 per-dimension eases passed cannot be written at another count/, both);
+  assert.match(both, /the 2 per-dimension eases passed as easeOut cannot be written at another count/, both);
   const after = ok(ae.call("get_keyframes", { compId: 100, layerId: 2, propertyPath: SCALE }), "after");
   assert.deepEqual(after, before);
+});
+
+check("a refusal caused by the side the caller did not send names that side", () => {
+  const ae = keyed();
+  // Key 1's easeOut already differs per dimension (3 values).
+  ok(ae.call("set_temporal_ease", { compId: 100, layerId: 2, propertyPath: SCALE, keyIndex: 1,
+    easeOut: [{ influence: 80, speed: 0 }, { influence: 20, speed: 0 }, { influence: 50, speed: 0 }] }), "existing per-dim easeOut");
+  const before = ok(ae.call("get_keyframes", { compId: 100, layerId: 2, propertyPath: SCALE }), "before");
+  const msg = ae.call("set_temporal_ease", { compId: 100, layerId: 2, propertyPath: SCALE, keyIndex: 1,
+    easeIn: [{ influence: 70, speed: 0 }, { influence: 10, speed: 0 }] }).error;
+  assert.match(msg, /the existing easeOut on this key differs per dimension \(3 values\).*pass easeOut too/, msg);
+  assert.match(msg, /the 2 per-dimension eases passed as easeIn/, msg);
+  assert.deepEqual(ok(ae.call("get_keyframes", { compId: 100, layerId: 2, propertyPath: SCALE }), "after"), before);
 });
 
 check("differing per-dimension pairs on a spatial property are refused; identical ones collapse to one", () => {

@@ -236,17 +236,29 @@ function __applyTemporalEase(prop, keyIndex, easeIn, easeOut, resolved) {
   // sent, and naming it in both lists contradicts itself (PR #216 live pass).
   var detail = "";
   if (skipped.length) {
-    // Which side made a count unwritable: the per-dimension list passed, unless
-    // it is uniform (any count carries that) and so the kept side is the cause.
-    // Both sides are checked: with both passed nothing is kept (`known` is null).
-    var blameList = null;
-    if (easeIn && easeIn.length && !__easeUniform(easeIn)) blameList = easeIn;
-    else if (easeOut && easeOut.length && !__easeUniform(easeOut)) blameList = easeOut;
-    detail = " Not tried at " + skipped.join(", ") + ": " +
-      (blameList !== null || known === null
-        ? "the " + (blameList ? blameList.length : asked) + " per-dimension eases passed cannot be written at another count without changing them" +
-          " — pass one pair, or one per dimension this property has"
-        : "the kept side reads back as " + known + " different per-dimension eases, which cannot be written at another count without changing them") + ".";
+    // Name every side that made a count unwritable, as what it is: a list the
+    // caller passed, or the key's existing ease on a side the caller did not
+    // send — which used to be blamed on the caller's list (PR #216 live pass).
+    var causes = [];
+    var names = { "in": "easeIn", "out": "easeOut" };
+    var other = { "in": "out", "out": "in" };
+    for (var s in names) {
+      if (!names.hasOwnProperty(s)) continue;
+      var blocked = false;
+      for (var k = 0; k < skipped.length; k++) if (!__easeSide(sides[s], skipped[k])) blocked = true;
+      if (!blocked) continue;
+      var list = sides[s];
+      var sent = s === "in" ? easeIn : easeOut;
+      if (sent) {
+        causes.push("the " + list.length + " per-dimension eases passed as " + names[s] + " cannot be written at another count " +
+          "without changing them — pass one pair, or one per dimension this property has");
+      } else {
+        causes.push("the existing " + names[s] + " on this key differs per dimension (" + list.length + " values) and is kept as it is, " +
+          "so only " + list.length + " entries can carry it — pass " + names[s] + " too, or give " + names[other[s]] + " " +
+          list.length + " entries (or one pair)");
+      }
+    }
+    detail = " Not tried at " + skipped.join(", ") + ": " + causes.join("; and ") + ".";
   }
   throw new Error(
     "Could not set the temporal ease on " + label + " at key " + keyIndex + ": " +
