@@ -298,8 +298,14 @@ if (canChmod) {
 // Simulated, on every platform: each errno a stat can fail with.
 {
   const realStat = fs.statSync;
-  const failWith = (code) => {
-    fs.statSync = () => { const e = new Error(code); e.code = code; throw e; };
+  const isRoot = (p) => path.parse(path.resolve(String(p))).root === path.resolve(String(p));
+  // Every stat fails with `code`; the volume root answers unless `rootCode` says otherwise.
+  const failWith = (code, rootCode = null) => {
+    fs.statSync = (p) => {
+      const c = isRoot(p) ? rootCode : code;
+      if (c === null) return realStat(p);
+      const e = new Error(c); e.code = c; throw e;
+    };
   };
   try {
     for (const code of ["EACCES", "EPERM", "EIO", "ELOOP", "ENAMETOOLONG", "EBUSY"]) {
@@ -314,6 +320,19 @@ if (canChmod) {
       assert.equal(D.pathState(at("x")), "missing", code);
       assert.match(result(() => D.checkRenderOutput({ outputPath: at("a", "x.mov") })), /does not exist/, `render refused on ${code}`);
       assert.match(result(() => D.checkFootageExists({ path: at("clip.mov") })), /^No file at /, `footage refused on ${code}`);
+    }
+    // A mapped drive the server's logon session cannot see: Windows answers
+    // ENOENT for the path *and* for the drive root. The volume is not
+    // visible, so the server cannot tell, and the call is forwarded.
+    for (const rootCode of ["ENOENT", "EACCES", "EIO"]) {
+      failWith("ENOENT", rootCode);
+      assert.equal(D.pathState(at("x")), "unknown", `root ${rootCode}`);
+      assert.equal(result(() => D.checkRenderOutput({ outputPath: at("a", "x.mov") })), PASSED, `render forwarded, root ${rootCode}`);
+      assert.equal(result(() => D.checkFootageExists({ path: at("clip.mov") })), PASSED, `footage forwarded, root ${rootCode}`);
+    }
+    for (const p of ["Z:\\renders\\x.mov", "\\\\server\\share\\renders\\x.mov"]) {
+      const root = path.win32.parse(p).root;
+      assert.ok(root === "Z:\\" || root === "\\\\server\\share\\", `${p} has a drive or UNC root: ${root}`);
     }
   } finally {
     fs.statSync = realStat;

@@ -249,14 +249,19 @@ never creates, writes or removes anything, so a refused call leaves nothing on
 disk that the jsx alone would not have left.
 
 **"Not allowed to look" is not "missing".** Only a definite `ENOENT` or
-`ENOTDIR` refuses (`pathState()` in `destinations.ts`). `EACCES`, `EPERM` and
+`ENOTDIR` refuses (`pathState()` in `destinations.ts`). It counts as definite
+only when the path's root (the drive, the UNC share, or `/`) is itself visible.
+Windows reports a mapped drive that the server's logon session cannot see as
+`ENOENT`, not `EACCES`, so a missing or erroring root means the server cannot
+tell. `EACCES`, `EPERM` and
 every other failure to look forward the call, and the jsx decides. The server
 and After Effects are different processes with different access. On macOS,
 privacy access (TCC) to Desktop, Documents, removable and network volumes is
 granted per app, so AE can see a folder the server is not allowed to look into.
 On Windows a mapped drive can be invisible to the server's process while AE
-sees it. `tests/unit/destination-checks.mjs` checks this with a real `EACCES`
-and with simulated `EPERM`, `EIO` and others.
+sees it. `tests/unit/destination-checks.mjs` checks this with a real `EACCES`,
+with simulated `EPERM`, `EIO` and others, and with a simulated root that is
+itself missing.
 
 **A check runs only where Node and ExtendScript's `File` read the path the same
 way.** `File` decodes `%XX` escapes, reads `~` as the home folder, and on

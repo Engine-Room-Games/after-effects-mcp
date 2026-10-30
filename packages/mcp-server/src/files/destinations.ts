@@ -52,7 +52,8 @@ function expandHome(p: string, platform: NodeJS.Platform): string {
  * What the server can say for certain about a path: it is there, it is
  * definitely not there, or the server cannot tell.
  *
- * Only ENOENT and ENOTDIR mean "not there". Anything else, EACCES and EPERM
+ * Only ENOENT and ENOTDIR mean "not there", and only when the path's root
+ * (drive, UNC share or "/") is itself visible. Anything else, EACCES and EPERM
  * above all, means this process was not allowed to look, and that says
  * nothing about After Effects: on macOS, privacy access (TCC) to Desktop,
  * Documents, removable and network volumes is granted per app, and on Windows
@@ -67,8 +68,19 @@ export function pathState(p: string): PathState {
     return "exists";
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
-    return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
+    if (code !== "ENOENT" && code !== "ENOTDIR") return "unknown";
   }
+  // Windows reports a mapped drive the server's logon session cannot see as
+  // ENOENT, not EACCES. So "missing" also needs the volume itself to be
+  // visible: a root (drive, UNC share or "/") that is missing or will not
+  // answer means the server cannot tell.
+  const root = path.parse(path.resolve(p)).root;
+  try {
+    fs.statSync(root);
+  } catch {
+    return "unknown";
+  }
+  return "missing";
 }
 
 // ---------- add_to_render_queue (render.jsx) ----------
