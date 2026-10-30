@@ -176,6 +176,10 @@ interface Segment {
 
 interface Move {
   label: string;
+  layerId: number;
+  matchName: string;
+  start: number;
+  end: number;
   seconds: number;
   frames: number;
   segments: number;
@@ -245,6 +249,40 @@ function oneMove(k: RawKey[], i: number, e: number): boolean {
     progress = Math.max(progress, t);
   }
   return true;
+}
+
+/** Both sides of the key bring the speed to zero: the motion stops there. */
+function stopsAt(key: RawKey): boolean {
+  const side = (interp: Interp, speed: number | null) =>
+    interp === "h" || (interp === "b" && speed !== null && Math.abs(speed) < STOP_SPEED);
+  return side(key[1], key[4]) && side(key[2], key[6]);
+}
+
+/** True when the travel into key m turns back on itself leaving it (within ~25°). */
+function reversesAt(k: RawKey[], m: number): boolean {
+  const a = k[m - 1][7], b = k[m][7], c = k[m + 1][7];
+  if (!a || !b || !c || a.length !== b.length || b.length !== c.length) return false;
+  let dot = 0, la = 0, lb = 0;
+  for (let d = 0; d < a.length; d++) {
+    const u = b[d] - a[d];
+    const v = c[d] - b[d];
+    dot += u * v;
+    la += u * u;
+    lb += v * v;
+  }
+  if (la < EPS || lb < EPS) return false;
+  return dot / Math.sqrt(la * lb) < -0.9;
+}
+
+/**
+ * The first key in run i..j where the motion stops and goes on in another
+ * direction (a corner) or the same one (a pause), or j. A stop that turns
+ * straight back is left to oneMove, which reads it as an overshoot's peak or a
+ * wind-up when it is one.
+ */
+function stopEnd(k: RawKey[], i: number, j: number): number {
+  for (let m = i + 1; m < j; m++) if (stopsAt(k[m]) && !reversesAt(k, m)) return m;
+  return j;
 }
 
 /** The longest stretch from key i, within run end j, that reads as one move. */
@@ -328,7 +366,7 @@ function walkProperty(p: RawProp, fps: number, w: Walk): void {
       }
     }
     impactsSeen = Math.max(impactsSeen, j);
-    j = moveEnd(k, i, j);
+    j = moveEnd(k, i, stopEnd(k, i, j));
     if (offscreen(k[i][0], k[j][0])) {
       // Wholly before the in point or after the out point. A move that is
       // seen even in part is kept whole.
@@ -353,7 +391,10 @@ function walkProperty(p: RawProp, fps: number, w: Walk): void {
     prevMoveStart = i;
     prevMoveEnd = j;
     const seconds = k[j][0] - k[i][0];
-    const move: Move = { label, seconds, frames: seconds * fps, segments: j - i, overshoot: null, anticipation: null };
+    const move: Move = {
+      label, layerId: p.layerId, matchName: p.matchName, start: k[i][0], end: k[j][0],
+      seconds, frames: seconds * fps, segments: j - i, overshoot: null, anticipation: null,
+    };
 
     // Overshoot: the middle key furthest past where the move ends, measured
     // along the travel from its first key to its last; each later crossing of
@@ -391,6 +432,57 @@ function walkProperty(p: RawProp, fps: number, w: Walk): void {
 }
 
 const SEPARATED_POSITION = ["ADBE Position_0", "ADBE Position_1", "ADBE Position_2"];
+/** Separated X/Y moves on one layer this close (or overlapping) are one motion. */
+const SEPARATED_GAP = 0.1;
+
+/**
+ * Separated X / Y (/ Z) Position moves on one layer that overlap in time, or
+ * meet within SEPARATED_GAP, are one motion — a Y keyed a little after X is
+ * still one move to the designer. Merged moves span both and keep the larger
+ * overshoot and wind-up. Moves keyed at the very same times were already
+ * merged at the key level (mergeSeparatedPosition).
+ */
+export function mergeSeparatedMoves(moves: Move[]): Move[] {
+  const out: Move[] = [];
+  const sep = new Map<number, Move[]>();
+  for (const m of moves) {
+    if (!SEPARATED_POSITION.includes(m.matchName)) {
+      out.push(m);
+      continue;
+    }
+    const list = sep.get(m.layerId) ?? [];
+    list.push(m);
+    sep.set(m.layerId, list);
+  }
+  for (const list of sep.values()) {
+    list.sort((a, b) => a.start - b.start);
+    let cur: Move | null = null;
+    for (const m of list) {
+      if (cur && m.start <= cur.end + SEPARATED_GAP) {
+        const c: Move = cur;
+        const end = Math.max(c.end, m.end);
+        const fps: number = c.seconds > 0 ? c.frames / c.seconds : m.seconds > 0 ? m.frames / m.seconds : 30;
+        const bigger = <T extends { amount: number }>(a: T | null, b: T | null): T | null =>
+          !a ? b : !b ? a : a.amount >= b.amount ? a : b;
+        cur = {
+          ...c,
+          label: "Position",
+          end,
+          seconds: end - c.start,
+          frames: (end - c.start) * fps,
+          segments: c.segments + m.segments,
+          overshoot: bigger(c.overshoot, m.overshoot),
+          anticipation: bigger(c.anticipation, m.anticipation),
+        };
+        continue;
+      }
+      if (cur) out.push(cur);
+      cur = m;
+    }
+    if (cur) out.push(cur);
+  }
+  return out;
+}
 
 /**
  * A layer's separated X / Y (/ Z) Position keyed at the same times is one
@@ -442,11 +534,39 @@ export function mergeSeparatedPosition(props: RawProp[]): RawProp[] {
  * out and named.
  */
 export function isBaked(p: RawProp, fps: number): boolean {
-  if (p.keys.length < BAKED_MIN_KEYS) return false;
-  const gaps: number[] = [];
-  for (let i = 1; i < p.keys.length; i++) gaps.push(Math.abs(p.keys[i][0] - p.keys[i - 1][0]) * fps);
-  gaps.sort((a, b) => a - b);
-  return quantile(gaps, 0.5) <= BAKED_MAX_GAP_FRAMES;
+  const pieces = splitBaked(p, fps);
+  return pieces.bakedKeys > 0 && pieces.kept.length === 0;
+}
+
+/**
+ * The designer's stretches of a property, with any baked run cut out: a run
+ * of BAKED_MIN_KEYS or more keys, each within BAKED_MAX_GAP_FRAMES of the
+ * last. A property keyed by hand and then baked for its tail keeps its hand
+ * keys; one baked throughout keeps nothing. A kept stretch ends on the key
+ * where the baked run begins, so a move into it is still whole.
+ */
+export function splitBaked(p: RawProp, fps: number): { kept: RawProp[]; bakedKeys: number } {
+  const k = p.keys;
+  const runs: [number, number][] = [];
+  let s = 0;
+  for (let i = 1; i <= k.length; i++) {
+    const dense = i < k.length && Math.abs(k[i][0] - k[i - 1][0]) * fps <= BAKED_MAX_GAP_FRAMES;
+    if (dense) continue;
+    if (i - s >= BAKED_MIN_KEYS) runs.push([s, i - 1]);
+    s = i;
+  }
+  if (!runs.length) return { kept: [p], bakedKeys: 0 };
+  const kept: RawProp[] = [];
+  let from = 0;
+  let bakedKeys = 0;
+  for (const [a, b] of runs) {
+    if (a - from >= 1) kept.push({ ...p, keys: k.slice(from, a + 1) });
+    bakedKeys += b - a + 1;
+    from = b;
+  }
+  if (k.length - 1 - from >= 1) kept.push({ ...p, keys: k.slice(from) });
+  // A stretch that is only the baked run's own end key and nothing after it is not a stretch.
+  return { kept: kept.filter((piece) => piece.keys.length >= 2), bakedKeys };
 }
 
 /**
@@ -561,14 +681,14 @@ export function summarizeMotion(raw: MotionKeys) {
     for (const raw of mergeSeparatedPosition(c.props)) {
       const { prop: p, reordered: sorted } = inTimeOrder(raw);
       if (sorted || p.reversed) reordered++;
-      if (isBaked(p, fps)) {
-        baked.push(`${p.layer} ${propertyLabel(p)}`);
-        continue;
-      }
+      const { kept, bakedKeys } = splitBaked(p, fps);
+      if (bakedKeys) baked.push(`${p.layer} ${propertyLabel(p)}${kept.length ? " (baked part only)" : ""}`);
+      if (!kept.length) continue;
       layers.add(p.layerId);
-      clean.push(p);
-      walkProperty(p, fps, walk);
+      clean.push(kept[0]);
+      for (const piece of kept) walkProperty(piece, fps, walk);
     }
+    moves.push(...mergeSeparatedMoves(moves.splice(before)));
     staggers.push(...staggersOf({ ...c, props: clean }));
     return { id: c.id, name: c.name, frameRate: c.frameRate, animatedLayers: layers.size, keys, moves: moves.length - before };
   });
@@ -603,7 +723,7 @@ export function summarizeMotion(raw: MotionKeys) {
   const common = [...pairs.values()]
     .sort((a, b) => b.segments - a.segments)
     .slice(0, MAX_EASE_PAIRS)
-    .map((p) => ({ outInfluence: p.out, inInfluence: p.in, segments: p.segments, share: share(p.segments, pairable) }));
+    .map((p) => ({ outInfluence: p.out, inInfluence: p.in, segments: p.segments, share: share(p.segments, segments.length) }));
 
   // Overshoot and anticipation.
   const over = moves.filter((m) => m.overshoot);
@@ -669,6 +789,8 @@ export function summarizeMotion(raw: MotionKeys) {
       segments: kinds,
       leaving: startEase,
       arriving: endEase,
+      /** Segments eased to a stop at both ends; commonPairs' shares are of ALL segments. */
+      stoppingBothEnds: pairable,
       commonPairs: common,
     },
     overshoot,
@@ -721,7 +843,7 @@ export function summarizeMotion(raw: MotionKeys) {
   if (baked.length) {
     const named = baked.slice(0, 3).join(", ") + (baked.length > 3 ? `, and ${baked.length - 3} more` : "");
     result.notes.push(
-      `${baked.length} propert${baked.length === 1 ? "y is" : "ies are"} keyed on nearly every frame (baked or tracked) and left out of the statistics: ${named}.`
+      `${baked.length} propert${baked.length === 1 ? "y is" : "ies are"} keyed on nearly every frame (baked or tracked) and that part is left out of the statistics: ${named}.`
     );
   }
   if (reordered) {
@@ -775,27 +897,36 @@ export function suggestLines(x: LineInputs): string[] {
   const lines: string[] = [];
   const stepLine =
     x.steps && x.stepSeconds
-      ? `Steps (hold keys — blinks, cuts, text changes): ${x.steps}, typically ${x.stepSeconds.median}s apart`
+      ? x.steps === 1
+        ? `One step (a hold key — blink, cut or text change), after ${x.stepSeconds.median}s`
+        : `Steps (hold keys — blinks, cuts, text changes): ${x.steps}, typically ${x.stepSeconds.median}s apart`
       : null;
   if (!x.moves || !x.moveSeconds || !x.moveFrames) return stepLine ? [stepLine] : lines;
   const at = x.fps ? ` at ${x.fps}fps` : "";
   const range = x.moveSeconds.p25 === x.moveSeconds.p75 ? "" : `; most ${x.moveSeconds.p25}–${x.moveSeconds.p75}s`;
   lines.push(`Typical move: ${x.moveSeconds.median}s (${Math.round(x.moveFrames.median)}f${at})${range}`);
   const top = x.common[0];
+  // Every share here is of all segments, so the lines add up to what was read.
   if (top && top.share >= 0.25) {
     const ease =
       top.outInfluence === top.inInfluence
         ? `${top.outInfluence}% influence both ends`
         : `${top.outInfluence}% out / ${top.inInfluence}% in`;
-    lines.push(`Ease: ${ease}, speed 0 (${pct(top.share)}% of eased segments)`);
+    lines.push(`Ease: ${ease}, speed 0 (${pct(top.share)}% of segments)`);
   }
   if (x.segments >= FEW_MOVES) {
     if (x.kinds.linear === 0) lines.push("No linear motion");
     else lines.push(`Linear on ${pct(x.kinds.linear / x.segments)}% of segments`);
+    if (x.kinds.mixed / x.segments >= 0.1) lines.push(`Eased one end only on ${pct(x.kinds.mixed / x.segments)}% of segments`);
   }
   if (x.overshoot && x.overshoot.amountPercent && x.overshoot.settleSeconds) {
     const on = x.overshoot.mostOn.length ? ` (mostly ${x.overshoot.mostOn.slice(0, 2).join(", ")})` : "";
-    const elastic = x.overshoot.elastic ? `; ${x.overshoot.elastic} elastic (oscillating before settling)` : "";
+    const e = x.overshoot.elastic;
+    const elastic = !e
+      ? ""
+      : e === x.overshoot.moves
+        ? "; elastic (oscillating before settling)"
+        : `; ${e} of ${x.overshoot.moves} elastic (oscillating before settling)`;
     lines.push(
       `Overshoot on ${pct(x.overshoot.share)}% of moves${on}: ~${Math.round(x.overshoot.amountPercent.median)}% of the travel past the target, settling over ${x.overshoot.settleSeconds.median}s${elastic}`
     );

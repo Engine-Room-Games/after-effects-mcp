@@ -182,7 +182,7 @@ await check("a baked track on every frame is left out and named; the designer's 
   assert.equal(s.moves, 10);
   assert.equal(s.eases.segments.linear, 0);
   assert.ok(s.suggestedLines.includes("No linear motion"), s.suggestedLines.join("\n"));
-  assert.ok(s.notes.some((n) => /1 property is keyed on nearly every frame \(baked or tracked\) and left out of the statistics: L50 Position\./.test(n)), s.notes.join("\n"));
+  assert.ok(s.notes.some((n) => /1 property is keyed on nearly every frame \(baked or tracked\) and that part is left out of the statistics: L50 Position\./.test(n)), s.notes.join("\n"));
   assert.equal(s.staggers.top[0].layers, 10, "the track does not join the stagger");
 });
 
@@ -284,8 +284,75 @@ await check("an elastic overshoot is worded as elastic, never as a bounce", () =
     key(0, [0, 0]), key(f(6), [120, 120]), key(f(12), [95, 95]), key(f(17), [102, 102]), key(f(22), [100, 100]),
   ]);
   const s = summarizeMotion(raw([comp([p])]));
-  assert.ok(s.suggestedLines.some((l) => /1 elastic \(oscillating before settling\)/.test(l)), s.suggestedLines.join("\n"));
+  assert.ok(s.suggestedLines.some((l) => /; elastic \(oscillating before settling\)$/.test(l)), s.suggestedLines.join("\n"));
   assert.ok(!s.suggestedLines.some((l) => /Bounce/.test(l)), s.suggestedLines.join("\n"));
+});
+
+// Round-4 review fixtures (#254).
+await check("ease shares are of every segment: 1 eased in 10 is 10%, not 100% of eased", () => {
+  const props = [prop(1, "Opacity", "ADBE Opacity", [key(0, [0]), key(f(10), [100])])];
+  for (let i = 0; i < 9; i++) props.push(prop(i + 2, "Rotation", "ADBE Rotate Z", [key(0, [0], linear), key(f(10), [90], linear)]));
+  const s = summarizeMotion(raw([comp(props)]));
+  assert.equal(s.eases.commonPairs[0].share, 0.1);
+  assert.equal(s.eases.stoppingBothEnds, 1);
+  assert.ok(!s.suggestedLines.some((l) => /^Ease:/.test(l)), "10% is not the house ease");
+  assert.ok(s.suggestedLines.includes("Linear on 90% of segments"), s.suggestedLines.join("\n"));
+});
+
+await check("half-eased segments are reported as such", () => {
+  const props = [];
+  for (let i = 0; i < 10; i++) props.push(prop(i + 1, "Opacity", "ADBE Opacity", [key(0, [0], { outI: "l" }), key(f(10), [100])]));
+  const s = summarizeMotion(raw([comp(props)]));
+  assert.ok(s.suggestedLines.includes("Eased one end only on 100% of segments"), s.suggestedLines.join("\n"));
+});
+
+await check("a stop at a corner ends the move: right, stop, then down is two moves", () => {
+  const p = prop(1, "Position", "ADBE Position", [key(0, [0, 0]), key(f(15), [500, 0]), key(f(30), [500, 400])]);
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.equal(s.moves, 2);
+  assert.equal(s.overshoot.moves, 0);
+});
+
+await check("a pause mid-travel (stop, same direction) ends the move; a waypoint that flows does not", () => {
+  const stop = prop(1, "Rotation", "ADBE Rotate Z", [key(0, [0]), key(f(10), [45]), key(f(20), [90])]);
+  assert.equal(summarizeMotion(raw([comp([stop])])).moves, 2);
+  const flow = prop(1, "Rotation", "ADBE Rotate Z", [key(0, [0]), key(f(10), [45], { inE: [33, 120], outE: [33, 120] }), key(f(20), [90])]);
+  assert.equal(summarizeMotion(raw([comp([flow])])).moves, 1);
+});
+
+await check("separated X and Y keyed a little apart on one layer are one move", () => {
+  const x = prop(1, "X Position", "ADBE Position_0", [key(0, [0]), key(f(15), [500])]);
+  const y = prop(1, "Y Position", "ADBE Position_1", [key(0.2, [0]), key(0.2 + f(15), [300])]);
+  const s = summarizeMotion(raw([comp([x, y])]));
+  assert.equal(s.moves, 1);
+  assert.equal(s.durations.moveSeconds.median, 0.7);
+  assert.equal(s.byProperty[0].property, "Position");
+  // Far apart they stay two.
+  const y2 = prop(1, "Y Position", "ADBE Position_1", [key(2, [0]), key(2.5, [300])]);
+  assert.equal(summarizeMotion(raw([comp([x, y2])])).moves, 2);
+  // And another layer's Y never joins this layer's X.
+  const y3 = prop(2, "Y Position", "ADBE Position_1", [key(0.2, [0]), key(0.7, [300])]);
+  assert.equal(summarizeMotion(raw([comp([x, y3])])).moves, 2);
+});
+
+await check("designer keys plus a baked tail: the designer moves are kept, only the baked run is cut", () => {
+  const keys = [key(0, [0, 0]), key(f(6), [110, 110]), key(f(20), [100, 100])];
+  for (let i = 1; i <= 60; i++) keys.push(key(f(20 + i), [100 + i, 100], linear));
+  const s = summarizeMotion(raw([comp([prop(1, "Scale", "ADBE Scale", keys)])]));
+  assert.equal(s.moves, 1, "the pop, and nothing from the baked tail");
+  assert.equal(s.overshoot.moves, 1);
+  assert.equal(s.bakedProperties, 1);
+  assert.ok(s.notes.some((n) => /L1 Scale \(baked part only\)/.test(n)), s.notes.join("\n"));
+  assert.ok(!s.notes.some((n) => /expressions or in a precomp/.test(n)), "moves were found");
+});
+
+await check("singulars: one step, one elastic move of several", () => {
+  const blink = prop(1, "Opacity", "ADBE Opacity", [key(0, [100], hold), key(1, [0], hold)]);
+  const s = summarizeMotion(raw([comp([blink])]));
+  assert.deepEqual(s.suggestedLines, ["One step (a hold key — blink, cut or text change), after 1s"]);
+  const elastic = prop(1, "Scale", "ADBE Scale", [key(0, [0, 0]), key(f(6), [120, 120]), key(f(12), [95, 95]), key(f(17), [102, 102]), key(f(22), [100, 100])]);
+  const s2 = summarizeMotion(raw([comp([elastic, popIn(2, 0)])]));
+  assert.ok(s2.suggestedLines.some((l) => /; 1 of 2 elastic \(oscillating before settling\)$/.test(l)), s2.suggestedLines.join("\n"));
 });
 
 await check("anticipation is worded as a share of the travel", () => {
@@ -511,7 +578,7 @@ await check("classified: the tool and its gathering op are reads; it is refused 
   assert.ok(!StrictOpSchemas.analyze_motion.safeParse({ compIds: [1], layers: [2] }).success, "strict");
   const { problems } = prepareBatchSteps([{ op: "analyze_motion", args: { compIds: [1] } }]);
   assert.equal(problems.length, 1);
-  assert.match(problems[0].problem, /raw key/);
+  assert.match(problems[0].problem, /no analyze_motion of its own/);
 });
 
 // ---------------------------------------------------------------- the tool, through tools/call

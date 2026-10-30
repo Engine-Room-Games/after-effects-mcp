@@ -292,11 +292,16 @@ before — diminishing amplitude, not segment duration, because a pop's settle i
 usually longer than its approach. So `0 → 110 → 100` and `0 → 120 → 95 → 102 →
 100` are one move each, and `0 → 100 → 50` or `0 → 100 → 0` are two. A
 reversal with no ease at the key (a floor hit) is counted as an impact, and a
-move straight back to where the last one started as a return. A property keyed
-on nearly every frame (baked or tracked: 20+ keys, median gap 1.5 frames or
-less) is left out and named. A hold keyframe into a different value is a step (a blink, a cut, Source
+move straight back to where the last one started as a return. A run of 20+ keys
+each within 1.5 frames of the last (baked or tracked) is cut out and named;
+the hand keys either side of it on the same property are kept. A hold keyframe into a different value is a step (a blink, a cut, Source
 Text) — counted with its interval, never a move with eases and never a hold.
-Separated X/Y(/Z) Position keyed at the same times is merged into one move.
+Separated X/Y(/Z) Position keyed at the same times is merged into one move,
+and separated moves on one layer that overlap or meet within 0.1s are one
+move too. A key where the motion stops (speed 0 both sides) and goes on in
+another direction, or the same one, ends a move; only a stop that turns
+straight back is left for the overshoot rule. Ease shares are of every
+segment, so one eased segment in ten reads as 10%, never "100% of eased".
 Impacts are counted once per key even though the walk restarts inside a run
 after each move. A time-reversed layer's keys arrive descending;
 the panel puts them in comp-time order and swaps each key's ease sides. A move,
