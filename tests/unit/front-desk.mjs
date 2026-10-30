@@ -172,6 +172,18 @@ await check("a wait that runs out behind another session says so; one cancelled 
   lock.release(a.id);
 });
 
+await check("a resumed lease keeps its age: its holder is reported as held for as long as it really has been", async () => {
+  const lock = new DeskLock();
+  const a = await lock.acquire(req("run_batch", "A", { resume: true, heldForMs: 40_000 }));
+  const seen = [];
+  const p = lock.acquire(req("set_text", "B", { onUpdate: (l) => seen.push(l) }));
+  await sleep(10);
+  assert.ok(seen.at(-1).holder.forMs >= 40_000, `reported ${seen.at(-1).holder.forMs}ms`);
+  assert.match(describeLockWait("set_text", seen.at(-1)), /held it for 40s/);
+  lock.release(a.id);
+  lock.release((await p).id);
+});
+
 await check("a held lease is freed at its ceiling", async () => {
   const lock = new DeskLock();
   await lock.acquire(req("run_batch", "A", { holdCeilingMs: 50 }));
@@ -517,7 +529,7 @@ await check("a leftover desk file costs a lone session nothing; one left by a ru
   const t1 = Date.now();
   (await M.acquire("set_text", undefined, (m) => said.push(m))).release();
   assert.ok(Date.now() - t1 >= 400, "a batch was holding the lock: its session gets its grace");
-  assert.ok(said.some((m) => /is waiting up to 1s for the write queue: the previous front desk went away while another session's long write held it/.test(m)), said.join("\n"));
+  assert.ok(said.some((m) => /is waiting up to 0\.6s for the write queue: the previous front desk went away while another session's long write held it/.test(m)), said.join("\n"));
   await M.close();
 });
 
@@ -856,6 +868,8 @@ try {
     await until("C3 at the panel", () => ran("C3").length === 1);
     const hb = begin(B, "run_jsx", jsx("B3", 20));
     await until("B to be queued behind C3", () => hb.progress.length > 0);
+    const hbQueuedAt = Date.now();
+    await sleep(400); // let B's wait at A grow, so losing it in the handover would show
     kill(A);
     const [rc, rb] = await Promise.all([pc, hb.done]);
 
@@ -863,6 +877,11 @@ try {
     assert.match(rc.text, /went away in the middle of `run_jsx`/);
     assert.match(rc.text, /may or may not have/);
     assert.equal(rb.res.isError, undefined, `B's queued write should have moved to the new desk: ${rb.text}`);
+    // The whole wait, across the handover, and who it was behind — not just the new desk's share.
+    const b3 = rb.json();
+    assert.equal(b3.queuedBehind, "run_jsx", rb.text);
+    assert.match(b3.queuedBehindSession, new RegExp(`^desk-test-C, pid ${C.pid}$`));
+    assert.ok(b3.waitedMs >= 400, `B reported ${b3.waitedMs}ms, having waited 400ms at the dead desk alone`);
     await sleep(300);
     assert.equal(ran("C3").length, 1, "C3 ran exactly once — never re-sent");
     assert.equal(ran("B3").length, 1, "B3 ran exactly once — not lost, not doubled");

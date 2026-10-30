@@ -391,6 +391,7 @@ export class FrontDesk {
       maxDepth: num(b.maxDepth, 64),
       resume: b.resume === true,
       holdCeilingMs: num(b.holdCeilingMs, 1_200_000),
+      heldForMs: typeof b.heldForMs === "number" && b.heldForMs > 0 && b.resume === true ? b.heldForMs : undefined,
       onUpdate: (l) => { if (!finished && !res.writableEnded) res.write(line(l)); },
     };
     this.lock.acquire(request, abort.signal).then(

@@ -138,7 +138,7 @@ export function ordinal(n: number): string {
 export function describeLockWait(op: string, line: Extract<LockLine, { t: "wait" }>): string {
   if (!line.holder && line.graceMs) {
     return (
-      `\`${op}\` is waiting up to ${Math.ceil(line.graceMs / 1000)}s for the write queue: the previous front desk went ` +
+      `\`${op}\` is waiting up to ${(line.graceMs / 1000).toFixed(1)}s for the write queue: the previous front desk went ` +
       "away while another session's long write held it, and that session gets the first chance to reclaim it."
     );
   }

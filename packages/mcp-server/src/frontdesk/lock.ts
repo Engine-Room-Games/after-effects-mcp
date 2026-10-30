@@ -38,6 +38,8 @@ export interface LockRequest {
   resume?: boolean;
   /** The longest the grant may be held before the desk frees it regardless. */
   holdCeilingMs: number;
+  /** A resumed lease's age when it was lost, so its holder is reported truthfully. */
+  heldForMs?: number;
   onUpdate?: (line: Extract<LockLine, { t: "wait" }>) => void;
 }
 
@@ -222,7 +224,7 @@ export class DeskLock {
       this.release(id);
     }, req.holdCeilingMs);
     ceiling.unref?.();
-    this.setHolder({ id, op: req.op, sessionId: req.sessionId, session: req.session, since: now, ceiling });
+    this.setHolder({ id, op: req.op, sessionId: req.sessionId, session: req.session, since: now - (req.heldForMs ?? 0), ceiling });
     const wait: GrantWait | null =
       waiter && waiter.behindOther
         ? { queuedBehind: waiter.behindOther.op, queuedBehindSession: waiter.behindOther.session, waitedMs: now - waiter.enqueuedAt }

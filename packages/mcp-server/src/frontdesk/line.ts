@@ -172,7 +172,27 @@ export class SessionLine {
    * cannot grant it — stalled, or changing hands too often — is an explicit
    * failure, never a write sent without it.
    */
-  async takeSlot(op: string, signal: AbortSignal | undefined, onWait: OnWait | undefined, resume: boolean): Promise<{ slot: Slot; wait: GrantWait | null } | null> {
+  async takeSlot(
+    op: string,
+    signal: AbortSignal | undefined,
+    onWait: OnWait | undefined,
+    resume: boolean,
+    heldForMs?: number
+  ): Promise<{ slot: Slot; wait: GrantWait | null } | null> {
+    // The wait is this call's, not one desk's: a handover in the middle of it
+    // must not shorten it, or lose who it was behind, in the result.
+    const startedAt = monoMs();
+    let behind: { op: string; session: string } | null = null;
+    let handedOver = false;
+    const watch = (l: Extract<LockLine, { t: "wait" }>) => {
+      if (!behind && l.holder) behind = { op: l.holder.op, session: l.holder.session };
+      surfaceLock(op, l, onWait);
+    };
+    const whole = (w: GrantWait | null): GrantWait | null => {
+      const first = handedOver && behind ? behind : w ? { op: w.queuedBehind, session: w.queuedBehindSession } : behind;
+      if (!first || (!w && !handedOver)) return w;
+      return { queuedBehind: first.op, queuedBehindSession: first.session, waitedMs: Math.max(w?.waitedMs ?? 0, monoMs() - startedAt) };
+    };
     for (let attempt = 0; attempt < MAX_HANDOVERS; attempt++) {
       const mode = await this.ensure();
       const req = {
@@ -183,11 +203,13 @@ export class SessionLine {
         maxDepth: this.local.maxDepthLimit,
         resume,
         holdCeilingMs: this.local.holdCeilingMs + 60_000,
+        // A resumed lease keeps the age it had: "held for 40s", not "for 0s".
+        heldForMs,
       };
       if (mode.kind === "leader") {
         try {
-          const g = await mode.desk.lock.acquire({ ...req, onUpdate: (l) => surfaceLock(op, l, onWait) }, signal);
-          return { slot: { kind: "local", id: g.id, desk: mode.desk }, wait: g.wait };
+          const g = await mode.desk.lock.acquire({ ...req, onUpdate: watch }, signal);
+          return { slot: { kind: "local", id: g.id, desk: mode.desk }, wait: whole(g.wait) };
         } catch (e) {
           // Only this server's own shutdown closes its desk.
           if (e instanceof DeskClosedError) return null;
@@ -195,14 +217,15 @@ export class SessionLine {
         }
       }
       if (mode.kind !== "follower") return null;
-      const r = await remoteLock(mode, req, op, signal, onWait);
-      if (r.kind === "granted") return { slot: r.slot, wait: r.wait };
+      const r = await remoteLock(mode, req, op, signal, watch);
+      if (r.kind === "granted") return { slot: r.slot, wait: whole(r.wait) };
       if (r.kind === "error") throw r.error;
       if (r.kind === "stalled") {
         this.deskStalled(mode);
         throw new DeskPlaceLostError(op, stalledWhy(mode, "before this call's turn came"));
       }
       this.deskLost(mode);
+      handedOver = true;
     }
     throw new DeskPlaceLostError(op, `the front desk changed hands ${MAX_HANDOVERS} times while this call waited for its turn.`);
   }
@@ -545,6 +568,7 @@ class HeldDesk {
   private pending: Promise<void> | null = null;
   private lostFor: string | null = null;
   private listeners: ((why: string) => void)[] = [];
+  private readonly grantedAt = monoMs();
 
   constructor(private line: SessionLine, private op: string, first: Slot) {
     this.attach(first);
@@ -557,21 +581,25 @@ class HeldDesk {
 
   private attach(slot: Slot): void {
     this.slot = slot;
-    if (slot.kind === "remote") slot.closed.then(() => { if (this.slot === slot) this.lost(); });
+    if (slot.kind === "remote") {
+      slot.closed.then((end) => {
+        if (this.slot === slot) this.lost((end as { kind?: string } | undefined)?.kind === "stalled" ? "stalled" : "went away");
+      });
+    }
   }
 
   /** The desk says `id` is not the lease holding the lock. */
   invalidate(id: string): void {
     if (this.slot?.id === id) {
       if (this.slot.kind === "remote") this.slot.abort();
-      this.lost();
+      this.lost("no longer recognises the lease");
     }
   }
 
-  private lost(): void {
+  private lost(how: string): void {
     if (this.released || this.pending || this.lostFor) return;
     this.slot = null;
-    logger.warn(`Front desk: the desk holding \`${this.op}\`'s write lock went away; re-taking it at the next one.`);
+    logger.warn(`Front desk: the desk holding \`${this.op}\`'s write lock ${how}; re-taking it at the next one.`);
     const giveUp = (reason: string) => {
       this.lostFor =
         `This ${this.op} lost the shared After Effects write lock when the front desk changed hands (${reason}), ` +
@@ -580,7 +608,7 @@ class HeldDesk {
       for (const l of this.listeners.splice(0)) { try { l(this.lostFor); } catch {} }
     };
     this.pending = this.line
-      .takeSlot(this.op, undefined, undefined, true)
+      .takeSlot(this.op, undefined, undefined, true, monoMs() - this.grantedAt)
       .then(
         (r) => {
           if (this.released) {
@@ -759,7 +787,7 @@ function remoteLock(
   req: Record<string, unknown>,
   op: string,
   signal: AbortSignal | undefined,
-  onWait: OnWait | undefined
+  onWaitLine: (l: Extract<LockLine, { t: "wait" }>) => void
 ): Promise<LockOutcome> {
   if (signal?.aborted) return Promise.resolve({ kind: "error", error: new WriteQueueCancelledError(op) });
   return new Promise<LockOutcome>((resolve) => {
@@ -772,7 +800,7 @@ function remoteLock(
     };
     const s = deskStream(mode.port, mode.token, "/desk/lock", req, mode.idleMs, (raw) => {
       const l = raw as LockLine;
-      if (l.t === "wait") surfaceLock(op, l, onWait);
+      if (l.t === "wait") onWaitLine(l);
       else if (l.t === "granted") finish({ kind: "granted", slot: { kind: "remote", id: l.id, abort: s.abort, closed: s.closed }, wait: l.wait });
       else if (l.t === "err") finish({ kind: "error", error: fromWire(l.error) });
       else if (l.t === "moved") finish({ kind: "gone" });
