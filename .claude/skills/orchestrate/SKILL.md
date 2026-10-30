@@ -64,7 +64,7 @@ reasoning: a reviewer handed a conclusion confirms it. Brief it to read
 - `packages/jsx/*.jsx` stays ES3 (no `let`/`const`/arrows/templates/`Object.keys`);
 - nothing in `mcp-server` writes to stdout (no `console.log`);
 - no success reported for work that did not happen; free-form schemas `.strict()`;
-- the bundle stays deterministic; the four bridge-failure messages stay distinct;
+- the bundle stays deterministic; the five bridge-failure messages stay distinct;
 - the new test actually fails without the fix.
 
 Findings come back with severity (blocker / should-fix / nit) and file:line.

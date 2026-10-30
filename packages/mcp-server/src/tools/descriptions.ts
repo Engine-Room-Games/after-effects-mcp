@@ -39,7 +39,7 @@ export const descriptions: Record<string, string> = {
   create_text_layer:
     "Text layer with optional font/size/color/position/tracking. `anchorAlign` (default 'left') aligns by paragraph justification with the anchor left at [0,0], so `position` is the start of the baseline and stays right when the text changes later. Tracking is 0 unless passed. Justification is read back: the result's `justification` is what AE holds (`justificationReasserted` when a second write was needed), and if it still disagrees the layer is removed and the call throws. `boxSize` makes wrapping box text.",
   create_shape_layer: "Creates an EMPTY shape layer (no fill, stroke or shapes) — draw into it with add_shape_content: a group, then a rect/ellipse/path, then a fill or stroke inside the group. Position and Anchor Point default to [0,0], so the layer's space IS the comp's and every coordinate you add is in comp pixels; `position:'center'` gives AE's own default, which offsets a comp-space drawing by half a frame. The result echoes the position and anchor point.",
-  create_solid_layer: "Solid-color layer. color is RGB 0..1.",
+  create_solid_layer: "Solid-color layer. color is RGB 0..1 or hex.",
   create_null_layer: "Null parent layer.",
   create_adjustment_layer: "Adjustment layer — effects on it apply to layers below.",
   create_precomp_layer: "Insert an existing comp into another as a pre-comp layer.",
@@ -94,7 +94,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- shapes ----------
   set_shape_path: "Replace a shape path with new vertices/tangents/closed. `shapePath` names a path node (e.g. [\"Contents\", \"Group 1\", \"Contents\", \"Path 1\"]) or its Path property; anything else (a rect, a group) is refused. Tangents not given are straight corners; a tangent array must have one entry per vertex.",
-  add_shape_content: "Add shape content under Contents or a sub-group. `content.type` picks the node (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group); its other keys set the node's properties. Unknown or unsettable keys are NOT ignored — the node is rolled back and the error lists them, so trust a success. ORDER MATTERS: index 1 renders in FRONT and each call appends behind the last, so add front-to-back (details first, background rects last) rather than reaching for `zOrder`. A reference to one node goes stale once a sibling is added ('Object is invalid'): add every node first, then address them by name. More in ae_guide topic 'shapes'.",
+  add_shape_content: "Add shape content under Contents or a sub-group. `content.type` picks the node (rect/ellipse/star/path/fill/stroke/trim/repeater/merge/group); its other keys set the node's properties. No gradient fill/stroke: a script cannot set its colour stops. Unknown or unsettable keys are NOT ignored — the node is rolled back and the error lists them, so trust a success. ORDER MATTERS: index 1 renders in FRONT and each call appends behind the last, so add front-to-back (details first, background rects last) rather than reaching for `zOrder`. A reference to one node goes stale once a sibling is added ('Object is invalid'): add every node first, then address them by name. More in ae_guide topic 'shapes'.",
   set_shape_property: "Set a property on a shape content node. `keyframe:true` requires `time` and writes a keyframe there; otherwise it sets the static value.",
 
   // ---------- masks ----------

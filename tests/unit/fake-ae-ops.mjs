@@ -175,7 +175,7 @@ check("get_keyframes on a property with no keys is an empty list", () => {
 
 check("get_keyframes on a path that does not exist names the segment", () => {
   const ae = scene();
-  refused(ae.call("get_keyframes", { compId: 100, layerId: 2, propertyPath: ["Transform", "Wobble"] }), /\[1\]=Wobble/, "get_keyframes");
+  refused(ae.call("get_keyframes", { compId: 100, layerId: 2, propertyPath: ["Transform", "Wobble"] }), /no "Wobble" \(segment 1\).*'Position' = ADBE Position/, "get_keyframes");
 });
 
 check("set_interpolation sets in and out on the one key it names, and not the other way round", () => {
