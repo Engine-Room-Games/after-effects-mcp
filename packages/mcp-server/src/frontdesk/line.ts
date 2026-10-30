@@ -9,6 +9,7 @@ import { DESK_ID, DESK_NONCE_HEADER, DESK_PROTOCOL, FEATURE_YIELD_READS, DESK_TO
 import { DeadlinePassedError, FrontDesk, LeaseNotHeldError, deskProof, type DeskForwarder } from "./desk.js";
 import { DeskClosedError } from "./lock.js";
 import { describeAhead, describeLockWait, fromWire, type DeskAhead, type GrantWait, type LockLine, type OpLine } from "./protocol.js";
+import { displayOp } from "../util/opNames.js";
 
 /**
  * One session's way to After Effects when several sessions share it (issue #223).
@@ -414,9 +415,9 @@ export class SessionLine {
         case "rejected":
           throw new Error(
             r.status === 413
-              ? `\`${op}\` was not sent: its request is larger than the front desk accepts. Nothing reached ` +
+              ? `\`${displayOp(op)}\` was not sent: its request is larger than the front desk accepts. Nothing reached ` +
                   "After Effects. Split the work into smaller calls — several smaller run_batch calls rather than one."
-              : `\`${op}\` was not sent: the front desk refused it with HTTP ${r.status}, which this server does not ` +
+              : `\`${displayOp(op)}\` was not sent: the front desk refused it with HTTP ${r.status}, which this server does not ` +
                   "expect — probably a different version of the server is running the desk. Nothing reached After Effects; " +
                   "re-sending is safe, and restarting the other AI session's MCP server would end the mismatch."
           );
@@ -653,10 +654,10 @@ class HeldDesk {
   private lost(how: string): void {
     if (this.released || this.pending || this.lostFor) return;
     this.slot = null;
-    logger.warn(`Front desk: the desk holding \`${this.op}\`'s write lock ${how}; re-taking it at the next one.`);
+    logger.warn(`Front desk: the desk holding \`${displayOp(this.op)}\`'s write lock ${how}; re-taking it at the next one.`);
     const giveUp = (reason: string) => {
       this.lostFor =
-        `This ${this.op} lost the shared After Effects write lock when the front desk changed hands (${reason}), ` +
+        `This ${displayOp(this.op)} lost the shared After Effects write lock when the front desk changed hands (${reason}), ` +
         "so another AI session's writes may have landed between its steps. Read the comp back before relying on its order.";
       logger.warn(`Front desk: ${this.lostFor}`);
       for (const l of this.listeners.splice(0)) { try { l(this.lostFor); } catch {} }

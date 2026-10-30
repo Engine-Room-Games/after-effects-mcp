@@ -250,10 +250,9 @@ export function createServer(opts: CreateServerOptions = {}) {
     onRendered: (items) => markRendered(line, internalVia(() => false), items),
   });
   const snapshots = new SnapshotStore();
-  // A chunked run_batch on a panel reporting `server-drives-jobs` is driven
-  // from here, one `_continue_job` per chunk under the batch's own lease
-  // (issue #220, stage 5; jobs/batchDriver.ts). Older panels drive their own
-  // and report over the event socket below.
+  // Every chunked run_batch is driven from here, one `_continue_job` per
+  // chunk under the batch's own lease (issue #220, stage 5;
+  // jobs/batchDriver.ts). The panel no longer drives any (issue #243).
   let closing = false;
   const sendChunkWrite = internalVia(() => true);
   const batches = new BatchDriver(jobs, {

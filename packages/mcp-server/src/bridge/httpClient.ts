@@ -2,6 +2,7 @@ import type { AeSourceInfo } from "../util/errors.js";
 import { AeError, BridgeAuthError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, isResetError, isTimeoutError, isUnsentError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { authHeaders, DEFAULT_PORT, discoverPort, locatePanel, panelToken, pinnedPort, portCandidates, type LocateResult, type PanelHealth } from "./discovery.js";
+import { displayOp } from "../util/opNames.js";
 
 interface OpResultOk { ok: true; result: unknown; }
 interface OpResultErr { ok: false; error: string; code?: string; stack?: string; line?: number; source?: AeSourceInfo; }
@@ -248,7 +249,7 @@ export class HttpClient {
       const located = await this.rediscover();
       if (located.found && located.found.port !== refusedPort) {
         logger.warn(
-          `\`${op}\` was refused on port ${refusedPort}; the panel is answering on port ${located.found.port}. Switching and re-sending once.`
+          `\`${displayOp(op)}\` was refused on port ${refusedPort}; the panel is answering on port ${located.found.port}. Switching and re-sending once.`
         );
         await this.switchPort(located.found.port);
         opts.beforeRetry?.();

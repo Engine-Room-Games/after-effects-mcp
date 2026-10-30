@@ -1,3 +1,4 @@
+import { displayOp } from "./opNames.js";
 export class BridgeUnreachableError extends Error {
   constructor(public port: number, cause?: Error) {
     super(BridgeUnreachableError.message(port, cause));
@@ -193,7 +194,7 @@ export class BridgeTimeoutError extends Error {
     opts: TimeoutOpts = {}
   ): string {
     const secs = secondsText(timeoutMs);
-    const what = opts.op ? `\`${opts.op}\`` : "the call";
+    const what = opts.op ? `\`${displayOp(opts.op)}\`` : "the call";
     const t = opts.timing;
     // Only worth a sentence when the call visibly outlasted its limit; a few
     // hundred milliseconds of scheduling is not a story.
@@ -260,7 +261,7 @@ export class BridgeResetError extends Error {
     this.name = "BridgeResetError";
   }
   static message(port: number, op?: string, cause?: Error): string {
-    const what = op ? `\`${op}\`` : "the call";
+    const what = op ? `\`${displayOp(op)}\`` : "the call";
     return [
       `The After Effects panel at http://127.0.0.1:${port} dropped the connection in the middle of ${what}.`,
       cause ? `Underlying error: ${errorChainText(cause)}` : "",
@@ -452,12 +453,12 @@ export class WriteQueueWaitError extends Error {
   static message(op: string, waitedMs: number, behind: string, confirmation?: string): string {
     const secs = Math.round(waitedMs / 1000);
     return [
-      `\`${op}\` waited ${secs}s behind \`${behind}\` for the After Effects write queue and was dropped without running.`,
+      `\`${displayOp(op)}\` waited ${secs}s behind \`${displayOp(behind)}\` for the After Effects write queue and was dropped without running.`,
       // Its clock was stopped while that op waited on a person (issue #245),
       // so the seconds above are all spent on work, never on the dialog.
       ...(confirmation
         ? [
-            `It also waited while \`${confirmation}\` waited for the user to answer a confirmation prompt; that time is not`,
+            `It also waited while \`${displayOp(confirmation)}\` waited for the user to answer a confirmation prompt; that time is not`,
             "counted in the figure above.",
           ]
         : []),
@@ -491,12 +492,12 @@ export class WriteQueueFullError extends Error {
   }
   static message(op: string, maxDepth: number, behind: string, confirmation?: string): string {
     return [
-      `The After Effects write queue is full — ${maxDepth} calls are already waiting, so \`${op}\` was refused.`,
+      `The After Effects write queue is full — ${maxDepth} calls are already waiting, so \`${displayOp(op)}\` was refused.`,
       "",
       `Nothing was written. Writes are serialized so they land in the order you sent them,`,
       confirmation
-        ? `and \`${confirmation}\` is holding the queue up while it waits for the user to answer a confirmation prompt — ask them to answer it.`
-        : `and \`${behind}\` is holding the queue up.`,
+        ? `and \`${displayOp(confirmation)}\` is holding the queue up while it waits for the user to answer a confirmation prompt — ask them to answer it.`
+        : `and \`${displayOp(behind)}\` is holding the queue up.`,
       "",
       "Stop issuing writes and let it drain — reads are not queued, so list_/get_ calls",
       "still work. If you have this much independent work to do, send it as one",
@@ -515,7 +516,7 @@ export class WriteQueueFullError extends Error {
  */
 export class WriteQueueCancelledError extends Error {
   constructor(public op: string) {
-    super(`\`${op}\` was cancelled while waiting for the After Effects write queue. It never ran, and nothing was changed.`);
+    super(`\`${displayOp(op)}\` was cancelled while waiting for the After Effects write queue. It never ran, and nothing was changed.`);
     this.name = "WriteQueueCancelledError";
   }
 }
@@ -642,7 +643,7 @@ export class DeskWaitError extends WriteQueueWaitError {
   static text(op: string, waitedMs: number, behind: string, behindSession: string): string {
     const secs = Math.round(waitedMs / 1000);
     return [
-      `\`${op}\` waited ${secs}s behind another session's \`${behind}\` (${behindSession}) for the After Effects write queue and was dropped without running.`,
+      `\`${displayOp(op)}\` waited ${secs}s behind another session's \`${displayOp(behind)}\` (${behindSession}) for the After Effects write queue and was dropped without running.`,
       "",
       "Another AI session is connected to the same After Effects, and its writes and",
       "this session's writes take turns. This call never reached After Effects, so",
@@ -679,8 +680,8 @@ export class FrontDeskLostError extends BridgeResetError {
   static text(op: string, how: "exited" | "stalled" = "exited"): string {
     const what =
       how === "stalled"
-        ? "stopped answering in the middle of `" + op + "` — the server process running it is suspended or hung."
-        : "went away in the middle of `" + op + "` — the server process running it exited.";
+        ? "stopped answering in the middle of `" + displayOp(op) + "` — the server process running it is suspended or hung."
+        : "went away in the middle of `" + displayOp(op) + "` — the server process running it exited.";
     return [
       `The front desk this session shares with other AI sessions on the same After Effects ${what}`,
       "",
@@ -717,7 +718,7 @@ export class DeskPlaceLostError extends WriteQueueWaitError {
   }
   static text(op: string, why: string): string {
     return [
-      `\`${op}\` was not sent: ${why}`,
+      `\`${displayOp(op)}\` was not sent: ${why}`,
       "",
       "Several AI sessions share this After Effects through a front desk run by one of",
       "their servers, and this call's place in the shared write queue is gone. It never",
