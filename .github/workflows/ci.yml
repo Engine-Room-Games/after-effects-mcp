@@ -336,6 +336,7 @@ jobs:
       - name: The ops added in 0.4.0 behave
         run: |
           node tests/unit/comp-snapshot.mjs
+          node tests/unit/comp-diff-server.mjs
           node tests/unit/duplicate-comp.mjs
           node tests/unit/comp-checkpoint.mjs
           node tests/unit/audio-cues.mjs

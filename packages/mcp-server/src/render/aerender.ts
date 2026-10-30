@@ -374,12 +374,9 @@ export function verifyOutputs(
       problems.push(`output module ${o.index} has no file`);
       continue;
     }
-    const seq = /\[(#+)\]/.exec(path.basename(o.path));
-    if (seq) {
+    const re = sequenceMatcher(path.basename(o.path));
+    if (re) {
       const dir = path.dirname(o.path);
-      const base = path.basename(o.path);
-      const prefix = base.slice(0, seq.index);
-      const suffix = base.slice(seq.index + seq[0].length);
       let names: string[] = [];
       try {
         names = fs.readdirSync(dir);
@@ -387,7 +384,6 @@ export function verifyOutputs(
         problems.push(`the folder ${dir} cannot be read`);
         continue;
       }
-      const re = new RegExp("^" + escapeRe(prefix) + "\\d+" + escapeRe(suffix) + "$");
       let files = 0;
       let bytes = 0;
       for (const n of names) {
@@ -482,8 +478,26 @@ interface Running {
   startedAt: number;
   /** The private copy of the saved .aep every item renders from. */
   snapshot: string;
+  /** Where the copy sits, and the folder everything the job writes is inside (#215). */
+  layout: SnapshotLayout;
   /** When the snapshot folder's mtime was last refreshed (see touchSnapshot). */
   touchedAt: number;
+  /** Outputs that could not be moved out of the job folder (#215), for a cancel's report. */
+  relocateProblems: string[];
+  /** The current item's output files as they were before it rendered. */
+  before: Map<string, FileStamp>;
+  /**
+   * Partial output of a cancelled item left in the job folder because the
+   * asked path held a file from before the render. The job folder is then
+   * kept (only the copy is removed) so these survive the job's end.
+   */
+  kept: Map<string, string>;
+  /** Set while cancel() runs; run() waits on it before removing the job folder. */
+  cancelDone: Promise<void> | null;
+  /** The current item's aerender exited 0: it is finished and being verified, not interrupted (#217). */
+  exitedOk: boolean;
+  /** A cancel came while the current item was being verified: decide it, then start no other. */
+  stopAfterItem: boolean;
 }
 
 export interface RenderRunnerOptions {
@@ -546,20 +560,322 @@ export interface RenderRunnerOptions {
  * #145). aerender's own missing-footage line, and `missingFootageHint`, remain
  * the second layer. The copy keeps the project's file name, so aerender's
  * messages read the same.
+ *
+ * Why the copy sits at the bottom of a CHAIN OF ONE-LETTER FOLDERS as deep as
+ * the project's own folder (`<tmp>/ae-mcp-render/<jobId>/a/a/a/a/a/show.aep`
+ * for `/Users/me/work/show/show.aep`, two spare levels included) — issue #215,
+ * MEASURED on 26.5 (macOS): an output module's folder is saved as an alias
+ * (`fullpath` plus ascend counts) and a file name, and aerender uses the
+ * RELATIVE form whenever the folder it names exists next to the project it
+ * was given. With the copy directly in `<jobId>/`, an output beside the
+ * project was written into the job folder and deleted with it, and an output
+ * one folder up landed in the shared `ae-mcp-render/` root and was never
+ * cleaned. In the chain, every folder the ascend counts can climb to is one
+ * of this job's own. The relative form of an output that is not in the
+ * project's folder or an ancestor of it continues below the climb with a
+ * real folder name — never the chain's letter, which is chosen to match no
+ * name in the project's or any output's path — so it names nothing, and
+ * aerender uses the absolute path. An output in the project's folder or an
+ * ancestor lands in a chain folder; `relocateShadowOutputs` moves it to
+ * where the user asked. The chain is as deep as the deeper of the project's
+ * given and real (symlinks resolved) spellings, plus spare levels, because
+ * which spelling After Effects counts against is not measured. Letters keep
+ * the path short on Windows, where a mirror of real names doubled it.
  */
-export function snapshotProject(projectPath: string, jobId: string, tmpRoot: string = os.tmpdir()): string {
-  const dir = path.join(tmpRoot, "ae-mcp-render", jobId);
-  const snap = path.join(dir, path.basename(projectPath));
+export function snapshotProject(
+  projectPath: string,
+  jobId: string,
+  tmpRoot: string = os.tmpdir(),
+  outputPaths: string[] = []
+): SnapshotLayout {
+  const layout = snapshotLayout(projectPath, jobId, tmpRoot, outputPaths);
   try {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.copyFileSync(projectPath, snap);
+    fs.mkdirSync(path.dirname(layout.snap), { recursive: true });
+    fs.copyFileSync(projectPath, layout.snap);
   } catch (e) {
-    removeSnapshot(snap);
+    removeSnapshot(layout.jobDir);
     throw new Error(
-      `Could not copy the project to ${snap} for the render (${(e as Error).message}), so nothing was rendered.`
+      `Could not copy the project to ${layout.snap} for the render (${(e as Error).message}), so nothing was rendered.`
     );
   }
-  return snap;
+  return layout;
+}
+
+/** Where a job's copy lives, and the chain of folders above it (#215). */
+export interface SnapshotLayout {
+  /** `<tmpRoot>/ae-mcp-render/<jobId>` — everything the job writes is inside it. */
+  jobDir: string;
+  /** The copy aerender renders. */
+  snap: string;
+  /** How many chain folders lie between `jobDir` and the copy. */
+  depth: number;
+  /** The one name every chain folder has. */
+  name: string;
+}
+
+/** Levels the ascend counts may climb past the deepest spelling of the project's folder we know. */
+export const SPARE_LEVELS = 2;
+const CHAIN_NAMES = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+/** A job's own folder. Derived, never searched for. */
+export function jobFolder(tmpRoot: string, jobId: string, p: path.PlatformPath = path): string {
+  return p.join(tmpRoot, "ae-mcp-render", jobId);
+}
+
+/** The folder names of a path below its root. */
+function segments(dir: string, p: path.PlatformPath): string[] {
+  return dir.slice(p.parse(dir).root.length).split(/[\\/]+/).filter(Boolean);
+}
+
+/**
+ * Lay out a job's copy. `real` resolves symlinks (a test's stand-in); the
+ * chain's letter is the first that is no folder or file name, in any case, of
+ * the project's or any output's path in either spelling.
+ */
+export function snapshotLayout(
+  projectPath: string,
+  jobId: string,
+  tmpRoot: string = os.tmpdir(),
+  outputPaths: string[] = [],
+  p: path.PlatformPath = path,
+  real: (dir: string) => string = realOrSelf
+): SnapshotLayout {
+  const given = p.dirname(projectPath);
+  const depth = Math.max(segments(given, p).length, segments(real(given), p).length) + SPARE_LEVELS;
+  const used = new Set<string>();
+  for (const f of [projectPath, ...outputPaths]) {
+    const d = p.dirname(f);
+    for (const s of [...segments(f, p), ...segments(real(d), p)]) used.add(s.toLowerCase());
+  }
+  let name = "";
+  for (const c of CHAIN_NAMES) {
+    if (!used.has(c)) {
+      name = c;
+      break;
+    }
+  }
+  if (!name) {
+    let n = 0;
+    while (used.has(`m${n}`)) n++;
+    name = `m${n}`;
+  }
+  const jobDir = jobFolder(tmpRoot, jobId, p);
+  const snap = p.join(jobDir, ...new Array<string>(depth).fill(name), p.basename(projectPath));
+  return { jobDir, snap, depth, name };
+}
+
+/** Levels from `dir` up to `anc`, or null when `anc` is not `dir` or above it. */
+function levelsUp(anc: string, dir: string, p: path.PlatformPath): number | null {
+  const rel = p.relative(anc, dir);
+  if (rel === "") return 0;
+  if (rel.startsWith("..") || p.isAbsolute(rel)) return null;
+  return rel.split(/[\\/]+/).filter(Boolean).length;
+}
+
+/**
+ * The chain folders aerender writes `outputPath` into if it resolves the
+ * output's folder relative to the copy (#215): one per spelling (given, real)
+ * of the project's and the output's folders in which the output's folder is
+ * the project's or an ancestor of it. Empty for any other output — aerender
+ * writes those by their absolute path.
+ */
+export function shadowDirs(
+  outputPath: string,
+  projectPath: string,
+  layout: SnapshotLayout,
+  p: path.PlatformPath = path,
+  real: (dir: string) => string = realOrSelf
+): string[] {
+  const projDirs = [p.dirname(projectPath), real(p.dirname(projectPath))];
+  const outDirs = [p.dirname(outputPath), real(p.dirname(outputPath))];
+  const out: string[] = [];
+  for (const pd of projDirs) {
+    for (const od of outDirs) {
+      const k = levelsUp(od, pd, p);
+      if (k === null || k > layout.depth) continue;
+      const dir = p.join(layout.jobDir, ...new Array<string>(layout.depth - k).fill(layout.name));
+      if (!out.includes(dir)) out.push(dir);
+    }
+  }
+  return out;
+}
+
+/** The frame files of an `[####]` image-sequence name, or null when `base` is not one. */
+function sequenceMatcher(base: string): RegExp | null {
+  const seq = /\[(#+)\]/.exec(base);
+  if (!seq) return null;
+  const prefix = base.slice(0, seq.index);
+  const suffix = base.slice(seq.index + seq[0].length);
+  return new RegExp("^" + escapeRe(prefix) + "\\d+" + escapeRe(suffix) + "$");
+}
+
+function moveFile(from: string, to: string): void {
+  try {
+    fs.renameSync(from, to);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EXDEV") throw e;
+    // The temp folder and the output are on different volumes.
+    fs.copyFileSync(from, to);
+    fs.unlinkSync(from);
+  }
+}
+
+/** Every file in a job folder other than the copy itself — output aerender wrote there. */
+export function strayFiles(layout: SnapshotLayout): string[] {
+  const out: string[] = [];
+  const walk = (dir: string, depth: number) => {
+    if (depth > 256) return;
+    let ents: fs.Dirent[];
+    try {
+      ents = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of ents) {
+      const f = path.join(dir, e.name);
+      if (e.isDirectory()) walk(f, depth + 1);
+      else if (f !== layout.snap) out.push(f);
+    }
+  };
+  walk(layout.jobDir, 0);
+  return out;
+}
+
+/**
+ * Move every file aerender wrote inside the job folder to the output it
+ * belongs to (#215). The WHOLE job folder is scanned, not only the folders
+ * `shadowDirs` predicts, so a resolution counted against a spelling of the
+ * project's path this did not foresee is still caught. A file belongs to the
+ * output whose file name it has (or whose `[####]` pattern it matches); when
+ * two outputs share a name, the one whose predicted folder it is in. A file
+ * no output claims is left, and reported by the caller through `strayFiles`.
+ *
+ * Called after every aerender exit — success, failure or cancel — so a file
+ * is where the user asked whenever there is a file at all: a failure that
+ * says "left in place", or a cancel that names the partial file, must be
+ * true. Never throws: a move that fails is a problem the job reports, because
+ * the file is about to be deleted with the copy.
+ */
+export function relocateShadowOutputs(
+  outputs: RenderOutputPlan[],
+  projectPath: string,
+  layout: SnapshotLayout,
+  /**
+   * A cancelled render's partial output must never replace a file that was
+   * there before the render: when this says so for a destination, the file
+   * stays in the job folder and is named in `kept` with the exact path it
+   * belongs at — a sequence's frames one by one — instead of being moved.
+   */
+  keep?: (dest: string) => boolean
+): { moved: string[]; problems: string[]; kept: { from: string; to: string }[] } {
+  const moved: string[] = [];
+  const problems: string[] = [];
+  const kept: { from: string; to: string }[] = [];
+  const claims = outputs
+    .filter((o): o is RenderOutputPlan & { path: string } => !!o.path)
+    .map((o) => {
+      const base = path.basename(o.path);
+      const re = sequenceMatcher(base);
+      return { o, seq: !!re, matches: (n: string) => (re ? re.test(n) : n === base), dirs: shadowDirs(o.path, projectPath, layout) };
+    });
+  for (const f of strayFiles(layout)) {
+    const name = path.basename(f);
+    let owners = claims.filter((c) => c.matches(name));
+    if (owners.length > 1) owners = owners.filter((c) => c.dirs.includes(path.dirname(f)));
+    if (owners.length !== 1) continue;
+    const to = path.join(path.dirname(owners[0].o.path), name);
+    if (keep?.(to)) {
+      kept.push({ from: f, to });
+      continue;
+    }
+    try {
+      moveFile(f, to);
+      moved.push(to);
+    } catch (e) {
+      problems.push(
+        `After Effects wrote ${to} into the render's private copy folder (${f}) and moving it out failed: ` +
+          `${(e as Error).message}`
+      );
+    }
+  }
+  return { moved, problems, kept };
+}
+
+/** What a file looked like before a render, to tell it from one the render wrote. */
+export interface FileStamp {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+}
+
+function stampOf(f: string): FileStamp | null {
+  try {
+    const st = fs.statSync(f);
+    return st.isFile() ? { ino: st.ino, size: st.size, mtimeMs: st.mtimeMs } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The files in `o`'s folder that a `[####]` pattern names, or `[o]` itself. */
+function outputFiles(o: string): string[] {
+  const re = sequenceMatcher(path.basename(o));
+  if (!re) return [o];
+  try {
+    return fs.readdirSync(path.dirname(o)).filter((n) => re.test(n)).map((n) => path.join(path.dirname(o), n));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Every file an item's outputs could land on that exists before it renders —
+ * a movie's path, every frame of a sequence's pattern — with its stamp. A
+ * render with `overwrite:true` starts with these in place.
+ */
+export function stampOutputs(outputs: RenderOutputPlan[]): Map<string, FileStamp> {
+  const out = new Map<string, FileStamp>();
+  for (const o of outputs) {
+    if (!o.path) continue;
+    for (const f of outputFiles(o.path)) {
+      const st = stampOf(f);
+      if (st) out.set(f, st);
+    }
+  }
+  return out;
+}
+
+/** True when `f` is still exactly the file it was before the render: same inode, size and time. */
+export function unchangedSince(f: string, before: Map<string, FileStamp>): boolean {
+  const was = before.get(f);
+  if (!was) return false;
+  const now = stampOf(f);
+  return !!now && now.ino === was.ino && now.size === was.size && now.mtimeMs === was.mtimeMs;
+}
+
+/**
+ * The partial output a cancelled item left (#215 review): an output at the
+ * asked path counts only when this render wrote it — a file that was there
+ * before and is unchanged is a previous render's, complete, and never a
+ * partial — plus anything `kept` in the job folder because the asked path
+ * held such a file. Every file is named exactly — a sequence's frames one by
+ * one, never by its pattern, which would also cover frames from an earlier
+ * render that are left as they were (#217 review).
+ */
+export function cancelledPartials(
+  outputs: RenderOutputPlan[],
+  before: Map<string, FileStamp>,
+  kept: string[] = []
+): string[] {
+  const found: string[] = [];
+  for (const o of outputs) {
+    if (!o.path) continue;
+    for (const f of outputFiles(o.path)) {
+      if (stampOf(f) && !unchangedSince(f, before) && !found.includes(f)) found.push(f);
+    }
+  }
+  for (const k of kept) if (!found.includes(k)) found.push(k);
+  return found;
 }
 
 /** How old another job's snapshot folder must be before a new render clears it away. */
@@ -582,8 +898,8 @@ export const STALE_SNAPSHOT_MS = 24 * 60 * 60 * 1000;
  * age limit is not mistaken for a leftover by another session's sweep. Called
  * as the job runs; never throws.
  */
-export function touchSnapshot(snap: string, now: Date = new Date()): void {
-  try { fs.utimesSync(path.dirname(snap), now, now); } catch {}
+export function touchSnapshot(jobDir: string, now: Date = new Date()): void {
+  try { fs.utimesSync(jobDir, now, now); } catch {}
 }
 
 /** How often a running job refreshes its snapshot folder's age. */
@@ -608,7 +924,9 @@ export function sweepStaleSnapshots(
     const dir = path.join(root, n);
     try {
       const st = fs.statSync(dir);
-      if (!st.isDirectory() || now - st.mtimeMs < maxAgeMs) continue;
+      // A plain file here is an output an older version let aerender write
+      // into this folder (#215) — never anything a render still needs.
+      if (now - st.mtimeMs < maxAgeMs) continue;
       fs.rmSync(dir, { recursive: true, force: true });
       removed.push(dir);
     } catch (e) {
@@ -618,11 +936,13 @@ export function sweepStaleSnapshots(
   return removed;
 }
 
-/** Remove a snapshot and the per-job folder it was made in — and nothing else. */
-export function removeSnapshot(snap: string): void {
-  const dir = path.dirname(snap);
-  if (path.basename(path.dirname(dir)) !== "ae-mcp-render") return;
-  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+/**
+ * Remove a job's folder (`jobFolder`), copy and chain included — and nothing
+ * else: a path that is not an `ae-mcp-render/<jobId>` folder is left alone.
+ */
+export function removeSnapshot(jobDir: string): void {
+  if (path.basename(path.dirname(jobDir)) !== "ae-mcp-render") return;
+  try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch {}
 }
 
 /**
@@ -1182,7 +1502,9 @@ export class RenderRunner {
     if (this.current) throw new Error(`A render is already running (job ${this.current.jobId}).`);
     const jobId = `r_${Date.now()}_${++seq}`;
     sweepStaleSnapshots(jobId, this.tmpRoot);
-    const snapshot = snapshotProject(plan.projectPath, jobId, this.tmpRoot);
+    const outputPaths = plan.items.flatMap((i) => i.outputs.map((o) => o.path).filter((x): x is string => !!x));
+    const layout = snapshotProject(plan.projectPath, jobId, this.tmpRoot, outputPaths);
+    const snapshot = layout.snap;
     const totalFrames = Math.max(1, plan.items.reduce((n, i) => n + Math.max(0, i.frames || 0), 0));
     const r: Running = {
       jobId,
@@ -1201,7 +1523,14 @@ export class RenderRunner {
       rendered: [],
       startedAt: Date.now(),
       snapshot,
+      layout,
       touchedAt: Date.now(),
+      relocateProblems: [],
+      before: new Map(),
+      kept: new Map(),
+      cancelDone: null,
+      exitedOk: false,
+      stopAfterItem: false,
     };
     this.current = r;
     this.arm();
@@ -1216,7 +1545,14 @@ export class RenderRunner {
       const items = r.plan.items;
       for (let i = 0; i < items.length; i++) {
         if (r.cancelled) break;
+        if (r.stopAfterItem) {
+          // A cancel arrived while the previous item was being verified: that
+          // item was decided; no later one starts.
+          r.cancelled = true;
+          break;
+        }
         const item = items[i];
+        r.exitedOk = false;
         r.itemPos = i;
         r.itemFrames = 0;
         const label = `"${item.compName ?? "?"}" (render queue item ${item.index}, ${i + 1} of ${items.length})`;
@@ -1227,10 +1563,29 @@ export class RenderRunner {
           `Starting aerender for ${label} — a background copy of After Effects takes a while to launch`
         );
         const itemStart = Date.now();
+        r.before = stampOutputs(item.outputs);
         r.touchedAt = itemStart;
-        touchSnapshot(r.snapshot);
+        touchSnapshot(r.layout.jobDir);
         const outcome = await this.renderItem(r, item, label);
+        // Before any verdict, and before a cancel's: an output aerender
+        // resolved relative to the copy is in the job folder, and goes where
+        // it was asked (#215) — a partial one too, so a cancel can name it.
+        const relocated = this.relocate(r, item);
         if (r.cancelled) break;
+        if (relocated.problems.length) {
+          status = "failed";
+          r.settled = true;
+          await this.unqueue(r);
+          this.jobs.fail(
+            r.jobId,
+            `aerender finished ${label} but its output could not be put where it was asked: ` +
+              `${relocated.problems.join("; ")}. Nothing is claimed rendered for that item.` +
+              this.writtenText(r, item) +
+              this.renderedSoFar(r) +
+              this.unqueueText(r)
+          );
+          return;
+        }
         if (outcome.spawnError || outcome.code !== 0) {
           status = "failed";
           r.settled = true;
@@ -1246,10 +1601,11 @@ export class RenderRunner {
             r.jobId,
             `aerender finished ${label} (exit ${outcome.code}) but reported ` +
               (outcome.missing.some(isMissingFootageLine) ? "missing footage" : "errors logged during the render") +
-              `, so the file at ${item.outputs.map((x) => x.path).join(", ")} cannot be trusted — it may hold ` +
-              `After Effects' missing-footage placeholder, or be unreadable. It is NOT reported as rendered. The file ` +
-              `was left in place: if the user opens it and judges the errors below harmless, it is theirs to use. ` +
-              `aerender said: ` +
+              `, so what it wrote cannot be trusted — it may hold After Effects' missing-footage placeholder, or ` +
+              `be unreadable. It is NOT reported as rendered. What it wrote was left on disk: if the user opens it ` +
+              `and judges the errors below harmless, it is theirs to use.` +
+              this.writtenText(r, item) +
+              ` aerender said: ` +
               `${outcome.missing.join(" | ")}.` +
               missingFootageHint(outcome.missing) +
               this.renderedSoFar(r) +
@@ -1257,19 +1613,36 @@ export class RenderRunner {
           );
           return;
         }
-        const checked = verifyOutputs(item.outputs, itemStart);
+        // Judge the files where they are: an output kept in the job folder
+        // (the asked path held an earlier file) is checked there, and only
+        // moved over the earlier file once it has passed (#217).
+        const checked = this.verifyItem(r, item, itemStart);
         const verified = checked.verified;
         const problems = [...checked.problems, ...renderEvidenceProblems(item, r.itemFrames, verified)];
+        if (!problems.length) {
+          const promoted = this.promoteKept(r, item);
+          problems.push(...promoted);
+          if (!promoted.length) verified.forEach((v, n) => (v.path = checked.finals[n]));
+        }
         if (problems.length) {
           status = "failed";
           r.settled = true;
           await this.unqueue(r);
+          // A file kept on purpose (writtenText names it) is not an
+          // unforeseen #215 resolution, and is not deleted with the job.
+          const stray = strayFiles(r.layout).filter((f) => !r.kept.has(f));
           this.jobs.fail(
             r.jobId,
             `aerender reported success on ${label} but the output cannot be verified: ${problems.join("; ")}. ` +
               `Nothing is claimed rendered for that item.` +
+              (stray.length
+                ? ` aerender wrote ${stray.slice(0, 5).join(", ")} inside the render's private copy folder, which is ` +
+                  `deleted as the job ends — After Effects resolved an output path relative to the copy in a way ` +
+                  `this server did not foresee (issue #215).`
+                : "") +
               (outcome.errors.length ? ` aerender's error lines: ${outcome.errors.join(" | ")}.` : "") +
-              ` Last output: ${outcome.tail.join(" | ")}` +
+              ` Last output: ${outcome.tail.join(" | ")}.` +
+              this.writtenText(r, item) +
               this.renderedSoFar(r) +
               this.unqueueText(r)
           );
@@ -1278,7 +1651,7 @@ export class RenderRunner {
         // The count reported is never lower than what the file proves: the
         // live run (26.5) read 26–29 of 30 progress lines on 6 of 14 good
         // renders — late or coalesced lines — while the files were complete.
-        const onDisk = verifiedFrameCount(item, verified);
+        const onDisk = checked.framesOnDisk;
         const frames = Math.max(r.itemFrames, onDisk ?? 0);
         const done: RenderedItem = {
           index: item.index,
@@ -1304,23 +1677,25 @@ export class RenderRunner {
       }
       if (r.cancelled) {
         status = "cancelled";
-        // Normally cancel() has settled the job with its own report. When it
-        // could not see the process exit it reported stopped:false and left the
-        // job open — and this is that exit, arriving late. Settle it here, or
-        // await_job waits for ever on a render that is over.
-        if (!r.settled && r.cancelGaveUp) {
-          r.settled = true;
-          await this.unqueue(r);
-          this.jobs.cancel(r.jobId, {
-            jobId: r.jobId,
-            stopped: true,
-            wasRunning: true,
-            rendered: r.rendered,
-            partialFiles: existingOutputs(r.plan.items[r.itemPos]?.outputs ?? []),
-            note:
-              "aerender exited after cancel_job had reported it still running; the render is stopped now. " +
-              "The interrupted item's output, if any, is incomplete.",
-          });
+        // cancel() is still stopping the engine, which may yet write the
+        // partial file into the job folder; that folder must not be removed
+        // under it (#215 review: a cancelled partial beside the project was
+        // deleted with the copy, and partialFiles came back empty).
+        if (r.cancelDone) await r.cancelDone;
+        // Normally cancel() has settled the job with its own report. Two cases
+        // are left to here: cancel() could not see the process exit and
+        // reported stopped:false (this is that exit, arriving late), or the
+        // cancel came while an item aerender had finished was being verified
+        // and returned at once (stopAfterItem). Settle it, or await_job waits
+        // for ever on a render that is over.
+        if (!r.settled && (r.cancelGaveUp || r.stopAfterItem)) {
+          await this.settleCancelled(
+            r,
+            r.cancelGaveUp
+              ? "aerender exited after cancel_job had reported it still running. "
+              : "Cancelled after an item aerender had already finished when the cancel came; that item was " +
+                  "verified (see `rendered`) and no later item was started. "
+          );
         }
         return;
       }
@@ -1349,7 +1724,7 @@ export class RenderRunner {
     } finally {
       this.finished.set(r.jobId, status);
       if (this.current === r) this.current = null;
-      removeSnapshot(r.snapshot);
+      removeJobFolder(r);
       this.disarm?.();
       // Last, because it is the one async step: the job is settled and its
       // copy gone by now, and an engine that outlived aerender (see cancel)
@@ -1380,6 +1755,206 @@ export class RenderRunner {
       const a = answers.find((x) => x.index === done.index);
       done.unqueued = a ? { marked: a.marked, ...(a.reason ? { reason: a.reason } : {}) } : { marked: false, reason: "no answer" };
     }
+  }
+
+  /** `relocateShadowOutputs` for one item, remembering what could not be moved. */
+  private relocate(r: Running, item: RenderItemPlan): { moved: string[]; problems: string[] } {
+    // Until the item is verified its output may be partial or broken: it
+    // never replaces a file that was there before the render, which is a
+    // previous render's and complete. promoteKept moves it over once verified.
+    const keep = (dest: string) => unchangedSince(dest, r.before);
+    const res = relocateShadowOutputs(item.outputs, r.plan.projectPath, r.layout, keep);
+    for (const k of res.kept) r.kept.set(k.from, k.to);
+    if (res.moved.length) {
+      logger.info(`render ${r.jobId}: moved ${res.moved.length} output file(s) out of the copy's folder (#215)`);
+    }
+    for (const x of res.problems) if (!r.relocateProblems.includes(x)) r.relocateProblems.push(x);
+    return res;
+  }
+
+  /**
+   * The kept files that belong to output `o`, by the full path each one
+   * belongs at — never by file name alone: two outputs may share a name in
+   * different folders.
+   */
+  private keptFor(r: Running, o: string): string[] {
+    const re = sequenceMatcher(path.basename(o));
+    const out: string[] = [];
+    for (const [from, to] of r.kept) {
+      if (path.dirname(to) !== path.dirname(o)) continue;
+      if (re ? re.test(path.basename(to)) : to === o) out.push(from);
+    }
+    return out;
+  }
+
+  /**
+   * run()'s own cancel report, for the two cases cancel() leaves to it. The
+   * render engine is stopped first and `stopped` says whether it went — the
+   * same rule as cancel()'s, so the two never disagree.
+   */
+  private async settleCancelled(r: Running, lead: string): Promise<void> {
+    r.settled = true;
+    const pos = r.plan.items[r.itemPos];
+    const cut = pos && !r.rendered.some((x) => x.index === pos.index) ? pos : undefined;
+    if (cut) this.relocate(r, cut);
+    await this.signalEngines(r, true).catch(() => 0);
+    const survivors = await this.engineSurvivors(r, this.graceMs).catch(() => [] as number[]);
+    await this.unqueue(r);
+    const partialFiles = cut ? cancelledPartials(cut.outputs, r.before, [...r.kept.keys()]) : [];
+    this.jobs.cancel(r.jobId, {
+      jobId: r.jobId,
+      stopped: survivors.length === 0,
+      wasRunning: true,
+      rendered: r.rendered,
+      interruptedItem: cut ? { index: cut.index, compName: cut.compName, framesDone: r.itemFrames, frames: cut.frames } : null,
+      partialFiles,
+      note:
+        lead +
+        (survivors.length
+          ? `Render engine process(es) ${survivors.join(", ")} for this job are still alive after SIGKILL — the ` +
+            "render may still be running. Ask the user to end any aerender / aerendercore (Windows: aerender.exe, " +
+            "AfterFX) process in Activity Monitor or Task Manager. "
+          : "aerender and its render engine have exited. ") +
+        this.partialNote(r, cut, partialFiles) +
+        (r.rendered.length ? "Items listed in `rendered` finished and were verified." : "No item had finished."),
+    } satisfies CancelReport);
+  }
+
+  /**
+   * verifyOutputs for an item whose output may be split between the asked
+   * place and the job folder (kept files). A movie kept in the job folder is
+   * judged there — `path` is that file until promoteKept moves it; a
+   * sequence's fresh frames are counted in both places.
+   */
+  private verifyItem(
+    r: Running,
+    item: RenderItemPlan,
+    since: number
+  ): { verified: VerifiedOutput[]; finals: string[]; problems: string[]; framesOnDisk: number | null } {
+    const verified: VerifiedOutput[] = [];
+    const finals: string[] = [];
+    const problems: string[] = [];
+    for (const o of item.outputs) {
+      const kept = o.path ? this.keptFor(r, o.path) : [];
+      if (!o.path || !kept.length) {
+        const c = verifyOutputs([o], since);
+        for (const v of c.verified) (verified.push(v), finals.push(v.path));
+        problems.push(...c.problems);
+        continue;
+      }
+      if (!sequenceMatcher(path.basename(o.path))) {
+        const c = verifyOutputs([{ ...o, path: kept[0] }], since);
+        for (const v of c.verified) (verified.push(v), finals.push(o.path));
+        problems.push(...c.problems);
+        continue;
+      }
+      let files = 0;
+      let bytes = 0;
+      const dirs = [path.dirname(o.path), ...new Set(kept.map((k) => path.dirname(k)))];
+      for (const d of dirs) {
+        const c = verifyOutputs([{ ...o, path: path.join(d, path.basename(o.path)) }], since);
+        for (const v of c.verified) {
+          files += v.files ?? 0;
+          bytes += v.bytes;
+        }
+      }
+      if (files === 0) problems.push(`no frames matching ${o.path} were written by this render`);
+      else (verified.push({ path: o.path, bytes, files }), finals.push(o.path));
+    }
+    return { verified, finals, problems, framesOnDisk: problems.length ? null : verifiedFrameCount(item, verified) };
+  }
+
+  /** Move a verified item's kept files over the earlier files at the asked paths. Returns problems. */
+  private promoteKept(r: Running, item: RenderItemPlan): string[] {
+    const problems: string[] = [];
+    for (const o of item.outputs) {
+      if (!o.path) continue;
+      for (const k of this.keptFor(r, o.path)) {
+        const to = r.kept.get(k) as string;
+        try {
+          moveFile(k, to);
+          r.kept.delete(k);
+        } catch (e) {
+          problems.push(`the verified output ${k} could not be moved over the earlier ${to}: ${(e as Error).message}`);
+        }
+      }
+    }
+    return problems;
+  }
+
+  /**
+   * Where an item's output is, file by file, for a cancel or a failure: what
+   * it wrote at the asked location, what it left in the temp folder because
+   * an earlier file was at the asked path, and which earlier files are
+   * untouched — never by a `[####]` pattern, which covers both kinds.
+   */
+  private partialNote(r: Running, item: RenderItemPlan | undefined, partialFiles: string[]): string {
+    const leftAlone = item ? [...r.before.keys()].filter((f) => unchangedSince(f, r.before)) : [];
+    const moved = partialFiles.filter((f) => !r.kept.has(f));
+    const kept = partialFiles.filter((f) => r.kept.has(f));
+    const list = (xs: string[]) => xs.slice(0, 10).join(", ") + (xs.length > 10 ? ` and ${xs.length - 10} more` : "");
+    // What After Effects wrote under a name no output claims (live, 26.5: an
+    // in-progress .m4v for an .mp4 output) stays in the job folder and goes
+    // with it. Say so — "nothing found" would hide a file thrown away.
+    // A file an output does claim, but could not be moved, is not one of
+    // these: relocateProblems names it, with why.
+    const claimed = (f: string) =>
+      r.plan.items.some((it) =>
+        it.outputs.some((o) => {
+          if (!o.path) return false;
+          const re = sequenceMatcher(path.basename(o.path));
+          return re ? re.test(path.basename(f)) : path.basename(f) === path.basename(o.path);
+        })
+      );
+    const discarded = strayFiles(r.layout).filter((f) => !r.kept.has(f) && !claimed(f));
+    const mb = discarded.reduce((n, f) => {
+      try {
+        return n + fs.statSync(f).size;
+      } catch {
+        return n;
+      }
+    }, 0) / (1 << 20);
+    return (
+      (partialFiles.length
+        ? `The interrupted item's output may be INCOMPLETE: the render was stopped before After Effects confirmed it ` +
+          `finished. Before using or deleting any of the ${partialFiles.length} file(s) in \`partialFiles\`, check ` +
+          "its duration or frame count — a cancel near the end can leave a complete file. Never present one as a " +
+          "finished render without that check, and delete only by those exact names (never by a folder or a [####] " +
+          "pattern). "
+        : discarded.length
+          ? "No partial output reached the asked location. "
+          : "No partial output was found on disk. ") +
+      (discarded.length
+        ? `After Effects' unfinished file(s) in the render's private copy folder were discarded with it, under names ` +
+          `no output asked for: ${list(discarded.map((f) => path.basename(f)))} (${mb.toFixed(1)} MB). `
+        : "") +
+      (moved.length ? `At the asked location: ${list(moved)}. ` : "") +
+      (kept.length
+        ? `In the temp folder, because a file from before this render was at the asked path and was NOT replaced: ${list(kept)}. ` +
+          "These are cleared by the first render_queue started a day or more from now. "
+        : "") +
+      (leftAlone.length
+        ? `Not partial — these existed before this render and are unchanged; do not delete them: ${list(leftAlone)}. `
+        : "")
+    );
+  }
+
+  /** partialNote's facts for a failure message: where this item's output is, if anywhere. */
+  private writtenText(r: Running, item: RenderItemPlan): string {
+    const files = cancelledPartials(item.outputs, r.before, [...r.kept.keys()]);
+    const leftAlone = [...r.before.keys()].filter((f) => unchangedSince(f, r.before));
+    const moved = files.filter((f) => !r.kept.has(f));
+    const kept = files.filter((f) => r.kept.has(f));
+    const list = (xs: string[]) => xs.slice(0, 10).join(", ") + (xs.length > 10 ? ` and ${xs.length - 10} more` : "");
+    return (
+      (moved.length ? ` Files this item wrote: ${list(moved)}.` : "") +
+      (kept.length
+        ? ` Files this item wrote that were left in the temp folder, because a file from before this render was at ` +
+          `the asked path and was NOT replaced: ${list(kept)} (cleared by the first render_queue started a day or ` +
+          `more later).`
+        : "") +
+      (leftAlone.length ? ` Unchanged from before this render, not its output: ${list(leftAlone)}.` : "")
+    );
   }
 
   /** The sentence a failure message carries about the unticking, when any happened. */
@@ -1439,6 +2014,7 @@ export class RenderRunner {
           finish(code, signal);
         });
         child.on("exit", (code, signal) => {
+          if (code === 0) r.exitedOk = true;
           let quietSince = 0;
           const exitedAt = Date.now();
           const poll = async () => {
@@ -1476,7 +2052,7 @@ export class RenderRunner {
           r.itemFrames++;
           if (Date.now() - r.touchedAt >= TOUCH_EVERY_MS) {
             r.touchedAt = Date.now();
-            touchSnapshot(r.snapshot);
+            touchSnapshot(r.layout.jobDir);
           }
           const done = Math.min(r.framesBefore + r.itemFrames, r.totalFrames);
           this.jobs.reportProgress(
@@ -1508,7 +2084,7 @@ export class RenderRunner {
         ` after ${r.itemFrames} of ${item.frames} frames.`;
     const errs = o.errors.length ? ` Its error lines: ${o.errors.join(" | ")}.` : "";
     const tail = o.tail.length ? ` Last output: ${o.tail.join(" | ")}` : "";
-    const partial = o.spawnError ? "" : ` Any file it started at ${item.outputs.map((x) => x.path).join(", ")} is incomplete.`;
+    const partial = o.spawnError ? "" : " What it wrote is incomplete." + this.writtenText(r, item);
     return head + errs + tail + partial + missingFootageHint([...o.errors, ...o.tail]) + this.renderedSoFar(r);
   }
 
@@ -1553,8 +2129,71 @@ export class RenderRunner {
         note: `This render had already finished (${status}) — there was nothing to cancel. await_job or get_job returns its outcome.`,
       };
     }
+    if (r.settled) {
+      // The job's outcome is already decided — every item rendered, or the
+      // job failed — and only its last steps (unticking the queue) remain.
+      // Nothing is rendering, and nothing it wrote is partial (#217 review).
+      return this.finishedReport(r);
+    }
+    if (r.exitedOk && !r.cancelled) {
+      // aerender already exited 0 on this item: it is finished, not
+      // interrupted, and is being verified — which can wait up to the drain
+      // cap while its render engine closes the output. Do not hold the
+      // caller for that: say so now, start no later item, and let run()
+      // report the item and settle the job.
+      r.stopAfterItem = true;
+      const item = r.plan.items[r.itemPos];
+      const what = `render queue item ${item?.index ?? "?"} ("${item?.compName ?? "?"}")`;
+      this.jobs.reportProgress(
+        jobId,
+        Math.min(r.framesBefore + r.itemFrames, r.totalFrames),
+        r.totalFrames,
+        `Cancel requested: aerender had already finished ${what}; verifying its output, then stopping — no later item will start`
+      );
+      return {
+        jobId,
+        stopped: false,
+        wasRunning: false,
+        status: "finishing",
+        note:
+          `aerender had already finished ${what} when the cancel came, so it was not interrupted: its output is ` +
+          "being verified now (this can take up to a minute while the render engine closes the file), and it will " +
+          "be reported as rendered or failed. No later item will start. Call await_job for the outcome.",
+      };
+    }
+    if (r.cancelDone) {
+      // A second cancel while the first is still stopping: wait for it, then
+      // answer from where things stand (finished, or this cancel tries again).
+      await r.cancelDone;
+      if (this.current !== r || r.settled) return this.cancel(jobId);
+    }
+    let done = () => {};
+    r.cancelDone = new Promise<void>((res) => (done = res));
+    try {
+      return await this.cancelRunning(r);
+    } finally {
+      done();
+    }
+  }
+
+  private finishedReport(r: Running): CancelReport {
+    const status = this.finished.get(r.jobId) ?? "finishing";
+    return {
+      jobId: r.jobId,
+      stopped: false,
+      wasRunning: false,
+      status,
+      note: `This render had already finished (${status}) — there was nothing to cancel. await_job or get_job returns its outcome.`,
+    };
+  }
+
+  private async cancelRunning(r: Running): Promise<CancelReport> {
+    const jobId = r.jobId;
     r.cancelled = true;
-    const item = r.plan.items[r.itemPos];
+    // An item already verified and listed in `rendered` is not interrupted,
+    // whatever itemPos still says: its files are finished work.
+    const pos = r.plan.items[r.itemPos];
+    const item = pos && !r.rendered.some((x) => x.index === pos.index) ? pos : undefined;
     const child = r.child;
     const exited = r.exited;
     let aerenderGone = true;
@@ -1577,15 +2216,14 @@ export class RenderRunner {
       await this.signalEngines(r, true);
       survivors = await this.engineSurvivors(r, this.graceMs);
     }
-    let stopped = aerenderGone && survivors.length === 0;
-    if (!stopped) {
-      // From here on the late exit, if it ever comes, is run()'s to settle.
-      // It may already have come in the instant since the last check, in
-      // which case run() has finished and this report can say so honestly.
-      r.cancelGaveUp = true;
-      if (this.current !== r && survivors.length === 0) stopped = true;
-    }
-    const partialFiles = item ? existingOutputs(item.outputs) : [];
+    const stopped = aerenderGone && survivors.length === 0;
+    // From here on the late exit, if it ever comes, is run()'s to settle —
+    // run() waits for this cancel to finish before it looks (cancelDone).
+    if (!stopped) r.cancelGaveUp = true;
+    // run() relocates as aerender exits; this catches what an engine that
+    // outlived aerender wrote after that (#215).
+    if (item) this.relocate(r, item);
+    const partialFiles = item ? cancelledPartials(item.outputs, r.before, [...r.kept.keys()]) : [];
     const report: CancelReport = {
       jobId,
       stopped,
@@ -1597,8 +2235,9 @@ export class RenderRunner {
       partialFiles,
       note: stopped
         ? "aerender and its render engine were stopped and have exited; no later item was started. " +
-          (partialFiles.length
-            ? `The interrupted item's output is INCOMPLETE and was left on disk: ${partialFiles.join(", ")} — tell the user, or delete it, rather than presenting it as a render. `
+          this.partialNote(r, item, partialFiles) +
+          (r.relocateProblems.length
+            ? `Part of the output could not be moved out of the render's private copy folder, which is deleted: ${r.relocateProblems.join("; ")}. `
             : "") +
           (r.rendered.length ? "Items listed in `rendered` finished and were verified before the cancel." : "No item had finished.")
         : (aerenderGone ? "" : `aerender (pid ${child?.pid}) did not exit after being told to stop and then killed. `) +
@@ -1661,9 +2300,29 @@ export class RenderRunner {
       }
     }
     if (r) {
-      removeSnapshot(r.snapshot);
+      // A partial output in the job folder goes where it was asked, not with the copy (#215).
+      const cut = r.plan.items[r.itemPos];
+      if (cut) {
+        const res = relocateShadowOutputs(cut.outputs, r.plan.projectPath, r.layout, (dest) => unchangedSince(dest, r.before));
+        for (const k of res.kept) r.kept.set(k.from, k.to);
+      }
+      removeJobFolder(r);
     }
   }
+}
+
+/**
+ * The end of a job: its folder goes, copy and chain — unless a cancelled
+ * item's partial output was kept in it (see Running.kept), in which case only
+ * the copy goes and the folder is left for the stale sweep of the first render
+ * started a day or more later.
+ */
+function removeJobFolder(r: Running): void {
+  if (!r.kept.size) {
+    removeSnapshot(r.layout.jobDir);
+    return;
+  }
+  try { fs.rmSync(r.snapshot, { force: true }); } catch {}
 }
 
 function within(p: Promise<void>, ms: number): Promise<boolean> {

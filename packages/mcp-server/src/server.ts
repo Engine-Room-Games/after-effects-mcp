@@ -28,6 +28,7 @@ import { markRendered } from "./render/markDone.js";
 import { aerenderCandidates, afterEffectsInstallRoots } from "./setup/platform.js";
 import { SnapshotStore } from "./snapshots/store.js";
 import type { CompFingerprint } from "./snapshots/store.js";
+import { diffFingerprints } from "./snapshots/diff.js";
 import { descriptions } from "./tools/descriptions.js";
 import { AeError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
 import { resolveRunJsxSource, type RunJsxArgs } from "./tools/runJsxSource.js";
@@ -1058,18 +1059,21 @@ async function runSnapshotOp(
         `A diff only means anything against a snapshot of the same comp — omit compId, or snapshot_comp(${d.compId}) first.`
     );
   }
-  const res = (await bridge.runOp("_comp_diff", {
+  // Only the gathering needs After Effects. The comparison runs here (issue
+  // #220): `_comp_fingerprint` is in every panel ever shipped, so this works
+  // against old bundles too, and the diff no longer costs AE main-thread time.
+  const fingerprint = (await bridge.runOp("_comp_fingerprint", {
     compId: previous.compId,
-    since: previous.fingerprint,
-  })) as { diff: Record<string, unknown>; fingerprint: CompFingerprint };
+  })) as CompFingerprint;
+  const diff = diffFingerprints(previous.fingerprint, fingerprint);
   // The fresh fingerprint becomes a snapshot of its own, so a verify-as-you-go
   // loop can keep diffing forward without a second call per step.
-  const next = snapshots.store(res.fingerprint);
+  const next = snapshots.store(fingerprint);
   return textResult({
-    ...res.diff,
+    ...diff,
     since: d.since,
     snapshotId: next.id,
-    fingerprint: d.includeFingerprint ? res.fingerprint : undefined,
+    fingerprint: d.includeFingerprint ? fingerprint : undefined,
   });
 }
 

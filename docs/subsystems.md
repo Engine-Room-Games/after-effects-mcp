@@ -237,6 +237,16 @@ Three further things hold this honest:
   the before, the write and the after are one bridge call, and the diff logic
   lives in `snapshot.jsx` where `raw.jsx` and `batch.jsx` can both reach it —
   each of them gains about six lines and no new contract.
+- **`diff_comp` diffs on the server; `diff:true` still diffs in AE** (issue
+  #220, stage 1). Only the gathering needs After Effects, and the comparison
+  ran on AE's main thread and could only be fixed with a panel reinstall. So
+  `diff_comp` asks for a fresh `_comp_fingerprint` — in every bundle ever
+  shipped, so no panel update is needed — and diffs it in
+  `snapshots/diff.ts`. That leaves two copies of the diff until `diff:true`
+  returns its before/after fingerprints too; `tests/unit/comp-snapshot.mjs`
+  runs every case against both and a seeded parity sweep compares their
+  serialized output byte for byte. `_comp_diff` stays in the bundle, unused,
+  so a newer panel never breaks an older server that still calls it.
 - **A failed write still gets its diff.** Nothing rolls back, so "where did it
   stop" is the most valuable question after a throw. `__diffAnnotateError`
   *mutates* the error's `message` and rethrows the same object, so `line` and

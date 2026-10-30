@@ -28,9 +28,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo, snapshotLayout, jobFolder, shadowDirs, strayFiles, relocateShadowOutputs, stampOutputs, cancelledPartials } =
   await import(dist("render", "aerender.js"));
-const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin, stopProcessTreeSync } = await import(dist("setup", "platform.js"));
+const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin, stopProcessTreeSync, snapshotMarker } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
 const { OpMutation } = await import(pathToFileURL(path.join(root, "packages", "shared", "dist", "schemas.js")).href);
 
@@ -199,14 +199,17 @@ await check("the snapshot goes to a per-job temp folder, never beside the projec
   const proj = path.join(tmp, "snap-src.aep");
   fs.writeFileSync(proj, "aep");
   const tmpRoot = path.join(tmp, "osTmp");
-  const snap = snapshotProject(proj, "r_1_1", tmpRoot);
-  assert.equal(snap, path.join(tmpRoot, "ae-mcp-render", "r_1_1", "snap-src.aep"));
+  const layout = snapshotProject(proj, "r_1_1", tmpRoot);
+  const snap = layout.snap;
+  const jobDir = path.join(tmpRoot, "ae-mcp-render", "r_1_1");
+  assert.equal(layout.jobDir, jobDir);
+  assert.equal(snap, path.join(jobDir, ...new Array(layout.depth).fill(layout.name), "snap-src.aep"));
   assert.equal(fs.readFileSync(snap, "utf8"), "aep");
   assert.deepEqual(fs.readdirSync(tmp).filter((n) => n.includes("ae-mcp-render")), [], "nothing new beside the project");
-  removeSnapshot(snap);
-  assert.ok(!fs.existsSync(path.dirname(snap)), "the per-job folder goes with it");
+  removeSnapshot(layout.jobDir);
+  assert.ok(!fs.existsSync(jobDir), "the per-job folder goes with it");
   // removeSnapshot only ever removes an ae-mcp-render/<job> folder.
-  removeSnapshot(proj);
+  removeSnapshot(path.dirname(proj));
   assert.ok(fs.existsSync(proj));
   assert.throws(() => snapshotProject(path.join(tmp, "nope", "x.aep"), "r_1_2", tmpRoot), /nothing was rendered/);
 });
@@ -226,8 +229,12 @@ await check("a render clears day-old snapshot folders, never a newer one or its 
   const fresh = mk("r_fresh_2", 3600_000);
   const mine = mk("r_mine_3", 3 * 24 * 3600_000);
   fs.writeFileSync(path.join(base, "stray.txt"), "not a job folder");
+  // An output an older version let aerender write into the shared root (#215).
+  const leaked = path.join(base, "out4.mp4");
+  fs.writeFileSync(leaked, "lost render");
+  fs.utimesSync(leaked, new Date(now - 2 * 24 * 3600_000), new Date(now - 2 * 24 * 3600_000));
   const removed = sweepStaleSnapshots("r_mine_3", root, 24 * 3600_000, now);
-  assert.deepEqual(removed, [old]);
+  assert.deepEqual(removed.sort(), [old, leaked].sort());
   assert.ok(!fs.existsSync(old));
   assert.ok(fs.existsSync(fresh), "another session's newer render is left alone");
   assert.ok(fs.existsSync(mine), "the current job's folder is never touched");
@@ -238,14 +245,13 @@ await check("a running job keeps its snapshot folder young, so a long render sur
   const root = path.join(tmp, "touchTmp");
   const src = path.join(tmp, "long.aep");
   fs.writeFileSync(src, "aep");
-  const snap = snapshotProject(src, "r_long_9", root);
-  const dir = path.dirname(snap);
+  const { snap, jobDir: dir } = snapshotProject(src, "r_long_9", root);
   const old = new Date(Date.now() - 3 * 24 * 3600_000);
   fs.utimesSync(dir, old, old);
-  touchSnapshot(snap);
+  touchSnapshot(dir);
   assert.deepEqual(sweepStaleSnapshots("r_other", root), [], "a touched folder is not stale");
   assert.ok(fs.existsSync(snap));
-  removeSnapshot(snap);
+  removeSnapshot(dir);
 });
 await check("missing-footage lines are recognised, ordinary ones are not", () => {
   assert.ok(isMissingFootageLine("aerender WARNING: Footage file missing: /x/clip.mov"));
@@ -287,6 +293,84 @@ await check("Windows: name AND command line, so the PowerShell search never matc
   assert.equal(isRenderProcessWin("powershell.exe", "powershell -Command Get-CimInstance ... ae-mcp-render\\r_1_2\\rq.aep", snap), false);
   assert.equal(isRenderProcessWin("cmd.exe", "cmd /c echo r_1_2", snap), false);
   assert.equal(isRenderProcessWin("aerender.exe", "aerender.exe -project C:\\other\\ae-mcp-render\\r_9_9\\rq.aep", snap), false);
+});
+await check("a chained snapshot path still identifies its job, and only its job (#215)", () => {
+  const a = "/var/folders/xx/T/ae-mcp-render/r_1_2/a/a/a/a/a/a/a/show.aep";
+  const b = "/var/folders/xx/T/ae-mcp-render/r_9_9/a/a/a/a/a/a/a/show.aep";
+  assert.equal(snapshotMarker(a), "ae-mcp-render/r_1_2/a/a/a/a/a/a/a/show.aep");
+  const ps = [
+    `  201 /Applications/Adobe After Effects 2026/aerender -project ${a} -rqindex 1`,
+    `  202 /Applications/Adobe After Effects 2026/aerender -project ${b} -rqindex 1`,
+  ].join("\n");
+  assert.deepEqual(renderPidsFromPs(ps, a), [201], "another job on the same project is not this one");
+  assert.equal(snapshotMarker("/var/folders/xx/T/ae-mcp-render/r_1_2/rq.aep"), "ae-mcp-render/r_1_2/rq.aep");
+});
+await check("the copy sits under a chain of one-letter folders as deep as the project's, on both hosts (#215)", () => {
+  const id = (d) => d;
+  const L = snapshotLayout("/Users/me/show/show.aep", "r_1_1", "/tmp/T", [], path.posix, id);
+  assert.deepEqual(L, {
+    jobDir: "/tmp/T/ae-mcp-render/r_1_1",
+    snap: "/tmp/T/ae-mcp-render/r_1_1/a/a/a/a/a/show.aep",
+    depth: 5,
+    name: "a",
+  });
+  assert.equal(jobFolder("/tmp/T", "r_1_1", path.posix), L.jobDir);
+  // The letter never matches a folder name in the project's or an output's path.
+  assert.equal(snapshotLayout("/A/b/show.aep", "r", "/t", ["/x/c/o.mov"], path.posix, id).name, "d");
+  // A symlinked spelling: the chain is as deep as the deeper of the two.
+  const sym = (d) => (d === "/Users/me/Dropbox/show" ? "/Users/me/Library/CloudStorage/Dropbox/show" : d);
+  assert.equal(snapshotLayout("/Users/me/Dropbox/show/show.aep", "r", "/t", [], path.posix, sym).depth, 6 + 2);
+  // Windows: short, whatever the project's depth — two characters a level.
+  const deep = "C:\\Users\\someone\\Documents\\Client Work 2026\\Big Campaign\\Shots\\shot_010\\ae\\v12";
+  const W = snapshotLayout(deep + "\\shot_010_comp_v12.aep", "r_1793320237670_7", "C:\\Users\\someone\\AppData\\Local\\Temp", [], path.win32, id);
+  assert.equal(W.depth, 9 + 2);
+  assert.ok(W.snap.length < 140, `${W.snap.length}: ${W.snap}`);
+  assert.equal(W.snap, "C:\\Users\\someone\\AppData\\Local\\Temp\\ae-mcp-render\\r_1793320237670_7\\" + "a\\".repeat(11) + "shot_010_comp_v12.aep");
+  // Where aerender's relative resolution puts each output: the chain folder
+  // as many levels up as the output's folder is above the project's. A
+  // subfolder or a sibling branch is not in the chain, so it is written absolutely.
+  const at = (n) => "/tmp/T/ae-mcp-render/r_1_1" + "/a".repeat(n);
+  assert.deepEqual(shadowDirs("/Users/me/show/out.mp4", "/Users/me/show/show.aep", L, path.posix, id), [at(5)]);
+  assert.deepEqual(shadowDirs("/Users/me/out4.mp4", "/Users/me/show/show.aep", L, path.posix, id), [at(4)]);
+  assert.deepEqual(shadowDirs("/Users/me/show/renders/o.mov", "/Users/me/show/show.aep", L, path.posix, id), []);
+  assert.deepEqual(shadowDirs("/Users/other/o.mov", "/Users/me/show/show.aep", L, path.posix, id), []);
+  assert.deepEqual(shadowDirs("c:\\users\\SOMEONE\\o.mov", deep + "\\p.aep", W, path.win32, id), [W.jobDir + "\\a".repeat(11 - 7)]);
+});
+await check("whatever aerender wrote anywhere in the job folder is moved to where it was asked (#215)", () => {
+  const proj = path.join(tmp, "reloc", "show");
+  fs.mkdirSync(proj, { recursive: true });
+  const projFile = path.join(proj, "show.aep");
+  fs.writeFileSync(projFile, "aep");
+  const outs = [
+    { index: 1, path: path.join(proj, "beside.mov") },
+    { index: 2, path: path.join(proj, "f_[####].png") },
+    { index: 3, path: path.join(path.dirname(proj), "up.mov") },
+    { index: 4, path: path.join(proj, "untouched.mov") },
+  ];
+  const layout = snapshotProject(projFile, "r_reloc_1", path.join(tmp, "relocTmp"), outs.map((o) => o.path));
+  const here = path.dirname(layout.snap);
+  // Beside the project, a frame sequence beside it, one folder up — and one
+  // a level nobody predicted (a spelling of the path AE counted against that
+  // this did not foresee), which the whole-folder scan still finds.
+  fs.writeFileSync(path.join(here, "beside.mov"), "movie");
+  fs.writeFileSync(path.join(here, "f_0001.png"), "png");
+  fs.writeFileSync(path.join(here, "f_0002.png"), "png");
+  fs.writeFileSync(path.join(layout.jobDir, "up.mov"), "movie");
+  fs.writeFileSync(path.join(here, "nobody-asked.txt"), "?");
+  fs.writeFileSync(path.join(proj, "beside.mov"), "the previous render"); // overwrite:true
+  const r = relocateShadowOutputs(outs, projFile, layout);
+  assert.deepEqual(r.problems, []);
+  assert.equal(r.moved.length, 4);
+  assert.equal(fs.readFileSync(path.join(proj, "beside.mov"), "utf8"), "movie");
+  assert.ok(fs.existsSync(path.join(proj, "f_0001.png")) && fs.existsSync(path.join(proj, "f_0002.png")));
+  assert.equal(fs.readFileSync(path.join(path.dirname(proj), "up.mov"), "utf8"), "movie");
+  assert.ok(!fs.existsSync(path.join(proj, "untouched.mov")));
+  assert.ok(fs.existsSync(layout.snap), "the copy itself is never moved");
+  assert.deepEqual(strayFiles(layout), [path.join(here, "nobody-asked.txt")], "a file no output claims is reported, not moved");
+  removeSnapshot(layout.jobDir);
+  assert.ok(!fs.existsSync(layout.jobDir));
+  removeSnapshot(proj);
+  assert.ok(fs.existsSync(projFile), "removeSnapshot only ever removes an ae-mcp-render/<job> folder");
 });
 await check("names and paths that merely contain the words do not fail a good render", () => {
   // The two examples from review: an output path and a comp name.
@@ -379,6 +463,33 @@ function mvhd(seconds) {
 function writeMovie(p) {
   const dur = Number(process.env.FAKE_DUR || 4 / 30);
   fs.writeFileSync(p, Buffer.concat([box("ftyp", Buffer.from("qt  ")), box("mdat", Buffer.alloc(64)), box("moov", mvhd(dur))]));
+}
+if (mode === "relative") {
+  // After Effects as measured on 26.5 (#215): the output folder is saved as
+  // ascend counts from the project's folder plus the names below the common
+  // ancestor, and aerender uses that relative form, resolved against the
+  // project it was GIVEN, whenever the folder it names exists.
+  const path = require("path");
+  const project = args[args.indexOf("-project") + 1];
+  const spell = (d) => (process.env.FAKE_SPELLING === "given" ? path.resolve(d) : fs.realpathSync(d));
+  for (let n = 0; n < 4; n++) console.log("PROGRESS:  0:00:00:0" + n + " (" + (n + 1) + "): 0 Seconds");
+  for (const o of [out, process.env.FAKE_OUT2].filter(Boolean)) {
+    const a = spell(process.env.FAKE_REAL_PROJ_DIR).split(path.sep);
+    const b = spell(path.dirname(o)).split(path.sep);
+    let k = 0;
+    while (k < a.length && k < b.length && a[k] === b[k]) k++;
+    let base = path.dirname(project);
+    for (let n = 0; n < a.length - k; n++) base = path.dirname(base);
+    const rel = path.join(base, ...b.slice(k));
+    const dir = fs.existsSync(rel) ? rel : path.dirname(o);
+    const name = path.basename(o);
+    if (name.includes("[####]")) {
+      for (let n = 0; n < 4; n++) fs.writeFileSync(path.join(dir, name.replace("[####]", String(n).padStart(4, "0"))), "png");
+    } else {
+      writeMovie(path.join(dir, name));
+    }
+  }
+  process.exit(0);
 }
 if (mode === "shortlines") {
   console.log("PROGRESS:  0:00:00:00 (1): 0 Seconds");
@@ -574,7 +685,7 @@ function alive(pid) {
     const args = JSON.parse(fs.readFileSync(process.env.FAKE_ARGS, "utf8"));
     assert.equal(args[0], "-project");
     assert.equal(path.basename(args[1]), "show.aep");
-    assert.equal(path.basename(path.dirname(path.dirname(args[1]))), "ae-mcp-render");
+    assert.ok(path.relative(path.join(runTmp, "ae-mcp-render"), args[1]).split(path.sep).length > 2, args[1]);
     assert.notEqual(path.dirname(args[1]), tmp);
     assert.deepEqual(args.slice(2), aerenderArgs("x", 2).slice(2));
     assert.ok(!fs.existsSync(args[1]), "the snapshot must be removed when the job ends");
@@ -630,6 +741,367 @@ function alive(pid) {
       if (ok) assert.equal((await jobs.waitFor(jobId, 10_000)).status, "completed");
       else await assert.rejects(jobs.waitFor(jobId, 10_000), /3 fresh frame files .* where 4 were expected/);
     }
+  });
+
+  await check("outputs beside the project, one folder up, in a subfolder and on a sibling branch all land where asked (#215)", async () => {
+    // The measured failure: aerender resolved an output beside the project
+    // against the temp copy, wrote it into the job folder, and it was deleted
+    // with the copy; one folder up it leaked into ae-mcp-render/ for good.
+    const top = path.join(tmp, "p215");
+    const projDir = path.join(top, "show");
+    fs.mkdirSync(path.join(projDir, "renders"), { recursive: true });
+    fs.mkdirSync(path.join(top, "other"), { recursive: true });
+    const proj = path.join(projDir, "show.aep");
+    fs.writeFileSync(proj, "aep bytes");
+    process.env.FAKE_REAL_PROJ_DIR = projDir;
+    const outs = [
+      path.join(projDir, "beside.mov"),
+      path.join(top, "up.mov"),
+      path.join(projDir, "renders", "sub.mov"),
+      path.join(top, "other", "sib.mov"),
+      path.join(projDir, "shot_[####].png"),
+    ];
+    for (const out of outs) {
+      const jobs = new JobManager();
+      const runner = runnerFor(jobs, { tmpRoot: runTmp });
+      env("relative", out);
+      const p = { ...plan(out), projectPath: proj };
+      const { jobId } = runner.start(p, fake);
+      const st = await jobs.waitFor(jobId, 10_000);
+      assert.equal(st.status, "completed", `${out}: ${st.error ?? ""}`);
+      assert.equal(st.result.rendered[0].outputs[0].path, out);
+      if (out.includes("[####]")) assert.ok(fs.existsSync(path.join(projDir, "shot_0003.png")));
+      else assert.ok(fs.statSync(out).size > 0, out);
+      assert.ok(!fs.existsSync(path.join(runTmp, "ae-mcp-render", jobId)), "the job folder is gone");
+    }
+    const root215 = path.join(runTmp, "ae-mcp-render");
+    const leaked = fs.existsSync(root215) ? fs.readdirSync(root215).filter((n) => !fs.statSync(path.join(root215, n)).isDirectory()) : [];
+    assert.deepEqual(leaked, [], "nothing written into the shared ae-mcp-render folder");
+    delete process.env.FAKE_REAL_PROJ_DIR;
+  });
+
+  await check("a project reached through a symlink of another depth: outputs still land where asked, either way AE counts (#215)", async () => {
+    if (win) return; // symlinked folders need privileges on Windows
+    const top = path.join(tmp, "sl215");
+    const real = path.join(top, "x", "y", "z", "show");
+    fs.mkdirSync(real, { recursive: true });
+    const link = path.join(top, "ln");
+    fs.symlinkSync(real, link);
+    const proj = path.join(link, "show.aep");
+    fs.writeFileSync(proj, "aep bytes");
+    process.env.FAKE_REAL_PROJ_DIR = link;
+    for (const spelling of ["given", "real"]) {
+      process.env.FAKE_SPELLING = spelling;
+      for (const out of [path.join(link, `beside-${spelling}.mov`), path.join(top, `up-${spelling}.mov`)]) {
+        const jobs = new JobManager();
+        const runner = runnerFor(jobs, { tmpRoot: runTmp });
+        env("relative", out);
+        const { jobId } = runner.start({ ...plan(out), projectPath: proj }, fake);
+        const st = await jobs.waitFor(jobId, 10_000);
+        assert.equal(st.status, "completed");
+        assert.ok(fs.statSync(out).size > 0, `${spelling}: ${out}`);
+      }
+    }
+    delete process.env.FAKE_SPELLING;
+    delete process.env.FAKE_REAL_PROJ_DIR;
+  });
+
+  await check("a cancelled render's partial output beside the project is moved out and named, not deleted (#215)", async () => {
+    const projDir = path.join(tmp, "cancel215");
+    fs.mkdirSync(projDir, { recursive: true });
+    const proj = path.join(projDir, "show.aep");
+    fs.writeFileSync(proj, "aep bytes");
+    const out = path.join(projDir, "partial.mov");
+    const jobs = new JobManager();
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, graceMs: 500 });
+    // The hanging fake's own file goes elsewhere; the partial output is
+    // written into the job folder, where aerender resolving the output
+    // relative to the copy puts it.
+    env("hang", path.join(tmp, "cancel215-elsewhere.mov"));
+    const { jobId } = runner.start({ ...plan(out, 100), projectPath: proj }, fake);
+    const shadow = path.join(path.dirname(snapshotLayout(proj, jobId, runTmp, [out]).snap), "partial.mov");
+    for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_SELF); i++) await sleep(20);
+    fs.writeFileSync(shadow, "partial");
+    const report = await runner.cancel(jobId);
+    assert.equal(report.stopped, true, report.note);
+    assert.deepEqual(report.partialFiles, [out]);
+    assert.equal(fs.readFileSync(out, "utf8"), "partial");
+    try { process.kill(Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8")), "SIGKILL"); } catch {}
+  });
+
+  // The live AE check of #215: aerender exits on cancel at once, while its
+  // engine — still being stopped — is what writes the partial file into the
+  // job folder. The engine here is a sleeper the test owns: the runner sees
+  // it through `findEngines`, never signals it (`confirmEngine` says no), and
+  // the test ends it once the partial file is written — the same on both hosts.
+  async function cancelWithLateEngineWrite(name, { prior, outName = "beside.mp4", priorFiles = {}, late }) {
+    const projDir = path.join(tmp, `cancellate-${name}`);
+    fs.mkdirSync(projDir, { recursive: true });
+    const proj = path.join(projDir, "show.aep");
+    fs.writeFileSync(proj, "aep bytes");
+    const out = path.join(projDir, outName);
+    if (prior !== undefined) fs.writeFileSync(out, prior);
+    for (const [n, c] of Object.entries(priorFiles)) fs.writeFileSync(path.join(projDir, n), c);
+    const priorStat = prior !== undefined ? fs.statSync(out) : null;
+    const sleeper = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { stdio: "ignore" });
+    const jobs = new JobManager();
+    const runner = runnerFor(jobs, {
+      tmpRoot: runTmp,
+      graceMs: 4000,
+      findEngines: async () => (alive(sleeper.pid) ? [sleeper.pid] : []),
+      confirmEngine: async () => false,
+    });
+    env("hang", path.join(tmp, `cancellate-${name}-elsewhere.mov`));
+    const { jobId } = runner.start({ ...plan(out, 100), projectPath: proj }, fake);
+    const shadowDir = path.dirname(snapshotLayout(proj, jobId, runTmp, [out]).snap);
+    const shadow = path.join(shadowDir, outName);
+    for (let i = 0; i < 200 && !fs.existsSync(process.env.FAKE_SELF); i++) await sleep(20);
+    const aerenderPid = Number(fs.readFileSync(process.env.FAKE_SELF, "utf8"));
+    const cancelling = runner.cancel(jobId);
+    for (let i = 0; i < 200 && alive(aerenderPid); i++) await sleep(20);
+    await sleep(300);
+    // The engine writes its partial file after aerender has gone — into the
+    // job folder as it stands, never re-creating a folder that was removed.
+    let wrote = true;
+    try {
+      if (late) late(shadowDir, projDir);
+      else fs.writeFileSync(shadow, "partial");
+    } catch { wrote = false; }
+    sleeper.kill("SIGKILL");
+    const report = await cancelling;
+    for (let i = 0; i < 200 && runner.activeJobId; i++) await sleep(20);
+    return { out, shadow, shadowDir, projDir, wrote, report, priorStat, jobs, jobId };
+  }
+
+  await check("cancel: a partial the engine writes after aerender exits is moved where asked and named, not deleted with the copy (#215 review)", async () => {
+    const { out, wrote, report, jobs, jobId } = await cancelWithLateEngineWrite("fresh", {});
+    assert.ok(wrote, "the job folder was removed while cancel was still stopping the engine");
+    assert.equal(report.stopped, true, report.note);
+    assert.deepEqual(report.partialFiles, [out]);
+    assert.equal(fs.readFileSync(out, "utf8"), "partial");
+    assert.match(report.note, /may be INCOMPLETE: the render was stopped before After Effects confirmed it finished/);
+    assert.match(report.note, /check its duration or frame count/);
+    assert.doesNotMatch(report.note, /or delete those files by name/, "never a bare instruction to delete");
+    assert.equal(jobs.get(jobId).status, "cancelled");
+  });
+
+  await check("cancel: a correctly named output whose move failed is named as a move failure, never as discarded (#217 final)", async () => {
+    const { wrote, report } = await cancelWithLateEngineWrite("movefail", {
+      late: (sd, pd) => {
+        fs.mkdirSync(path.join(pd, "beside.mp4")); // the move onto it fails
+        fs.writeFileSync(path.join(sd, "beside.mp4"), "partial");
+      },
+    });
+    assert.ok(wrote);
+    assert.match(report.note, /could not be moved out of the render's private copy folder/);
+    assert.doesNotMatch(report.note, /discarded with it/, report.note);
+  });
+
+  await check("cancel: an unfinished file After Effects wrote under another name is said to be discarded, not 'nothing found' (#217 live)", async () => {
+    const { wrote, report } = await cancelWithLateEngineWrite("tmpname", {
+      late: (sd) => fs.writeFileSync(path.join(sd, "beside_inprogress.m4v"), Buffer.alloc(4096)),
+    });
+    assert.ok(wrote);
+    assert.equal(report.stopped, true, report.note);
+    assert.deepEqual(report.partialFiles, []);
+    assert.doesNotMatch(report.note, /No partial output was found on disk/);
+    assert.match(report.note, /unfinished file\(s\)[^]*discarded[^]*beside_inprogress\.m4v/);
+  });
+
+  await check("cancel: a complete file from an earlier render is never reported as partial, nor replaced (#215 review)", async () => {
+    const { out, shadow, wrote, report, priorStat } = await cancelWithLateEngineWrite("prior", { prior: "old complete render" });
+    assert.ok(wrote);
+    assert.equal(report.stopped, true, report.note);
+    assert.ok(!report.partialFiles.includes(out), `the earlier render's file was named as partial: ${report.partialFiles}`);
+    assert.equal(fs.readFileSync(out, "utf8"), "old complete render", "the earlier render's file must be untouched");
+    assert.equal(fs.statSync(out).mtimeMs, priorStat.mtimeMs);
+    assert.deepEqual(report.partialFiles, [shadow], "the partial is named where it actually is");
+    assert.equal(fs.readFileSync(shadow, "utf8"), "partial", "the kept partial survives the job's end");
+    assert.ok(!fs.existsSync(path.join(path.dirname(shadow), "show.aep")), "the project copy itself is still removed");
+    assert.ok(report.note.slice(report.note.indexOf("do not delete them:")).includes(out), report.note);
+    assert.match(report.note, /NOT replaced/);
+    assert.match(report.note, /first render_queue started a day or more from now/);
+  });
+
+  await check("cancel: a sequence partly over an earlier render's frames names each file where it is, never the pattern (#217 review)", async () => {
+    const { out, shadowDir, projDir, wrote, report } = await cancelWithLateEngineWrite("mixedseq", {
+      outName: "f_[####].png",
+      priorFiles: { "f_0000.png": "old 0", "f_0001.png": "old 1", "f_0003.png": "old 3" },
+      late: (sd, pd) => {
+        fs.writeFileSync(path.join(pd, "f_0000.png"), "new 0, written in place"); // aerender overwrote it
+        fs.writeFileSync(path.join(sd, "f_0001.png"), "new 1"); // would replace an old frame
+        fs.writeFileSync(path.join(sd, "f_0002.png"), "new 2"); // a frame that did not exist
+      },
+    });
+    assert.ok(wrote);
+    assert.equal(report.stopped, true, report.note);
+    const want = [path.join(projDir, "f_0000.png"), path.join(projDir, "f_0002.png"), path.join(shadowDir, "f_0001.png")];
+    assert.deepEqual([...report.partialFiles].sort(), [...want].sort());
+    assert.ok(!report.partialFiles.includes(out), "never the pattern, which also covers old frames");
+    assert.equal(fs.readFileSync(path.join(projDir, "f_0001.png"), "utf8"), "old 1");
+    assert.equal(fs.readFileSync(path.join(projDir, "f_0003.png"), "utf8"), "old 3");
+    assert.equal(fs.readFileSync(path.join(shadowDir, "f_0001.png"), "utf8"), "new 1");
+    assert.equal(fs.readFileSync(path.join(projDir, "f_0002.png"), "utf8"), "new 2");
+    assert.ok(!report.note.includes(out), "the note never names the pattern as something to delete");
+    const part = (label) => report.note.slice(report.note.indexOf(label)).split(". ")[0];
+    assert.ok(part("At the asked location:").includes(path.join(projDir, "f_0002.png")));
+    assert.ok(part("In the temp folder").includes(path.join(shadowDir, "f_0001.png")));
+    const keepList = report.note.slice(report.note.indexOf("do not delete them:"));
+    assert.ok(keepList.includes(path.join(projDir, "f_0001.png")) && keepList.includes(path.join(projDir, "f_0003.png")));
+  });
+
+  await check("cancel while the last item's queue is being unticked: nothing is called partial (#217 review)", async () => {
+    const jobs = new JobManager();
+    let release;
+    const hookEntered = new Promise((res) => {
+      release = res;
+    });
+    let unblock;
+    const gate = new Promise((res) => (unblock = res));
+    const runner = runnerFor(jobs, {
+      tmpRoot: runTmp,
+      onRendered: async (items) => {
+        release();
+        await gate;
+        return items.map((i) => ({ index: i.index, marked: true }));
+      },
+    });
+    const out = path.join(tmp, "settling.mov");
+    env("ok", out);
+    const { jobId } = runner.start(plan(out), fake);
+    await hookEntered;
+    const report = await runner.cancel(jobId);
+    unblock();
+    const st = await jobs.waitFor(jobId, 10_000);
+    assert.equal(st.status, "completed");
+    assert.equal(st.result.rendered[0].outputs[0].path, out);
+    assert.ok(!(report.partialFiles ?? []).includes(out), "a verified output is never partial");
+    assert.equal(report.stopped, false);
+    assert.equal(report.wasRunning, false);
+    assert.doesNotMatch(report.note, /INCOMPLETE/);
+  });
+
+  await check("cancel: an earlier render's file the cancelled render never touched is not a partial; a sequence's old frames neither", async () => {
+    const dir = path.join(tmp, "partials-pure");
+    fs.mkdirSync(dir, { recursive: true });
+    const mov = path.join(dir, "old.mov");
+    const seq = path.join(dir, "f_[####].png");
+    fs.writeFileSync(mov, "old");
+    fs.writeFileSync(path.join(dir, "f_0000.png"), "old");
+    const outputs = [{ index: 1, path: mov }, { index: 2, path: seq }];
+    const before = stampOutputs(outputs);
+    assert.deepEqual(cancelledPartials(outputs, before), [], "nothing new was written");
+    fs.writeFileSync(path.join(dir, "f_0001.png"), "new frame");
+    const f1 = path.join(dir, "f_0001.png");
+    assert.deepEqual(cancelledPartials(outputs, before), [f1], "the new frame, by name; never the pattern");
+    await sleep(20);
+    fs.writeFileSync(mov, "rewritten by aerender in place");
+    assert.deepEqual(cancelledPartials(outputs, before), [mov, f1], "a file the render rewrote in place is partial");
+  });
+
+  await check("cancel while a finished item's output is still draining: it is verified and reported rendered, never INCOMPLETE (#217 round 3)", async () => {
+    const jobs = new JobManager();
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, drainCapMs: 1500 });
+    const out = path.join(tmp, "draining.mov");
+    env("stuckengine", out);
+    const { jobId } = runner.start(plan(out), fake);
+    for (let i = 0; i < 200 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
+    await sleep(500); // aerender has exited 0; its engine still holds the output open
+    const t0 = Date.now();
+    const report = await runner.cancel(jobId);
+    assert.ok(Date.now() - t0 < 1000, `the cancel held the caller ${Date.now() - t0}ms for the drain`);
+    assert.equal(report.status, "finishing");
+    assert.match(report.note, /being verified now/);
+    assert.match(jobs.get(jobId).message ?? "", /Cancel requested/);
+    const st = await jobs.waitFor(jobId, 15_000);
+    assert.equal(st.status, "completed", st.error);
+    assert.equal(st.result.rendered[0].outputs[0].path, out);
+    assert.ok(!(report.partialFiles ?? []).includes(out), `a finished file was called partial: ${report.note}`);
+    assert.doesNotMatch(report.note, /INCOMPLETE/);
+    assert.equal(report.wasRunning, false);
+  });
+
+  await check("cancel while a finished item drains, with a later item queued: verified, the later one never starts, the job is cancelled (#217 round 4)", async () => {
+    const jobs = new JobManager();
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, drainCapMs: 1500 });
+    const out = path.join(tmp, "draining2.mov");
+    env("stuckengine", out);
+    const p = plan(out);
+    p.items.push({ ...p.items[0], index: 3, outputs: [{ index: 1, path: path.join(tmp, "never.mov") }] });
+    const { jobId } = runner.start(p, fake);
+    for (let i = 0; i < 200 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
+    await sleep(500);
+    const report = await runner.cancel(jobId);
+    assert.equal(report.status, "finishing");
+    const st = await jobs.waitFor(jobId, 15_000).catch((e) => ({ status: "threw", error: e.message }));
+    const final = jobs.get(jobId);
+    assert.equal(final.status, "cancelled", JSON.stringify(st));
+    assert.deepEqual(final.result.rendered.map((x) => x.index), [2]);
+    assert.equal(final.result.stopped, true, final.result.note);
+    assert.match(final.result.note, /no later item was started/);
+    assert.ok(!fs.existsSync(path.join(tmp, "never.mov")));
+  });
+
+  for (const [ok, dur] of [[false, 2 / 30], [true, 4 / 30]]) {
+    await check(`an output beside the project over an earlier file: ${ok ? "replaces it once verified" : "a failed render never replaces it, and says where its file is"} (#217 round 3)`, async () => {
+      const projDir = path.join(tmp, `over-${ok}`);
+      fs.mkdirSync(projDir, { recursive: true });
+      const proj = path.join(projDir, "show.aep");
+      fs.writeFileSync(proj, "aep bytes");
+      const out = path.join(projDir, "beside.mov");
+      fs.writeFileSync(out, "old complete render");
+      process.env.FAKE_REAL_PROJ_DIR = projDir;
+      const jobs = new JobManager();
+      const runner = runnerFor(jobs, { tmpRoot: runTmp });
+      env("relative", out);
+      process.env.FAKE_DUR = String(dur);
+      const { jobId } = runner.start({ ...plan(out), projectPath: proj }, fake);
+      const kept = path.join(path.dirname(snapshotLayout(proj, jobId, runTmp, [out]).snap), "beside.mov");
+      if (ok) {
+        const st = await jobs.waitFor(jobId, 10_000);
+        assert.equal(st.status, "completed", st.error);
+        assert.equal(st.result.rendered[0].outputs[0].path, out);
+        assert.notEqual(fs.readFileSync(out, "utf8"), "old complete render", "the verified render replaced the earlier file");
+        assert.ok(!fs.existsSync(path.join(runTmp, "ae-mcp-render", jobId)), "nothing left in the job folder");
+      } else {
+        let err = "";
+        await jobs.waitFor(jobId, 10_000).catch((e) => (err = e.message));
+        assert.match(err, /more than a frame apart/);
+        assert.equal(fs.readFileSync(out, "utf8"), "old complete render", "a failed render must not replace the earlier file");
+        assert.ok(fs.existsSync(kept), "the failed render's file is kept in the temp folder");
+        assert.ok(err.includes(kept) && /NOT replaced/.test(err), err);
+        assert.ok(err.includes(`Unchanged from before this render, not its output: ${out}`), err);
+        assert.doesNotMatch(err, /deleted as the job ends/, "a kept file is not an unforeseen #215 stray");
+      }
+      delete process.env.FAKE_REAL_PROJ_DIR;
+    });
+  }
+
+  await check("two same-named outputs in different folders over earlier files: each lands at its own path (#217 round 4)", async () => {
+    const top = path.join(tmp, "twin");
+    const projDir = path.join(top, "show");
+    fs.mkdirSync(projDir, { recursive: true });
+    const proj = path.join(projDir, "show.aep");
+    fs.writeFileSync(proj, "aep bytes");
+    const a = path.join(projDir, "out.mov");
+    const b = path.join(top, "out.mov");
+    fs.writeFileSync(a, "old a");
+    fs.writeFileSync(b, "old b");
+    process.env.FAKE_REAL_PROJ_DIR = projDir;
+    const jobs = new JobManager();
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
+    env("relative", a);
+    process.env.FAKE_OUT2 = b;
+    const p = { ...plan(a), projectPath: proj };
+    p.items[0].outputs = [{ index: 1, path: a }, { index: 2, path: b }];
+    const { jobId } = runner.start(p, fake);
+    const st = await jobs.waitFor(jobId, 10_000);
+    delete process.env.FAKE_OUT2;
+    delete process.env.FAKE_REAL_PROJ_DIR;
+    assert.equal(st.status, "completed", st.error);
+    assert.deepEqual(st.result.rendered[0].outputs.map((o) => o.path), [a, b]);
+    assert.notEqual(fs.readFileSync(a, "utf8"), "old a");
+    assert.notEqual(fs.readFileSync(b, "utf8"), "old b", "the second folder's earlier file must be replaced too");
   });
 
   await check("a stuck engine cannot hold the job open: killed at the cap, then decided", async () => {
@@ -737,8 +1209,7 @@ function alive(pid) {
     env("hang", out);
     const { jobId } = runner.start(plan(out, 100), fake);
     for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
-    const snapDir = path.join(runTmp, "ae-mcp-render", jobId);
-    const snapPath = path.join(snapDir, "show.aep");
+    const snapPath = snapshotLayout(projectFile, jobId, runTmp, [out]).snap;
     // A non-aerender process whose arguments hold this job's snapshot path and id.
     const decoy = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)", "--", jobId, snapPath], { detached: true, stdio: "ignore" });
     decoy.unref();
@@ -803,11 +1274,14 @@ function alive(pid) {
     for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
     const grandchild = Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8"));
     assert.ok(alive(grandchild), "the fake's grandchild should be running before the cancel");
+    // The fake writes its partial file just after the grandchild's pid: wait
+    // for it, or a fast cancel lands in between (a CI flake, #217).
+    for (let i = 0; i < 100 && !fs.existsSync(out); i++) await sleep(20);
     const report = await runner.cancel(jobId);
     assert.equal(report.stopped, true);
     assert.equal(report.wasRunning, true);
     assert.deepEqual(report.partialFiles, [out]);
-    assert.match(report.note, /INCOMPLETE/);
+    assert.match(report.note, /may be INCOMPLETE/);
     assert.equal(jobs.get(jobId).status, "cancelled");
     assert.equal(jobs.get(jobId).result.stopped, true);
     for (let i = 0; i < 50 && alive(grandchild); i++) await sleep(20);
@@ -836,6 +1310,7 @@ function alive(pid) {
     assert.equal(st.status, "cancelled");
     assert.equal(st.result.stopped, true);
     assert.match(st.result.note, /after cancel_job had reported it still running/);
+    assert.match(st.result.note, /may be INCOMPLETE|No partial output was found/, "the follow-up names where the partial is, like a normal cancel");
     try { process.kill(grandchild, "SIGKILL"); } catch {}
   });
 
