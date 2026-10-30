@@ -13,26 +13,30 @@ export const VecAny = z.union([z.number(), Vec2, Vec3, z.array(z.number())]);
 /**
  * Hex colours (issue #170). A house style's palette is written in hex, and an
  * agent converting `#FF8800` to `[1, 0.533, 0]` by hand is a place to get it
- * wrong. `#` is optional; 3/6 digits are RGB, 4/8 add alpha.
+ * wrong. `#` is optional; 3 or 6 digits.
+ *
+ * No alpha form (`#rrggbbaa`, `#rgba`). Measured on AE 26.5: a shape Fill
+ * Color, an effect's Color and a text animator's Fill Color all STORE an alpha
+ * of 0 and render exactly as with 1 — so accepting it would answer ok:true for
+ * transparency that never shows. The refusal says where transparency lives.
  */
 export const HEX_RGB = /^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
-export const HEX_RGBA = /^#?(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+const HEX_MESSAGE =
+  "Hex colour is '#rrggbb' or '#rgb'. After Effects ignores a colour's alpha, so '#rrggbbaa' is refused: " +
+  "set transparency with Opacity (the layer's, or a shape fill's/stroke's).";
+const Hex = z.string().regex(HEX_RGB, HEX_MESSAGE);
 /**
- * `#f80` -> [1, 0x88/255, 0]; `#ff8800cc` adds 0xcc/255 as alpha. Channels
- * 0..1, unrounded. `__hexToRgba` in values.jsx is the same arithmetic, and
- * tests/unit/hex-colour.mjs holds the two to the same answers.
+ * `#f80` -> [1, 0x88/255, 0]. Channels 0..1, unrounded. `__hexToRgb` in
+ * values.jsx is the same arithmetic, and tests/unit/hex-colour.mjs holds the
+ * two to the same answers.
  */
-export function hexToRgba(hex: string): number[] {
+export function hexToRgb(hex: string): [number, number, number] {
   let h = hex.replace(/^#/, "");
-  if (h.length <= 4) h = h.split("").map((c) => c + c).join("");
-  const out: number[] = [];
-  for (let i = 0; i < h.length; i += 2) out.push(parseInt(h.slice(i, i + 2), 16) / 255);
-  return out;
+  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255) as [number, number, number];
 }
 const RGB = z.tuple([z.number(), z.number(), z.number()]);
-export const Color = z
-  .union([RGB, z.string().regex(HEX_RGB).transform((s) => hexToRgba(s) as [number, number, number])])
-  .describe("RGB 0..1, or hex '#ff8800'.");
+export const Color = z.union([RGB, Hex.transform(hexToRgb)]).describe("RGB 0..1, or hex '#ff8800'.");
 export const ColorRGBA = z.tuple([z.number(), z.number(), z.number(), z.number()]);
 /**
  * The `value` of a write aimed at any property. A hex string is checked for
@@ -40,7 +44,7 @@ export const ColorRGBA = z.tuple([z.number(), z.number(), z.number(), z.number()
  * the property's type is known: only a colour property takes it, so a hex
  * aimed at Position is refused instead of landing as three small numbers.
  */
-const PropertyValue = z.union([VecAny, z.string().regex(HEX_RGBA)]).describe("A colour property also takes hex '#ff8800'.");
+const PropertyValue = z.union([VecAny, Hex]).describe("A colour property also takes hex '#ff8800'.");
 
 /**
  * A closed set of names, matched without regard to case and forwarded in the
@@ -983,9 +987,7 @@ export const SetShapePath = z.object({
  * as a silently-missing property and produce an empty shape that still reports
  * success.
  */
-const ShapeColor = z
-  .union([RGB, ColorRGBA, z.string().regex(HEX_RGBA).transform((s) => hexToRgba(s))])
-  .describe("RGB(A) 0..1, or hex '#ff8800' / '#ff8800cc'.");
+const ShapeColor = z.union([RGB, ColorRGBA, Hex.transform(hexToRgb)]).describe("RGB 0..1, or hex '#ff8800'.");
 
 export const ShapeContent = z.discriminatedUnion("type", [
   z.object({

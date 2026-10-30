@@ -565,6 +565,17 @@ export function invalidArgsText(op: string, e: unknown): string {
     let text = issue.message ?? "invalid";
     const received = issue.received ?? /received (\w+)\s*$/.exec(issue.message ?? "")?.[1];
     const unknownKeys = (raw as { keys?: unknown }).keys;
+    // A union's own message is "Invalid input", whatever went wrong. When only
+    // one branch was the right type and failed on something else — a hex
+    // string with an alpha against a colour that is an RGB array or a hex —
+    // that branch's message is the one that says how to fix it (issue #170).
+    const branches = (raw as { errors?: unknown }).errors;
+    if (issue.code === "invalid_union" && Array.isArray(branches)) {
+      const typed = (branches as { code?: string; path?: unknown[]; message?: string }[][]).filter(
+        (b) => Array.isArray(b) && b.length > 0 && !b.some((i) => i.code === "invalid_type" && !(i.path && i.path.length))
+      );
+      if (typed.length === 1) text = typed[0].map((i) => i.message ?? "invalid").join("; ");
+    }
     if (issue.code === "unrecognized_keys" && Array.isArray(unknownKeys)) {
       // Refused rather than stripped (issue #147): a key the tool does not know
       // is one it would have ignored while reporting success.

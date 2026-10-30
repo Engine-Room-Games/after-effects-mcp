@@ -9,6 +9,10 @@
 // After Effects converts it — and refuses it on a property that is not a colour,
 // rather than writing a hex aimed at Position as three small numbers.
 //
+// No alpha form: measured on AE 26.5, a shape Fill Color, an effect Color and a
+// text animator Fill Color all store an alpha of 0 and render exactly as with
+// 1, so '#rrggbbaa' / '#rgba' are refused with a message naming Opacity.
+//
 // Path misses: walkProperty used to answer "segment returned null at [1]=Wobble"
 // and nothing else, so the agent guessed again. It now lists what IS there —
 // capped, with the remainder counted.
@@ -23,8 +27,9 @@ import { loadFakeAe } from "./lib/fake-ae.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const sharedDist = pathToFileURL(path.join(root, "packages", "shared", "dist", "schemas.js")).href;
 const serverDist = pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "server.js")).href;
-const { StrictOpSchemas, hexToRgba } = await import(sharedDist);
+const { StrictOpSchemas, hexToRgb } = await import(sharedDist);
 const { toolInputSchema } = await import(serverDist);
+const { prepareBatchSteps } = await import(pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "tools", "batchSteps.js")).href);
 
 let passed = 0;
 function check(name, fn) {
@@ -43,14 +48,12 @@ const refuses = (op, args) => assert.equal(StrictOpSchemas[op].safeParse(args).s
 
 // ---------------------------------------------------------------- the schema
 
-check("hexToRgba: 3, 4, 6 and 8 digits, with or without #, either case", () => {
-  assert.deepEqual(hexToRgba("#ff8800"), ORANGE);
-  assert.deepEqual(hexToRgba("FF8800"), ORANGE);
-  assert.deepEqual(hexToRgba("#f80"), ORANGE);
-  assert.deepEqual(hexToRgba("#ff8800cc"), [...ORANGE, 0xcc / 255]);
-  assert.deepEqual(hexToRgba("#f80c"), [...ORANGE, 0xcc / 255]);
-  assert.deepEqual(hexToRgba("#000"), [0, 0, 0]);
-  assert.deepEqual(hexToRgba("#FFFFFF"), [1, 1, 1]);
+check("hexToRgb: 3 and 6 digits, with or without #, either case", () => {
+  assert.deepEqual(hexToRgb("#ff8800"), ORANGE);
+  assert.deepEqual(hexToRgb("FF8800"), ORANGE);
+  assert.deepEqual(hexToRgb("#f80"), ORANGE);
+  assert.deepEqual(hexToRgb("#000"), [0, 0, 0]);
+  assert.deepEqual(hexToRgb("#FFFFFF"), [1, 1, 1]);
 });
 
 check("a typed colour field converts hex to RGB 0..1 before it is forwarded", () => {
@@ -66,16 +69,28 @@ check("a typed colour field converts hex to RGB 0..1 before it is forwarded", ()
   assert.deepEqual(parse("create_solid_layer", { compId: 1, color: [0.1, 0.2, 0.3] }).color, [0.1, 0.2, 0.3]);
 });
 
-check("an RGB-only field refuses hex with alpha rather than dropping the alpha", () => {
-  refuses("create_solid_layer", { compId: 1, color: "#ff8800cc" });
-  refuses("set_text", { compId: 1, layerId: 2, fillColor: "#f80c" });
+check("hex with alpha is refused everywhere, naming Opacity: After Effects renders a colour's alpha as 1", () => {
+  const cases = [
+    ["create_solid_layer", { compId: 1, color: "#ff8800cc" }],
+    ["set_text", { compId: 1, layerId: 2, fillColor: "#f80c" }],
+    ["add_shape_content", { compId: 1, layerId: 2, content: { type: "fill", color: "#ff8800cc" } }],
+    ["add_shape_content", { compId: 1, layerId: 2, content: { type: "stroke", color: "#f80c" } }],
+    ["set_effect_param", { compId: 1, layerId: 2, effectIndex: 1, paramMatchName: "x", value: "#ff000000" }],
+    ["add_keyframe", { compId: 1, layerId: 2, propertyPath: ["x"], time: 0, value: "#f80c" }],
+    ["set_shape_property", { compId: 1, layerId: 2, contentPath: ["x"], property: "Color", value: "#ff8800cc" }],
+  ];
+  for (const [op, args] of cases) {
+    const r = StrictOpSchemas[op].safeParse(args);
+    assert.equal(r.success, false, `${op} accepted ${JSON.stringify(args)}`);
+    assert.match(JSON.stringify(r.error.issues), /ignores a colour's alpha.*Opacity/, op);
+  }
 });
 
-check("a shape fill or stroke takes hex with or without alpha", () => {
+check("a shape fill or stroke takes hex, and an RGBA array as before", () => {
   const fill = parse("add_shape_content", { compId: 1, layerId: 2, content: { type: "fill", color: "#ff8800" } });
   assert.deepEqual(fill.content.color, ORANGE);
-  const stroke = parse("add_shape_content", { compId: 1, layerId: 2, content: { type: "stroke", color: "#ff8800cc" } });
-  assert.deepEqual(stroke.content.color, [...ORANGE, 0xcc / 255]);
+  const stroke = parse("add_shape_content", { compId: 1, layerId: 2, content: { type: "stroke", color: "#f80" } });
+  assert.deepEqual(stroke.content.color, ORANGE);
   const rgba = parse("add_shape_content", { compId: 1, layerId: 2, content: { type: "fill", color: [1, 0, 0, 1] } });
   assert.deepEqual(rgba.content.color, [1, 0, 0, 1]);
 });
@@ -91,17 +106,28 @@ check("a string that is not a hex colour is refused before anything reaches Afte
 
 check("a property `value` passes hex through for After Effects to convert", () => {
   assert.equal(parse("set_effect_param", { compId: 1, layerId: 2, effectIndex: 1, paramMatchName: "x", value: "#ff8800" }).value, "#ff8800");
-  assert.equal(parse("add_keyframe", { compId: 1, layerId: 2, propertyPath: ["x"], time: 0, value: "#f80c" }).value, "#f80c");
+  assert.equal(parse("add_keyframe", { compId: 1, layerId: 2, propertyPath: ["x"], time: 0, value: "#f80" }).value, "#f80");
   assert.equal(parse("set_shape_property", { compId: 1, layerId: 2, contentPath: ["x"], property: "Color", value: "ff8800" }).value, "ff8800");
   // Numbers and arrays are as before.
   assert.equal(parse("add_keyframe", { compId: 1, layerId: 2, propertyPath: ["x"], time: 0, value: 50 }).value, 50);
 });
 
-check("a run_batch step is held to the same conversion", () => {
-  const b = parse("run_batch", { ops: [{ op: "create_solid_layer", args: { compId: 1, color: "#ff8800" } }] });
-  // The batch envelope keeps args free-form; the server parses each step against
-  // its own tool, which is what forwards the converted value.
-  assert.deepEqual(StrictOpSchemas[b.ops[0].op].parse(b.ops[0].args).color, ORANGE);
+check("a run_batch step is converted and refused exactly as the tool is, at any depth", () => {
+  // prepareBatchSteps is what server.ts forwards a batch through.
+  const good = prepareBatchSteps([
+    { op: "create_solid_layer", args: { compId: 1, color: "#ff8800" } },
+    { op: "run_batch", args: { ops: [{ op: "set_comp", args: { compId: 1, bgColor: "#fff" } }] } },
+  ]);
+  assert.deepEqual(good.problems, []);
+  assert.deepEqual(good.ops[0].args.color, ORANGE);
+  assert.deepEqual(good.ops[1].args.ops[0].args.bgColor, [1, 1, 1]);
+  const bad = prepareBatchSteps([
+    { op: "create_solid_layer", args: { compId: 1, color: "#ff8800" } },
+    { op: "create_solid_layer", args: { compId: 1, color: "#ff8800cc" } },
+  ]);
+  assert.equal(bad.problems.length, 1);
+  assert.equal(bad.problems[0].path, "ops[1]");
+  assert.match(bad.problems[0].problem, /Opacity/);
 });
 
 check("the emitted schema tells the model hex is accepted", () => {
@@ -143,8 +169,8 @@ function refused(res, pattern, what) {
 
 check("values.jsx converts hex exactly as the schema does", () => {
   const ae = loadFakeAe(["values.jsx"]);
-  for (const hex of ["#ff8800", "FF8800", "#f80", "#ff8800cc", "#f80c", "#000", "#123456", "#abcdef80"]) {
-    assert.deepEqual(ae.json(`__hexToRgba(${JSON.stringify(hex)})`), hexToRgba(hex), hex);
+  for (const hex of ["#ff8800", "FF8800", "#f80", "#000", "#123456", "#ABCDEF", "fff"]) {
+    assert.deepEqual(ae.json(`__hexToRgb(${JSON.stringify(hex)})`), hexToRgb(hex), hex);
   }
 });
 
@@ -166,14 +192,24 @@ check("set_effect_param refuses hex on a parameter that is not a colour, and wri
 
 check("add_keyframe keys a hex colour, and refuses hex on Position without adding a key", () => {
   const ae = scene();
-  ok(ae.call("add_keyframe", { compId: 100, layerId: 2, propertyPath: ["Effects", "Fill", "Color"], time: 1, value: "#ff8800cc" }), "add_keyframe");
-  assert.deepEqual(ae.json(`CARD.property("Effects").property(1).property("Color").keyValue(1)`), [...ORANGE, 0xcc / 255]);
+  ok(ae.call("add_keyframe", { compId: 100, layerId: 2, propertyPath: ["Effects", "Fill", "Color"], time: 1, value: "#ff8800" }), "add_keyframe");
+  assert.deepEqual(ae.json(`CARD.property("Effects").property(1).property("Color").keyValue(1)`), ORANGE);
   refused(
     ae.call("add_keyframe", { compId: 100, layerId: 2, propertyPath: ["Transform", "Position"], time: 1, value: "#ff8800" }),
     /not a colour property/,
     "add_keyframe"
   );
   assert.equal(ae.json(`CARD.property("Transform").property("Position").numKeys`), 0);
+});
+
+check("After Effects refuses an alpha hex that reached it by another route (run_jsx calling OPS), writing nothing", () => {
+  const ae = scene();
+  refused(
+    ae.call("set_effect_param", { compId: 100, layerId: 2, effectIndex: 1, paramMatchName: "ADBE Fill-0002", value: "#ff880000" }),
+    /not a hex colour.*alpha is ignored/,
+    "set_effect_param"
+  );
+  assert.deepEqual(ae.json(`CARD.property("Effects").property(1).property("ADBE Fill-0002").value`), [1, 0, 0, 1]);
 });
 
 check("set_shape_property writes a hex colour to a shape fill", () => {
