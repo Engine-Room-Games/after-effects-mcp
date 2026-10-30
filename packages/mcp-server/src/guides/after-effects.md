@@ -51,6 +51,11 @@ not be read as a spec and its opening text is returned instead; `found: false`
 means there is none — build with sensible defaults and offer once, at the end,
 to capture one from what you made. Do not nag about it.
 
+Pass the palette's hexes as they are. Every colour field takes `"#ff8800"` as
+well as RGB 0..1 (`#f80` too; shape fills and strokes, and a `value` aimed at a
+colour property, also take `#ff8800cc` with alpha). A hex `value` aimed at a
+property that is not a colour is refused, not converted.
+
 ## Orient before you touch anything
 
 Never guess at project state. Cheap reads exist for exactly this, and the

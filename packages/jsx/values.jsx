@@ -160,7 +160,48 @@ function __requireKeyTime(keyframe, time, op) {
 // caller checks that itself first, with its own op name; this is the backstop.
 function __setOrKeyAtTime(prop, value, time, keyframe, op) {
   __requireKeyTime(keyframe, time, op || "__setOrKeyAtTime");
+  value = __hexValue(prop, value, op || "__setOrKeyAtTime");
   var hasTime = time !== undefined && time !== null;
   if (hasTime && (keyframe || prop.numKeys > 0)) prop.setValueAtTime(time, value);
   else __setValue(prop, value);
+}
+
+// Hex colours (issue #170). The schema lets a `value` be a hex string, checked
+// for form only: whether it may be a colour depends on the property, and only
+// After Effects knows that. A colour property gets the channels 0..1 — [r,g,b]
+// for 3/6 digits, [r,g,b,a] for 4/8 — and anything else is refused, rather than
+// a hex aimed at Position landing there as three small numbers.
+// The arithmetic is hexToRgba's in schemas.ts; tests/unit/hex-colour.mjs holds
+// the two to the same answers.
+var __HEX_COLOUR = /^#?([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+
+function __hexToRgba(hex) {
+  var h = String(hex).replace(/^#/, "");
+  if (h.length <= 4) {
+    var doubled = "";
+    for (var i = 0; i < h.length; i++) doubled += h.charAt(i) + h.charAt(i);
+    h = doubled;
+  }
+  var out = [];
+  for (var j = 0; j < h.length; j += 2) out.push(parseInt(h.substr(j, 2), 16) / 255);
+  return out;
+}
+
+// `value` unchanged unless it is a string; a hex string becomes its channels
+// when `prop` is a colour property, and is refused otherwise. Nothing is
+// written here, so a refusal leaves the property as it was.
+function __hexValue(prop, value, op) {
+  if (typeof value !== "string") return value;
+  if (!__HEX_COLOUR.test(value)) {
+    throw new Error(op + ": value '" + value + "' is a string but not a hex colour ('#ff8800', '#f80', '#ff8800cc'). Nothing was changed.");
+  }
+  var isColour = false;
+  try { isColour = prop.propertyValueType === PropertyValueType.COLOR; } catch (e) { isColour = false; }
+  if (!isColour) {
+    var label = "this property";
+    try { label = "'" + prop.name + "' (" + prop.matchName + ")"; } catch (e2) { label = "this property"; }
+    throw new Error(op + ": value '" + value + "' is a hex colour, but " + label +
+      " is not a colour property. Nothing was changed. Pass a number or an array of numbers.");
+  }
+  return __hexToRgba(value);
 }

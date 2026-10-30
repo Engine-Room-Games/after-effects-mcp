@@ -235,6 +235,11 @@ jobs:
       - name: Capability gaps reach After Effects and are read back
         run: node tests/unit/capability-gaps.mjs
 
+      # #170: every colour field takes hex (a `value` only on a colour
+      # property), and a propertyPath that misses lists what is there, capped.
+      - name: Hex colours convert, and a missed path lists its children
+        run: node tests/unit/hex-colour.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.
