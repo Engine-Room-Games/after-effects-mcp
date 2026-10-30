@@ -8,6 +8,15 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # The types must match the oldest Node we support (engines: >=22), or the
+      # compiler accepts APIs that crash on a user's Node 22.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # TypeScript 7 (the Go port) ships no compiler API yet, and
+      # tests/unit/schema-handler-contract.mjs parses sources with it.
+      - dependency-name: "typescript"
+        versions: [">=7"]
     groups:
       npm-minor-and-patch:
         update-types: [minor, patch]

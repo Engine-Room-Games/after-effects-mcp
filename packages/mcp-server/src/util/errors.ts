@@ -16,8 +16,8 @@ export class BridgeUnreachableError extends Error {
 }
 
 /**
- * The panel answered, and what it answered was "no" — the fourth bridge failure,
- * whose remedy contradicts the other three (see docs/fragile-areas-bridge.md).
+ * The panel answered, and what it answered was "no" — one of the five bridge
+ * failures, whose remedy contradicts the other four (see docs/fragile-areas-bridge.md).
  * `sentToken` splits it: nothing sent means this server cannot see the panel's
  * token file; sent and rejected means the file outlived the panel that wrote it.
  */

@@ -45,9 +45,9 @@ jobs:
     outputs:
       tarball: ${{ steps.pack.outputs.tarball }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -129,7 +129,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-tarball
           path: ${{ runner.temp }}/pkg/${{ steps.pack.outputs.tarball }}
@@ -148,7 +148,7 @@ jobs:
       # no NODE_AUTH_TOKEN set, npm sees an empty token, decides auth is already
       # configured, and never starts the OIDC exchange.
       # See https://github.com/actions/setup-node/issues/1551
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -169,7 +169,7 @@ jobs:
           fi
           echo "OIDC endpoint present, no conflicting .npmrc"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: npm-tarball
           path: ${{ runner.temp }}/pkg

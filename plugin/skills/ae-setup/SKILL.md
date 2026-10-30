@@ -61,20 +61,30 @@ read alike and their remedies contradict each other:
   them and nothing drops into the middle of work the user asked for as one
   thing; something in front is taking a very long time, usually a long
   `run_batch`. Re-sending **is** safe here, once the work in
-  front has finished; this is the one of the four where it is. Find out what is
+  front has finished, because nothing ran. Find out what is
   in front with `get_job` or `await_job` — reads are never queued, so `list_`
   and `get_` calls still answer.
+- **Dropped the connection mid-call** — the call was delivered, then the
+  connection broke before any answer, so it may or may not have landed — unlike
+  a refusal, it may have changed the project. Do not re-send it blind: confirm the panel with `check_setup`, read
+  the comp or layer back (`diff_comp` against a snapshot, `get_layer_full`), and
+  re-send only if the change is not there.
+- **The shared front desk went away mid-call** — the message names the front
+  desk, another AI session's server, not the panel; the panel never left, so
+  `check_setup` will not help. The call may already have reached After Effects
+  and **may land later**, even after a read-back that missed it. Read back
+  before re-sending, and again after any re-send.
 
 The message itself tells you which one you have; the queue error says in as many
 words that nothing was written. Never collapse them into "the bridge is playing
-up", because "re-send it", "do not re-send it" and "do not restart it" are three
-different answers.
+up", because "re-send it", "do not re-send it", "read it back first" and "do not
+restart it" are different answers.
 
 On a timeout, `check_setup` says so itself: `bridgeReachable` reports that the port accepted the connection but did not answer in time, and `nextSteps` tells you to wait. Follow it. Re-running `setup_panel` or restarting After Effects here costs the user their work-in-progress for nothing, and both are the wrong move. Poll `check_setup` for about a minute; it usually clears on its own.
 
 Two things to ask about while waiting: whether a dialog is sitting behind another window in After Effects, and — on macOS — whether they have switched to another desktop. Calls have been reported to stall while the user is on a different Space and to complete as soon as they come back.
 
-A **full** write queue is a fifth message and a different instruction again:
+A **full** write queue is a sixth message and a different instruction again:
 too many calls are already waiting, so stop issuing writes and let it drain. If
 you have that much independent work, send it as one `run_batch` — one
 ExtendScript pass and one place in the queue, instead of dozens of each.
