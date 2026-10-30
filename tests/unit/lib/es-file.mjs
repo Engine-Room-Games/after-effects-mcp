@@ -79,8 +79,10 @@ export class EsFile {
   }
   write(s) {
     if (this._mode !== "w" || this._fd === null) return false;
-    // lineFeed "Unix" writes "\n" as given; "Macintosh" turns each into "\r".
-    const text = this.lineFeed === "Unix" ? String(s) : String(s).replace(/\n/g, "\r");
+    // lineFeed "Unix" writes every line ending as "\n" — measured on AE 26.5:
+    // "\r\n" and a bare "\r" both reach disk as LF. "Macintosh" turns each
+    // "\n" into "\r".
+    const text = this.lineFeed === "Unix" ? String(s).replace(/\r\n?/g, "\n") : String(s).replace(/\n/g, "\r");
     fs.writeSync(this._fd, text, null, "utf8");
     return true;
   }

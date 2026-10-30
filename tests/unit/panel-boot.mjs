@@ -263,6 +263,10 @@ await check("serves /health on the port it announced", async () => {
   assert.ok(body.bundleHash, "health did not report a bundle hash");
   // Read off the socket, not the configured number: the config said 0.
   assert.equal(body.port, port, "health must report the port actually bound");
+  // Issue #220, stage 3: the one word on which panel code is answering. The
+  // server uses `_project_path` only when this lists `project-path`.
+  assert.ok(Array.isArray(body.capabilities), "health must list the panel's capabilities");
+  assert.ok(body.capabilities.includes("project-path"), "the panel must report project-path");
 });
 
 await check("wrote the port file the MCP server discovers it by", () => {

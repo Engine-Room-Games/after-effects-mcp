@@ -6,6 +6,7 @@ export interface WriteLock {
   readonly held: string | null;
 }
 import type { RenderItemPlan } from "./aerender.js";
+import type { SendInternal } from "../tools/internalOps.js";
 
 /**
  * How long a finished render waits for the write lock before giving up on the
@@ -26,7 +27,7 @@ export type MarkAnswer = { index: number; marked: boolean; reason?: string };
  */
 export async function markRendered(
   writes: WriteLock,
-  runOp: (op: string, args: unknown) => Promise<unknown>,
+  runOp: SendInternal,
   items: RenderItemPlan[],
   waitMs: number = MARK_DONE_WAIT_MS
 ): Promise<MarkAnswer[]> {
