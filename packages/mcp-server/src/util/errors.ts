@@ -104,6 +104,36 @@ function measuredBeforeText(t: TimeoutTiming): string {
   return parts.length ? ` Of that, ${parts.join(" and ")}.` : "";
 }
 
+/** What may still happen after the timeout — which, for render_queue, is little. */
+function landingLines(step: "prepare" | "save" | undefined): string[] {
+  const another = [
+    "One possible reason for the wait is another MCP client connected to the same After",
+    "Effects, since the panel runs one call at a time for every client; this message",
+    "cannot tell which.",
+  ];
+  if (step === "prepare") {
+    return [
+      "Nothing was saved and no render was started: this step only reads the render",
+      "queue, so nothing can land from it.",
+      ...another,
+    ];
+  }
+  if (step === "save") {
+    return [
+      "No render was started. Only the project save may still complete after this",
+      "message — it reached After Effects and nothing cancels it. Calling render_queue",
+      "again is safe: a second save of the same project changes nothing.",
+      ...another,
+    ];
+  }
+  return [
+    "The call may still run and land after this message: it reached the panel, or is",
+    "queued there, and nothing cancels it. That has been measured — a write that timed",
+    "out this way appeared in the comp once After Effects was free.",
+    ...another,
+  ];
+}
+
 /**
  * The panel accepted the connection and then did not answer in time.
  *
@@ -118,11 +148,19 @@ function measuredBeforeText(t: TimeoutTiming): string {
  * The whole point of this message is to stop the reader restarting things that
  * do not need restarting.
  */
+/**
+ * `renderStep` marks a timeout in one of `render_queue`'s two bridge steps,
+ * which escape before any render starts: the prepare only reads, and only the
+ * save can still land. The generic "may still land, do not re-send" is false
+ * for both, and `_render_save` is a name no agent ever called.
+ */
+export interface TimeoutOpts { op?: string; adjustable?: boolean; timing?: TimeoutTiming; renderStep?: "prepare" | "save"; }
+
 export class BridgeTimeoutError extends Error {
   constructor(
     public port: number,
     public timeoutMs: number,
-    public opts: { op?: string; adjustable?: boolean; timing?: TimeoutTiming } = {}
+    public opts: TimeoutOpts = {}
   ) {
     super(BridgeTimeoutError.message(port, timeoutMs, opts));
     this.name = "BridgeTimeoutError";
@@ -142,10 +180,17 @@ export class BridgeTimeoutError extends Error {
     return this;
   }
 
+  /** Restate the message as a timeout in `render_queue`'s prepare or save step. */
+  asRenderStep(step: "prepare" | "save"): this {
+    this.opts = { ...this.opts, op: "render_queue", renderStep: step };
+    this.message = BridgeTimeoutError.message(this.port, this.timeoutMs, this.opts);
+    return this;
+  }
+
   static message(
     port: number,
     timeoutMs: number,
-    opts: { op?: string; adjustable?: boolean; timing?: TimeoutTiming } = {}
+    opts: TimeoutOpts = {}
   ): string {
     const secs = secondsText(timeoutMs);
     const what = opts.op ? `\`${opts.op}\`` : "the call";
@@ -168,15 +213,18 @@ export class BridgeTimeoutError extends Error {
       "script it cannot answer the bridge at all, and a busy AE looks exactly like a",
       "dead one from here. It usually recovers on its own.",
       "",
-      "The call may still run and land after this message: it reached the panel, or is",
-      "queued there, and nothing cancels it. That has been measured — a write that timed",
-      "out this way appeared in the comp once After Effects was free. One possible reason",
-      "for the wait is another MCP client connected to the same After Effects, since the",
-      "panel runs one call at a time for every client; this message cannot tell which.",
+      ...landingLines(opts.renderStep),
       "",
       "What to do, in order:",
-      "1. Do not restart After Effects, and do not run setup_panel. Do not re-send the",
-      "   call either — that would queue a second copy of the same work.",
+      ...(opts.renderStep
+        ? [
+            "1. Do not restart After Effects, and do not run setup_panel. Once check_setup",
+            "   shows the panel answering, call render_queue again — that starts the render.",
+          ]
+        : [
+            "1. Do not restart After Effects, and do not run setup_panel. Do not re-send the",
+            "   call either — that would queue a second copy of the same work.",
+          ]),
       "2. Call check_setup, and keep polling it for about a minute. The bridge normally",
       "   comes back by itself once the script finishes.",
       "3. Ask the user to look at After Effects. A modal dialog — an unsaved-project",

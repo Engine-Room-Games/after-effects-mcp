@@ -905,7 +905,17 @@ async function runRender(
         `each render is a whole background copy of After Effects, so they are run one at a time.`
     );
   }
-  const plan = (await bridge.runOp("_render_prepare", { indices: args.indices, all: args.all })) as RenderPlan & {
+  // A timeout in either bridge step escapes before any render starts, so it is
+  // restated as render_queue's, saying what can and cannot still land.
+  const renderStep = async <T>(step: "prepare" | "save", p: Promise<T>): Promise<T> => {
+    try {
+      return await p;
+    } catch (e) {
+      if (e instanceof BridgeTimeoutError) e.asRenderStep(step);
+      throw e;
+    }
+  };
+  const plan = (await renderStep("prepare", bridge.runOp("_render_prepare", { indices: args.indices, all: args.all }))) as RenderPlan & {
     readOnly?: boolean | null;
   };
   // Items the user queued by hand never passed add_to_render_queue's guard.
@@ -931,7 +941,7 @@ async function runRender(
     beforeSave: () => {
       aerender = resolveAerender(aerenderCandidates(plan.appPackage, { installRoots: afterEffectsInstallRoots() }));
     },
-    save: async (force) => (await bridge.runOp("_render_save", { force })) as { saved: boolean },
+    save: async (force) => (await renderStep("save", bridge.runOp("_render_save", { force }))) as { saved: boolean },
   });
   const save = { saved };
   const footageWarnings = plan.items.flatMap((i) => (i.footageWarnings ?? []).map((w) => `item ${i.index}: ${w}`));

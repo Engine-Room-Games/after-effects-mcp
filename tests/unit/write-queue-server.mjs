@@ -193,6 +193,27 @@ await check("a timeout says what the whole call cost, not only the op's limit", 
   }
 });
 
+await check("a render_queue step that times out is reported as render_queue, with no render started", async () => {
+  // The prepare and the save cross the bridge before any render starts; a
+  // timeout in either must not say "may still land, do not re-send" under an
+  // internal op name.
+  process.env.AE_MCP_OP_TIMEOUT_MS = "300";
+  behaviour.set("_render_prepare", { ms: 900, result: { items: [] } });
+  try {
+    const res = await client.callTool({ name: "render_queue", arguments: { all: true } });
+    assert.equal(res.isError, true);
+    const text = res.content[0].text;
+    assert.match(text, /`render_queue`/);
+    assert.doesNotMatch(text, /_render_prepare|may still run and land|Do not re-send/);
+    assert.match(text, /Nothing was saved and no render was started/);
+    assert.match(text, /call render_queue again/);
+  } finally {
+    delete process.env.AE_MCP_OP_TIMEOUT_MS;
+    behaviour.delete("_render_prepare");
+    await new Promise((r) => setTimeout(r, 700)); // let the stub answer the abandoned request
+  }
+});
+
 await check("a long batch holds the queue until the job finishes", async () => {
   // The gap the panel's own evalScript mutex leaves, and the whole reason for
   // this queue: run_batch answers with a jobId and the panel goes on driving

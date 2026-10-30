@@ -131,6 +131,24 @@ check("time nobody itemised is not pinned on a step that did not take it", () =>
   assert.match(e.message, /other 12s went on earlier steps of this call\.$/m);
   assert.doesNotMatch(e.message, /panel's version|own earlier write|before the request was sent/);
 });
+check("a render_queue save timeout says only the save can land, under the tool's name", () => {
+  const e = new BridgeTimeoutError(7777, 3000, { op: "_render_save" }).asRenderStep("save");
+  assert.match(e.message, /`render_queue`/);
+  assert.doesNotMatch(e.message, /_render_save/);
+  assert.match(e.message, /No render was started/);
+  assert.match(e.message, /Only the project save may still complete/);
+  assert.match(e.message, /call render_queue again/);
+  assert.doesNotMatch(e.message, /may still run and land|Do not re-send/);
+  // Timing restated afterwards keeps the render wording.
+  e.withTiming({ totalMs: 15_000, gateMs: 3, queueMs: 0 });
+  assert.match(e.message, /did not answer `render_queue` in time/);
+  assert.match(e.message, /No render was started/);
+});
+check("a render_queue prepare timeout says nothing was saved or started", () => {
+  const e = new BridgeTimeoutError(7777, 3000, { op: "_render_prepare" }).asRenderStep("prepare");
+  assert.match(e.message, /Nothing was saved and no render was started/);
+  assert.doesNotMatch(e.message, /_render_prepare|may still run and land|Do not re-send/);
+});
 check("a timeout that kept to its limit keeps the plain sentence", () => {
   const e = new BridgeTimeoutError(7777, 3000, { op: "set_layer" });
   e.withTiming({ totalMs: 3040, gateMs: 2, queueMs: 0 });
