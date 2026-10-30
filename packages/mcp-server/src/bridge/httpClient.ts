@@ -1,5 +1,5 @@
 import type { AeSourceInfo } from "../util/errors.js";
-import { AeError, BridgeAuthError, BridgeTimeoutError, BridgeUnreachableError, isTimeoutError } from "../util/errors.js";
+import { AeError, BridgeAuthError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, isResetError, isTimeoutError, isUnsentError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { authHeaders, DEFAULT_PORT, discoverPort, locatePanel, panelToken, pinnedPort, portCandidates, type LocateResult } from "./discovery.js";
 
@@ -58,6 +58,22 @@ export type PortChangeListener = (next: number, previous: number) => void | Prom
 
 /** How long a port-change listener gets to settle before the retried op goes out. */
 const LISTENER_SETTLE_MS = 750;
+
+/**
+ * `timeoutMs` is the op timeout of the session that *issued* the call. The
+ * front desk (issue #223) forwards other sessions' calls, and each of those
+ * sessions may have its own `AE_MCP_OP_TIMEOUT_MS`; the one that applies is
+ * theirs, not the desk's.
+ */
+export interface RunOpOptions {
+  timeoutMs?: number;
+  /**
+   * Asked immediately before a re-post after a refusal (the port search below
+   * can take seconds). Throwing stops the re-post: the front desk uses it to
+   * re-check, at the last moment, that the caller still wants the call.
+   */
+  beforeRetry?: () => void;
+}
 
 export interface HttpClientOptions {
   /**
@@ -165,9 +181,9 @@ export class HttpClient {
    * here, so a retry after a port switch gets the full budget rather than the
    * remainder of a clock that started before the refusal.
    */
-  private async postOp(op: string, args: unknown, progressToken?: string | number): Promise<unknown> {
+  private async postOp(op: string, args: unknown, progressToken?: string | number, opts: RunOpOptions = {}): Promise<unknown> {
     let resp: Response;
-    const timeoutMs = opTimeoutMs(op);
+    const timeoutMs = opts.timeoutMs ?? opTimeoutMs(op);
     try {
       resp = await fetch(`${this.base}/op`, {
         method: "POST",
@@ -180,6 +196,9 @@ export class HttpClient {
       // Collapsing them into "cannot reach the panel" is what sends people off
       // restarting a bridge that was only busy.
       if (isTimeoutError(e)) throw new BridgeTimeoutError(this.port, timeoutMs, { op });
+      // A reset is a third case (#163): the request reached a panel, so it is
+      // not "unreachable" — and must not be, because runOp re-sends those.
+      if (!isUnsentError(e) && isResetError(e)) throw new BridgeResetError(this.port, op, e as Error);
       throw new BridgeUnreachableError(this.port, e as Error);
     }
     // A refusal is not an After Effects error and must not be dressed as one.
@@ -214,9 +233,9 @@ export class HttpClient {
    * answers as the panel. The same port answering again means the refusal was
    * something else, and that is the original error's story to tell.
    */
-  async runOp(op: string, args: unknown, progressToken?: string | number): Promise<unknown> {
+  async runOp(op: string, args: unknown, progressToken?: string | number, opts: RunOpOptions = {}): Promise<unknown> {
     try {
-      return await this.postOp(op, args, progressToken);
+      return await this.postOp(op, args, progressToken, opts);
     } catch (e) {
       if (!(e instanceof BridgeUnreachableError)) throw e;
       const refusedPort = this.port;
@@ -226,7 +245,8 @@ export class HttpClient {
           `\`${op}\` was refused on port ${refusedPort}; the panel is answering on port ${located.found.port}. Switching and re-sending once.`
         );
         await this.switchPort(located.found.port);
-        return await this.postOp(op, args, progressToken);
+        opts.beforeRetry?.();
+        return await this.postOp(op, args, progressToken, opts);
       }
       // Nothing better found. The refusal stands, but the message says what
       // was looked at — a reader told only "cannot reach 7780" would go and
@@ -261,6 +281,7 @@ export class HttpClient {
       });
     } catch (e) {
       if (isTimeoutError(e)) throw new BridgeTimeoutError(this.port, timeoutMs, { op: "cancel_job" });
+      if (!isUnsentError(e) && isResetError(e)) throw new BridgeResetError(this.port, "cancel_job", e as Error);
       throw new BridgeUnreachableError(this.port, e as Error);
     }
     if (resp.status === 401 || resp.status === 403) {

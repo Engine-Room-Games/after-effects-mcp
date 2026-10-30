@@ -335,8 +335,40 @@ function composeContactSheet(tiles, opts) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// The sheet's overall deadline (issue #163)
+// ---------------------------------------------------------------------------
+
+// Every tile is read with the single-frame budget (120s) and may be re-rendered
+// once, one after another, so six slow tiles could wait far past the server's
+// 300s ceiling for screenshot_frame. The server would then report a bridge
+// timeout — "do not re-send, After Effects is busy" — for a sheet the panel was
+// still assembling, and the tiles that had rendered were thrown away with it.
+// One deadline for the whole sheet, comfortably under the server's, turns that
+// into a sheet whose late tiles are marked blocks that say why.
+var CONTACT_SHEET_BUDGET_MS = 240000;
+
+// Below this, a tile is not worth starting: the read could not finish and the
+// re-render could not even begin.
+var MIN_TILE_BUDGET_MS = 1000;
+
+// The least time a FRAME_INCOMPLETE tile must have left to be re-rendered at
+// all: a render plus a read inside it, not a render that starts and is cut off.
+var RETRY_MIN_MS = 15000;
+
+// How long the next tile read may wait: what is left of the sheet's deadline,
+// capped at the per-frame budget. 0 means do not start it.
+function tileBudgetMs(deadline, now, perFrameMs) {
+  var left = deadline - now;
+  if (left < MIN_TILE_BUDGET_MS) return 0;
+  return Math.min(left, perFrameMs);
+}
+
 module.exports = {
   composeContactSheet: composeContactSheet,
+  CONTACT_SHEET_BUDGET_MS: CONTACT_SHEET_BUDGET_MS,
+  tileBudgetMs: tileBudgetMs,
+  RETRY_MIN_MS: RETRY_MIN_MS,
   // Exported for the tests, which have to be able to state the expected sheet
   // size without re-deriving the layout from the code under test.
   layoutFor: layoutFor,

@@ -254,7 +254,9 @@ function __footageKind(it) {
 function __usedInList(it) {
   var out = [];
   var comps = null;
-  try { comps = it.usedIn; } catch (e) { comps = null; }
+  // A read that throws is not "nothing uses it": the list carries `unreadable`
+  // (with AE's message) so a caller about to delete can fail closed.
+  try { comps = it.usedIn; } catch (e) { comps = null; out.unreadable = String(e && e.message ? e.message : e); }
   if (!comps) return out;
   for (var i = 0; i < comps.length; i++) {
     var c = comps[i];
@@ -370,7 +372,8 @@ OPS.purge_unused_footage = noUndoWhen(
       if (solidsOnly && !__isSolidItem(it)) continue;
       if (folder && !__isInFolder(it, folder)) continue;
       scanned += 1;
-      if (__usedInList(it).length > 0) { inUse += 1; continue; }
+      var usedBy = __usedInList(it);
+      if (usedBy.length > 0 || usedBy.unreadable) { inUse += 1; continue; }
       var missing = false;
       try { missing = !!it.footageMissing; } catch (eMissing) {}
       candidates.push({ item: it, id: it.id, name: it.name, kind: __footageKind(it), index: i, footageMissing: missing });

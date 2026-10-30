@@ -1,0 +1,137 @@
+{
+  "recipe": 37,
+  "title": "find_layers returns the identifying core unless asked for more",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "one",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "hero A",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "other",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "two",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "two",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${two.id}",
+        "name": "hero B",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "find_layers",
+      "args": {
+        "namePattern": "hero"
+      },
+      "expect": [
+        {
+          "path": "count",
+          "equals": 2
+        },
+        {
+          "path": "included",
+          "equals": []
+        },
+        {
+          "path": "matches[0].compName",
+          "type": "string"
+        },
+        {
+          "path": "matches[0].inPoint",
+          "exists": false
+        },
+        {
+          "path": "matches[0].enabled",
+          "exists": false
+        }
+      ]
+    },
+    {
+      "call": "find_layers",
+      "args": {
+        "namePattern": "hero",
+        "include": [
+          "timing"
+        ]
+      },
+      "expect": [
+        {
+          "path": "matches[0].inPoint",
+          "type": "number"
+        }
+      ]
+    }
+  ]
+}

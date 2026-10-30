@@ -133,12 +133,60 @@
     return p;
   }
 
+  // ---------- The bundle's one global (issue #185) ----------
+  // After Effects runs every extension's evalScript, File > Scripts, ScriptUI
+  // panels and osascript in one shared ExtendScript engine. The bundle keeps
+  // everything in a closure and publishes only `__AEMCP` (scripts/bundle-jsx.mjs),
+  // so another script can no longer replace `dispatch` or `OPS` under us. It can
+  // still delete or overwrite `__AEMCP` itself, so every op checks it is ours
+  // first and answers NS_MISSING — before running anything — when it is not.
+  var NS_MISSING = "__AEMCP_MISSING__";
+  var NS_READY = "(typeof __AEMCP === 'object' && __AEMCP !== null && " +
+    "__AEMCP.id === 'games.engine-room.ae-mcp' && typeof __AEMCP.call === 'function')";
+
+  // U+2028 and U+2029 are legal raw inside JSON but are line terminators in an
+  // ES3 string literal, and JSON.stringify leaves them raw — so a text layer or
+  // run_jsx script containing one became an unterminated literal and the whole
+  // op died as "EvalScript error." (issue #163). Escaped in the JSON text, they
+  // survive both the literal and ExtendScript's JSON.parse as the same
+  // characters; the literal is escaped too, as a second line of defence.
+  function escapeLineSeparators(json) {
+    return json.replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  }
+
+  function opScript(payload) {
+    // JSON.stringify on the panel side, JSON.parse on the ExtendScript side.
+    var literal = escapeLineSeparators(JSON.stringify(escapeLineSeparators(payload)));
+    return NS_READY + " ? __AEMCP.call(" + literal + ") : '" + NS_MISSING + "'";
+  }
+
+  // One reload for however many ops found the namespace gone at once.
+  var __healing = null;
+  function healNamespace(op) {
+    if (!__healing) {
+      log("warn", "__AEMCP is missing or not ours (another script in After Effects' shared engine " +
+        "replaced it) — reloading bundle.jsx before " + op);
+      __healing = loadJsxBundle({ sameAsRunning: true }).then(
+        function () { __healing = null; setStatus("ready", "ok"); },
+        function (e) { __healing = null; throw e; }
+      );
+    }
+    return __healing;
+  }
+
   // Run an op through the dispatch table. Returns parsed JS object.
   function runOp(op, args) {
     var payload = JSON.stringify({ op: op, args: args || {} });
-    // Use \uXXXX-safe JSON pass: JSON.stringify on the panel side, JSON.parse on ExtendScript side.
-    var script = "JSON.stringify(dispatch(" + JSON.stringify(payload) + "))";
-    return evalScript(script).then(function (raw) {
+    return evalScript(opScript(payload)).then(function (raw) {
+      if (raw !== NS_MISSING) return raw;
+      // Nothing ran: NS_MISSING is answered instead of the op, so sending it
+      // again after the reload cannot run it twice.
+      return healNamespace(op).then(function () { return evalScript(opScript(payload)); });
+    }).then(function (raw) {
+      if (raw === NS_MISSING) {
+        throw new Error("The AE MCP bundle is not loaded in After Effects (__AEMCP missing even after reloading " +
+          "bundle.jsx). Nothing ran. Restart After Effects.");
+      }
       if (raw === "undefined" || raw === undefined || raw === null) {
         throw new Error("ExtendScript returned undefined for op " + op);
       }
@@ -170,6 +218,15 @@
     });
   }
 
+  // ---------- What this panel supports ----------
+  // Reported on /health as `capabilities` (issue #220, stage 3). Each name is
+  // something a server may use only when it is listed:
+  //   project-path — `_project_path` answers the .aep's path with no project
+  //                  walk, so the server reads and writes house-style.md itself.
+  // The panel and its bundle.jsx install together, so a name here may stand for
+  // an op in the bundle. The server still falls back on `Unknown op:`.
+  var PANEL_CAPABILITIES = ["project-path"];
+
   // ---------- Load bundle.jsx ----------
   // Hash of the bundle *actually evaluated into ExtendScript*, reported on
   // /health. The server compares it against the bundle it ships to decide
@@ -189,25 +246,44 @@
     }
   }
 
-  function loadJsxBundle() {
+  // `opts.sameAsRunning`: the automatic heal, which must re-load the code this
+  // panel is already running and nothing newer. Between setup_panel and the
+  // next After Effects launch the installed bundle.jsx is newer than this
+  // main.js; loading it would mix the two and move `loadedBundleHash` onto the
+  // new hash, so the version gate would call a stale panel current. The heal
+  // refuses instead and the running hash keeps saying "restart needed".
+  // `/reload-jsx` is the dev route and loads whatever is on disk.
+  function loadJsxBundle(opts) {
     setStatus("Loading bundle.jsx…");
     if (!fs.existsSync(bundlePath)) {
       setStatus("bundle.jsx missing", "err");
       log("error", "bundle.jsx not found at " + bundlePath + " — run `npm run build:jsx`");
-      throw new Error("bundle.jsx missing");
+      return Promise.reject(new Error("bundle.jsx missing"));
+    }
+    var diskHash = hashFile(bundlePath);
+    if (opts && opts.sameAsRunning && loadedBundleHash && diskHash !== loadedBundleHash) {
+      setStatus("restart After Effects", "err");
+      return Promise.reject(new Error(
+        "The AE MCP bundle was removed from After Effects' shared script engine by another script, and the " +
+        "installed bundle.jsx is a newer version than this running panel, so it cannot be reloaded in place. " +
+        "Nothing ran. Restart After Effects."));
     }
     // Use $.evalFile from ExtendScript side so paths work cross-platform.
-    var loadScript = "$.evalFile(" + JSON.stringify(bundlePath) + "); typeof dispatch === 'function' ? 'ok' : 'no-dispatch';";
-    return new Promise(function (resolve, reject) {
-      cs.evalScript(loadScript, function (raw) {
-        if (raw === "ok") {
-          loadedBundleHash = hashFile(bundlePath);
-          $jsx.textContent = "loaded";
-          $jsx.className = "ok";
-          resolve();
-        }
-        else { $jsx.textContent = "fail: " + raw; $jsx.className = "err"; reject(new Error("dispatch not defined after loading bundle.jsx: " + raw)); }
-      });
+    // Through the evalScript mutex like every other call: the heal triggers
+    // this while ops are queued, and a load must not interleave with one.
+    var loadScript = "$.evalFile(" + JSON.stringify(bundlePath) + "); " + NS_READY + " ? 'ok' : 'no-namespace';";
+    return evalScript(loadScript).then(function (raw) {
+      if (raw === "ok") {
+        loadedBundleHash = diskHash;
+        $jsx.textContent = "loaded";
+        $jsx.className = "ok";
+        return;
+      }
+      $jsx.textContent = "fail: " + raw; $jsx.className = "err";
+      throw new Error("__AEMCP not defined after loading bundle.jsx: " + raw);
+    }, function (e) {
+      $jsx.textContent = "fail: " + e.message; $jsx.className = "err";
+      throw e;
     });
   }
 
@@ -378,11 +454,11 @@
   // converts those to 8-bit, tells us when the frame is entirely transparent,
   // and hands back the decoded samples so a frame can be recognised if After
   // Effects serves the same buffer again for a different request.
-  function readPngFrame(file) {
+  function readPngFrame(file, opts) {
     // waitForCompletePng owns the temp file and removes it on every path,
     // success or failure. A file left behind is one a later read could find,
     // which is how a corrupt frame would start coming back for free.
-    return waitForCompletePng(file).then(function (buf) {
+    return waitForCompletePng(file, opts).then(function (buf) {
       var norm;
       try {
         norm = pngCodec.normalizePng(buf);
@@ -539,13 +615,49 @@
   // only a pacing knob any more: it decides how many undo steps a long batch
   // costs the user. It comes off the job envelope so the JSX side owns the
   // number and the two cannot drift.
-  function driveJob(jobId, progressToken, chunkSize) {
-    var totalGuess = null;
+  // Every batch this panel is driving, by id, with how far it has got. The
+  // job table lives in the bundle's closure, so /reload-jsx would drop each of
+  // these mid-run; it reads this to refuse instead (issue #163).
+  var jobsInFlight = {};
+
+  function jobsInFlightText() {
+    var parts = [];
+    for (var id in jobsInFlight) {
+      if (!jobsInFlight.hasOwnProperty(id)) continue;
+      var j = jobsInFlight[id];
+      parts.push(id + " (" + j.attempted + " of " + (j.total === null ? "?" : j.total) + " ops attempted)");
+    }
+    return parts.join(", ");
+  }
+
+  function driveJob(jobId, progressToken, chunkSize, total) {
+    var tracked = { attempted: 0, total: (typeof total === "number") ? total : null };
+    jobsInFlight[jobId] = tracked;
+    function untrack(v) { delete jobsInFlight[jobId]; return v; }
+    function untrackThrow(e) { delete jobsInFlight[jobId]; throw e; }
+    return driveJobSteps(jobId, progressToken, chunkSize, total, tracked).then(untrack, untrackThrow);
+  }
+
+  function driveJobSteps(jobId, progressToken, chunkSize, total, tracked) {
+    var totalGuess = (typeof total === "number") ? total : null;
     var size = chunkSize || 25;
+    // The cursor: ops attempted, not ops that succeeded — a continue-on-error
+    // batch moves past a failed op too.
+    var attempted = 0;
+    var stepsTaken = 0;
+    // What After Effects reported through app.onError in ANY chunk (core.jsx,
+    // dialog guard, issue #225). Each chunk is its own dispatch, so a warning
+    // raised in chunk 3 of 40 would otherwise be on a result nobody reads.
+    var aeWarnings = [];
     function step() {
       return runOp("_continue_job", { jobId: jobId, chunkSize: size }).then(function (res) {
+        if (res && res.aeWarnings && res.aeWarnings.length) aeWarnings = aeWarnings.concat(res.aeWarnings);
         if (res.total) totalGuess = res.total;
+        tracked.total = totalGuess;
         if (!res.done) {
+          if (typeof res.progress === "number") attempted = res.progress;
+          tracked.attempted = attempted;
+          if (typeof res.undoSteps === "number") stepsTaken = res.undoSteps;
           broadcast({ type: "progress", jobId: jobId, progress: res.progress, total: res.total, message: "running" });
           // Yield to UI so AE stays responsive.
           return new Promise(function (r) { setTimeout(r, 0); }).then(step);
@@ -554,34 +666,70 @@
           // A failed job reaches the server as an error string and nothing else,
           // so what the batch cost has to travel inside it or it is lost: the
           // ops before the failure are applied and stay applied.
-          var failedMsg = (res.error || "batch failed") + (res.note ? " || " + res.note : "");
-          broadcast({ type: "error", jobId: jobId, error: failedMsg });
-          return { done: true, failed: true, jobId: jobId, error: res.error, results: res.results, errors: res.errors, atIndex: res.atIndex, undoSteps: res.undoSteps, note: res.note };
+          var failedMsg = (res.error || "batch failed") + (res.note ? " || " + res.note : "") +
+            (aeWarnings.length ? " || After Effects also reported, through app.onError while dialogs were suppressed: " +
+              aeWarnings.join(" | ") : "");
+          // Where it stopped travels with the error (issue #222): the last
+          // progress event is the boundary before the failing chunk.
+          var failedAt = (res.results ? res.results.length : 0) + (res.errors ? res.errors.length : 0);
+          broadcast({ type: "error", jobId: jobId, error: failedMsg, progress: failedAt });
+          var failedOut = { done: true, failed: true, jobId: jobId, error: res.error, results: res.results, errors: res.errors, atIndex: res.atIndex, undoSteps: res.undoSteps, note: res.note };
+          if (aeWarnings.length) failedOut.aeWarnings = aeWarnings;
+          return failedOut;
         }
         // `undoSteps` is the measured number of undo groups the batch opened,
         // and `diff` is the batch's own before/after — both are only ever seen
         // by the agent if they are carried on this event.
-        broadcast({
-          type: "complete",
-          jobId: jobId,
-          result: {
-            results: res.results,
-            errors: res.errors,
-            total: res.total || totalGuess,
-            cancelled: !!res.cancelled,
-            undoSteps: res.undoSteps,
-            undoGroupName: res.undoGroupName,
-            note: res.note,
-            diff: res.diff,
-          },
-        });
-        return {
-          done: true, jobId: jobId,
-          results: res.results, errors: res.errors,
-          total: res.total || totalGuess, cancelled: !!res.cancelled,
-          undoSteps: res.undoSteps, undoGroupName: res.undoGroupName,
-          note: res.note, diff: res.diff,
+        var completed = {
+          results: res.results,
+          errors: res.errors,
+          total: res.total || totalGuess,
+          cancelled: !!res.cancelled,
+          undoSteps: res.undoSteps,
+          undoGroupName: res.undoGroupName,
+          note: res.note,
+          diff: res.diff,
         };
+        if (aeWarnings.length) completed.aeWarnings = aeWarnings;
+        broadcast({ type: "complete", jobId: jobId, result: completed });
+        var doneOut = { done: true, jobId: jobId };
+        for (var k in completed) { if (completed.hasOwnProperty(k)) doneOut[k] = completed[k]; }
+        return doneOut;
+      }, function (e) {
+        // Any failure of a continuation leaves the chunks before it in the
+        // project, and a bare error — "No job: j_…" after a bundle reload, or
+        // the heal's own "Nothing ran", which is true of that one call and
+        // false of the batch — would invite a re-run that applies them twice.
+        // So every failure path of an in-flight job says what had landed.
+        //
+        // The job table lives in the bundle's closure, so a bundle reload —
+        // the automatic heal after another script removed __AEMCP (issue #185),
+        // or /reload-jsx — loses every job in flight; that is the "No job" case.
+        var msg = String(e && e.message ? e.message : e);
+        var cause = msg.indexOf("No job: ") === 0
+          ? "the AE MCP bundle was reloaded in After Effects (another script removed it from the shared " +
+            "script engine, or /reload-jsx ran), which discards running jobs."
+          : msg.split("Nothing ran.").join("The next chunk did not run.");
+        var landed = (attempted === 0 && stepsTaken === 0)
+          ? "No op of the batch had run yet."
+          : attempted + " of " + (totalGuess === null ? "?" : totalGuess) + " ops had already been attempted, " +
+            "in " + stepsTaken + " undo step(s); whatever they changed stays applied (an op that failed under " +
+            "continue-on-error may not have changed anything, and its error is lost with the job). " +
+            "Do NOT re-run the batch as it was: read the comp back and send only the ops that are missing.";
+        // Warnings from chunks that did run are still true of the project.
+        var warned = aeWarnings.length
+          ? " || After Effects also reported, through app.onError while dialogs were suppressed: " +
+            aeWarnings.join(" | ")
+          : "";
+        var stopped = new Error("Batch " + jobId + " stopped mid-run: " + cause + " " + landed + warned);
+        stopped.code = e && e.code;
+        // A lower bound, not a stop point: the failing chunk may have partly
+        // or fully run ("Bad JSON" means it did) (issue #222).
+        stopped.progress = attempted;
+        stopped.unsureThrough = totalGuess === null ? attempted + size : Math.min(attempted + size, totalGuess);
+        if (aeWarnings.length) stopped.aeWarnings = aeWarnings;
+        log("error", stopped.message);
+        throw stopped;
       });
     }
     return step();
@@ -643,27 +791,64 @@
     return String(s).split("\n")[0];
   }
 
-  function readSheetTile(info, tile) {
+  function sheetOutOfTime(tile) {
+    return {
+      time: tile.time,
+      status: "failed",
+      note: "not read: the contact sheet's overall time limit (" +
+        Math.round(contactSheetModule.CONTACT_SHEET_BUDGET_MS / 1000) + "s) ran out before this tile",
+    };
+  }
+
+  function readSheetTile(info, tile, deadline) {
     if (tile.error) {
       return Promise.resolve({ time: tile.time, status: "failed", note: tile.error });
     }
-    return readPngFrame(tile.path).then(function (img) {
+    var budget = contactSheetModule.tileBudgetMs(deadline, Date.now(), frameReaderModule.FRAME_RENDER_BUDGET_MS);
+    if (!budget) {
+      // Never read, so nothing else will remove it.
+      unlinkQuietly(tile.path);
+      return Promise.resolve(sheetOutOfTime(tile));
+    }
+    return readPngFrame(tile.path, { budgetMs: budget }).then(function (img) {
       return { time: tile.time, status: "ok", img: img };
     }, function (err) {
       if (err.code !== "FRAME_INCOMPLETE") {
         return { time: tile.time, status: "failed", note: shortReason(err) };
+      }
+      // A re-render is a whole render plus a read. Started with less than
+      // RETRY_MIN_MS left, it could only finish past the sheet's deadline.
+      if (deadline - Date.now() < contactSheetModule.RETRY_MIN_MS) {
+        return { time: tile.time, status: "failed", note: shortReason(err) + "; too little of the sheet's time limit left to re-render it" };
       }
       // The same bounded retry the single-frame path gets, and safe for the same
       // reason — but re-rendering only this one time. The already-derived
       // downsample is passed explicitly so the per-tile factor cannot drift from
       // the rest of the sheet.
       log("warn", "contact sheet tile at " + tile.time + "s: " + shortReason(err) + " — re-rendering once");
-      return runOp("screenshot_frame", {
+      // The render itself cannot be interrupted once it is in ExtendScript, but
+      // the sheet does not wait for it past the deadline: the race settles the
+      // tile then, and a render that answers later has its file removed.
+      var outOfTime = false;
+      var rerender = runOp("screenshot_frame", {
         compId: info.compId,
         time: tile.time,
         downsample: info.downsample,
-      }).then(function (retry) {
-        return readPngFrame(retry.path).then(function (img) {
+      });
+      rerender.then(function (late) { if (outOfTime && late && late.path) unlinkQuietly(late.path); }, function () {});
+      var timer;
+      var expire = new Promise(function (resolve) {
+        timer = setTimeout(function () { outOfTime = true; resolve(null); }, Math.max(0, deadline - Date.now()));
+      });
+      return Promise.race([rerender, expire]).then(function (retry) {
+        clearTimeout(timer);
+        if (!retry) return sheetOutOfTime(tile);
+        var left = contactSheetModule.tileBudgetMs(deadline, Date.now(), frameReaderModule.FRAME_RENDER_BUDGET_MS);
+        if (!left) {
+          unlinkQuietly(retry.path);
+          return sheetOutOfTime(tile);
+        }
+        return readPngFrame(retry.path, { budgetMs: left }).then(function (img) {
           return { time: tile.time, status: "ok", img: img };
         });
       }).catch(function (again) {
@@ -813,6 +998,8 @@
   }
 
   function renderContactSheet(args) {
+    // Started before the render, because the server's clock starts then too.
+    var deadline = Date.now() + contactSheetModule.CONTACT_SHEET_BUDGET_MS;
     return runOp("screenshot_frame", args).then(function (info) {
       var jsxTiles = info.tiles || [];
       // Sequentially: `evalScript` is a mutex anyway, a per-tile retry re-enters
@@ -822,7 +1009,7 @@
       for (var i = 0; i < jsxTiles.length; i++) {
         chain = chain.then(function (tile) {
           return function () {
-            return readSheetTile(info, tile).then(function (res) { read.push(res); });
+            return readSheetTile(info, tile, deadline).then(function (res) { read.push(res); });
           };
         }(jsxTiles[i]));
       }
@@ -913,8 +1100,11 @@
     if (op === "run_batch") {
       return runOp(op, args).then(function (res) {
         if (res && res.async && res.jobId) {
-          driveJob(res.jobId, progressToken, res.chunkSize).catch(function (e) {
-            broadcast({ type: "error", jobId: res.jobId, error: e.message });
+          driveJob(res.jobId, progressToken, res.chunkSize, res.total).catch(function (e) {
+            var stoppedEvt = { type: "error", jobId: res.jobId, error: e.message };
+            if (typeof e.progress === "number") stoppedEvt.progress = e.progress;
+            if (typeof e.unsureThrough === "number") stoppedEvt.unsureThrough = e.unsureThrough;
+            broadcast(stoppedEvt);
           });
           // The undo fields ride out with the envelope so the agent is told the
           // batch will be several steps *before* it goes and says otherwise —
@@ -940,6 +1130,11 @@
     return new Promise(function (resolve, reject) {
       var server = http.createServer(function (req, res) {
         var url = req.url || "/";
+        // Only /reload-jsx takes a query (`?force=1`); every other route is
+        // still matched on the whole url, as before.
+        var qAt = url.indexOf("?");
+        var route = qAt < 0 ? url : url.slice(0, qAt);
+        var query = qAt < 0 ? "" : url.slice(qAt + 1);
 
         // No CORS headers, deliberately: nothing that legitimately calls this
         // bridge is a web page (issue #106).
@@ -964,6 +1159,12 @@
             // pre-#106 panel, which is how the server tells "needs a token"
             // from "too old to want one".
             auth: true,
+            // What this panel can do that a panel without this field cannot
+            // (issue #220, stage 3). bundleHash names the ExtendScript; this is
+            // the only thing that says which panel code answers. The server
+            // reads a missing field as "legacy" and keeps to what every panel
+            // has, so a name is only ever added here, never relied on alone.
+            capabilities: PANEL_CAPABILITIES,
             ts: Date.now()
           }));
           return;
@@ -1026,8 +1227,25 @@
             return;
           }
 
-          if (url === "/reload-jsx") {
+          if (route === "/reload-jsx") {
             // Dev-only: re-evalFile the bundle. Useful while editing .jsx without restarting AE.
+            // A reload replaces the bundle's job table, so every batch in flight
+            // stops mid-run with part of it applied (issue #163). Refused while
+            // one runs; `?force=1` reloads anyway, and the batch then reports
+            // exactly what had landed.
+            var busy = jobsInFlightText();
+            if (busy && !/(^|&)force=1(&|$)/.test(query)) {
+              res.statusCode = 409;
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify({
+                ok: false,
+                code: "batch_in_flight",
+                error: "Not reloaded: a run_batch is still running — " + busy + ". Reloading the bundle now " +
+                  "would stop it mid-run with part of it applied. Wait for it to finish (await_job), or cancel " +
+                  "it (cancel_job), then reload. POST /reload-jsx?force=1 reloads anyway.",
+              }));
+              return;
+            }
             loadJsxBundle()
               .then(function () { res.statusCode = 200; res.end(JSON.stringify({ ok: true })); })
               .catch(function (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); });

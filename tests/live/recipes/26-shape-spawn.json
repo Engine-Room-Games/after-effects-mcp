@@ -1,0 +1,102 @@
+{
+  "recipe": 26,
+  "title": "create_shape_layer spawns at [0,0] unless asked for the centre",
+  "manual": "Screenshot: the rect sits centred on (400,200), near the top-left — not half a frame away.",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 3840,
+        "height": 2160,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_shape_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "Shapes"
+      },
+      "save": "shape",
+      "expect": [
+        {
+          "path": "position",
+          "equals": [
+            0,
+            0
+          ]
+        },
+        {
+          "path": "anchorPoint",
+          "equals": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "call": "add_shape_content",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${shape.id}",
+        "content": {
+          "type": "rect",
+          "size": [
+            400,
+            200
+          ],
+          "position": [
+            400,
+            200
+          ]
+        }
+      }
+    },
+    {
+      "call": "create_shape_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "position": "center"
+      },
+      "expect": [
+        {
+          "path": "position",
+          "equals": [
+            1920,
+            1080
+          ]
+        }
+      ]
+    },
+    {
+      "call": "create_shape_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "position": "middle"
+      },
+      "expectError": true
+    },
+    {
+      "call": "list_layers",
+      "args": {
+        "compId": "${comp.id}",
+        "include": []
+      },
+      "expect": [
+        {
+          "length": 2
+        }
+      ]
+    }
+  ]
+}

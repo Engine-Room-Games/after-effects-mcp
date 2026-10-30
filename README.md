@@ -304,7 +304,7 @@ These switches limit what your assistant can do through this connection. They do
 ---
 
 <details>
-<summary><b>🧰 All 84 tools</b></summary>
+<summary><b>🧰 All 88 tools</b></summary>
 
 <br>
 
@@ -313,7 +313,7 @@ These switches limit what your assistant can do through this connection. They do
 | Comps (14) | `list_comps`, `get_comp`, `get_comp_tree`, `create_comp`, `set_comp`, `delete_comp`, `set_active_comp`, `duplicate_comp`, `snapshot_comp`, `diff_comp`, `checkpoint_comp`, `list_checkpoints`, `revert_comp`, `delete_checkpoints` |
 | Layers (15) | `list_layers`, `get_layer_full`, `create_{text,shape,solid,null,adjustment,precomp,camera,light}_layer`, `duplicate_layer`, `delete_layer`, `set_layer`, `parent_layer`, `reorder_layer` |
 | Transforms (1) | `set_transform` — position, scale, rotation, anchor, opacity; 2D and 3D; optionally keyframed |
-| Keyframes (6) | `add_keyframe`, `remove_keyframe`, `get_keyframes`, `set_interpolation`, `set_temporal_ease`, `set_spatial_tangents` |
+| Keyframes (8) | `add_keyframe`, `remove_keyframe`, `get_keyframes`, `set_interpolation`, `set_temporal_ease`, `set_spatial_tangents`, `retime_keyframes`, `copy_animation` |
 | Expressions (4) | `get_expression`, `set_expression`, `toggle_expression`, `clear_expression` |
 | Effects (6) | `list_effects`, `add_effect`, `remove_effect`, `set_effect_param`, `set_effect_enabled`, `list_available_effects` |
 | Text (2) | `set_text`, `add_text_animator` |
@@ -324,9 +324,9 @@ These switches limit what your assistant can do through this connection. They do
 | Batch (1) | `run_batch` |
 | Footage (3) | `import_footage`, `create_footage_layer`, `purge_unused_footage` — remove the solids (or any footage) no comp uses, with a dry run |
 | Audio (1) | `place_audio_cues` — a whole cue list placed as one undo step |
-| Motion Graphics (1) | `export_mogrt` — export a comp as a `.mogrt` template for Premiere |
+| Motion Graphics (2) | `add_essential_property`, `export_mogrt` — fill the Essential Graphics panel, then export a comp as a `.mogrt` template for Premiere |
 | Render queue (4) | `add_to_render_queue`, `list_render_queue`, `remove_render_item`, `render_queue` — render in the background, with progress and cancel |
-| Explore (2) | `get_project_summary`, `find_layers` |
+| Explore (3) | `get_project_summary`, `find_layers`, `get_selection` — what the user has selected and where the playhead is |
 | Raw (1) | `run_jsx` |
 | House style (2) | `get_house_style`, `set_house_style` |
 | Jobs (3) | `await_job`, `get_job`, `cancel_job` |

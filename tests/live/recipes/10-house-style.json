@@ -1,0 +1,77 @@
+{
+  "recipe": 10,
+  "title": "house style: refused unsaved, written beside the .aep, overwrite rule, UTF-8 round trip",
+  "needsSavedProject": true,
+  "manual": "With --keep-scratch, open house-style.md beside the scratch .aep: LF line endings, no bare CR.",
+  "steps": [
+    {
+      "call": "get_house_style",
+      "expect": [
+        {
+          "path": "found",
+          "equals": false
+        },
+        {
+          "path": "projectSaved",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "saveProject": "style.aep"
+    },
+    {
+      "call": "set_house_style",
+      "args": {
+        "content": "# House style\n\n## Palette\n\n- Ink “Night” #101820\n- Accent café #FF6A13\n\n## Type\n\n- Headlines in Grötesk Bold\n"
+      }
+    },
+    {
+      "call": "set_house_style",
+      "args": {
+        "content": "# House style\n\n## Palette\n\n- Ink “Night” #101820\n- Accent café #FF6A13\n\n## Type\n\n- Headlines in Grötesk Bold\n"
+      },
+      "expectError": "overwrite"
+    },
+    {
+      "call": "set_house_style",
+      "args": {
+        "content": "# House style\n\n## Palette\n\n- Ink “Night” #101820\n- Accent café #FF6A13\n\n## Type\n\n- Headlines in Grötesk Bold\n",
+        "overwrite": true
+      }
+    },
+    {
+      "call": "get_house_style",
+      "args": {
+        "detail": "full"
+      },
+      "expect": [
+        {
+          "path": "found",
+          "equals": true
+        },
+        {
+          "path": "content",
+          "equals": "# House style\n\n## Palette\n\n- Ink “Night” #101820\n- Accent café #FF6A13\n\n## Type\n\n- Headlines in Grötesk Bold\n"
+        }
+      ]
+    },
+    {
+      "call": "get_house_style",
+      "expect": [
+        {
+          "path": "content",
+          "exists": false
+        },
+        {
+          "path": "summary",
+          "exists": true
+        },
+        {
+          "path": "note",
+          "matches": "detail"
+        }
+      ]
+    }
+  ]
+}

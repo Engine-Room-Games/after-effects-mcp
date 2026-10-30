@@ -1,0 +1,89 @@
+{
+  "recipe": 30,
+  "title": "duplicate_comp is shallow by default and deep on request",
+  "manual": "In the deep copy, editing its nested comp leaves the original's alone.",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "Nested",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "nested",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "A",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_precomp_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "sourceCompId": "${nested.id}"
+      }
+    },
+    {
+      "call": "duplicate_comp",
+      "args": {
+        "compId": "${comp.id}"
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        },
+        {
+          "path": "name",
+          "equals": "A 2"
+        },
+        {
+          "path": "deep",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "duplicate_comp",
+      "args": {
+        "compId": "${comp.id}",
+        "deep": true
+      },
+      "expect": [
+        {
+          "path": "deep",
+          "equals": true
+        }
+      ]
+    },
+    {
+      "call": "list_comps",
+      "expect": [
+        {
+          "length": 5
+        }
+      ]
+    }
+  ]
+}

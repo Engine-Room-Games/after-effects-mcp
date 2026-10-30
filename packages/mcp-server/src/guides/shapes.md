@@ -18,6 +18,10 @@ want that back, or any `[x, y]` to place the origin yourself. The result echoes
 the position and anchor it ended up with, so nobody has to render a frame to
 learn the coordinate system.
 
+The layer it makes is empty: `create_shape_layer` takes no `fill`, `stroke`,
+`strokeWidth` or `shapes`, and refuses them by name rather than ignoring them.
+Everything visible goes in with `add_shape_content`.
+
 ## Adding contents
 
 `add_shape_content` builds one node at a time under `Contents` — `rect`,
@@ -27,6 +31,12 @@ learn the coordinate system.
 `{type: "path", vertices: [[x, y], …], closed: true}` — the key is `vertices`,
 not `points`. `set_shape_path` replaces a path's vertices and tangents later;
 `set_shape_property` sets one property on a node, optionally as a keyframe.
+A `repeater` takes its Transform group in the same call —
+`{type: "repeater", copies: 5, transform: {position: [40, 0], scale: [90, 90],
+rotation: 15, startOpacity: 100, endOpacity: 20}}` — which is what each copy
+adds to the one before it; After Effects' default position is `[100, 0]`.
+Gradient fills and strokes are not offered: their colour stops are not
+writable from a script.
 
 The tool is **all-or-nothing**: if a key cannot be applied, the whole node is
 removed and the error names the bad keys, so a success result means everything

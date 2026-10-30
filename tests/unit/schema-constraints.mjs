@@ -215,7 +215,7 @@ check("there is at least one declared rule, so the rest of this file means somet
 check("every rule is well formed", () => {
   for (const { op, rule } of rules) {
     assert.ok(
-      ["exactlyOne", "atMostOne", "atLeastOne"].includes(rule.kind),
+      ["exactlyOne", "atMostOne", "atLeastOne", "whenTrue"].includes(rule.kind),
       `${op}: unknown rule kind ${JSON.stringify(rule.kind)}`
     );
     assert.ok(rule.fields.length >= 2, `${op}: a cross-field rule needs at least two fields`);
@@ -341,7 +341,16 @@ check("the JSON Schema form and the zod form agree on every combination", () => 
       if (rule.fields.includes(key)) continue;
       base[key] = sampleFor(op, schema.properties[key]);
     }
+    // An op can carry several rules (set_effect_param does). Satisfy the
+    // others minimally, so the only thing that can fail is the rule under test.
+    for (const other of rules) {
+      if (other.op !== op || other.rule === rule) continue;
+      if (other.rule.kind !== "exactlyOne" && other.rule.kind !== "atLeastOne") continue;
+      const field = other.rule.fields.find((f) => !rule.fields.includes(f));
+      if (field && !(field in base)) base[field] = sampleFor(op, schema.properties[field]);
+    }
 
+    const payloads = [];
     for (let mask = 0; mask < 1 << rule.fields.length; mask++) {
       const payload = { ...base };
       const present = [];
@@ -350,6 +359,15 @@ check("the JSON Schema form and the zod form agree on every combination", () => 
         payload[field] = sampleFor(op, schema.properties[field]);
         present.push(field);
       });
+      payloads.push({ payload, present });
+    }
+    // sampleFor() makes every boolean `true`; a "whenTrue" trigger passed as
+    // `false` is the other half of its meaning, so probe that as well.
+    if (rule.kind === "whenTrue") {
+      payloads.push({ payload: { ...base, [rule.fields[0]]: false }, present: [`${rule.fields[0]}:false`] });
+    }
+
+    for (const { payload, present } of payloads) {
 
       const bySchema = validate(payload);
       const byZod = zodSchema.safeParse(payload).success;
@@ -384,6 +402,7 @@ const PHRASES = {
   exactlyOne: ["exactly one"],
   atLeastOne: ["at least one"],
   atMostOne: ["mutually exclusive", "not both", "at most one"],
+  whenTrue: ["requires", "needs"],
 };
 
 check("every rule is stated in its tool description", () => {
@@ -418,6 +437,17 @@ check("every rule is stated in its tool description", () => {
 
 check("the runtime message names the fields and says what to do", () => {
   for (const { op, rule } of rules) {
+    if (rule.kind === "whenTrue") {
+      // Broken only one way: the trigger is true and something it needs is
+      // missing. The message names the trigger and the missing field, and
+      // says both ways out.
+      const message = crossFieldMessage(rule, [rule.fields[0]]);
+      for (const field of rule.fields) {
+        assert.ok(message.includes(field), `${op}: the message does not name \`${field}\`:\n${message}`);
+      }
+      assert.ok(/drop/i.test(message), `${op}: the message has to offer dropping the trigger:\n${message}`);
+      continue;
+    }
     const none = crossFieldMessage(rule, []);
     const several = crossFieldMessage(rule, rule.fields.slice(0, 2));
     for (const [label, message] of [["none", none], ["several", several]]) {
@@ -468,17 +498,22 @@ check("a rejected call reads as prose, not as a zod dump", () => {
 // ---------------------------------------------------------------------------
 
 check("the ops known to carry a cross-field rule still carry one", () => {
-  const byOp = Object.fromEntries(rules.map((r) => [r.op, r.rule]));
-  const expected = {
-    reorder_layer: "exactlyOne",
-    screenshot_frame: "atMostOne",
-    run_jsx: "exactlyOne",
-    set_temporal_ease: "atLeastOne",
-    set_effect_param: "atLeastOne",
-  };
-  for (const [op, kind] of Object.entries(expected)) {
-    assert.ok(byOp[op], `${op} lost its cross-field rule`);
-    assert.equal(byOp[op].kind, kind, `${op} changed rule kind`);
+  const expected = [
+    ["reorder_layer", "exactlyOne"],
+    ["screenshot_frame", "atMostOne"],
+    ["run_jsx", "exactlyOne"],
+    ["set_temporal_ease", "atLeastOne"],
+    ["set_effect_param", "atLeastOne"],
+    // keyframe:true requires time (issue #151).
+    ["set_transform", "whenTrue"],
+    ["set_effect_param", "whenTrue"],
+    ["set_shape_property", "whenTrue"],
+  ];
+  for (const [op, kind] of expected) {
+    assert.ok(
+      rules.some((r) => r.op === op && r.rule.kind === kind),
+      `${op} lost its "${kind}" cross-field rule`
+    );
   }
 });
 

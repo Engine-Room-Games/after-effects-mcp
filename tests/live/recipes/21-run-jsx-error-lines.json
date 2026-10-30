@@ -1,0 +1,62 @@
+{
+  "recipe": 21,
+  "title": "run_jsx names the line that threw, and the work above it landed",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "set_active_comp",
+      "args": {
+        "compId": "${comp.id}"
+      }
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var comp = app.project.activeItem;\ncomp.layers.addNull();\ncomp.layers.addNull();\ncomp.property(\"Nope\").setValue(1);"
+      },
+      "expectError": "at line 4\\b"
+    },
+    {
+      "call": "list_layers",
+      "args": {
+        "compId": "${comp.id}",
+        "include": []
+      },
+      "expect": [
+        {
+          "length": 2
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var comp = app.project.activeItem;\ncomp.property(\"Nope\").setValue(1);\ncomp.layers.addNull();"
+      },
+      "expectError": "at line 2\\b"
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "nope.boom();"
+      },
+      "expectError": "at line 1\\b"
+    }
+  ]
+}

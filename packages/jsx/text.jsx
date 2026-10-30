@@ -50,6 +50,22 @@ function __verifyJustification(src, expected) {
   );
 }
 
+/**
+ * Read a box text layer's box back and compare with what was asked (issue
+ * #181). Returns the size AE holds; throws naming both when they differ.
+ */
+function __verifyBoxSize(src, want, op, tail) {
+  var got = null;
+  try { got = src.value.boxTextSize; } catch (e) { got = null; }
+  // Within a pixel: After Effects may round a fractional box size, and a write
+  // that landed must not be reported as one that did not.
+  if (!got || Math.abs(got[0] - want[0]) > 1 || Math.abs(got[1] - want[1]) > 1) {
+    throw new Error(op + ": asked for a text box of [" + want[0] + ", " + want[1] + "] but After Effects reads " +
+      (got ? "[" + got[0] + ", " + got[1] + "]" : "no box") + " afterwards. " + tail);
+  }
+  return [got[0], got[1]];
+}
+
 OPS.set_text = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
@@ -67,7 +83,14 @@ OPS.set_text = function (args) {
     }
     justificationWanted = __JUSTIFICATION[args.justification];
   }
+  // Box text (issue #181). Point text has no box, and scripting cannot turn
+  // it into box text, so a size for it is refused before anything is written.
+  if (args.boxSize !== undefined && !td.boxText) {
+    throw new Error("set_text: layer '" + l.name + "' is point text, which has no box; After Effects' scripting cannot convert it to " +
+      "box text. Nothing was changed. Create a box text layer with create_text_layer boxSize:[w, h] instead.");
+  }
   if (args.text !== undefined) td.text = args.text;
+  if (args.boxSize !== undefined) td.boxTextSize = [args.boxSize[0], args.boxSize[1]];
   if (args.font !== undefined) td.font = args.font;
   if (args.size !== undefined) td.fontSize = args.size;
   if (args.fillColor) { td.applyFill = true; td.fillColor = [args.fillColor[0], args.fillColor[1], args.fillColor[2]]; }
@@ -85,41 +108,112 @@ OPS.set_text = function (args) {
   if (args.baselineShift !== undefined) td.baselineShift = args.baselineShift;
   src.setValue(td);
   var verified = __verifyJustification(src, justificationWanted);
-  return {
+  var res = {
     ok: true,
     justification: __justificationName(verified.justification),
     justificationReasserted: verified.reasserted,
   };
+  if (args.boxSize !== undefined) res.boxSize = __verifyBoxSize(src, args.boxSize, "set_text", "The other fields were written.");
+  return res;
+};
+
+// Issue #154: the animator property used to be added inside `catch (e) {}`,
+// so a type AE refused left an empty animator behind an `{ok:true}`. Now it is
+// all-or-nothing, the add_shape_content contract: every requested piece — the
+// property for `type`, the range selector and each of its values — is resolved
+// and set, failures are collected by name, and if any failed the animator this
+// call created is removed and the error names what failed.
+var __TEXT_ANIMATOR_PROPS = {
+  position: "ADBE Text Position 3D",
+  scale: "ADBE Text Scale 3D",
+  rotation: "ADBE Text Rotation",
+  opacity: "ADBE Text Opacity",
+  tracking: "ADBE Text Tracking Amount",
+  skew: "ADBE Text Skew",
+  fillColor: "ADBE Text Fill Color",
+  strokeColor: "ADBE Text Stroke Color",
 };
 
 OPS.add_text_animator = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
   if (!(l instanceof TextLayer)) throw new Error("Layer is not a TextLayer");
+  var match = __TEXT_ANIMATOR_PROPS.hasOwnProperty(args.type) ? __TEXT_ANIMATOR_PROPS[args.type] : undefined;
+  if (!match) {
+    var known = [];
+    for (var k in __TEXT_ANIMATOR_PROPS) if (__TEXT_ANIMATOR_PROPS.hasOwnProperty(k)) known.push(k);
+    throw new Error("Unknown text animator type '" + String(args.type) + "'; expected one of " + known.join(", ") + ". Nothing was changed.");
+  }
   var anims = l.property("Text").property("Animators");
   var anim = anims.addProperty("ADBE Text Animator");
-  var typeMap = {
-    position: "ADBE Text Position 3D",
-    scale: "ADBE Text Scale 3D",
-    rotation: "ADBE Text Rotation",
-    opacity: "ADBE Text Opacity",
-    tracking: "ADBE Text Tracking Amount",
-    skew: "ADBE Text Skew",
-    fillColor: "ADBE Text Fill Color",
-    strokeColor: "ADBE Text Stroke Color",
-  };
-  var propsGroup = anim.property("ADBE Text Animator Properties");
-  if (typeMap[args.type]) {
-    try { propsGroup.addProperty(typeMap[args.type]); }
-    catch (e) {}
+  // Kept so the rollback can re-fetch the animator, and so the result does not
+  // read through `anim` again: adding a property can leave earlier references
+  // into the same layer invalid. Read inside the try, so a failure here still
+  // rolls back.
+  var animIndex = null;
+  var animName = "the new animator";
+
+  var failed = [];
+  var added = null;
+  try {
+    animIndex = anim.propertyIndex;
+    animName = anim.name;
+    var propsGroup = anim.property("ADBE Text Animator Properties");
+    try {
+      added = propsGroup.addProperty(match);
+      if (!added) failed.push(args.type + " (" + match + "): After Effects did not add it");
+    } catch (eAdd) {
+      failed.push(args.type + " (" + match + "): " + eAdd.message);
+    }
+    if (failed.length === 0 && args.range) {
+      var selectors = anim.property("ADBE Text Selectors");
+      var sel = null;
+      try {
+        if (selectors.numProperties === 0) selectors.addProperty("ADBE Text Selector");
+        sel = selectors.property(1);
+        if (!sel) failed.push("range (no Range Selector on the animator)");
+      } catch (eSel) {
+        failed.push("range (" + eSel.message + ")");
+      }
+      if (sel) {
+        var rangeKeys = [["start", "ADBE Text Percent Start"], ["end", "ADBE Text Percent End"], ["offset", "ADBE Text Percent Offset"]];
+        for (var i = 0; i < rangeKeys.length; i++) {
+          var key = rangeKeys[i][0];
+          if (args.range[key] === undefined) continue;
+          try {
+            var target = sel.property(rangeKeys[i][1]);
+            if (!target) { failed.push("range." + key + " (no " + rangeKeys[i][1] + " property)"); continue; }
+            __setValue(target, args.range[key]);
+          } catch (eSet) {
+            failed.push("range." + key + " (" + eSet.message + ")");
+          }
+        }
+      }
+    }
+  } catch (e) {
+    failed.push(e.message);
   }
-  if (args.range) {
-    var selectors = anim.property("ADBE Text Selectors");
-    if (selectors.numProperties === 0) selectors.addProperty("ADBE Text Selector");
-    var sel = selectors.property(1);
-    if (args.range.start !== undefined) __setValue(sel.property("ADBE Text Percent Start"), args.range.start);
-    if (args.range.end !== undefined) __setValue(sel.property("ADBE Text Percent End"), args.range.end);
-    if (args.range.offset !== undefined) __setValue(sel.property("ADBE Text Percent Offset"), args.range.offset);
+
+  if (failed.length > 0) {
+    var removed = __removeTextAnimator(l, anim, animIndex);
+    throw new Error(
+      "add_text_animator could not build the '" + String(args.type) + "' animator: " + failed.join("; ") + ". " +
+      (removed
+        ? "The animator was removed, so nothing changed."
+        : "The animator could not be removed and is still on the layer as '" + animName + "'; delete it before retrying.")
+    );
   }
-  return { ok: true, animatorName: anim.name };
+  return { ok: true, animatorName: animName, property: match };
 };
+
+// Removes the animator add_text_animator just created. Re-fetches it by index
+// first and only trusts the result when it is a Text Animator; falls back to the
+// reference held. Returns whether something was removed.
+function __removeTextAnimator(layer, anim, animIndex) {
+  try {
+    var fresh = animIndex ? layer.property("Text").property("Animators").property(animIndex) : null;
+    if (fresh && fresh.matchName === "ADBE Text Animator") { fresh.remove(); return true; }
+  } catch (e) {}
+  try { anim.remove(); return true; } catch (e2) {}
+  return false;
+}

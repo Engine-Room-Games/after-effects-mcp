@@ -1,0 +1,158 @@
+{
+  "recipe": 33,
+  "title": "reorder_layer lands where it says, in both directions",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "D",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ],
+      "save": "d"
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "C",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "B",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "A",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ],
+      "save": "a"
+    },
+    {
+      "call": "reorder_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${d.id}",
+        "toIndex": 2
+      },
+      "expect": [
+        {
+          "path": "index",
+          "equals": 2
+        },
+        {
+          "path": "movedFrom",
+          "equals": 4
+        }
+      ]
+    },
+    {
+      "call": "reorder_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${a.id}",
+        "toIndex": 3
+      },
+      "expect": [
+        {
+          "path": "index",
+          "equals": 3
+        },
+        {
+          "path": "movedFrom",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "call": "list_layers",
+      "args": {
+        "compId": "${comp.id}",
+        "include": []
+      },
+      "expect": [
+        {
+          "path": "[0].name",
+          "equals": "D"
+        },
+        {
+          "path": "[1].name",
+          "equals": "B"
+        },
+        {
+          "path": "[2].name",
+          "equals": "A"
+        },
+        {
+          "path": "[3].name",
+          "equals": "C"
+        }
+      ]
+    }
+  ]
+}

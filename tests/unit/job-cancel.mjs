@@ -189,6 +189,12 @@ async function finish(jobId) {
   assert.equal(c.isError, true);
   assert.match(text(c), /Nothing was cancelled/);
   assert.equal(cancelsSeen, before, "an unknown job must not be cancelled on the panel");
+
+  // get_job used to answer a bare `null` here (#163) — the same id, the same story.
+  const g = await call("get_job", { jobId: "j_from_last_week" });
+  assert.equal(g.isError, true, `get_job on an unknown id answered: ${text(g)}`);
+  assert.match(text(g), /No job "j_from_last_week" in this server process/);
+  assert.doesNotMatch(text(g), /^null$/);
   passed++;
 }
 

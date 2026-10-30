@@ -159,12 +159,14 @@ export async function smokeServer({ command, args = [], cwd, opNames, timeoutMs 
 
   return new Promise((resolve) => {
     let settled = false;
+    let stdinTimer = null;
     let stderr = "";
     const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     const finish = (res) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (stdinTimer) clearTimeout(stdinTimer);
       try {
         child.kill();
       } catch {
@@ -182,6 +184,19 @@ export async function smokeServer({ command, args = [], cwd, opNames, timeoutMs 
       finish({ ok: false, reason: `exited before answering tools/list (code ${code}, signal ${signal})` })
     );
     child.stderr.on("data", (d) => (stderr += d));
+    // A child that exits (or closes its stdin) before reading what we send
+    // turns our next write into an asynchronous EPIPE on `child.stdin`. With no
+    // listener that error is thrown and takes the whole release script down,
+    // racing the "exit" handler above. The exit is the real reason, so let it
+    // report; the fallback only covers a child that closed stdin and lives on.
+    child.stdin.on("error", (err) => {
+      if (settled || stdinTimer) return;
+      stdinTimer = setTimeout(
+        () => finish({ ok: false, reason: `stdin closed before answering tools/list (${err.code || err.message})` }),
+        2000
+      );
+      stdinTimer.unref?.();
+    });
 
     let buf = "";
     const pending = new Map();
@@ -212,6 +227,9 @@ export async function smokeServer({ command, args = [], cwd, opNames, timeoutMs 
       new Promise((r) => {
         const id = ++nextId;
         pending.set(id, r);
+        // Once the child is gone, or its stdin is, the answer can only come
+        // from "exit", the stdin fallback or the timeout — never write.
+        if (settled || !child.stdin.writable) return;
         child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
       });
 
@@ -222,7 +240,9 @@ export async function smokeServer({ command, args = [], cwd, opNames, timeoutMs 
         clientInfo: { name: "release-smoke", version: "1" },
       });
       if (!init.result) return finish({ ok: false, reason: `initialize failed: ${JSON.stringify(init.error)}` });
-      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+      if (!settled && child.stdin.writable) {
+        child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+      }
       const list = await send("tools/list", {});
       if (!list.result) return finish({ ok: false, reason: `tools/list failed: ${JSON.stringify(list.error)}` });
       finish(checkToolList(list.result, opNames));

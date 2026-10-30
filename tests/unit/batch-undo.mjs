@@ -316,6 +316,40 @@ let passed = 0;
 }
 
 // ---------------------------------------------------------------------------
+// 6b. Issue #163: a finished job frees its ops and results. What is left is a
+//     tombstone of counters — so a cancel that races the end is answered as
+//     "known, already over", not "no such job" (which the server reads as After
+//     Effects having restarted) — and only the newest 64 tombstones are kept.
+// ---------------------------------------------------------------------------
+{
+  const { ctx, call, drive } = load();
+  const env = call("run_batch", { ops: makeOps(ctx, 600), undoGroupName: "Freed" }).result;
+  const { final } = drive(env.jobId, env.chunkSize);
+  assert.equal(final.done, true);
+  assert.equal(final.results.length, 600, "the finishing call still returns every result");
+  const tomb = ctx.JOBS[env.jobId];
+  assert.equal(tomb.finished, true);
+  assert.equal(tomb.ops, undefined, "the ops are freed");
+  assert.equal(tomb.results, undefined, "the results are freed");
+  const c = call("_cancel_job", { jobId: env.jobId }).result;
+  assert.deepEqual({ ...c }, { ok: true, finished: true }, "a late cancel is known, and changes nothing");
+  const g = call("_get_job", { jobId: env.jobId }).result;
+  assert.equal(g.finished, true);
+  assert.equal(g.cursor, 600);
+  const again = call("_continue_job", { jobId: env.jobId, chunkSize: env.chunkSize });
+  assert.equal(again.ok, false, "a finished job cannot be continued into a second result");
+  assert.match(again.error, /already finished/);
+
+  for (let i = 0; i < 70; i++) {
+    const e = call("run_batch", { ops: makeOps(ctx, 501) }).result;
+    drive(e.jobId, e.chunkSize);
+  }
+  assert.equal(ctx.JOBS[env.jobId], undefined, "the oldest tombstones are dropped");
+  assert.equal(Object.keys(ctx.JOBS).length, 64, "the table is bounded");
+  passed += 12;
+}
+
+// ---------------------------------------------------------------------------
 // 7. A transactional failure mid-chunk: the chunk's group closes, the count is
 //    honest, and no rollback is claimed. The old code fired a menu `Undo` here
 //    and reported it as one; menu commands do not work over this bridge.
@@ -433,7 +467,7 @@ let passed = 0;
   const main = fs.readFileSync(path.join(root, "packages", "ae-panel", "client", "main.js"), "utf8");
   assert.match(
     main,
-    /driveJob\(res\.jobId, progressToken, res\.chunkSize\)/,
+    /driveJob\(res\.jobId, progressToken, res\.chunkSize[,)]/,
     "the panel must take its chunk size from the job envelope"
   );
   assert.match(main, /chunkSize: size/, "and drive _continue_job with it");

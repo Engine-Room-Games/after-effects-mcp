@@ -1,0 +1,212 @@
+{
+  "recipe": 25,
+  "title": "set_temporal_ease sizes the ease for each property",
+  "manual": "Not scripted: Ellipse Size (expect 2) and Position on a 3D layer (expect 1); the graph editor shows non-linear easing.",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "e",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ],
+      "save": "layer"
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Opacity"
+        ],
+        "time": 0,
+        "value": 0
+      }
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Opacity"
+        ],
+        "time": 1,
+        "value": 100
+      }
+    },
+    {
+      "call": "set_temporal_ease",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Opacity"
+        ],
+        "keyIndex": 1,
+        "easeOut": {
+          "influence": 60,
+          "speed": 0
+        }
+      },
+      "expect": [
+        {
+          "path": "easeDimensions",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Scale"
+        ],
+        "time": 0,
+        "value": [
+          100,
+          100
+        ]
+      }
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Scale"
+        ],
+        "time": 1,
+        "value": [
+          50,
+          50
+        ]
+      }
+    },
+    {
+      "call": "set_temporal_ease",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Scale"
+        ],
+        "keyIndex": 1,
+        "easeOut": {
+          "influence": 60,
+          "speed": 0
+        }
+      },
+      "expect": [
+        {
+          "path": "easeDimensions",
+          "equals": 3
+        }
+      ]
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Position"
+        ],
+        "time": 0,
+        "value": [
+          100,
+          100
+        ]
+      }
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Position"
+        ],
+        "time": 1,
+        "value": [
+          900,
+          500
+        ]
+      }
+    },
+    {
+      "call": "set_temporal_ease",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Position"
+        ],
+        "keyIndex": 1,
+        "easeOut": {
+          "influence": 60,
+          "speed": 0
+        }
+      },
+      "expect": [
+        {
+          "path": "easeDimensions",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "call": "set_temporal_ease",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Opacity"
+        ],
+        "keyIndex": 1
+      },
+      "expectError": true
+    }
+  ]
+}

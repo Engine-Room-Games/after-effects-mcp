@@ -130,3 +130,37 @@ function __setValue(prop, value) {
     throw e;
   }
 }
+
+// keyframe:true with no time used to fall through to a static write and report
+// ok (issue #151). The schema refuses it before the call gets here; this is the
+// same refusal for a caller that reaches OPS directly (run_jsx). Used by
+// set_transform, set_effect_param and set_shape_property.
+function __requireKeyTime(keyframe, time, op) {
+  if (keyframe && (time === undefined || time === null)) {
+    throw new Error(
+      op + ": keyframe:true needs `time` (the keyframe's time in comp seconds). " +
+      "Nothing was changed. Pass `time`, or drop `keyframe` to set a static value."
+    );
+  }
+}
+
+// The one write path for an op that takes `value` plus optional `time` and
+// `keyframe`: set_transform, set_effect_param, set_shape_property (issue #184).
+// It lives here rather than in transforms.jsx because
+// tests/unit/effect-param-lookup.mjs loads effects.jsx with values.jsx alone.
+//
+//   keyframe + time   -> a keyframe at `time`
+//   time, no keyframe -> a keyframe at `time` if the property is already
+//                        animated, otherwise the static value
+//   no time           -> the static value
+//
+// A null time is no time. Static writes go through __setValue (#129); keyframe
+// writes do not, since the false throw was only ever measured on setValue.
+// keyframe:true without a time is refused before anything is written. Every
+// caller checks that itself first, with its own op name; this is the backstop.
+function __setOrKeyAtTime(prop, value, time, keyframe, op) {
+  __requireKeyTime(keyframe, time, op || "__setOrKeyAtTime");
+  var hasTime = time !== undefined && time !== null;
+  if (hasTime && (keyframe || prop.numKeys > 0)) prop.setValueAtTime(time, value);
+  else __setValue(prop, value);
+}

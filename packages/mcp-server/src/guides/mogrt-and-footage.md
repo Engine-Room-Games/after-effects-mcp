@@ -1,7 +1,7 @@
 ---
 name: mogrt-and-footage
 reference: after-effects
-description: Exporting a Motion Graphics template, importing footage and keeping the project bin clean through the AE MCP tools — export_mogrt and the preconditions it checks before touching the project, the thumbnail, the modal dialogs that freeze this connection, the SVG whose viewBox makes After Effects fabricate dimensions and render nothing, and the solids a deleted comp leaves behind. Load when a task exports a .mogrt, imports a file, or deletes comps.
+description: Exporting a Motion Graphics template and filling its Essential Graphics panel (add_essential_property), importing footage and keeping the project bin clean through the AE MCP tools — export_mogrt and the preconditions it checks before touching the project, the thumbnail, the modal dialogs that freeze this connection, the SVG whose viewBox makes After Effects fabricate dimensions and render nothing, and the solids a deleted comp leaves behind. Load when a task exports a .mogrt, imports a file, or deletes comps.
 ---
 
 # Motion Graphics templates and footage
@@ -30,9 +30,9 @@ stops exports:
 - **The comp needs at least one property in its Essential Graphics panel.**
   After Effects will not build a template from an empty one, and it refuses
   silently — no file, no dialog, not a word. The tool checks the controller
-  count first and refuses before touching anything. The fix is in AE and the
-  user has to do it: Window > Essential Graphics, pick the comp, drag a layer
-  property in.
+  count first and refuses before touching anything. Fill the panel yourself
+  with `add_essential_property` (below); the user dragging a property in from
+  Window > Essential Graphics works too, but is no longer the only way.
 - **The project must have been saved once, by hand.** There is no folder to
   save into otherwise, and the tool refuses rather than raising a dialog the
   user was not expecting.
@@ -59,13 +59,34 @@ moment that actually shows the design and it is rendered and swapped in. If
 only the thumbnail fails the export still succeeds — check `thumbnail.patched`
 in the result.
 
-`comp.setMotionGraphicsControllerName(index, …)` numbers controllers in
-**reverse order of addition**: index 1 is the one added last.
-
 **If any long call seems to have hung, assume a dialog before you assume a
 crash** — it may be behind another window. `comp.saveFrameToPng(...)` from
 `run_jsx` raises the save prompt the same way; use `screenshot_frame`, which
 does not.
+
+### Filling the Essential Graphics panel
+
+**`add_essential_property`** adds one layer property to its comp's panel as a
+controller — one call per property, `name` for the label the Premiere user will
+see. Pass the comp the layer is in; that comp is the template. Point
+`propertyPath` at a single property, never a group: `["Source Text"]` on a text
+layer, `["Effects", "<effect>", "<param>"]`, `["Transform", "Position"]`.
+
+After Effects decides what may go in, and the tool asks it first. Text, colours,
+checkboxes, single numbers (sliders, angles, opacity), 2D points (position,
+scale) and dropdowns go in; paths, masks, markers and layer pickers are refused
+with nothing changed. To expose one of those, put an expression control
+(Slider/Color/Checkbox/Point/Dropdown Menu Control) on the layer, drive the
+property from it with an expression, and add the control's property instead —
+which is also how one controller drives several layers.
+
+Trust the result, not the boolean AE returns: `controllerCount`,
+`controllerIndex` and `controllerName` are read back from the panel. A call
+that leaves the count unchanged is refused — most often the property is already
+in the panel, so do not call twice for the same one.
+
+`comp.setMotionGraphicsControllerName(index, …)` numbers controllers in
+**reverse order of addition**: index 1 is the one added last.
 
 ## Importing footage, and the SVG trap
 

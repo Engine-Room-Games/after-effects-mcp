@@ -231,7 +231,8 @@ function makeShapeLayer(sizeMode) {
     nodes: nodes, threeDLayer: false,
     property: function (n) {
       if (n === "Contents") return contents;
-      if (n === "Transform") return { property: function (k) { return transform[k]; } };
+      // set_transform resolves by match name; AE answers either form.
+      if (n === "Transform") return { property: function (k) { return transform[k] || transform[{ "ADBE Position": "Position", "ADBE Scale": "Scale" }[k]] || null; } };
       return null;
     },
     transform: transform

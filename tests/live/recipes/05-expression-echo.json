@@ -1,0 +1,101 @@
+{
+  "recipe": 5,
+  "title": "an expression set on an effect parameter is echoed back",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "bg",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ],
+      "save": "layer"
+    },
+    {
+      "call": "add_effect",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "matchName": "ADBE Gaussian Blur 2"
+      }
+    },
+    {
+      "call": "set_expression",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Effects",
+          "Gaussian Blur",
+          "Blurriness"
+        ],
+        "expression": "time*10"
+      }
+    },
+    {
+      "call": "get_expression",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Effects",
+          "Gaussian Blur",
+          "Blurriness"
+        ]
+      },
+      "expect": [
+        {
+          "path": "expression",
+          "equals": "time*10"
+        },
+        {
+          "path": "enabled",
+          "equals": true
+        }
+      ]
+    },
+    {
+      "call": "get_layer_full",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "include": [
+          "effects"
+        ]
+      },
+      "expect": [
+        {
+          "path": "$text",
+          "matches": "time\\*10"
+        }
+      ]
+    }
+  ]
+}
