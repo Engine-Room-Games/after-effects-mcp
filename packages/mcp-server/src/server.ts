@@ -70,6 +70,7 @@ import { archiveIssue, listIssues, logIssue, markReported } from "./issues/journ
 import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
 import { houseStyleOnServer } from "./style/houseStyleFile.js";
+import { runAnalyzeMotion } from "./style/motion.js";
 import { internalSender, type SendInternal } from "./tools/internalOps.js";
 import { CAP_PROJECT_PATH, CAP_SERVER_DRIVES_JOBS, CAP_SERVER_IMAGES, CAP_SERVER_RUN_JSX } from "./setup/panelCapabilities.js";
 import { BatchDriver, foreignJobText, readAeJobRecord } from "./jobs/batchDriver.js";
@@ -930,6 +931,10 @@ export function createServer(opts: CreateServerOptions = {}) {
       if (SNAPSHOT_OPS.has(name)) {
         const withView = clientSupportsApps(server.getClientCapabilities());
         return await runSnapshotOp(name, args, sendInternal, snapshots, withView);
+      }
+      // The panel gathers raw keys; the statistics are computed here (style/motion.ts).
+      if (name === "analyze_motion") {
+        return textResult(await runAnalyzeMotion(args as { compIds: number[]; maxKeys?: number }, sendInternal), wait);
       }
       // The render runs outside After Effects; only the prepare and the save
       // cross the bridge. The lease is released when this returns, on purpose

@@ -306,7 +306,7 @@ These switches limit what your assistant can do through this connection. They do
 ---
 
 <details>
-<summary><b>🧰 All 88 tools</b></summary>
+<summary><b>🧰 All 89 tools</b></summary>
 
 <br>
 
@@ -330,7 +330,7 @@ These switches limit what your assistant can do through this connection. They do
 | Render queue (4) | `add_to_render_queue`, `list_render_queue`, `remove_render_item`, `render_queue` — render in the background, with progress and cancel |
 | Explore (3) | `get_project_summary`, `find_layers`, `get_selection` — what the user has selected and where the playhead is |
 | Raw (1) | `run_jsx` |
-| House style (2) | `get_house_style`, `set_house_style` |
+| House style (3) | `get_house_style`, `set_house_style`, `analyze_motion` — read the eases, timings and staggers of comps already animated, for the style guide |
 | Jobs (3) | `await_job`, `get_job`, `cancel_job` |
 | Setup (3) | `check_setup`, `setup_panel`, `init_project` |
 | Guidance (1) | `ae_guide` |

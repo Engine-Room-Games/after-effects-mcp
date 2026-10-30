@@ -39,7 +39,7 @@ const jsxDir = path.join(root, "packages", "jsx");
 // reads it at top level exactly as in the shipped bundle.
 const BUNDLE_ORDER = [
   "core.jsx", "ids.jsx", "values.jsx", "comps.jsx", "layers.jsx", "snapshot.jsx", "checkpoint.jsx",
-  "transforms.jsx", "keyframes.jsx", "expressions.jsx", "effects.jsx", "text.jsx", "shapes.jsx", "masks.jsx",
+  "transforms.jsx", "keyframes.jsx", "expressions.jsx", "retime.jsx", "motion.jsx", "effects.jsx", "text.jsx", "shapes.jsx", "masks.jsx",
   "markers.jsx", "vision.jsx", "footage.jsx", "audio.jsx", "mogrt.jsx", "render.jsx", "style.jsx",
   "batch.jsx", "explore.jsx", "helpers.jsx", "raw.jsx",
 ];

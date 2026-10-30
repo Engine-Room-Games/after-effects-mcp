@@ -18,11 +18,14 @@ Load the `style-guide` topic of `ae_guide` and follow it. In short:
    it, keep what is there, and send the whole merged document back.
 2. Prefer reading the style off work they already like over asking them to
    describe it. Ask which comp, then `get_comp` and `get_layer_full` on the
-   layers that carry the look, and `get_keyframes` for the timing signature.
+   layers that carry the look, and `analyze_motion` on the comps that move the
+   way they like for the timing signature — eases, durations, overshoot,
+   staggers.
 3. Show what you found in plain language and let them correct it. Adjectives
    from you, numbers in the file.
-4. Write it with `set_house_style` (`overwrite: true` when replacing), then tell
-   them where it is and that they can edit it in any text editor.
+4. Only once they agree, write it with `set_house_style` (`overwrite: true`
+   when replacing), then tell them where it is and that they can edit it in
+   any text editor.
 
 Two things that will stop you: the project must have been **saved** at least
 once, and `set_house_style` replaces the whole file rather than patching it.

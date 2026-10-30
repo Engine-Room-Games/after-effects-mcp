@@ -66,6 +66,7 @@ Numbered recipes referenced below are in [verification-recipes.md](verification-
 | `packages/jsx/style.jsx` | `get_house_style` / `set_house_style`, and `_project_path`. A panel reporting `project-path` (#220, stage 3) answers only the path and the server opens the file; every other panel reads `house-style.md` beside the .aep itself. |
 | `packages/mcp-server/src/style/houseStyleFile.ts` | The house style's file I/O on the server: ports of `style.jsx` with its sentences, falling back to the panel's op for a folder this process cannot see. |
 | `packages/mcp-server/src/setup/panelCapabilities.ts` | Reads `capabilities` off `/health`. Absent or malformed is legacy; a capability is used only when listed. |
+| `packages/jsx/motion.jsx` + `packages/mcp-server/src/style/motion.ts` | `analyze_motion` (issue #244): `_motion_keys` gathers compact raw keys in AE, bounded by `maxKeys`; the server turns them into moves, eases, overshoot, staggers and draft house-style lines. See "Reading a motion style" in [subsystems.md](subsystems.md). |
 | `packages/mcp-server/src/style/summary.ts` | The digest `get_house_style` returns by default. Parses a markdown document nobody controls; falls back to the document's own opening when it recognises nothing. Applies wherever the document was read. |
 | `packages/mcp-server/src/files/destinations.ts` | The filesystem checks `add_to_render_queue`, `import_footage` and `export_mogrt` (with `destDir`) make before the call is forwarded. Ports of the jsx checks, which still run afterwards; a path Node and ExtendScript might read differently is forwarded unjudged. Held to the jsx by `tests/unit/destination-checks.mjs`. Change one, change both. |
 | `plugin/` | The Claude Code plugin: `.mcp.json` + generated `skills/` and `commands/`. Everything under those two is output, not source. |
@@ -782,7 +783,7 @@ saying why; the cost the other way is a switch silently not applied.
 **The `.mcpb` manifest's tool list cannot follow the switches.** Its `tools`
 array is static metadata, written at build time and shown by Claude Desktop
 before the server ever runs; `user_config` values are substituted into the
-server's environment, not into the manifest. So it lists all 88 whatever is
+server's environment, not into the manifest. So it lists all 89 whatever is
 ticked. What the model actually gets is `tools/list` from the running server,
 which does follow them.
 

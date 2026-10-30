@@ -258,6 +258,42 @@ a summary that looks complete and is not:
 So `detail: "full"` is not optional before an edit — read the document, merge,
 send it back.
 
+### Reading a motion style off existing comps
+
+`analyze_motion` (issue #244) turns keys a designer already made into numbers
+for the Motion section: how long a move takes, which ease influence they reach
+for, how far things overshoot and how fast they settle, the stagger between
+layers. It never writes the guide — the style-guide topic has the agent show
+the user what it found and call `set_house_style` only once they agree, the
+same "adjectives from you, numbers in the file" flow as reading colours off a
+layer.
+
+It is split the way `diff_comp` is. `_motion_keys` (`packages/jsx/motion.jsx`)
+does plain reads — one compact array per key, the first ease entry of each
+side, the value only when it is numbers — and `style/motion.ts` computes every
+statistic. Two reasons, both the summary's: the statistics will be tuned, and a
+tuning in the bundle would be dark until a panel reinstall and an AE restart;
+and they are arithmetic over arrays, testable with no AE
+(`tests/unit/motion-style.mjs`, which also drives the gathering op against the
+fake AE). The raw keys never reach the agent: a tool result is re-sent on every
+later request, so the answer is a digest with fixed caps (8 properties, 4 ease
+pairs, 5 staggers), and a `run_batch` step — which would return the raw keys —
+is refused.
+
+The vocabulary is the designer's, not After Effects': a **move** is a run of
+changing keys with no hold between them, so `0 → 108 → 100` is one move with an
+8% overshoot, not two segments. Overshoot is measured against the move's last
+key along the travel from its first, so a bounce (`0 → 110 → 97 → 100`) is one
+overshoot with a bounce rather than two overshoots. Everything heuristic says
+what it cannot see: expressions are skipped and counted, motion-path shape and
+per-dimension eases are not read, nested precomps are not followed, and fewer
+than eight moves come back marked as a hint rather than a pattern.
+
+Unmeasured live: that `keyTime` answers comp time for a layer whose
+`startTime` is not zero (a stagger built by sliding layers depends on it), and
+how long the read takes on a large comp — `maxKeys` (default 2000) is the
+bound, and hitting it is reported.
+
 ## Filesystem checks on the server
 
 Three ops check the filesystem before they touch the project, and since issue

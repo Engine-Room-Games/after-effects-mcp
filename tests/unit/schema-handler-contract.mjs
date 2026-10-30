@@ -97,6 +97,8 @@ const SERVER_READERS = {
   // The panel gathers a fingerprint; the server stores and diffs it.
   snapshot_comp: { fns: ["runSnapshotOp"] },
   diff_comp: { fns: ["runSnapshotOp"] },
+  // The panel gathers raw keys (_motion_keys); the server summarises them.
+  analyze_motion: { fns: ["runAnalyzeMotion"], files: ["style/motion.ts"] },
   // The render itself is an aerender process; only prepare and save are AE.
   render_queue: { fns: ["runRender"], files: ["render/aerender.ts"] },
   // The one op whose input is rewritten: scriptPath -> code, libraries ->
