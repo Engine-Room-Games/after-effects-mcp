@@ -141,25 +141,64 @@ await check("compaction keeps exactly the in-memory window", () => {
 
 // Lossless under contention. The window is made large enough that nothing
 // leaves it by size or age, and compaction small enough to run constantly, so
-// the only way a key's last frame can go missing is a lost line.
-await check("three writers at once, compacting all the time: no line is lost and every line is whole", async () => {
-  const f = path.join(work, "concurrent.jsonl");
+// the only way a key's last frame can go missing is a lost line. Any writer
+// that fell back to its own window fails the check, wherever its record was.
+// The lock wait is raised from half a second: three processes in a hot loop
+// on a loaded CI machine can wait that long for an honest lock, and that
+// designed bound (held by the stuck-lock check below) is not what this tests.
+//
+// `faults` injects, into each writer's own `fs`, the sharing failures Windows
+// produces under exactly this load (measured on windows-latest, PR #241): a
+// lock its holder has just deleted is still on disk "delete pending" and
+// creating it again fails EPERM, not EEXIST; and a rename, an open or a read
+// can meet another process's handle and fail EPERM/EBUSY for a moment. Each
+// injected failure is followed by a real attempt, as the real thing clears.
+const FAULTS = `
+import fs from "node:fs";
+const owed = new Set();
+const flaky = (name, code, p, applies) => {
+  const real = fs[name];
+  fs[name] = function (...a) {
+    if (applies(...a) && !owed.has(name) && Math.random() < p) {
+      owed.add(name);
+      const e = new Error(code + ": injected, " + name + " " + a[0]);
+      e.code = code;
+      throw e;
+    }
+    owed.delete(name);
+    return real.apply(this, a);
+  };
+};
+const isLock = (p) => String(p).endsWith(".lock");
+flaky("openSync", "EPERM", 0.4, (p, flags) => isLock(p) && flags === "wx");
+flaky("unlinkSync", "EPERM", 0.1, isLock);
+flaky("renameSync", "EPERM", 0.3, () => true);
+flaky("readFileSync", "EBUSY", 0.1, (p) => String(p).endsWith(".jsonl"));
+`;
+
+async function writers(f, faults) {
   const WRITER = `
+${faults ? FAULTS : ""}
 const { createSharedFrameCache } = await import(${JSON.stringify(url("sharedFrameCache.js"))});
-const c = createSharedFrameCache(() => ({ file: ${JSON.stringify(f)}, instance: "i" }), { limit: 1000, compactAt: 25 });
+const warnings = [];
+const c = createSharedFrameCache(() => ({ file: ${JSON.stringify(f)}, instance: "i" }), { limit: 1000, compactAt: ${faults ? 60 : 25}, lockWaitMs: 20_000, warn: (m) => warnings.push(m) });
 const who = process.argv[2];
 for (let i = 0; i < 150; i++) c.remember(who + (i % 10), who + "-hash-" + i, { label: who, bytes: i });
+process.stderr.write(JSON.stringify({ warnings }));
 `;
-  const wf = path.join(work, "writer.mjs");
+  const wf = path.join(work, `writer-${path.basename(f)}.mjs`);
   fs.writeFileSync(wf, WRITER);
   const { spawn } = await import("node:child_process");
   const done = (who) => new Promise((res, rej) => {
     const p = spawn(process.execPath, [wf, who], { stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
     p.stderr.on("data", (d) => (err += d));
-    p.on("exit", (code) => (code === 0 ? res() : rej(new Error(err))));
+    p.on("exit", (code) => (code === 0 ? res(JSON.parse(err)) : rej(new Error(err))));
   });
-  await Promise.all([done("A"), done("B"), done("C")]);
+  const outs = await Promise.all([done("A"), done("B"), done("C")]);
+  // A writer that fell back to its own window dropped a record from the
+  // shared one: the very loss this file exists to prevent, however it shows.
+  assert.deepEqual(outs.flatMap((o) => o.warnings), [], "a writer could not write the shared window");
   for (const l of fs.readFileSync(f, "utf8").trim().split("\n")) JSON.parse(l);
   const c = createSharedFrameCache(() => ({ file: f, instance: "i" }), { limit: 1000 });
   for (const who of ["A", "B", "C"]) {
@@ -172,6 +211,38 @@ for (let i = 0; i < 150; i++) c.remember(who + (i % 10), who + "-hash-" + i, { l
   }
   assert.ok(!fs.existsSync(f + ".lock"), "a writer left its lock behind");
   assert.deepEqual(fs.readdirSync(work).filter((n) => n.includes(".tmp")), [], "a compaction left its temp file");
+}
+
+await check("three writers at once, compacting all the time: no line is lost and every line is whole", async () => {
+  for (let round = 0; round < 3; round++) await writers(path.join(work, `concurrent-${round}.jsonl`), false);
+});
+
+await check("Windows sharing failures (a delete-pending lock, a held file) are waited out, never a dropped line", async () => {
+  await writers(path.join(work, "faults.jsonl"), true);
+});
+
+await check("a compaction that cannot read the file leaves it alone instead of emptying it", () => {
+  const f = path.join(work, "unreadable.jsonl");
+  const c = createSharedFrameCache(() => ({ file: f, instance: "i" }), { limit: 1000, compactAt: 3 });
+  for (let i = 0; i < 3; i++) c.remember(`k${i}`, `h${i}`, { label: "k", bytes: 1 });
+  // The next remember counts lines (allowed), then compacts: that read fails.
+  const real = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = function (p, ...rest) {
+    if (p === f && ++reads > 1) {
+      const e = new Error("EBUSY: injected");
+      e.code = "EBUSY";
+      throw e;
+    }
+    return real.call(this, p, ...rest);
+  };
+  try {
+    c.remember("k3", "h3", { label: "k", bytes: 1 });
+  } finally {
+    fs.readFileSync = real;
+  }
+  assert.ok(reads > 1, "the compaction never ran");
+  assert.equal(fs.readFileSync(f, "utf8").trim().split("\n").length, 4, "the compaction rewrote the file from a failed read");
 });
 
 await check("a restarted After Effects starts with an empty window: another panel instance's lines do not count", () => {
@@ -198,34 +269,77 @@ await check("the instance tag is a hash of the token, never the token", async ()
   assert.equal(panelInstanceId(null), null);
 });
 
-await check("a lock that can never be removed costs half a second, not a hung server", () => {
+await check("a lock that can never be removed costs one wait, then nothing until the cool-off ends", () => {
   // A stale "lock" that is a directory: unlink fails (EISDIR / EPERM), as an
   // EACCES or a Windows sharing violation would. Run in its own process with a
   // hard timeout, so a regression fails here instead of hanging the suite.
+  // The lock is cleared during the cool-off: records inside it still skip the
+  // file without trying, and the first one after it lands.
   const f = path.join(work, "stuck.jsonl");
   fs.mkdirSync(f + ".lock");
   const old = new Date(Date.now() - 60_000);
   fs.utimesSync(f + ".lock", old, old);
   const STUCK = `
+import fs from "node:fs";
 const { createSharedFrameCache } = await import(${JSON.stringify(url("sharedFrameCache.js"))});
 const warnings = [];
-const c = createSharedFrameCache(() => ({ file: ${JSON.stringify(f)}, instance: "i" }), { warn: (m) => warnings.push(m) });
-const t0 = Date.now();
-c.remember("a", "h-stuck", { label: "a", bytes: 1 });
-c.remember("b", "h-stuck-2", { label: "b", bytes: 1 });
-process.stderr.write(JSON.stringify({ ms: Date.now() - t0, warnings, kept: !!c.match("z", "h-stuck") }));
+const c = createSharedFrameCache(() => ({ file: ${JSON.stringify(f)}, instance: "i" }), { warn: (m) => warnings.push(m), coolOffMs: 1500 });
+const timed = (k, h) => { const t = Date.now(); c.remember(k, h, { label: k, bytes: 1 }); return Date.now() - t; };
+const first = timed("a", "h-stuck");
+const cooling = [timed("b", "h-stuck-2"), timed("c", "h-stuck-3")];
+fs.rmdirSync(${JSON.stringify(f + ".lock")});
+cooling.push(timed("d", "h-stuck-4"));
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1600);
+timed("e", "h-stuck-5");
+process.stderr.write(JSON.stringify({ first, cooling, warnings, kept: ["h-stuck", "h-stuck-3", "h-stuck-4"].every((h) => !!c.match("z", h)) }));
 `;
   const sf = path.join(work, "stuck.mjs");
   fs.writeFileSync(sf, STUCK);
-  const r = spawnSync(process.execPath, [sf], { encoding: "utf8", timeout: 10_000 });
+  const r = spawnSync(process.execPath, [sf], { encoding: "utf8", timeout: 15_000 });
   assert.notEqual(r.signal, "SIGTERM", "remember() hung on a lock it could not remove");
   assert.equal(r.status, 0, r.stderr);
   const out = JSON.parse(r.stderr);
-  assert.ok(out.ms < 3000, `two records took ${out.ms}ms`);
+  assert.ok(out.first < 2000, `the first record took ${out.first}ms`);
+  assert.ok(Math.max(...out.cooling) < 100, `records during the cool-off still waited: ${out.cooling.join(", ")}ms`);
   assert.equal(out.warnings.length, 1, "warned once, not per frame");
   assert.match(out.warnings[0], /could not be taken/);
-  assert.equal(out.kept, true, "the frame is still in this process's own window");
-  assert.ok(!fs.existsSync(f), "nothing was written without the lock");
+  assert.match(out.warnings[0], /tries again in 2s/);
+  assert.equal(out.kept, true, "the frames are still in this process's own window");
+  const written = fs.readFileSync(f, "utf8");
+  assert.ok(written.includes("h-stuck-5"), "after the cool-off the shared file was not tried again");
+  assert.ok(!/h-stuck"|h-stuck-[234]/.test(written), "a record was written while the lock was stuck or during the cool-off");
+});
+
+await check("retries under the lock keep to the record's one deadline", () => {
+  // The lock is free, but the compaction's rename and the lock's release fail
+  // EPERM for ever. Every retry shares the record's deadline, so the record
+  // costs that deadline, not the deadline plus a retry budget per call.
+  const f = path.join(work, "deadline.jsonl");
+  const c = createSharedFrameCache(() => ({ file: f, instance: "i" }), { compactAt: 0, lockWaitMs: 50, warn: () => {} });
+  const realRename = fs.renameSync;
+  const realUnlink = fs.unlinkSync;
+  const eperm = (what) => Object.assign(new Error(`EPERM: injected, ${what}`), { code: "EPERM" });
+  fs.renameSync = function (from, to) {
+    if (to === f) throw eperm("rename");
+    return realRename.call(this, from, to);
+  };
+  fs.unlinkSync = function (p) {
+    if (p === f + ".lock") throw eperm("unlink");
+    return realUnlink.call(this, p);
+  };
+  let ms;
+  try {
+    const t = Date.now();
+    c.remember("k", "h-deadline", { label: "k", bytes: 1 });
+    ms = Date.now() - t;
+  } finally {
+    fs.renameSync = realRename;
+    fs.unlinkSync = realUnlink;
+  }
+  fs.rmSync(f + ".lock", { force: true });
+  assert.ok(ms < 150, `the record took ${ms}ms against a 50ms deadline`);
+  assert.ok(fs.readFileSync(f, "utf8").includes("h-deadline"), "the append before the failed compaction was lost");
+  assert.deepEqual(fs.readdirSync(work).filter((n) => n.includes(".tmp")), [], "a failed compaction left its temp file");
 });
 
 await check("an existing 0755 directory and 0644 file are tightened to 0700 and 0600", () => {
