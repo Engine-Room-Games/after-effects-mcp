@@ -119,6 +119,39 @@ await check("anticipation: a wind-up behind the start at the beginning of a move
   assert.equal(s.overshoot.moves, 0);
 });
 
+await check("a reversal past any plausible overshoot is two moves, not a 100% overshoot (review of #254)", () => {
+  const p = prop(1, "Position", "ADBE Position", [key(0, [0, 0]), key(0.5, [100, 0]), key(1, [50, 0])]);
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.equal(s.moves, 2);
+  assert.equal(s.overshoot.moves, 0);
+  assert.ok(!s.suggestedLines.some((l) => /Overshoot/.test(l)), s.suggestedLines.join("\n"));
+});
+
+await check("a small reversal that settles slower than it got there is a new move, not a settle", () => {
+  const p = prop(1, "Opacity", "ADBE Opacity", [key(0, [0]), key(0.2, [110]), key(1.2, [100])]);
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.equal(s.moves, 2);
+  assert.equal(s.overshoot.moves, 0);
+});
+
+await check("a wind-up bigger than half the travel is a move of its own, not anticipation", () => {
+  const p = prop(1, "Rotation", "ADBE Rotate Z", [key(0, [0]), key(0.2, [-80]), key(0.7, [100])]);
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.equal(s.moves, 2);
+  assert.equal(s.anticipation.moves, 0);
+});
+
+await check("one move prints one duration, not a 'most 0.4–0.4s' range", () => {
+  const s = summarizeMotion(raw([comp([popIn(1, 0)])]));
+  assert.equal(s.suggestedLines[0], "Typical move: 0.4s (12f at 30fps)");
+});
+
+await check("keys outside a layer's in/out are named in the notes", () => {
+  const s = summarizeMotion(raw([comp([popIn(1, 0)], { skipped: { notMotion: 0, expressionDriven: 0, outsideLayer: 2 } })]));
+  assert.ok(s.notes.some((n) => /2 keys outside their layer's in\/out range were ignored/.test(n)), s.notes.join("\n"));
+  assert.ok(!s.notes.some((n) => /Time Remap/.test(n)));
+});
+
 await check("holds split moves: equal values and hold keyframes are not motion", () => {
   const p = prop(1, "Position", "ADBE Position", [
     key(0, [0, 0]), key(0.5, [100, 0]), // move
@@ -246,6 +279,16 @@ ae.run(`
   var blur = b.property("Effects").addProperty("ADBE Gaussian Blur 2").property("Blurriness");
   blur.setValueAtTime(0.1, 20); blur.setValueAtTime(0.6, 0);
   c.addLayer(3, "Still", "shape");
+  // Separated dimensions: the master Position is not what plays.
+  var d = c.addLayer(4, "Slider", "shape");
+  var pos = d.property("Transform").property("Position");
+  pos.setValueAtTime(0, [0, 0]); pos.setValueAtTime(1, [100, 0]);
+  pos.dimensionsSeparated = true;
+  // A key past the layer's out point never plays.
+  var e2 = c.addLayer(5, "Short", "shape");
+  e2.outPoint = 1;
+  var o2 = e2.property("Transform").property("Opacity");
+  o2.setValueAtTime(0, 0); o2.setValueAtTime(0.5, 100); o2.setValueAtTime(3, 0);
   FAKE.comp(200, "Empty");
 `);
 
@@ -258,7 +301,7 @@ await check("_motion_keys reads every keyed property, compactly, with the first 
   assert.equal(pops.name, "Pops");
   assert.equal(pops.frameRate, 30);
   assert.deepEqual(empty.props, []);
-  const byPath = Object.fromEntries(pops.props.map((p) => [p.path, p]));
+  const byPath = Object.fromEntries(pops.props.filter((p) => p.layerId <= 2).map((p) => [p.path, p]));
   assert.deepEqual(Object.keys(byPath).sort(), ["Effects > Gaussian Blur > Blurriness", "Transform > Opacity", "Transform > Scale"]);
   assert.deepEqual(byPath["Transform > Scale"].keys[1], [0.3, "b", "b", 33.33, 0, 33.33, 0, [108, 108, 100]]);
   assert.equal(byPath["Transform > Scale"].matchName, "ADBE Scale");
@@ -267,7 +310,12 @@ await check("_motion_keys reads every keyed property, compactly, with the first 
   assert.deepEqual(byPath["Transform > Opacity"].keys[0][7], [0], "a scalar comes back as [v]");
   assert.equal(byPath["Effects > Gaussian Blur > Blurriness"].layerId, 2);
   assert.equal(pops.skipped.expressionDriven, 1);
-  assert.equal(r.keysRead, 7);
+  assert.equal(pops.skipped.notMotion, 0, "a marker is passed over, not reported as Time Remap / audio");
+  assert.ok(!pops.props.some((p) => p.layerId === 4), "a separated master Position is not read");
+  const short = pops.props.find((p) => p.layerId === 5);
+  assert.deepEqual(short.keys.map((k) => k[0]), [0, 0.5], "the key past the out point is dropped");
+  assert.equal(pops.skipped.outsideLayer, 1);
+  assert.equal(r.keysRead, 10);
   assert.equal(r.truncated, false);
 });
 
@@ -275,7 +323,7 @@ await check("_motion_keys stops at maxKeys and counts what it left", () => {
   const r = ae.call("_motion_keys", { compIds: [100], maxKeys: 4 }).result;
   assert.equal(r.truncated, true);
   assert.ok(r.keysRead <= 4);
-  assert.equal(r.keysRead + r.keysNotRead, 7);
+  assert.equal(r.keysRead + r.keysNotRead, 10);
   assert.ok(r.propsNotRead >= 1);
 });
 

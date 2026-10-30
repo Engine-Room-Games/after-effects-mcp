@@ -19,12 +19,16 @@
 // the walk and says so (`truncated`, with what was not read) rather than
 // returning a partial read that looks whole.
 //
-// Skipped, and counted so the summary can name them: markers (not motion),
-// Time Remap and audio levels (retiming and mixing, not a motion style), and
-// any keyed property whose expression is on (its keys are not what plays).
+// Skipped, and counted so the summary can name them: Time Remap and audio
+// levels (retiming and mixing, not a motion style), any keyed property whose
+// expression is on, and keys outside the layer's in/out range (neither is what
+// plays). Markers are passed over uncounted, and so is the master Position of
+// a layer whose dimensions are separated — X/Y/Z carry its keys.
+
+// Markers are not keyframed motion and are passed over without a count.
+var __MO_MARKER = "ADBE Marker";
 
 var __MO_SKIP = {
-  "ADBE Marker": true,
   "ADBE Time Remapping": true,
   "ADBE Audio Group": true,
   "ADBE Audio Levels": true
@@ -83,6 +87,13 @@ function __moWalk(group, names, layer, st) {
     var p = null;
     try { p = group.property(i); } catch (eP) { p = null; }
     if (!p) continue;
+    if (p.matchName === __MO_MARKER) continue;
+    // Separated dimensions: X/Y/Z Position carry the keys, the master is not what plays.
+    if (p.matchName === "ADBE Position") {
+      var sep = false;
+      try { sep = !!p.dimensionsSeparated; } catch (eSep) {}
+      if (sep) continue;
+    }
     if (__MO_SKIP[p.matchName]) {
       if (p.propertyType === PropertyType.PROPERTY && __moNumKeys(p) > 0) st.skipped.notMotion += 1;
       continue;
@@ -102,13 +113,19 @@ function __moWalk(group, names, layer, st) {
       continue;
     }
     var keys = [];
+    var lo = -Infinity, hi = Infinity;
+    try { lo = layer.inPoint; hi = layer.outPoint; } catch (eIO) {}
+    if (lo > hi) { var sw = lo; lo = hi; hi = sw; }
     for (var k = 1; k <= nk; k++) {
+      // A key outside the layer's in/out range never plays: ignored, counted.
+      var kt = p.keyTime(k);
+      if (kt < lo - 0.0005 || kt > hi + 0.0005) { st.skipped.outsideLayer += 1; continue; }
       var inE = __moEase(p, k, "in");
       var outE = __moEase(p, k, "out");
       var v = null;
       try { v = __moValue(p.keyValue(k)); } catch (eV) { v = null; }
       keys.push([
-        __moRound(p.keyTime(k), 5),
+        __moRound(kt, 5),
         __moInterp(p.keyInInterpolationType(k)),
         __moInterp(p.keyOutInterpolationType(k)),
         inE[0], inE[1], outE[0], outE[1],
@@ -116,6 +133,7 @@ function __moWalk(group, names, layer, st) {
       ]);
     }
     st.read += nk;
+    if (!keys.length) continue;
     var spatial = false;
     try { spatial = !!p.isSpatial; } catch (eS) {}
     st.props.push({
@@ -143,7 +161,7 @@ OPS._motion_keys = noUndo(function (args) {
     var comp = comps[j];
     st = {
       props: [], read: read, budget: budget, truncated: truncated, keysNotRead: 0, propsNotRead: 0,
-      skipped: { notMotion: 0, expressionDriven: 0 }
+      skipped: { notMotion: 0, expressionDriven: 0, outsideLayer: 0 }
     };
     for (var li = 1; li <= comp.numLayers; li++) {
       var layer = comp.layer(li);

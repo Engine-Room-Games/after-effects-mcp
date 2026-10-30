@@ -284,7 +284,13 @@ The vocabulary is the designer's, not After Effects': a **move** is a run of
 changing keys with no hold between them, so `0 → 108 → 100` is one move with an
 8% overshoot, not two segments. Overshoot is measured against the move's last
 key along the travel from its first, so a bounce (`0 → 110 → 97 → 100`) is one
-overshoot with a bounce rather than two overshoots. Everything heuristic says
+overshoot with a bounce rather than two overshoots. A reversal counts as
+overshoot only when it goes at most half the travel past the target and settles
+no slower than it got there (and a wind-up only at a move's first key, by the
+same bound); anything else splits the run into two moves, so `0 → 100 → 50`
+never reads as a 100% overshoot. Keys outside a layer's in/out are ignored and
+counted, markers are passed over, and a separated master Position is not read
+beside its X/Y/Z. Everything heuristic says
 what it cannot see: expressions are skipped and counted, motion-path shape and
 per-dimension eases are not read, nested precomps are not followed, and fewer
 than eight moves come back marked as a hint rather than a pattern.

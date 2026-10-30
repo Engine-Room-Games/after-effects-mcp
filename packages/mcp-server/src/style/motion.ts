@@ -42,7 +42,7 @@ export interface RawComp {
   duration: number;
   numLayers: number;
   props: RawProp[];
-  skipped: { notMotion: number; expressionDriven: number };
+  skipped: { notMotion: number; expressionDriven: number; outsideLayer?: number };
 }
 
 export interface MotionKeys {
@@ -60,6 +60,8 @@ const EPS = 1e-6;
 const STOP_SPEED = 0.01;
 /** A middle key must pass the target by more than this share of the travel to count as overshoot. */
 const OVERSHOOT_MIN = 0.02;
+/** Past this share of the travel, a reversal is a new move, not an overshoot or a wind-up. */
+const MAX_REVERSAL = 0.5;
 /** Output caps. Raising one is a decision about what every later request carries. */
 const MAX_PROPERTIES = 8;
 const MAX_EASE_PAIRS = 4;
@@ -191,6 +193,25 @@ function isMove(a: RawKey, b: RawKey): boolean {
   return !sameValue(a[7], b[7]);
 }
 
+/**
+ * The first key in run i..j where the travel reverses in a way that is not an
+ * overshoot-and-settle or a wind-up, or -1. Overshoot is genuine when it goes
+ * at most MAX_REVERSAL past the target and settles no slower than it got
+ * there; anticipation when it is the move's first key, at most MAX_REVERSAL
+ * back, and no longer than the move that follows.
+ */
+function reversalCut(k: RawKey[], i: number, j: number): number {
+  for (let m = i + 1; m < j; m++) {
+    const t = travelShare(k[i][7], k[m][7], k[j][7]);
+    if (t === null) continue;
+    const before = k[m][0] - k[i][0];
+    const after = k[j][0] - k[m][0];
+    if (t > 1 + OVERSHOOT_MIN && (t - 1 > MAX_REVERSAL || after > before)) return m;
+    if (t < -OVERSHOOT_MIN && (m !== i + 1 || -t > MAX_REVERSAL || before > after)) return m;
+  }
+  return -1;
+}
+
 /** Split one property's keys into moves, segments and holds. */
 function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[], holds: number[]): void {
   const k = p.keys;
@@ -205,9 +226,14 @@ function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[
     }
     // A run of moving segments, i .. j (keys).
     let j = i;
-    while (j < k.length - 1 && isMove(k[j], k[j + 1])) {
-      const a = k[j];
-      const b = k[j + 1];
+    while (j < k.length - 1 && isMove(k[j], k[j + 1])) j++;
+    // A reversal that is not an overshoot-and-settle (or a wind-up) is where
+    // one move ends and the next begins: 0 → 100 → 50 is two moves, not a
+    // 100% overshoot. Cut the run there and look again.
+    for (let cut = reversalCut(k, i, j); cut >= 0; cut = reversalCut(k, i, j)) j = cut;
+    for (let m = i; m < j; m++) {
+      const a = k[m];
+      const b = k[m + 1];
       const seconds = b[0] - a[0];
       segments.push({
         seconds,
@@ -216,7 +242,6 @@ function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[
         out: easeSide(a[2], a[5], a[6]),
         in: easeSide(b[1], b[3], b[4]),
       });
-      j++;
     }
     const seconds = k[j][0] - k[i][0];
     const move: Move = { label, seconds, frames: seconds * fps, segments: j - i, overshoot: null, anticipation: null };
@@ -226,6 +251,7 @@ function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[
     // each later key on the other side of the target is a bounce, so a
     // 0 → 110 → 97 → 100 settle is one overshoot of 10% with one bounce.
     // Anticipation: the move's first middle key behind where it started.
+    // reversalCut has already split off anything that is neither.
     let peak = -1;
     let peakShare = 1 + OVERSHOOT_MIN;
     for (let m = i + 1; m < j; m++) {
@@ -336,11 +362,13 @@ export function summarizeMotion(raw: MotionKeys) {
   const fpsSet = new Set<number>();
   let expressionDriven = 0;
   let notMotion = 0;
+  let outsideLayer = 0;
   const comps = raw.comps.map((c) => {
     const fps = c.frameRate > 0 ? c.frameRate : 30;
     fpsSet.add(round(fps, 3));
     expressionDriven += c.skipped?.expressionDriven ?? 0;
     notMotion += c.skipped?.notMotion ?? 0;
+    outsideLayer += c.skipped?.outsideLayer ?? 0;
     const before = moves.length;
     let keys = 0;
     const layers = new Set<number>();
@@ -479,6 +507,7 @@ export function summarizeMotion(raw: MotionKeys) {
     result.notes.push(`Only ${moves.length} move${moves.length === 1 ? "" : "s"} read — a hint, not a pattern. Read another comp before writing these as rules.`);
   }
   if (expressionDriven) result.notes.push(`${expressionDriven} keyed propert${expressionDriven === 1 ? "y is" : "ies are"} driven by an expression and ${expressionDriven === 1 ? "was" : "were"} skipped.`);
+  if (outsideLayer) result.notes.push(`${outsideLayer} key${outsideLayer === 1 ? "" : "s"} outside ${outsideLayer === 1 ? "its" : "their"} layer's in/out range ${outsideLayer === 1 ? "was" : "were"} ignored — never seen in the render.`);
   if (notMotion) result.notes.push(`${notMotion} keyed Time Remap / audio propert${notMotion === 1 ? "y was" : "ies were"} skipped as not motion.`);
   result.notes.push(NOT_COVERED);
   return result;
@@ -515,9 +544,8 @@ export function suggestLines(x: LineInputs): string[] {
   const lines: string[] = [];
   if (!x.moves || !x.moveSeconds || !x.moveFrames) return lines;
   const at = x.fps ? ` at ${x.fps}fps` : "";
-  lines.push(
-    `Typical move: ${x.moveSeconds.median}s (${Math.round(x.moveFrames.median)}f${at}); most ${x.moveSeconds.p25}–${x.moveSeconds.p75}s`
-  );
+  const range = x.moveSeconds.p25 === x.moveSeconds.p75 ? "" : `; most ${x.moveSeconds.p25}–${x.moveSeconds.p75}s`;
+  lines.push(`Typical move: ${x.moveSeconds.median}s (${Math.round(x.moveFrames.median)}f${at})${range}`);
   const top = x.common[0];
   if (top && top.share >= 0.25) {
     const ease =
