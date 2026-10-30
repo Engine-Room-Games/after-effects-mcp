@@ -45,10 +45,47 @@
  */
 
 import { BridgeTimeoutError } from "../util/errors.js";
+import { MAX_BATCH_DEPTH } from "./policy.js";
 import type { ElicitRequestFormParams, ElicitResult, ClientCapabilities } from "@modelcontextprotocol/sdk/types.js";
 
 /** The tools that ask. Exported for tests and the docs; nothing else reads it. */
 export const CONFIRMED_OPS: ReadonlySet<string> = new Set(["delete_comp", "purge_unused_footage", "revert_comp"]);
+
+/**
+ * True for a call that may ask: one of `CONFIRMED_OPS`, or a `run_batch`,
+ * which asks once, up front, when any step at any depth is one of them —
+ * otherwise wrapping `delete_comp` in a batch would be a way round the prompt.
+ */
+export function mayAsk(name: string): boolean {
+  return CONFIRMED_OPS.has(name) || name === "run_batch";
+}
+
+export type BatchStep = { path: string; op: string; args: Record<string, unknown> };
+
+/** Every confirmed step in a batch, nested batches included, in run order. */
+export function confirmedBatchSteps(ops: unknown): BatchStep[] {
+  const out: BatchStep[] = [];
+  const walk = (list: unknown, prefix: string, depth: number) => {
+    if (!Array.isArray(list) || depth > MAX_BATCH_DEPTH) return;
+    list.forEach((raw, i) => {
+      if (raw === null || typeof raw !== "object") return;
+      const step = raw as { op?: unknown; args?: unknown };
+      const path = `${prefix}ops[${i}]`;
+      const args = (step.args && typeof step.args === "object" ? step.args : {}) as Record<string, unknown>;
+      if (typeof step.op === "string" && CONFIRMED_OPS.has(step.op)) out.push({ path, op: step.op, args });
+      if (step.op === "run_batch") walk(args.ops, `${path}.args.`, depth + 1);
+    });
+  };
+  walk(ops, "", 0);
+  return out;
+}
+
+function describeStep(s: BatchStep): string {
+  if (s.op === "delete_comp") return `delete comp ${String(s.args.compId)}${s.args.force === true ? " and the precomp layers that use it" : ""}`;
+  if (s.op === "revert_comp") return `revert a comp to checkpoint ${String(s.args.checkpointId)}`;
+  if (s.args.dryRun === true) return "list unused footage (a dry run, removes nothing)";
+  return `remove whatever ${s.args.solidsOnly === false ? "footage items" : "solids"} are unused when it runs`;
+}
 
 /**
  * How long a prompt waits for a person. The SDK's default request timeout is
@@ -102,6 +139,21 @@ const UNDO_NOTE = "It can be undone in After Effects with Edit > Undo.";
  * have met, and nothing has been changed.
  */
 export async function buildPrompt(name: string, args: Record<string, unknown>, read: ReadOp): Promise<ConfirmPrompt | null> {
+  if (name === "run_batch") {
+    // No pre-read: a step can name a comp an earlier step creates. Asked once,
+    // for the whole batch, before any of it runs; a dry-run purge is no reason.
+    const steps = confirmedBatchSteps(args.ops).filter((s) => !(s.op === "purge_unused_footage" && s.args.dryRun === true));
+    if (steps.length === 0) return null;
+    const total = Array.isArray(args.ops) ? args.ops.length : 0;
+    const shown = steps.slice(0, 10).map((s) => `${s.path}: ${describeStep(s)}`);
+    const more = steps.length > shown.length ? `; and ${steps.length - shown.length} more` : "";
+    return {
+      message:
+        `Run this batch of ${total} step${total === 1 ? "" : "s"}? ${steps.length === 1 ? "One step throws" : `${steps.length} steps throw`} work away — ` +
+        `${shown.join("; ")}${more}. Declining runs none of it.`,
+      requestedSchema: NO_FIELDS,
+    };
+  }
   if (name === "delete_comp") {
     const comp = (await read("get_comp", { compId: args.compId })) as { name?: unknown } | null;
     const label = comp && comp.name !== undefined ? `the comp ${quoted(comp.name)}` : `comp ${String(args.compId)}`;

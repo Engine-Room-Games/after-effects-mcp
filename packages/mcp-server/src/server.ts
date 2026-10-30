@@ -47,7 +47,7 @@ import { AeError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, 
 import { resolveRunJsxSource, type ResolvedRunJsxArgs, type RunJsxArgs } from "./tools/runJsxSource.js";
 import { runJsxViaServer } from "./tools/runJsxAssembly.js";
 import { toolAnnotations } from "./tools/annotations.js";
-import { CONFIRMED_OPS, CONFIRM_TIMEOUT_MS, buildPrompt, clientCanElicit, confirmWithUser, notRunMessage, preReadFailureMessage, type ConfirmPrompt } from "./tools/confirm.js";
+import { mayAsk, CONFIRM_TIMEOUT_MS, buildPrompt, clientCanElicit, confirmWithUser, notRunMessage, preReadFailureMessage, type ConfirmPrompt } from "./tools/confirm.js";
 import {
   disabledOps,
   disabledToolMessage,
@@ -763,6 +763,8 @@ export function createServer(opts: CreateServerOptions = {}) {
     const gateMs = Date.now() - calledAt;
     if (staleness) return errorResult(staleness);
 
+    // Set once a confirmation prompt has been answered (issue #245).
+    let promptMs = 0;
     // How a failed bridge call is answered, for the forward below and for the
     // confirmation's pre-read, which meets the same bridge before any lease.
     const bridgeFailure = (e: unknown, queueMs: number) => {
@@ -772,7 +774,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       // knows about arrives with its pointer attached — that is the push half of
       // the journal, and the error path is the only place it can live.
       if (e instanceof BridgeTimeoutError) {
-        e.withTiming({ totalMs: Date.now() - calledAt, gateMs, queueMs });
+        e.withTiming({ totalMs: Date.now() - calledAt - promptMs, gateMs, queueMs });
         return fail(name, e.message);
       }
       if (e instanceof BridgeUnreachableError) return fail(name, e.message);
@@ -821,7 +823,7 @@ export function createServer(opts: CreateServerOptions = {}) {
     // cannot land before it, and no other session waits on a dialog. The
     // front desk's lock is taken after the answer (`withDesk`).
     let lease: WriteLease | null = null;
-    if (CONFIRMED_OPS.has(name) && clientCanElicit(server.getClientCapabilities())) {
+    if (mayAsk(name) && clientCanElicit(server.getClientCapabilities())) {
       let reserved: WriteLease;
       try {
         reserved = await line.reserve(name, extra?.signal);
@@ -845,6 +847,7 @@ export function createServer(opts: CreateServerOptions = {}) {
         return preReadFailure(e);
       }
       if (prompt) {
+        const promptStarted = Date.now();
         const outcome = await confirmWithUser(
           name,
           args as Record<string, unknown>,
@@ -854,6 +857,9 @@ export function createServer(opts: CreateServerOptions = {}) {
           extra.signal,
           (m) => logger.warn(m)
         );
+        // Time spent by a person reading a dialog is not time this call spent
+        // on After Effects, and a timeout's "earlier steps" must not count it.
+        promptMs = Date.now() - promptStarted;
         if (!outcome.proceed) {
           reserved.release();
           return errorResult(outcome.message);

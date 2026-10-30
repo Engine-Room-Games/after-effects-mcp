@@ -46,6 +46,7 @@ const bridge = http.createServer((req, res) => {
     const { op, args } = JSON.parse(body || "{}");
     seen.push({ op, args });
     if (op === "get_comp" && args.compId === 666) await new Promise((r) => setTimeout(r, 1000));
+    if (op === "delete_comp" && args.compId === 777) await new Promise((r) => setTimeout(r, 1500));
     let result = { ok: true, op };
     if (op === "get_comp") result = { id: args.compId, name: "Hero Title" };
     if (op === "purge_unused_footage" && args.dryRun) {
@@ -113,6 +114,13 @@ await check("no capability: delete_comp is forwarded at once, with no pre-read",
   assert.equal(res.isError, undefined, text(res));
   assert.deepEqual(ops(), ["delete_comp"]);
   assert.deepEqual(seen[0].args, { compId: 10 });
+});
+
+await check("no capability: a batch with a delete_comp step is forwarded at once", async () => {
+  seen.length = 0;
+  const res = await plain.client.callTool({ name: "run_batch", arguments: { ops: [{ op: "delete_comp", args: { compId: 10 } }] } });
+  assert.equal(res.isError, undefined, text(res));
+  assert.deepEqual(ops(), ["run_batch"]);
 });
 
 await check("no capability: purge_unused_footage and revert_comp likewise", async () => {
@@ -293,8 +301,66 @@ await check("a pre-read that times out says no write was sent, not that one may 
   assert.match(text(res), /delete_comp was not run/);
   assert.match(text(res), /Nothing that changes the project was sent/);
   assert.doesNotMatch(text(res), /may still/i);
+  assert.doesNotMatch(text(res), /re-send/i);
   assert.equal(prompts.length, 0);
   await new Promise((r) => setTimeout(r, 1000)); // let the stub finish the slow read
+});
+
+const destructiveBatch = {
+  ops: [
+    { op: "create_comp", args: { name: "tmp" } },
+    { op: "run_batch", args: { ops: [{ op: "delete_comp", args: { compId: 10, force: true } }] } },
+    { op: "purge_unused_footage", args: {} },
+  ],
+};
+
+await check("batch: a destructive step anywhere asks once, listing the steps; decline runs nothing", async () => {
+  seen.length = 0;
+  prompts.length = 0;
+  reply = { action: "decline" };
+  const res = await asked.client.callTool({ name: "run_batch", arguments: destructiveBatch });
+  assert.equal(res.isError, true, text(res));
+  assert.match(text(res), /run_batch was not run/);
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0].message, /batch of 3 steps/);
+  assert.match(prompts[0].message, /ops\[1\]\.args\.ops\[0\]: delete comp 10/);
+  assert.match(prompts[0].message, /ops\[2\]: remove whatever solids are unused/);
+  assert.deepEqual(ops(), [], `something reached the bridge: ${ops()}`);
+});
+
+await check("batch: accept runs the batch as sent", async () => {
+  seen.length = 0;
+  reply = { action: "accept", content: {} };
+  const res = await asked.client.callTool({ name: "run_batch", arguments: destructiveBatch });
+  assert.equal(res.isError, undefined, text(res));
+  assert.deepEqual(ops(), ["run_batch"]);
+});
+
+await check("batch: nothing destructive (or only a dry-run purge) asks nothing", async () => {
+  prompts.length = 0;
+  reply = { action: "decline" };
+  const res = await asked.client.callTool({
+    name: "run_batch",
+    arguments: { ops: [{ op: "create_comp", args: { name: "a" } }, { op: "purge_unused_footage", args: { dryRun: true } }] },
+  });
+  assert.equal(res.isError, undefined, text(res));
+  assert.equal(prompts.length, 0);
+});
+
+await check("a timeout after a prompt does not count the person's answering time as earlier steps", async () => {
+  seen.length = 0;
+  reply = { action: "accept", content: {} };
+  let release;
+  hold = new Promise((r) => (release = r));
+  setTimeout(() => release(), 900);
+  process.env.AE_MCP_OP_TIMEOUT_MS = "300";
+  const res = await asked.client.callTool({ name: "delete_comp", arguments: { compId: 777 } });
+  delete process.env.AE_MCP_OP_TIMEOUT_MS;
+  hold = null;
+  assert.equal(res.isError, true);
+  assert.match(text(res), /did not answer/);
+  assert.doesNotMatch(text(res), /earlier steps/, text(res));
+  await new Promise((r) => setTimeout(r, 1500)); // let the stub finish the slow delete
 });
 
 await check("the call cancelled while the prompt is open runs nothing", async () => {

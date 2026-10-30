@@ -443,9 +443,21 @@ and an SDK client with and without the capability.
   the better answer).
 - **Why only three.** Every call is one undo step, and a prompt on every
   `delete_layer` trains a person to click through the one on `delete_comp`.
-  Tools take ids, so there is no ambiguous target to ask about. `run_batch`
-  steps are not asked about: this is a convenience for the person, not a
-  security boundary, and the client's own tool approval covers the batch.
+  Tools take ids, so there is no ambiguous target to ask about.
+- **A batch asks once, up front.** Otherwise wrapping `delete_comp` in a
+  `run_batch` would be a way round the prompt. When any step, at any depth, is
+  one of the three (a dry-run purge excepted), `run_batch` asks once before
+  anything runs, listing those steps by path; decline runs none of it. No
+  pre-read — a step can name a comp an earlier step creates — so the steps are
+  named by id, and a purge step says it removes whatever is unused when it
+  runs, since no list can be approved in advance. `run_jsx`, in or out of a
+  batch, can do anything and is not asked about: this is a convenience for the
+  person, not a security boundary, and the client's own tool approval is the
+  gate for raw scripts.
+- **A timeout does not bill the person's reading time.** The timeout message
+  says how much of a call went on "earlier steps"; the span the prompt was
+  open is subtracted (`promptMs`), so a person who took a minute to answer
+  does not read as a minute After Effects spent busy.
 - **The one choice offered** is `revert_comp`'s `saveCurrent`, defaulting to
   what the agent passed and folded into the args on accept.
 - **Request-scoped.** `elicitInput` is sent with `relatedRequestId` and the
