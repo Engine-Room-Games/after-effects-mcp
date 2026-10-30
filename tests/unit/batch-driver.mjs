@@ -200,7 +200,7 @@ await check("drives to the end: one chunk per call, progress per chunk, the fina
   assert.equal(st.result.undoSteps, 25);
   assert.equal(st.result.cancelled, false);
   assert.equal(bridge.chunks, 25, "ceil(610/25) chunks, each its own call");
-  assert.deepEqual(progress.map(([p]) => p), Array.from({ length: 24 }, (_, i) => (i + 1) * 25));
+  assert.deepEqual(progress.map(([p]) => p), [...Array.from({ length: 24 }, (_, i) => (i + 1) * 25), 610], "the last notification is the full count (#239 live check)");
   ae.assertOnce(env.jobId, 610);
   assert.deepEqual(driver.running, [], "nothing left running");
 });
@@ -565,6 +565,8 @@ try {
     assert.equal(chunksOf(env.jobId).length, 12);
     ae.assertOnce(env.jobId, 300);
     assert.ok(aw.progress.length >= 1, "await_job carried the batch's progress");
+    assert.equal(aw.progress.at(-1).progress, 300, "the last notification on await_job is the full count, not one chunk short");
+    assert.equal(aw.progress.at(-1).total, 300);
   });
 
   await check("another session's write waits for the whole server-driven batch, never between its chunks", async () => {

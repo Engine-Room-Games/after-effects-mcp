@@ -226,6 +226,14 @@ export class BatchDriver {
         diff: res.diff,
       };
       if (aeWarnings.length) completed.aeWarnings = aeWarnings;
+      // The chunk that finishes a job reports `done`, not progress, so the last
+      // notification would stop one chunk short (600/625, measured on 26.5).
+      // One more at the count it ended on, before the completion flushes the
+      // emitters, so a client watching await_job sees the batch reach it.
+      const ran =
+        (Array.isArray(res.results) ? res.results.length : 0) + (Array.isArray(res.errors) ? res.errors.length : 0);
+      const endedAt = res.cancelled ? ran : (total ?? ran);
+      if (endedAt > attempted) this.jobs.reportProgress(jobId, endedAt, total ?? undefined, res.cancelled ? "cancelled" : "completed");
       this.jobs.complete(jobId, completed);
       return;
     }
