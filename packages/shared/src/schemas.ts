@@ -956,6 +956,14 @@ export const SetShapePath = z.object({
  */
 const ShapeColor = z.union([Color, ColorRGBA]);
 
+/** Matches a content type that names a gradient fill or stroke. Kept in step with shapes.jsx. */
+export const GRADIENT_TYPE = /grad|^g-?(fill|stroke)$/i;
+/** Why add_shape_content offers no gradient: measured on AE 26.5 (issue #181). */
+export const GRADIENT_REFUSAL =
+  "add_shape_content does not offer gradient fills or strokes: their colour stops cannot be set from a script " +
+  "(After Effects gives 'ADBE Vector Grad Colors' no value and refuses an expression on it). Nothing was changed. " +
+  "Use the Gradient Ramp effect instead (add_effect 'ADBE Ramp'; its colours are ordinary parameters), or build " +
+  "the gradient with run_jsx and ask the user to set the stops in the Gradient Editor.";
 export const ShapeContent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("rect"),
@@ -1022,6 +1030,8 @@ export const ShapeContent = z.discriminatedUnion("type", [
     name: z.string().optional(),
     copies: z.number().optional(),
     offset: z.number().optional(),
+    composite: z.union([namedEnum(["below", "above"]), z.literal(1), z.literal(2)]).optional()
+      .describe("below (After Effects' 1, the default: each copy behind the one before) or above (2)."),
     // The Repeater's own Transform group (issue #181): what each copy adds to
     // the one before it.
     transform: z.object({
@@ -1042,7 +1052,15 @@ export const ShapeContent = z.discriminatedUnion("type", [
     type: z.literal("group"),
     name: z.string().optional(),
   }).strict(),
-]);
+], {
+  // A gradient type fails the discriminator before the handler can explain
+  // why it is not offered, so the measured reason goes in the error itself
+  // (issue #181). Error text only: nothing is added to the emitted schema.
+  error: (iss) => {
+    const type = (iss.input as { type?: unknown } | undefined)?.type;
+    return typeof type === "string" && GRADIENT_TYPE.test(type) ? GRADIENT_REFUSAL : undefined;
+  },
+});
 
 export const AddShapeContent = z.object({
   compId: z.number(),
