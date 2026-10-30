@@ -704,8 +704,14 @@
             "in " + stepsTaken + " undo step(s); whatever they changed stays applied (an op that failed under " +
             "continue-on-error may not have changed anything, and its error is lost with the job). " +
             "Do NOT re-run the batch as it was: read the comp back and send only the ops that are missing.";
-        var stopped = new Error("Batch " + jobId + " stopped mid-run: " + cause + " " + landed);
+        // Warnings from chunks that did run are still true of the project.
+        var warned = aeWarnings.length
+          ? " || After Effects also reported, through app.onError while dialogs were suppressed: " +
+            aeWarnings.join(" | ")
+          : "";
+        var stopped = new Error("Batch " + jobId + " stopped mid-run: " + cause + " " + landed + warned);
         stopped.code = e && e.code;
+        if (aeWarnings.length) stopped.aeWarnings = aeWarnings;
         log("error", stopped.message);
         throw stopped;
       });

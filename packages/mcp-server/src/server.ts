@@ -1115,7 +1115,7 @@ export function textResult(value: unknown, wait?: QueueWait | null) {
   // nested read like get_layer_full. Content is unchanged — only whitespace.
   const json = (v: unknown) => ({ type: "text" as const, text: JSON.stringify(v) });
   const warned = (v: { content: { type: "text"; text: string }[] }) =>
-    withAeWarnings(v, isPlainRecord(value) ? value.aeWarnings : undefined);
+    withAeWarnings(v, findAeWarnings(value));
   if (!wait) return warned({ content: [json(value)] });
   const merged = mergeWait(value, wait);
   if (merged) return warned({ content: [json(merged)] });
@@ -1132,6 +1132,14 @@ export const AE_WARNED_MARK = "__aemcpWarned";
 
 function isPlainRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+// Top level, or one level down under `result` — the shape await_job and get_job
+// return a finished job in, which is where a chunked batch's warnings land.
+export function findAeWarnings(value: unknown): unknown {
+  if (!isPlainRecord(value)) return undefined;
+  if (Array.isArray(value.aeWarnings) && value.aeWarnings.length > 0) return value.aeWarnings;
+  return isPlainRecord(value.result) ? value.result.aeWarnings : undefined;
 }
 
 export function liftAeWarnings(raw: unknown): { value: unknown; envelopeWarnings: unknown } {

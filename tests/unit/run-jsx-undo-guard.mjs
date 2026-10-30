@@ -439,52 +439,86 @@ check("an AE without the suppression API runs ops exactly as before", () => {
 // ---------- A chunked batch carries every chunk's warnings to its result ----------
 // The panel's job driver builds the job result from named fields, so a field it
 // does not name is dropped. Its real source is run against scripted chunks.
-{
+// Async checks, run in order; a failure is reported by name like any other.
+async function checkAsync(name, fn) {
+  try { await fn(); passed++; }
+  catch (e) { console.error(`FAIL ${name}\n${e.stack}`); process.exit(1); }
+}
+
+function loadDriver() {
   const mainJs = fs.readFileSync(path.join(root, "packages", "ae-panel", "client", "main.js"), "utf8");
   const start = mainJs.indexOf("  function driveJobSteps(");
   const end = mainJs.indexOf("\n  }\n", start) + 4;
   assert.ok(start > 0 && end > start, "driveJobSteps moved; update this test");
-  const run = async (chunks) => {
+  return async (chunks) => {
     const events = [];
     let i = 0;
     const sandbox = {
-      Promise, setTimeout, String,
-      runOp: () => Promise.resolve(chunks[i++]),
+      Promise, setTimeout, String, Error,
+      runOp: () => {
+        const c = chunks[i++];
+        return c instanceof Error ? Promise.reject(c) : Promise.resolve(c);
+      },
       broadcast: (e) => events.push(e),
       log: () => {},
     };
     vm.createContext(sandbox);
     vm.runInContext(mainJs.slice(start, end), sandbox);
-    const out = await vm.runInContext("driveJobSteps", sandbox)("j1", null, 1, 3, {});
-    return { out, events };
+    try {
+      const out = await vm.runInContext("driveJobSteps", sandbox)("j1", null, 1, 3, {});
+      return { out, events, error: null };
+    } catch (error) {
+      return { out: null, events, error };
+    }
   };
+}
+
+await checkAsync("a chunked batch's result carries warnings from every chunk", async () => {
+  const run = loadDriver();
   const ok = await run([
     { done: false, progress: 1, total: 3, undoSteps: 1, aeWarnings: ["first"] },
     { done: false, progress: 2, total: 3, undoSteps: 2 },
     { done: true, total: 3, results: [1, 2, 3], errors: [], undoSteps: 3, aeWarnings: ["last"] },
   ]);
+  assert.equal(ok.error, null);
   assert.deepEqual(plain(ok.out.aeWarnings), ["first", "last"], "a warning from an early chunk was dropped");
   assert.deepEqual(plain(ok.events.find((e) => e.type === "complete").result.aeWarnings), ["first", "last"]);
   assert.equal(ok.out.undoSteps, 3);
-  passed++;
+});
 
+await checkAsync("a batch that fails in AE keeps earlier chunks' warnings", async () => {
+  const run = loadDriver();
   const failed = await run([
     { done: false, progress: 1, total: 2, undoSteps: 1, aeWarnings: ["early"] },
     { done: true, failed: true, error: "boom", atIndex: 1, undoSteps: 2 },
   ]);
   assert.deepEqual(plain(failed.out.aeWarnings), ["early"]);
   assert.match(failed.events.find((e) => e.type === "error").error, /boom.*app\.onError.*early/);
-  passed++;
+});
 
+await checkAsync("a batch whose next chunk call fails keeps earlier chunks' warnings", async () => {
+  const run = loadDriver();
+  const r = await run([
+    { done: false, progress: 1, total: 3, undoSteps: 1, aeWarnings: ["before the break"] },
+    new Error("No job: j1"),
+  ]);
+  assert.ok(r.error, "the driver must reject");
+  assert.match(String(r.error.message), /stopped mid-run.*app\.onError.*before the break/);
+});
+
+await checkAsync("no warnings, no field", async () => {
+  const run = loadDriver();
   const quiet = await run([{ done: true, total: 1, results: [1], errors: [], undoSteps: 1 }]);
-  assert.equal("aeWarnings" in quiet.out, false, "no warnings, no field");
-  passed++;
-}
+  assert.equal("aeWarnings" in quiet.out, false);
+});
 
 // ---------- The server never lets a warning read as a clean success ----------
-{
-  const dist = path.join(root, "packages", "mcp-server", "dist", "server.js");
-  const { liftAeWarnings, withAeWarnings, textResult } = await import(dist);
+const serverDist = path.join(root, "packages", "mcp-server", "dist", "server.js");
+const server = await import(serverDist).catch(() => ({}));
+
+await checkAsync("an unwrapped array result gets the WARNING block first, its value intact", async () => {
+  const { liftAeWarnings, withAeWarnings, textResult } = server;
+  assert.equal(typeof liftAeWarnings, "function", "server.ts exports no liftAeWarnings");
   const lifted = liftAeWarnings({ value: [1, 2], aeWarnings: ["w"], __aemcpWarned: true });
   assert.deepEqual(lifted.value, [1, 2], "the agent reads the array, not the envelope");
   const res = withAeWarnings(textResult(lifted.value), lifted.envelopeWarnings);
@@ -493,13 +527,23 @@ check("an AE without the suppression API runs ops exactly as before", () => {
   assert.match(res.content[0].text, /do not report it as a clean success/);
   assert.match(res.content[0].text, /Read the affected state back/);
   assert.equal(res.content[1].text, "[1,2]");
-  passed++;
-
-  const obj = textResult({ ok: true, aeWarnings: ["x"] });
-  assert.match(obj.content[0].text, /^WARNING/, "an object result with aeWarnings gets the warning block first");
-  assert.equal(textResult({ ok: true }).content.length, 1, "no warnings, no block");
   assert.deepEqual(liftAeWarnings([1]).value, [1]);
-  passed++;
-}
+});
+
+await checkAsync("an object result with aeWarnings gets the block; one without does not", async () => {
+  const { textResult } = server;
+  assert.equal(typeof textResult, "function", "server.ts exports no textResult");
+  assert.match(textResult({ ok: true, aeWarnings: ["x"] }).content[0].text, /^WARNING/);
+  assert.equal(textResult({ ok: true }).content.length, 1);
+});
+
+await checkAsync("await_job/get_job's {status, result:{aeWarnings}} is flagged too", async () => {
+  const { textResult } = server;
+  assert.equal(typeof textResult, "function", "server.ts exports no textResult");
+  const res = textResult({ jobId: "j1", status: "done", result: { undoSteps: 3, aeWarnings: ["chunk 2"] } });
+  assert.equal(res.content.length, 2, "a finished chunked batch's warnings went unflagged");
+  assert.match(res.content[0].text, /^WARNING.*"chunk 2"/);
+  assert.equal(textResult({ status: "done", result: { undoSteps: 3 } }).content.length, 1);
+});
 
 console.log(`run-jsx-undo-guard: ${passed} checks passed`);
