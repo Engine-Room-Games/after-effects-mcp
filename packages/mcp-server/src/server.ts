@@ -1,5 +1,5 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { diagnosticPortCandidates } from "./bridge/discovery.js";
+import { diagnosticPortCandidates, panelToken } from "./bridge/discovery.js";
 import {
   CallToolRequestSchema,
   GetPromptRequestSchema,
@@ -59,7 +59,7 @@ import { applyHouseStyleDetail } from "./style/summary.js";
 import { houseStyleOnServer } from "./style/houseStyleFile.js";
 import { internalSender, type SendInternal } from "./tools/internalOps.js";
 import { CAP_PROJECT_PATH, CAP_SERVER_IMAGES } from "./setup/panelCapabilities.js";
-import { createSharedFrameCache, sharedFrameCacheFile } from "./frames/sharedFrameCache.js";
+import { createSharedFrameCache, panelInstanceId, sharedFrameCacheFile } from "./frames/sharedFrameCache.js";
 import { createFramePipeline, RAW_IMAGE_OPS, type ImageTool, type FramePipeline } from "./frames/pipeline.js";
 import {
   checkFootageExists,
@@ -217,9 +217,13 @@ export function createServer(opts: CreateServerOptions = {}) {
   // is one per After Effects: a file per panel port, shared with every other
   // server on it, because AE re-serves buffers across sessions (#29).
   const frames = createFramePipeline({
+    // Keyed by port and by the running panel (its session token), so a
+    // restarted After Effects starts with an empty window.
     frameCache: createSharedFrameCache(() => {
       const port = (bridge as { port?: unknown }).port;
-      return typeof port === "number" && port > 0 ? sharedFrameCacheFile(port) : null;
+      if (typeof port !== "number" || port <= 0) return null;
+      const instance = panelInstanceId(panelToken(port));
+      return instance ? { file: sharedFrameCacheFile(port), instance } : null;
     }),
   });
   // Follows the bridge's port rather than copying it: see wsClient.ts.

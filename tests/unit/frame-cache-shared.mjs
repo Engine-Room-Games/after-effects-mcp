@@ -45,7 +45,7 @@ const PORT = 7931;
 const CHILD = `
 import fs from "node:fs";
 import path from "node:path";
-const [, , seed, time, work, port, framesUrl] = process.argv;
+const [, , seed, time, work, port, framesUrl, instance] = process.argv;
 const { createFramePipeline } = await import(framesUrl + "/pipeline.js");
 const { createSharedFrameCache, sharedFrameCacheFile } = await import(framesUrl + "/sharedFrameCache.js");
 const { encodePng8 } = await import(framesUrl + "/pngCodec.js");
@@ -53,7 +53,7 @@ const px = Buffer.alloc(8 * 6 * 4);
 for (let i = 0; i < px.length; i += 4) { px[i] = Number(seed); px[i + 1] = (i * 7) & 255; px[i + 2] = 40; px[i + 3] = 255; }
 const pipeline = createFramePipeline({
   warn: () => {},
-  frameCache: createSharedFrameCache(() => sharedFrameCacheFile(Number(port))),
+  frameCache: createSharedFrameCache(() => ({ file: sharedFrameCacheFile(Number(port)), instance })),
 });
 const send = async () => {
   const file = path.join(work, "f-" + process.pid + "-" + Date.now() + ".png");
@@ -70,8 +70,9 @@ try {
 const childFile = path.join(work, "child.mjs");
 fs.writeFileSync(childFile, CHILD);
 
-function run(seed, time) {
-  const r = spawnSync(process.execPath, [childFile, String(seed), String(time), work, String(PORT), pathToFileURL(frames).href], {
+/** One screenshot in its own process, against the running panel `instance`. */
+function run(seed, time, instance = "panel-1") {
+  const r = spawnSync(process.execPath, [childFile, String(seed), String(time), work, String(PORT), pathToFileURL(frames).href, instance], {
     env: { ...process.env, HOME: home, USERPROFILE: home },
     encoding: "utf8",
   });
@@ -106,7 +107,7 @@ await check("another port is another After Effects: no cross-talk", async () => 
   const { createSharedFrameCache, sharedFrameCacheFile } = await import(url("sharedFrameCache.js"));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
-  const other = createSharedFrameCache(() => sharedFrameCacheFile(PORT + 1));
+  const other = createSharedFrameCache(() => ({ file: sharedFrameCacheFile(PORT + 1), instance: "panel-1" }));
   assert.equal(other.match("x", "anything"), null);
 });
 
@@ -117,7 +118,7 @@ await check("compaction keeps exactly the in-memory window", () => {
   const f = path.join(work, "compact.jsonl");
   let t = 1_000_000;
   const now = () => t;
-  const shared = createSharedFrameCache(() => f, { now });
+  const shared = createSharedFrameCache(() => ({ file: f, instance: "i" }), { now });
   const mem = createFrameCache({ now });
   for (let i = 0; i < 450; i++) {
     t += 1000;
@@ -138,13 +139,16 @@ await check("compaction keeps exactly the in-memory window", () => {
   assert.deepEqual(fs.readdirSync(work).filter((n) => n.includes(".tmp")), [], "a compaction left its temp file");
 });
 
-await check("two writers at once: every line is whole, and both writers' frames are seen", async () => {
+// Lossless under contention. The window is made large enough that nothing
+// leaves it by size or age, and compaction small enough to run constantly, so
+// the only way a key's last frame can go missing is a lost line.
+await check("three writers at once, compacting all the time: no line is lost and every line is whole", async () => {
   const f = path.join(work, "concurrent.jsonl");
   const WRITER = `
 const { createSharedFrameCache } = await import(${JSON.stringify(url("sharedFrameCache.js"))});
-const c = createSharedFrameCache(() => ${JSON.stringify(f)});
+const c = createSharedFrameCache(() => ({ file: ${JSON.stringify(f)}, instance: "i" }), { limit: 1000, compactAt: 25 });
 const who = process.argv[2];
-for (let i = 0; i < 120; i++) c.remember(who + i, who + "-hash-" + i, { label: who, bytes: i });
+for (let i = 0; i < 150; i++) c.remember(who + (i % 10), who + "-hash-" + i, { label: who, bytes: i });
 `;
   const wf = path.join(work, "writer.mjs");
   fs.writeFileSync(wf, WRITER);
@@ -155,20 +159,51 @@ for (let i = 0; i < 120; i++) c.remember(who + i, who + "-hash-" + i, { label: w
     p.stderr.on("data", (d) => (err += d));
     p.on("exit", (code) => (code === 0 ? res() : rej(new Error(err))));
   });
-  await Promise.all([done("A"), done("B")]);
-  const text = fs.readFileSync(f, "utf8");
-  for (const l of text.trim().split("\n")) JSON.parse(l);
-  const c = createSharedFrameCache(() => f);
-  assert.ok(c.match("other", "A-hash-119"), "A's last frame is missing");
-  assert.ok(c.match("other", "B-hash-119"), "B's last frame is missing");
+  await Promise.all([done("A"), done("B"), done("C")]);
+  for (const l of fs.readFileSync(f, "utf8").trim().split("\n")) JSON.parse(l);
+  const c = createSharedFrameCache(() => ({ file: f, instance: "i" }), { limit: 1000 });
+  for (const who of ["A", "B", "C"]) {
+    for (let j = 0; j < 10; j++) {
+      const last = 140 + j;
+      const m = c.match("someone-else", `${who}-hash-${last}`);
+      assert.ok(m, `${who}${j}'s last frame (${who}-hash-${last}) was lost`);
+      assert.equal(m.key, `${who}${j}`);
+    }
+  }
+  assert.ok(!fs.existsSync(f + ".lock"), "a writer left its lock behind");
+  assert.deepEqual(fs.readdirSync(work).filter((n) => n.includes(".tmp")), [], "a compaction left its temp file");
+});
+
+await check("a restarted After Effects starts with an empty window: another panel instance's lines do not count", () => {
+  // panel-1 delivered seed 90 at t=0 above; a new AE on the same port is a new token.
+  const fresh = run(90, 5, "panel-2");
+  assert.equal(fresh.ok, true, `refused for matching a frame from a panel that no longer runs: ${fresh.message}`);
+  // And within the new instance the window works as before.
+  const b = run(90, 6, "panel-2");
+  assert.equal(b.code, "STALE_FRAME");
+  assert.match(b.message, /comp 5 @ 5\.000s/);
+});
+
+await check("the window file is private: 0600 in a 0700 directory", () => {
+  if (process.platform === "win32") return;
+  assert.equal(fs.statSync(sharedFile).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(sharedFile)).mode & 0o777, 0o700);
+});
+
+await check("the instance tag is a hash of the token, never the token", async () => {
+  const { panelInstanceId } = await import(url("sharedFrameCache.js"));
+  const id = panelInstanceId("s3cr3t-token-value");
+  assert.match(id, /^[0-9a-f]{16}$/);
+  assert.notEqual(id, panelInstanceId("another-token"));
+  assert.equal(panelInstanceId(null), null);
 });
 
 await check("a torn line or an unwritable file never fails a check", () => {
   const f = path.join(work, "torn.jsonl");
-  fs.writeFileSync(f, '{"key":"k","hash":"h","at":' + Date.now() + ',"label":"k","bytes":1}\n{"key":"k2","ha');
-  const c = createSharedFrameCache(() => f);
+  fs.writeFileSync(f, '{"key":"k","hash":"h","at":' + Date.now() + ',"label":"k","bytes":1,"inst":"i"}\n{"key":"k2","ha');
+  const c = createSharedFrameCache(() => ({ file: f, instance: "i" }));
   assert.ok(c.match("other", "h"));
-  const blocked = createSharedFrameCache(() => path.join(f, "not-a-dir", "x.jsonl"));
+  const blocked = createSharedFrameCache(() => ({ file: path.join(f, "not-a-dir", "x.jsonl"), instance: "i" }));
   blocked.remember("a", "h9", { label: "a", bytes: 1 });
   assert.ok(blocked.match("b", "h9"), "an unwritable file falls back to this process's own window");
 });

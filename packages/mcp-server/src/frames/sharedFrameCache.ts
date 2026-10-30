@@ -9,29 +9,56 @@
  * therefore a file per panel port, `~/.engineroom-ae-mcp/frames-<port>.jsonl`,
  * which works whether the desk is on or off.
  *
- * Lock-free: `remember` appends one JSON line (O_APPEND, one small write, so
- * concurrent writers interleave whole lines). `match` replays the file into
- * `createFrameCache` — the same window logic the panel uses, line by line at
- * each line's own time — so the semantics are the in-memory cache's exactly.
- * When the file passes COMPACT_AT lines it is rewritten to the live window
- * through a temp file and a rename; a line another process appends between
- * that read and the rename is lost, which can only make one later check miss,
- * never invent a match. Unreadable lines are skipped; an unreadable or
- * unwritable file degrades to no history, never to a failed screenshot.
+ * - **One running After Effects, not one port.** AE can only re-serve a buffer
+ *   from the process that rendered it, and the file outlives AE. Every line is
+ *   tagged with the panel instance — a hash of the per-session bridge token the
+ *   panel writes each time it binds (never the token itself) — and lines from
+ *   any other instance are ignored, so a restart starts an empty window rather
+ *   than refusing a fresh render for matching a dead one.
+ * - **Lossless.** Every write (an append, or a compaction) is made under a
+ *   short lock file, so a compaction can never drop a line another process
+ *   appended while it ran. A check reads without the lock: appends are single
+ *   small writes and a compaction lands by rename, so a reader sees whole
+ *   lines. A lock that cannot be had within LOCK_WAIT_MS is broken if it is
+ *   older than LOCK_STALE_MS (a writer that died holding it), and otherwise
+ *   the append goes ahead unlocked and the compaction is skipped. The one
+ *   way to lose a line is that unlocked append landing inside another
+ *   process's compaction after half a second of contention, which a compaction
+ *   of a few hundred short lines does not take.
+ * - **Semantics.** A check replays the file through `createFrameCache` — the
+ *   panel's own window logic — line by line at each line's own time, so the
+ *   answers are the in-memory cache's exactly. Torn or foreign lines are
+ *   skipped; an unreadable or unwritable file falls back to this process's own
+ *   window, never to a failed screenshot.
+ * - **Private.** 0600 inside a 0700 directory, like the token and desk files.
  */
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createFrameCache, type FrameCache, type FrameCacheMatch, type FrameCacheMeta } from "./frameCache.js";
 
-/** Lines kept before a compaction; the live window is 24, so this is generous. */
-const COMPACT_AT = 200;
-/** frameCache.ts's defaults, which the replay uses; compaction must keep the same window. */
-const WINDOW_LIMIT = 24;
-const WINDOW_TTL_MS = 10 * 60 * 1000;
+/** frameCache.ts's defaults; compaction must keep the same window the replay sees. */
+const DEFAULT_LIMIT = 24;
+const DEFAULT_TTL_MS = 10 * 60 * 1000;
+/** Lines kept before a compaction. */
+const DEFAULT_COMPACT_AT = 200;
+const LOCK_WAIT_MS = 500;
+const LOCK_STALE_MS = 5000;
 
 export function sharedFrameCacheFile(port: number): string {
   return path.join(os.homedir(), ".engineroom-ae-mcp", `frames-${port}.jsonl`);
+}
+
+/** The panel instance a token names, without writing the token anywhere. */
+export function panelInstanceId(token: string | null): string | null {
+  return token ? crypto.createHash("sha256").update(token).digest("hex").slice(0, 16) : null;
+}
+
+/** Where the window lives and which running panel it is about. */
+export interface SharedWindow {
+  file: string;
+  instance: string;
 }
 
 interface Line {
@@ -40,9 +67,17 @@ interface Line {
   at: number;
   label: string;
   bytes: number;
+  inst: string;
 }
 
-function readLines(file: string): Line[] {
+export interface SharedFrameCacheOptions {
+  now?: () => number;
+  limit?: number;
+  ttlMs?: number;
+  compactAt?: number;
+}
+
+function readLines(file: string, instance: string): Line[] {
   let text: string;
   try {
     text = fs.readFileSync(file, "utf8");
@@ -54,7 +89,9 @@ function readLines(file: string): Line[] {
     if (!raw) continue;
     try {
       const l = JSON.parse(raw) as Line;
-      if (typeof l.key === "string" && typeof l.hash === "string" && typeof l.at === "number") out.push(l);
+      if (typeof l.key === "string" && typeof l.hash === "string" && typeof l.at === "number" && l.inst === instance) {
+        out.push(l);
+      }
     } catch {
       /* a torn or foreign line: skip it */
     }
@@ -62,37 +99,91 @@ function readLines(file: string): Line[] {
   return out;
 }
 
-/** Replay the log into the panel's window logic, each remember at its own time. */
-function replay(lines: Line[], now: () => number): { cache: FrameCache; live: Line[] } {
-  let clock = 0;
-  const cache = createFrameCache({ now: () => clock });
-  for (const l of lines) {
-    clock = l.at;
-    cache.remember(l.key, l.hash, { label: l.label, bytes: l.bytes });
-  }
-  clock = now();
-  // What survives the window, for compaction: the newest line per key, in the
-  // order of that newest remember, inside the TTL, the last LIMIT of them —
-  // exactly what the replayed cache holds (one entry per key, oldest shifted).
-  const survivors = new Map<string, Line>();
-  for (const l of lines) {
-    survivors.delete(l.key);
-    survivors.set(l.key, l);
-  }
-  const live = [...survivors.values()].filter((l) => l.at > clock - WINDOW_TTL_MS).slice(-WINDOW_LIMIT);
-  return { cache, live };
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-export function createSharedFrameCache(file: () => string | null, opts: { now?: () => number } = {}) {
-  const now = opts.now ?? Date.now;
-  // When there is no file to share (no port known), the window is this process's.
-  const local = createFrameCache({ now });
-
-  function compact(f: string, live: Line[]): void {
-    const tmp = `${f}.${process.pid}.${Date.now()}.tmp`;
+/** Run `fn` holding `<file>.lock`. Returns false, without running it, when the lock cannot be had. */
+function withLock(file: string, fn: () => void): boolean {
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    let fd: number | null = null;
     try {
-      fs.writeFileSync(tmp, live.map((l) => JSON.stringify(l) + "\n").join(""));
-      fs.renameSync(tmp, f);
+      fd = fs.openSync(lock, "wx", 0o600);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") return false;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          fs.unlinkSync(lock);
+          continue;
+        }
+      } catch {
+        continue; // released between the open and the stat
+      }
+      if (Date.now() > deadline) return false;
+      sleepSync(5);
+      continue;
+    }
+    try {
+      fn();
+    } finally {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* closed */
+      }
+      try {
+        fs.unlinkSync(lock);
+      } catch {
+        /* already gone */
+      }
+    }
+    return true;
+  }
+}
+
+export function createSharedFrameCache(where: () => SharedWindow | null, opts: SharedFrameCacheOptions = {}) {
+  const now = opts.now ?? Date.now;
+  const limit = opts.limit ?? DEFAULT_LIMIT;
+  const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
+  const compactAt = opts.compactAt ?? DEFAULT_COMPACT_AT;
+  // What could not be written to the file (or every frame, when no window is known).
+  const local = createFrameCache({ now, limit, ttlMs });
+
+  /** Replay the log into the window logic, each remember at its own time. */
+  function replay(lines: Line[]): FrameCache {
+    let clock = 0;
+    const cache = createFrameCache({ now: () => clock, limit, ttlMs });
+    for (const l of lines) {
+      clock = l.at;
+      cache.remember(l.key, l.hash, { label: l.label, bytes: l.bytes });
+    }
+    clock = now();
+    return cache;
+  }
+
+  /**
+   * The lines the replayed window still holds: the newest per key, in the
+   * order of that newest remember, inside the TTL, the last `limit` of them.
+   */
+  function live(lines: Line[]): Line[] {
+    const newest = new Map<string, Line>();
+    for (const l of lines) {
+      newest.delete(l.key);
+      newest.set(l.key, l);
+    }
+    const cutoff = now() - ttlMs;
+    return [...newest.values()].filter((l) => l.at > cutoff).slice(-limit);
+  }
+
+  /** Under the lock: rewrite the file to its live window. Other instances' lines go. */
+  function compact(w: SharedWindow): void {
+    const kept = live(readLines(w.file, w.instance));
+    const tmp = `${w.file}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      fs.writeFileSync(tmp, kept.map((l) => JSON.stringify(l) + "\n").join(""), { mode: 0o600 });
+      fs.renameSync(tmp, w.file);
     } catch {
       try {
         fs.unlinkSync(tmp);
@@ -102,26 +193,44 @@ export function createSharedFrameCache(file: () => string | null, opts: { now?: 
     }
   }
 
+  function lineCount(file: string): number {
+    try {
+      const text = fs.readFileSync(file, "utf8");
+      let n = 0;
+      for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) n++;
+      return n;
+    } catch {
+      return 0;
+    }
+  }
+
   return {
     match(key: string, hash: string): FrameCacheMatch | null {
-      const f = file();
-      if (!f) return local.match(key, hash);
-      // `local` holds only what could not be appended to the file.
-      return replay(readLines(f), now).cache.match(key, hash) ?? local.match(key, hash);
+      const w = where();
+      if (!w) return local.match(key, hash);
+      return replay(readLines(w.file, w.instance)).match(key, hash) ?? local.match(key, hash);
     },
     remember(key: string, hash: string, meta?: FrameCacheMeta | null): void {
-      const f = file();
-      if (!f) return local.remember(key, hash, meta);
-      const line: Line = { key, hash, at: now(), label: meta?.label || key, bytes: meta?.bytes || 0 };
+      const w = where();
+      if (!w) return local.remember(key, hash, meta);
+      const line: Line = { key, hash, at: now(), label: meta?.label || key, bytes: meta?.bytes || 0, inst: w.instance };
+      const text = JSON.stringify(line) + "\n";
+      let appended = false;
+      const append = () => {
+        fs.appendFileSync(w.file, text, { mode: 0o600 });
+        appended = true;
+      };
       try {
-        fs.mkdirSync(path.dirname(f), { recursive: true });
-        fs.appendFileSync(f, JSON.stringify(line) + "\n");
+        fs.mkdirSync(path.dirname(w.file), { recursive: true, mode: 0o700 });
+        const locked = withLock(w.file, () => {
+          append();
+          if (lineCount(w.file) > compactAt) compact(w);
+        });
+        if (!locked) append();
       } catch {
-        local.remember(key, hash, meta);
-        return;
+        /* fall through */
       }
-      const lines = readLines(f);
-      if (lines.length > COMPACT_AT) compact(f, replay(lines, now).live);
+      if (!appended) local.remember(key, hash, meta);
     },
   };
 }
