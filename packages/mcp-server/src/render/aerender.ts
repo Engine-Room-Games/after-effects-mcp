@@ -76,7 +76,7 @@ export interface RenderPlan {
   dirty?: boolean;
   items: RenderItemPlan[];
   /** Every item but DONE ones that this render does not render, by output path — for `duplicateOutputs` (#228). */
-  otherQueued?: { index: number; compName: string | null; status?: string; outputs: RenderOutputPlan[] }[];
+  otherQueued?: { index: number; compId?: number | null; compName: string | null; status?: string; outputs: RenderOutputPlan[] }[];
 }
 
 /**
@@ -1428,10 +1428,10 @@ export function outputPathKey(p: string, platform: NodeJS.Platform = process.pla
  * cannot resolve. One line per file, naming every item and output module.
  */
 export function duplicateOutputs(plan: RenderPlan, platform: NodeJS.Platform = process.platform): string[] {
-  type Writer = { item: number; comp: string | null; status?: string; output: number; path: string; rendered: boolean };
+  type Writer = { item: number; compId?: number | null; comp: string | null; status?: string; output: number; path: string; rendered: boolean };
   const byKey = new Map<string, Writer[]>();
   const seen = new Set<number>();
-  const add = (item: { index: number; compName: string | null; status?: string; outputs: RenderOutputPlan[] }, rendered: boolean) => {
+  const add = (item: { index: number; compId?: number | null; compName: string | null; status?: string; outputs: RenderOutputPlan[] }, rendered: boolean) => {
     // An item named twice is one item, never a clash with itself.
     if (seen.has(item.index)) return;
     seen.add(item.index);
@@ -1439,7 +1439,7 @@ export function duplicateOutputs(plan: RenderPlan, platform: NodeJS.Platform = p
       if (!o.path) continue;
       const key = outputPathKey(o.path, platform);
       const list = byKey.get(key) ?? [];
-      list.push({ item: item.index, comp: item.compName, status: item.status, output: o.index, path: o.path, rendered });
+      list.push({ item: item.index, compId: item.compId, comp: item.compName, status: item.status, output: o.index, path: o.path, rendered });
       byKey.set(key, list);
     }
   };
@@ -1451,7 +1451,7 @@ export function duplicateOutputs(plan: RenderPlan, platform: NodeJS.Platform = p
     list.sort((a, b) => a.item - b.item || a.output - b.output);
     const who = list.map(
       (w) =>
-        `item ${w.item} ("${w.comp}")${!w.rendered && w.status && w.status !== "QUEUED" ? `, ${w.status},` : ""}` +
+        `item ${w.item} ("${w.comp}"${w.compId != null ? `, compId ${w.compId}` : ""})${!w.rendered && w.status && w.status !== "QUEUED" ? `, ${w.status},` : ""}` +
         `${w.output > 1 ? ` output module ${w.output}` : ""}${w.path !== list[0].path ? ` as ${w.path}` : ""}`
     );
     out.push(`${list[0].path} is written by ${who.join(" and ")}`);

@@ -73,10 +73,14 @@ ProRes 4444 with alpha is an **output module template** that already says so.
   same `[####]` pattern count even over separate frame ranges. So
   `add_to_render_queue` refuses such a path, and `render_queue` refuses before
   rendering; `overwrite: true` does not lift either. The refusal names the other
-  item. **To render a comp again to the file its last render wrote, remove the
-  old item first** with `remove_render_item` (its file stays on disk), then add
-  it again. Paths are compared as the same file, so a different case or a
-  symlinked folder still counts.
+  item with the exact `remove_render_item({index, compId})` call that clears it.
+  **To render a comp again to the file its last render wrote**: the old item
+  cannot be re-queued — `render_queue` renders only QUEUED items, no tool ticks
+  an item back on, and `render_queue` leaves what it rendered *Unqueued* — so
+  remove the old item with `remove_render_item` (its file stays on disk), then
+  `add_to_render_queue` again with `overwrite: true` and render the new index.
+  Paths are compared as the same file, so a different case or a symlinked
+  folder still counts.
 - **Edits made while it renders are not in the render.** The render reads a
   private copy in the system temp folder taken at its start, so neither your
   later edits nor a save by the user mid-render change it. After Effects stays

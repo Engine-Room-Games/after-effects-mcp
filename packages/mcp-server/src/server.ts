@@ -1009,7 +1009,7 @@ async function runRender(
     throw new Error(
       `Nothing was saved or rendered: an item to render shares its output with another render queue item, and ` +
         `aerender will not render it ("output module name already in use") — an unticked item still counts: ` +
-        `${duplicates.join("; ")}. Remove the extra items with remove_render_item (an already-rendered item's ` +
+        `${duplicates.join("; ")}. Remove the extra items with remove_render_item({index, compId}) using the index and compId named (an already-rendered item's ` +
         `file stays on disk) or point them elsewhere, then call render_queue again. list_render_queue shows the queue.`
     );
   }

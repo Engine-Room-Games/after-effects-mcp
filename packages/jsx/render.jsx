@@ -430,8 +430,9 @@ function __rqOutputClash(rq, key, skipIndex) {
       var omPath = __rqOmPath(item.outputModule(o));
       if (omPath && __rqPathKey(omPath) === key) {
         var compName = null;
-        try { compName = item.comp.name; } catch (e3) {}
-        return { index: i, compName: compName, output: o, path: omPath, status: status };
+        var compId = null;
+        try { compId = item.comp.id; compName = item.comp.name; } catch (e3) {}
+        return { index: i, compId: compId, compName: compName, output: o, path: omPath, status: status };
       }
     }
   }
@@ -440,15 +441,15 @@ function __rqOutputClash(rq, key, skipIndex) {
 
 function __rqClashMessage(clash, path) {
   var unticked = clash.status !== "QUEUED";
-  return "Render queue item " + clash.index + " (\"" + clash.compName + "\")" +
+  return "Render queue item " + clash.index + " (comp \"" + clash.compName + "\", compId " + clash.compId + ")" +
     (unticked ? ", " + clash.status + (clash.status === "UNQUEUED" ? " (already rendered, or switched off)," : ",") : "") +
     " already has the output " + clash.path +
     (clash.output > 1 ? " (its output module " + clash.output + ")" : "") +
     (clash.path !== path ? ", the same file as " + path : "") +
     ". aerender will not render an item whose output another item in the queue also has" +
     (unticked ? ", even an unticked one" : "") + " (\"output module name already in use\"), and it fails silently, " +
-    "writing nothing. Remove item " + clash.index + " first with remove_render_item" +
-    (unticked ? " (a file it rendered stays on disk)" : "") + ", or choose another outputPath. Nothing was queued.";
+    "writing nothing. Remove it first with remove_render_item({index: " + clash.index + ", compId: " + clash.compId + "})" +
+    (unticked ? " (a file it rendered stays on disk)" : "") + " and add again, or choose another outputPath. Nothing was queued.";
 }
 
 OPS.add_to_render_queue = function (args) {
@@ -686,7 +687,7 @@ OPS._render_prepare = noUndo(function (args) {
     for (var pk = 0; pk < picked.length; pk++) { if (picked[pk] === i) isPicked = true; }
     if (isPicked || __rqStatusName(rq.item(i).status) === "DONE") continue;
     var other = __rqItemSummary(rq, i, false);
-    otherQueued.push({ index: other.index, compName: other.compName, status: other.status, outputs: other.outputs });
+    otherQueued.push({ index: other.index, compId: other.compId, compName: other.compName, status: other.status, outputs: other.outputs });
   }
 
 

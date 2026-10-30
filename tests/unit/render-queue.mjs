@@ -1553,7 +1553,7 @@ await check("path problems are refused before the queue is touched", () => {
 await check("add_to_render_queue refuses a path another QUEUED item writes, naming it, and queues nothing (#228)", () => {
   const { ctx, items, log } = makeAe({ existing: ["QUEUED"] });
   const msg = throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/existing.mov" }));
-  assert.match(msg, /item 1 \("Lower Third"\) already has the output \/renders\/existing\.mov/);
+  assert.match(msg, /item 1 \(comp "Lower Third", compId 7\) already has the output \/renders\/existing\.mov/);
   assert.match(msg, /output module name already in use/);
   assert.match(msg, /remove_render_item/);
   assert.equal(items.length, 1);
@@ -1578,9 +1578,9 @@ await check("the same file in another spelling is the same file: case, NFD, a li
 await check("an UNQUEUED item still counts and is named as such; a DONE one does not (#228, measured)", () => {
   const un = makeAe({ existing: ["UNQUEUED"], files: ["/renders/existing.mov"] });
   const msg = throwsMsg(() => un.ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/existing.mov", overwrite: true }));
-  assert.match(msg, /item 1 \("Lower Third"\), UNQUEUED \(already rendered, or switched off\), already has the output/);
+  assert.match(msg, /item 1 \(comp "Lower Third", compId 7\), UNQUEUED \(already rendered, or switched off\), already has the output/);
   assert.match(msg, /even an unticked one/);
-  assert.match(msg, /Remove item 1 first with remove_render_item \(a file it rendered stays on disk\)/);
+  assert.match(msg, /Remove it first with remove_render_item\(\{index: 1, compId: 7\}\) \(a file it rendered stays on disk\)/);
   assert.equal(un.items.length, 1);
   const done = makeAe({ existing: ["DONE"], files: ["/renders/existing.mov"] });
   done.ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/existing.mov", overwrite: true });
@@ -1623,8 +1623,8 @@ await check("_render_prepare lists every item but DONE ones it leaves alone, for
   const { ctx } = makeAe({ existing: ["QUEUED", "DONE", "QUEUED", "UNQUEUED"], existingPaths: ["/r/a.mov", "/r/b.mov", "/r/c.mov", "/r/d.mov"] });
   const plan = ctx.OPS._render_prepare({ indices: [1] });
   assert.deepEqual(JSON.parse(JSON.stringify(plan.otherQueued)), [
-    { index: 3, compName: "Lower Third", status: "QUEUED", outputs: [{ index: 1, path: "/r/c.mov", template: "High Quality" }] },
-    { index: 4, compName: "Lower Third", status: "UNQUEUED", outputs: [{ index: 1, path: "/r/d.mov", template: "High Quality" }] },
+    { index: 3, compId: 7, compName: "Lower Third", status: "QUEUED", outputs: [{ index: 1, path: "/r/c.mov", template: "High Quality" }] },
+    { index: 4, compId: 7, compName: "Lower Third", status: "UNQUEUED", outputs: [{ index: 1, path: "/r/d.mov", template: "High Quality" }] },
   ]);
 });
 await check("render_queue's plan check: one file written by two QUEUED items is named, rendered or not (#228)", () => {
@@ -1635,12 +1635,12 @@ await check("render_queue's plan check: one file written by two QUEUED items is 
   const base = { projectPath: "/p.aep", appPackage: null };
   // Two rendered items, one file.
   assert.deepEqual(duplicateOutputs({ ...base, items: [item(1, path.join(dir, "x.mov")), item(2, path.join(dir, "x.mov"), "B")] }), [
-    `${path.join(dir, "x.mov")} is written by item 1 ("A") and item 2 ("B")`,
+    `${path.join(dir, "x.mov")} is written by item 1 ("A", compId 1) and item 2 ("B", compId 1)`,
   ]);
   // A rendered item and one left in the queue, through a symlinked folder.
   const viaLink = duplicateOutputs({ ...base, items: [item(2, path.join(link, "y.mov"))], otherQueued: [item(1, path.join(dir, "y.mov"), "B")] });
   assert.equal(viaLink.length, 1);
-  assert.match(viaLink[0], /item 1 \("B"\) and item 2 \("A"\) as .*dup-link/);
+  assert.match(viaLink[0], /item 1 \("B", compId 1\) and item 2 \("A", compId 1\) as .*dup-link/);
   // Unicode spelling and case, as on macOS and Windows.
   assert.equal(duplicateOutputs({ ...base, items: [item(1, "/r/Caf\u00e9.mov"), item(2, "/r/cafe\u0301.MOV")] }, "darwin").length, 1);
   assert.equal(duplicateOutputs({ ...base, items: [item(1, "C:\\r\\A.mov"), item(2, "c:/r/a.mov")] }, "win32").length, 1);
@@ -1657,7 +1657,7 @@ await check("render_queue's plan check: one file written by two QUEUED items is 
   // An UNQUEUED item left alone counts, and is named as such; a DONE one does not.
   const un = { ...item(1, "/r/z.mov", "Old"), status: "UNQUEUED" };
   assert.deepEqual(duplicateOutputs({ ...base, items: [item(2, "/r/z.mov")], otherQueued: [un] }), [
-    `/r/z.mov is written by item 1 ("Old"), UNQUEUED, and item 2 ("A")`,
+    `/r/z.mov is written by item 1 ("Old", compId 1), UNQUEUED, and item 2 ("A", compId 1)`,
   ]);
   assert.deepEqual(duplicateOutputs({ ...base, items: [item(2, "/r/z.mov")], otherQueued: [{ ...un, status: "DONE" }] }), []);
 });
