@@ -347,7 +347,7 @@ await check("a desk that cannot forward within the window, four times running, s
   const port = await freePort();
   const token = "fake-desk-expired";
   fs.mkdirSync(deskDir, { recursive: true });
-  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4245, port, token, startedAt: 1 }));
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
   let ops = 0;
   const fake = http.createServer((q, r) => {
     if (q.url === "/desk/hello") {
@@ -387,7 +387,7 @@ await check("a stall is never declared before the call's deadline, however large
   const port = await freePort();
   const token = "fake-desk-silent";
   fs.mkdirSync(deskDir, { recursive: true });
-  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4246, port, token, startedAt: 1 }));
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
   let deadline = null;
   const fake = http.createServer((q, r) => {
     if (q.url === "/desk/hello") {
@@ -428,6 +428,20 @@ await check("a stall is never declared before the call's deadline, however large
     fake.closeAllConnections?.();
     await new Promise((r) => fake.close(r));
   }
+});
+
+await check("a server sweeps away desk files left by servers that are gone, and only those", async () => {
+  const deadPort = await freePort();
+  const livePort = await freePort();
+  fs.mkdirSync(deskDir, { recursive: true });
+  fs.writeFileSync(deskFile(deadPort), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 999_999, port: deadPort, token: "dead", startedAt: 1 }));
+  fs.writeFileSync(deskFile(livePort), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port: livePort, token: "live", startedAt: 1 }));
+  const L = line(await freePort(), "L");
+  assert.equal(await L.ready(), "leader");
+  assert.equal(readDesk(deadPort), null, "a SIGKILLed server's file is removed");
+  assert.equal(readDesk(livePort)?.token, "live", "a running server's file is left alone");
+  await L.close();
+  fs.rmSync(deskFile(livePort), { force: true });
 });
 
 await check("the desk refuses a write without the lease holding the lock, and sends nothing", async () => {
@@ -510,7 +524,7 @@ await check("a leftover desk file costs a lone session nothing; one left by a ru
 await check("a request too large for the desk is its own error, not four handovers", async () => {
   const port = await freePort();
   const token = "fake-desk-413";
-  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4244, port, token, startedAt: 1 }));
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
   let posts = 0;
   const fake = http.createServer((q, r) => {
     if (q.url === "/desk/hello") {
@@ -559,7 +573,7 @@ await check("a desk that cannot prove it knows the token is never joined, and ne
     });
     await new Promise((r) => fake.listen(port, "127.0.0.1", r));
     if (withFile) {
-      fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4242, port, token: "t", startedAt: 1 }));
+      fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token: "t", startedAt: 1 }));
     }
     const L = line(port, "L", { electionDeadlineMs: 600 });
     assert.equal(await L.ready(), "direct", `withFile=${withFile}`);
@@ -575,7 +589,7 @@ await check("a write the desk may have forwarded is never re-sent: no answer is 
   // with the `start` line lost on the way, looks like from here.
   const port = await freePort();
   const token = "fake-desk-token";
-  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4243, port, token, startedAt: 1 }));
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
   const ops = [];
   const fake = http.createServer((q, r) => {
     if (q.url === "/desk/hello") {
@@ -652,6 +666,8 @@ const panel = http.createServer((req, res) => {
         }, runFor);
       }
       if (op === "list_comps") result = [];
+      // A non-object result After Effects warned about, as core.jsx wraps it (#225).
+      if (tag === "WARN") result = { __aemcpWarned: true, value: [1, 2], aeWarnings: ["Missing font: Inter"] };
       try {
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ ok: true, result }));
@@ -748,6 +764,14 @@ try {
     assert.equal(r.res.isError, undefined, r.text);
     assert.deepEqual(r.json(), { tag: "solo" });
     assert.equal(r.res.content.length, 1);
+  });
+
+  await check("After Effects' warnings survive the trip through the desk to a follower", async () => {
+    const r = await call(B, "run_jsx", jsx("WARN", 5));
+    assert.equal(r.res.isError, undefined, r.text);
+    const texts = r.res.content.map((c) => c.text);
+    assert.ok(texts.some((t) => /^WARNING: After Effects reported 1 message\(s\).*Missing font: Inter/.test(t)), texts.join("\n"));
+    assert.ok(texts.includes("[1,2]"), `the value keeps its shape: ${texts.join(" | ")}`);
   });
 
   await check("three sessions' writes reach After Effects one at a time, in the order they queued", async () => {
@@ -1082,6 +1106,17 @@ try {
       lease.release();
       await L.close();
       await stop(K);
+    });
+  }
+
+  if (process.platform !== "win32") {
+    await check("a desk stopped by SIGTERM removes its file on the way out", async () => {
+      const desk9 = await freePort();
+      const X = await startSession("desk-test-X", desk9);
+      await until("X to run the desk", () => readDesk(desk9)?.pid === X.pid);
+      X.alive = false;
+      process.kill(X.pid, "SIGTERM");
+      await until("X's desk file to go", () => readDesk(desk9) === null, 5000);
     });
   }
 

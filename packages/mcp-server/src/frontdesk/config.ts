@@ -173,6 +173,49 @@ export function writeDeskFile(info: DeskFile): void {
   }
 }
 
+/**
+ * Remove every desk file whose server is gone (issue #223). A desk killed
+ * hard — SIGKILL, a crash, a power cut — cannot remove its own file, and one
+ * on a port nobody uses again would stay for ever. A file is removed only when
+ * its pid is not running; a live pid, even an unrelated one that reused the
+ * number, leaves it alone — a stale file is harmless, a wrongly removed one is
+ * not. A file holding `batchHeld` on this server's own desk port is kept: it
+ * is what tells the next desk to give that batch its grace period.
+ */
+export function sweepStaleDeskFiles(keepPort?: number): number {
+  const dir = path.dirname(deskFilePath(0));
+  let removed = 0;
+  let names: string[] = [];
+  try { names = fs.readdirSync(dir); } catch { return 0; }
+  for (const name of names) {
+    const m = /^desk-(\d+)\.json$/.exec(name);
+    if (!m) continue;
+    const port = Number(m[1]);
+    const info = readDeskFile(port);
+    if (!info || pidAlive(info.pid)) continue;
+    if (port === keepPort && info.batchHeld) continue;
+    try {
+      // Re-read just before: a new desk may have rewritten it meanwhile.
+      if (readDeskFile(port)?.token === info.token) {
+        fs.unlinkSync(deskFilePath(port));
+        removed++;
+      }
+    } catch {}
+  }
+  return removed;
+}
+
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM: it exists, and belongs to someone else.
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /** Remove the file only if it is still this desk's — a successor may already have rewritten it. */
 export function removeDeskFile(port: number, token: string): void {
   try {

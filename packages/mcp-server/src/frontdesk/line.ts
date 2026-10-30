@@ -5,7 +5,7 @@ import { opTimeoutMs } from "../bridge/httpClient.js";
 import type { QueueWait, WriteLease, WriteQueue } from "../bridge/writeQueue.js";
 import { BridgeTimeoutError, DeskPlaceLostError, FrontDeskLostError, WriteQueueCancelledError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
-import { DESK_ID, DESK_NONCE_HEADER, DESK_PROTOCOL, DESK_TOKEN_HEADER, STALL_BEATS, bodyAllowanceMs, monoMs, readDeskFile, type FrontDeskOptions } from "./config.js";
+import { DESK_ID, DESK_NONCE_HEADER, DESK_PROTOCOL, DESK_TOKEN_HEADER, STALL_BEATS, bodyAllowanceMs, monoMs, readDeskFile, sweepStaleDeskFiles, type FrontDeskOptions } from "./config.js";
 import { DeadlinePassedError, FrontDesk, LeaseNotHeldError, deskProof, type DeskForwarder } from "./desk.js";
 import { DeskClosedError } from "./lock.js";
 import { describeAhead, describeLockWait, fromWire, type DeskAhead, type GrantWait, type LockLine, type OpLine } from "./protocol.js";
@@ -70,6 +70,8 @@ export class SessionLine {
   private electing: Promise<Mode> | null = null;
   /** Has followed or run a desk before — only so the log can say "taking over". */
   private everJoined = false;
+  /** Stale desk files are swept once per process, at the first election. */
+  private swept = false;
   /** The desk lease this session holds now. At most one: the session's own queue is in front of it. */
   private holding: HeldDesk | null = null;
   private closed = false;
@@ -440,6 +442,11 @@ export class SessionLine {
       // A grace period only when the desk before held a long lease: then a
       // session is coming back for it. A leftover file from a desk that held
       // nothing makes nobody wait.
+      if (!this.swept) {
+        this.swept = true;
+        const n = sweepStaleDeskFiles(port);
+        if (n > 0) logger.info(`Front desk: removed ${n} desk file${n > 1 ? "s" : ""} left by servers that are no longer running.`);
+      }
       const previous = readDeskFile(port);
       const graceMs = previous?.batchHeld ? (cfg.graceMs ?? GRACE_MS) : 0;
       const token = randomBytes(32).toString("hex");
@@ -680,25 +687,25 @@ function deskStream(
     heardCount++;
     if (idle) clearTimeout(idle);
     const at = heardCount;
-    idle = setTimeout(() => {
-      // After this process was itself blocked (a long synchronous stretch, the
-      // machine asleep), timers fire before the beats waiting in the socket are
-      // read. Let the poll phase read them, then decide.
+    // Every path to `stalled` goes through here: after this process was itself
+    // blocked (a long synchronous stretch, the machine asleep), timers fire
+    // before the beats waiting in the socket are read, so the poll phase reads
+    // them first (setImmediate); and a timer — the loop's clock can run a few
+    // ms ahead — is never trusted to mean the deadline has passed: it is
+    // re-read on the monotonic clock, and re-armed while still early.
+    const check = () => {
       setImmediate(() => {
         if (heardCount !== at || settled) return;
         const early = notBefore - monoMs();
         if (early >= 0) {
-          idle = setTimeout(() => {
-            if (heardCount !== at || settled) return;
-            settle({ kind: "stalled" });
-            req.destroy();
-          }, early + 1);
+          idle = setTimeout(check, early + 1);
           return;
         }
         settle({ kind: "stalled" });
         req.destroy();
       });
-    }, idleMs + extraMs);
+    };
+    idle = setTimeout(check, idleMs + extraMs);
   };
   // Until the desk answers it is still reading the body, and beats only after.
   heard(bodyAllowanceMs(payload.length));

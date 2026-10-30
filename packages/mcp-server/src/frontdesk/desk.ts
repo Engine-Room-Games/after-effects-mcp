@@ -96,6 +96,8 @@ interface InFlight {
   since: number;
 }
 
+const EXIT_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+
 /** A request body larger than this is refused. A run_batch of 2000 steps is a few MB. */
 
 export class FrontDesk {
@@ -156,6 +158,32 @@ export class FrontDesk {
   publish(): void {
     this.published = true;
     this.writeFile();
+    // Every exit this process can still run code on removes the file: a normal
+    // exit or an uncaught exception ('exit'), and the terminating signals,
+    // which are re-raised afterwards so they still terminate. SIGKILL and a
+    // crash cannot be caught; the next server's sweep removes those files.
+    process.on("exit", this.onExit);
+    for (const sig of EXIT_SIGNALS) process.on(sig, this.onSignal);
+  }
+
+  private unhook(): void {
+    process.removeListener("exit", this.onExit);
+    for (const sig of EXIT_SIGNALS) process.removeListener(sig, this.onSignal);
+  }
+
+  private readonly onExit = () => this.dropFile();
+
+  private readonly onSignal = (sig: NodeJS.Signals) => {
+    this.dropFile();
+    this.unhook();
+    // Someone else handles this signal: leave the decision to them.
+    if (process.listenerCount(sig) > 0) return;
+    process.kill(process.pid, sig);
+  };
+
+  /** The file goes unless a long lease holds the lock — the successor needs it then. */
+  private dropFile(): void {
+    if (this.published && !this.batchHeld) removeDeskFile(this.opts.port, this.opts.token);
   }
 
   private writeFile(): void {
@@ -289,7 +317,8 @@ export class FrontDesk {
         setTimeout(resolve, 50).unref?.();
       });
     }
-    if (this.published && !this.batchHeld) removeDeskFile(this.opts.port, this.opts.token);
+    this.dropFile();
+    this.unhook();
   }
 
   // ---------------------------------------------------------------- HTTP

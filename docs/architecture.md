@@ -352,7 +352,7 @@ holder dies, so there is never a lock to clean up; the file only carries the
 token, and nobody believes it without the port answering with it. A port held
 by something that is not a desk, or a desk speaking another protocol (a
 different server version), sends the server direct — today's behaviour — with a
-warning that says the sessions are not serialized.
+warning that says the sessions are not serialized. The file goes on every exit the process can run code on — a normal close, `exit`, SIGINT/SIGTERM/SIGHUP (re-raised afterwards) — and a server's first election sweeps away any desk file whose pid is no longer running, so a SIGKILLed or crashed desk leaves nothing behind for long. Tests that spawn servers point `HOME` at a temp folder or set `AE_MCP_FRONT_DESK=off`; a pinned ephemeral port otherwise becomes a desk on port+10000 in the real home folder.
 
 **What goes through it.** `server.ts` talks to a `SessionLine` instead of the
 `WriteQueue` and `HttpClient` directly. A write takes the session's own queue
