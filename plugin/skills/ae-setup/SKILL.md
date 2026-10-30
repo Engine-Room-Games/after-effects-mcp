@@ -89,17 +89,16 @@ too many calls are already waiting, so stop issuing writes and let it drain. If
 you have that much independent work, send it as one `run_batch` — one
 ExtendScript pass and one place in the queue, instead of dozens of each.
 
-## Install before they open After Effects, if you still can
+## After Effects must be closed while the panel installs
 
-The panel loads at launch and only at launch. So the order matters, and it is
-the opposite of what people assume:
+The panel loads at launch and only at launch, and **installing it while After
+Effects is open does not work.** So the order is fixed:
 
 - **After Effects is closed** — install now. When they open it, the panel is
-  simply there. No restart, nothing to ask for. This is the good path, and on a
-  first-time setup you can usually get it.
-- **After Effects is open** — install, then they have to quit and reopen it.
-  Unavoidable, but worth avoiding: if they have not opened AE yet in this
-  conversation, do the install *first* and tell them to open it after.
+  simply there. On a first-time setup, do the install *before* asking them to
+  open AE.
+- **After Effects is open** — do not call `setup_panel` yet. Ask them to quit
+  After Effects first, then install, then have them reopen it.
 
 `check_setup` reports `afterEffectsRunning`, so you always know which case you
 are in before you say anything.
@@ -107,8 +106,8 @@ are in before you say anything.
 ## The repair path
 
 1. **`check_setup`** — find out what is actually wrong.
-2. **`setup_panel`** — if the panel is missing or out of date. Tell the user what it will do *before* you call it: it copies the panel into their Adobe extensions folder and switches on two Adobe preferences — the one that permits unsigned panels, and CEP's own log (only where it was never set), so that if AE ever refuses to load the panel the reason is recorded. All of it is user-level and reversible. A released server ships the panel **signed** (the result says `signed: true`): After Effects loads it without the first preference, which is set only as a fallback, and no reboot is ever needed for it. One caution, for an **unsigned** panel only (a development build): if `check_setup` showed the install as **self-signed**, `setup_panel` replaces it with an unsigned copy and the signing has to be done again — the result's notes say so; tell the user before calling it.
-3. **Get the panel loaded.** If AE was closed, ask them to open it. If it was already open, ask them to quit and reopen it. You cannot do either for them.
+2. **`setup_panel`** — if the panel is missing or out of date, and only once After Effects is closed (`afterEffectsRunning` failing); if it is open, ask them to quit it first. Tell the user what it will do *before* you call it: it copies the panel into their Adobe extensions folder and switches on two Adobe preferences — the one that permits unsigned panels, and CEP's own log (only where it was never set), so that if AE ever refuses to load the panel the reason is recorded. All of it is user-level and reversible. A released server ships the panel **signed** (the result says `signed: true`): After Effects loads it without the first preference, which is set only as a fallback, and no reboot is ever needed for it. One caution, for an **unsigned** panel only (a development build): if `check_setup` showed the install as **self-signed**, `setup_panel` replaces it with an unsigned copy and the signing has to be done again — the result's notes say so; tell the user before calling it.
+3. **Get the panel loaded.** Ask them to open After Effects. You cannot do it for them.
 4. **`check_setup`** again to confirm.
 
 ## What the individual failures mean
@@ -122,7 +121,7 @@ are in before you say anything.
 | `panelUpToDate` | The files on disk are older than this server. Run `setup_panel`. The signature's own files (`META-INF/signatures.xml`, `mimetype`) do not count as differences. |
 | `panelSignatureIntact` | Present only for a signed install. Its files changed after it was signed — usually a developer's edit — and After Effects refuses such a panel. With After Effects closed, run `setup_panel` with `force: true`. It passes with a note (`evidence: "voided"`) when the debug preference is on, because then the panel normally still loads — unless CEP checks signatures anyway (the Windows bug below) and `panelSignature` fails; then `nextSteps` is the same forced reinstall, not hand signing. |
 | `panelRunningCurrent` | AE is *running* an older panel than these tools ship. This is the one that predicts whether calls will actually work — `panelUpToDate` can pass while this fails, for the whole window between installing an update and restarting AE. |
-| `afterEffectsRunning` | AE is closed. If the panel also needs installing, install it now and then ask them to open AE — that saves a restart. |
+| `afterEffectsRunning` | AE is closed. If the panel also needs installing, install it now and then ask them to open AE. If it passes (AE is open) and the panel needs installing, ask them to quit AE first — installing with it open does not work. |
 | `bridgeReachable` | Everything is installed but the panel isn't answering **on any port** — it asks the default port and the port file's port both, and reports whichever answers. Read the detail: if a port **timed out**, After Effects is busy and you should wait, not restart. If nothing is listening anywhere, one restart of AE is reasonable, because the panel loads only at launch; if that has already been tried, read `panelSignature` and `nextSteps` before suggesting a second. |
 | `bridgeToken` | The panel answers but requires a token this server cannot produce, so every call is refused before it reaches After Effects. The panel is fine: do not restart it and do not run `setup_panel`. The detail names the file the token should be in; `nextSteps` says what to do when it is not there. |
 | `portAgreement` | The panel answers, but on a different port from the one tool calls go to. The server is stale, the panel is fine. Retry the call, or reconnect the MCP server. Never restart After Effects for this. |
@@ -141,7 +140,7 @@ message tells you which of the two fixes applies:
 - **"updated on disk … still running the previous version"** — `setup_panel` has
   already done its part. Only a restart of After Effects will help; running it
   again will not.
-- **anything else** — run `setup_panel`, then get AE restarted.
+- **anything else** — ask them to quit After Effects, run `setup_panel`, then have them reopen it.
 
 Either way, do not retry the failed call until the user confirms AE has
 restarted. Say it as a version mismatch in plain language, not as a failure:
@@ -201,4 +200,4 @@ about.
 
 Ask the user to open **Window > Extensions > AE MCP Bridge** inside After Effects. That panel shows its own status and a log, and will say whether it started, which port it took, whether it is waiting for a port another panel holds, or what error it hit. Have them read it back to you.
 
-A common cause is a stale install: the panel loaded an older script bundle than the server expects. `check_setup`'s `panelUpToDate` catches that — the fix is `setup_panel` followed by an AE restart.
+A common cause is a stale install: the panel loaded an older script bundle than the server expects. `check_setup`'s `panelUpToDate` catches that — the fix is to quit After Effects, run `setup_panel`, then reopen AE.
