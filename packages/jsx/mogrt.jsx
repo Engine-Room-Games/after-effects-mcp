@@ -369,7 +369,7 @@ OPS.export_mogrt = noUndo(function (args) {
   // The thumbnail. AE has no scriptable poster time — CompItem.posterTime does
   // not exist — and the export ignores comp.time, so thumb.png inside the
   // .mogrt is whatever AE decided, usually black. Render the requested frame
-  // here and let the panel put it into the archive: ExtendScript can write a
+  // here and let the panel (or, on a server-images panel, the server) put it into the archive: ExtendScript can write a
   // PNG but cannot rewrite a zip, and the panel is already the layer that
   // post-processes files AE has just written.
   if (args.posterTime !== undefined && args.posterTime !== null) {
@@ -393,6 +393,11 @@ OPS.export_mogrt = noUndo(function (args) {
 // batch's suppression is already on and the export does not begin its own.
 if (!OPS.export_mogrt.__meta) OPS.export_mogrt.__meta = {};
 OPS.export_mogrt.__meta.ownDialogs = true;
+// The same export under an internal name (issue #220, stage 4): the panel does
+// not intercept it, so `posterPngPath` comes back and the server folds the
+// poster into the template itself. The same function object, so ownDialogs
+// above holds for both names.
+OPS._export_mogrt = OPS.export_mogrt;
 
 // ---------- add_essential_property (issue #177) ----------
 //

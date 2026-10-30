@@ -223,3 +223,13 @@ OPS.screenshot_layer = noUndo(function (args) {
     time: t, compId: c.id, layerId: l.id
   };
 });
+
+// The same two renders under internal names (issue #220, stage 4). The panel
+// post-processes `screenshot_frame` / `screenshot_layer` itself — waits for the
+// PNG, normalises it, base64-encodes it — for MCP servers that predate this
+// one. A server that sees the `server-images` capability sends these instead,
+// which the panel does not intercept, so the paths above come back as they are
+// and the server reads the files itself. One function object each, so the
+// dispatcher's flags cannot drift from the public op's.
+OPS._screenshot_frame = OPS.screenshot_frame;
+OPS._screenshot_layer = OPS.screenshot_layer;
