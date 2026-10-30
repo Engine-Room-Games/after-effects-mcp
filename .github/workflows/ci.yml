@@ -535,6 +535,13 @@ jobs:
       - name: Progress reaches the request that is still open
         run: node tests/unit/job-progress.mjs
 
+      # The SDK client handles a notification a microtask late but a response
+      # at once, so a final progress read together with the response was lost
+      # to onprogress (#261). Real server over stdio, real SDK client: the last
+      # progress must reach onprogress every run, with no client error.
+      - name: The last progress reaches the client before the response
+        run: node tests/unit/progress-delivery.mjs
+
       # cancel_job said ok for a cancel the panel never received, and a late
       # complete overwrote "cancelled" (#158); await_job on an unknown id sat
       # out its full ten minutes (#159).
