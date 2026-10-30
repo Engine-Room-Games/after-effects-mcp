@@ -382,12 +382,18 @@ function normSep(s: string): string {
 
 /**
  * The tail of a snapshot path that any spelling of it contains:
- * `ae-mcp-render/<jobId>/<file>`. A /var vs /private/var symlink, or a
- * Windows path with either slash, still ends in that.
+ * `ae-mcp-render/<jobId>/a/a/…/<file>` — everything from the `ae-mcp-render`
+ * folder on, which since #215 includes a chain of one-letter folders. A
+ * /var vs /private/var symlink, or a Windows path with either slash, still
+ * ends in that, and the job id in it keeps two jobs on the same project apart.
+ * The last `ae-mcp-render` segment is always the job's own: below it come only
+ * the job id, letters that `snapshotLayout` chose, and the file name — no
+ * folder name of the user's — so the search cannot land on the wrong one.
  */
 export function snapshotMarker(snapshotPath: string): string {
   const parts = normSep(snapshotPath).split("/").filter(Boolean);
-  return parts.slice(-3).join("/");
+  const at = parts.lastIndexOf("ae-mcp-render");
+  return (at >= 0 && at < parts.length - 2 ? parts.slice(at) : parts.slice(-3)).join("/");
 }
 
 /** POSIX: is this `ps` args string one of this job's render processes? Exported for the test. */
