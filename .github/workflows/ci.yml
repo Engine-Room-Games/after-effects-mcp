@@ -346,13 +346,12 @@ jobs:
           node tests/unit/batch-undo.mjs
           node tests/unit/mogrt-preconditions.mjs
 
-      # #220 stage 2: the house style and the export/render/import file checks
-      # run on the server. Each port is held to the jsx it came from on real
-      # folders (the jsx copies still run after it), and the server is driven
-      # against a stub bridge that refuses the panel-side house style.
-      - name: File work on the server matches the panel's
+      # #220 stage 2: the export/render/import file checks run on the server.
+      # Each port is held to the jsx it came from on real folders (the jsx
+      # copies still run after it), and the server is driven against a stub
+      # bridge to pin the round trips and the comp-first refusal order.
+      - name: File checks on the server match the panel's
         run: |
-          node tests/unit/house-style-files.mjs
           node tests/unit/destination-checks.mjs
           node tests/unit/file-ops-server.mjs
 

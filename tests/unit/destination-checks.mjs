@@ -16,6 +16,18 @@
 // untouched and the jsx decides, which is never a disagreement — those cases
 // are asserted separately.
 //
+// What only live After Effects can confirm, because the model in
+// lib/es-file.mjs assumes it (recipes 18, 57, 64 and 72):
+//   - `File.fsName` on a path that does not exist yet: whether it resolves
+//     symlinks (/tmp vs /private/tmp) or `..`, and whether a trailing
+//     separator is dropped. The refusals quote it.
+//   - Whether `fsName` hands back a Unicode path in the form it was given, or
+//     NFD on macOS. The port quotes the form it was given.
+//   - `~` as the home folder on macOS, and `Folder.create` making every
+//     missing parent.
+//   - A destination that exists as a *file*: `Folder.exists` may differ from
+//     Node's `existsSync`.
+//
 //   node tests/unit/destination-checks.mjs
 
 import assert from "node:assert/strict";
@@ -97,6 +109,7 @@ function parity(name, setup, runJsx, runTs, expect) {
 const at = (...p) => path.join(dir, ...p);
 const touch = (...p) => () => { fs.mkdirSync(path.dirname(at(...p)), { recursive: true }); fs.writeFileSync(at(...p), "x"); };
 const nothing = () => {};
+const and = (...fns) => () => fns.forEach((f) => f());
 
 // ---------- add_to_render_queue ----------
 
@@ -127,6 +140,19 @@ if (process.platform !== "win32") {
   passed++;
 }
 
+// Unicode in both normal forms. A folder made with a decomposed name (as
+// Finder makes one) and named in the caller's composed form, and the reverse.
+// Both copies answer from the same filesystem; on APFS and NTFS lookups are
+// normalisation-insensitive or byte-exact alike for Node and the model.
+const nfd = "Prüfung ✓";
+const nfc = nfd.normalize("NFC");
+const unicodeFolder = (name) => () => fs.mkdirSync(at(name));
+parity("render: NFD folder, NFD path", unicodeFolder(nfd), ...rq(at(nfd, "clip.mov")), /^PASSED$/);
+parity("render: NFC folder, NFC path", unicodeFolder(nfc), ...rq(at(nfc, "clip.mov")), /^PASSED$/);
+parity("render: NFD folder named in NFC", unicodeFolder(nfd), ...rq(at(nfc, "clip.mov")));
+parity("render: missing Unicode folder names it as given", nothing, ...rq(at(nfd, "日本", "x.mov")), /does not exist/);
+parity("render: existing NFD file", and(unicodeFolder(nfd), touch(nfd, "é.mov")), ...rq(at(nfd, "é.mov")), /already exists/);
+
 // Declined, never refused: a path ExtendScript might decode differently.
 assert.equal(result(() => D.checkRenderOutput({ outputPath: at("no%20such", "x.mov") })), PASSED);
 passed++;
@@ -144,17 +170,16 @@ passed++;
 
 const aep = at("proj", "show.aep");
 const saved = () => { fs.mkdirSync(at("proj"), { recursive: true }); fs.writeFileSync(aep, "aep"); };
-const project = { path: aep, items: [{ id: 7, type: "comp" }] };
+
 
 function mogrt(args) {
   return [
     () => { ctx.app.project.file = new EsFile(aep); return ctx.OPS.export_mogrt({ compId: 7, ...args }); },
-    () => D.prepareMogrtDestination({ compId: 7, ...args }, project),
+    () => D.prepareMogrtDestination({ compId: 7, ...args }),
   ];
 }
-const and = (...fns) => () => fns.forEach((f) => f());
 
-parity("mogrt: default destDir is the .aep's folder", saved, ...mogrt({ name: "LT" }), /^PASSED$/);
+assert.equal(D.prepareMogrtDestination({ compId: 7, name: "LT" }), null, "no destDir: the jsx checks the .aep folder, as before"); passed++;
 parity("mogrt: destDir exists", and(saved, () => fs.mkdirSync(at("out"))), ...mogrt({ name: "LT", destDir: at("out") }), /^PASSED$/);
 parity("mogrt: destDir is created", saved, ...mogrt({ name: "LT", destDir: at("new", "deeper") }), /^PASSED$/);
 parity("mogrt: trailing separator on destDir", saved, ...mogrt({ name: "LT", destDir: at("out") + "/" }), /^PASSED$/);
@@ -175,24 +200,23 @@ parity("mogrt: no name, new folder", saved, ...mogrt({ destDir: at("auto") }), /
 resetDir(dir);
 saved();
 fs.mkdirSync(at("out"));
-D.prepareMogrtDestination({ compId: 7, name: "LT", destDir: at("out") }, project);
+D.prepareMogrtDestination({ compId: 7, name: "LT", destDir: at("out") });
 assert.deepEqual(fs.readdirSync(at("out")), []);
 passed++;
 
-// Declined: every case where an earlier jsx check decides first, or the path
-// is one the two might read differently. Nothing is created for any of them.
+// Declined: no destDir, a blank name the jsx refuses first, or a path the two
+// might read differently. Nothing is created for any of them.
 resetDir(dir);
 saved();
 const declined = [
-  [{ name: "LT", destDir: at("x1") }, { path: null, items: project.items }, "unsaved project"],
-  [{ name: "LT", destDir: at("x2") }, { path: aep, items: [{ id: 8, type: "comp" }] }, "comp not in the project"],
-  [{ name: "LT", destDir: at("x3") }, { path: aep, items: [{ id: 7, type: "footage" }] }, "id is not a comp"],
-  [{ name: "   ", destDir: at("x4") }, project, "blank name"],
-  [{ name: "LT", destDir: "relative/x5" }, project, "relative destDir"],
-  [{ name: "LT", destDir: at("x%206") }, project, "escape in destDir"],
+  [{ name: "LT" }, "no destDir"],
+  [{ name: "LT", destDir: "" }, "empty destDir"],
+  [{ name: "   ", destDir: at("x4") }, "blank name"],
+  [{ name: "LT", destDir: "relative/x5" }, "relative destDir"],
+  [{ name: "LT", destDir: at("x%206") }, "escape in destDir"],
 ];
-for (const [args, facts, why] of declined) {
-  assert.equal(D.prepareMogrtDestination({ compId: 7, ...args }, facts), null, why);
+for (const [args, why] of declined) {
+  assert.equal(D.prepareMogrtDestination({ compId: 7, ...args }), null, why);
 }
 assert.deepEqual(fs.readdirSync(dir), ["proj"], "a declined check makes no folder");
 passed++;
@@ -200,11 +224,11 @@ passed++;
 // rollback() removes the folders it made, deepest first, and nothing with content.
 resetDir(dir);
 saved();
-let made = D.prepareMogrtDestination({ compId: 7, name: "LT", destDir: at("r1", "r2") }, project);
+let made = D.prepareMogrtDestination({ compId: 7, name: "LT", destDir: at("r1", "r2") });
 assert.deepEqual(made.created, [at("r1"), at("r1", "r2")]);
 made.rollback();
 assert.equal(fs.existsSync(at("r1")), false);
-made = D.prepareMogrtDestination({ compId: 7, name: "LT", destDir: at("r3") }, project);
+made = D.prepareMogrtDestination({ compId: 7, name: "LT", destDir: at("r3") });
 fs.writeFileSync(at("r3", "LT.mogrt"), "zip");
 made.rollback();
 assert.equal(fs.existsSync(at("r3", "LT.mogrt")), true, "a folder with the export in it is never removed");

@@ -54,13 +54,11 @@ import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./gen
 import { archiveIssue, listIssues, logIssue, markReported } from "./issues/journal.js";
 import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
-import { readHouseStyle, writeHouseStyle } from "./files/houseStyle.js";
 import {
   checkFootageExists,
   checkRenderOutput,
   prepareMogrtDestination,
   type MogrtDestination,
-  type ProjectFacts,
 } from "./files/destinations.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
@@ -668,30 +666,23 @@ export function createServer(opts: CreateServerOptions = {}) {
       // — see runRender.
       if (name === "render_queue") return textResult(await runRender(args as RenderQueueArgs, bridge, renders), wait);
 
-      // File work the server does itself (issue #220, stage 2). After Effects
-      // is asked only for what needs it — which .aep is open — through
-      // `get_project_summary`, which every panel ever shipped answers. The jsx
-      // copies of all of this stay in the bundle: older servers and `run_batch`
-      // steps still use them. See "Filesystem checks on the server" in
-      // docs/subsystems.md.
-      if (name === "get_house_style") {
-        const project = (await bridge.runOp("get_project_summary", {})) as ProjectFacts;
-        // Summarised here too, which predates the move: a summariser in the
-        // bundle would have been dark until the panel was reinstalled. See
-        // style/summary.ts.
-        const detail = (args as { detail?: "summary" | "full" }).detail ?? "summary";
-        return textResult(applyHouseStyleDetail(readHouseStyle(project.path), detail), wait);
-      }
-      if (name === "set_house_style") {
-        const project = (await bridge.runOp("get_project_summary", {})) as ProjectFacts;
-        return textResult(writeHouseStyle(project.path, args as { content: string; overwrite?: boolean }), wait);
-      }
-      if (name === "add_to_render_queue") checkRenderOutput(args as { outputPath: string; overwrite?: boolean });
-      if (name === "import_footage") checkFootageExists(args as { path: string });
+      // Filesystem checks the server makes itself (issue #220, stage 2), so a
+      // refusal costs After Effects nothing. The jsx copies stay in the bundle
+      // and run again after these: older servers and `run_batch` steps rely on
+      // them. See "Filesystem checks on the server" in docs/subsystems.md.
       let destination: MogrtDestination | null = null;
-      if (name === "export_mogrt") {
-        const project = (await bridge.runOp("get_project_summary", {})) as ProjectFacts;
-        destination = prepareMogrtDestination(args as { compId: number; destDir?: string; name?: string; overwrite?: boolean }, project);
+      try {
+        if (name === "add_to_render_queue") checkRenderOutput(args as { outputPath: string; overwrite?: boolean });
+        if (name === "import_footage") checkFootageExists(args as { path: string });
+        if (name === "export_mogrt") {
+          destination = prepareMogrtDestination(args as { compId: number; destDir?: string; name?: string; overwrite?: boolean });
+        }
+      } catch (e) {
+        // The jsx looks the comp up before any of these checks, so a missing
+        // comp is what it refused first. Asked only on this refusal path, so
+        // a call that passes costs no extra round trip.
+        if (name === "add_to_render_queue" || name === "export_mogrt") await refuseMissingComp(bridge, args);
+        throw e;
       }
 
       // The request's progressToken is deliberately not forwarded. The panel
@@ -816,6 +807,15 @@ export function createServer(opts: CreateServerOptions = {}) {
         );
       }
 
+      // The style guide is read over the bridge and summarised here: the panel
+      // does not update itself, so a summariser shipped in the .jsx bundle would
+      // answer `detail: "summary"` with the whole document until the user
+      // reinstalled the panel and relaunched AE. See style/summary.ts.
+      if (name === "get_house_style") {
+        const detail = (args as { detail?: "summary" | "full" }).detail ?? "summary";
+        return textResult(applyHouseStyleDetail(result, detail), wait);
+      }
+
       return textResult(result, wait);
     } catch (e) {
       // Checked before BridgeUnreachableError because the remedies are
@@ -855,6 +855,24 @@ export function createServer(opts: CreateServerOptions = {}) {
   });
 
   return server;
+}
+
+/**
+ * Throw the jsx's own "no such comp" refusal if `args.compId` is not a comp.
+ *
+ * `get_comp` resolves the id through the same `getCompById` as
+ * `add_to_render_queue` and `export_mogrt`, so its refusal is the one those
+ * ops gave before the server's filesystem checks ran ahead of them, word for
+ * word. Returns quietly when the comp exists, and the caller's own refusal
+ * stands. Any other failure (a busy or absent bridge) is not this check's to
+ * report, and the caller's refusal stands then too.
+ */
+async function refuseMissingComp(bridge: HttpClient, args: unknown): Promise<void> {
+  try {
+    await bridge.runOp("get_comp", { compId: (args as { compId: number }).compId });
+  } catch (e) {
+    if (e instanceof AeError && !e.code && !/^Unknown op: /.test(e.message)) throw e;
+  }
 }
 
 /**

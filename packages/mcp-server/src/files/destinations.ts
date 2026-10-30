@@ -159,12 +159,6 @@ export function folderIsWritable(folder: string): boolean {
   return opened;
 }
 
-/** What `get_project_summary` says that the mogrt checks need. */
-export interface ProjectFacts {
-  path: string | null;
-  items?: ReadonlyArray<{ id: number; type: string }>;
-}
-
 export interface MogrtDestination {
   /** Folders this call created, deepest last. Removed again if After Effects then refuses the export. */
   created: string[];
@@ -177,34 +171,36 @@ export interface MogrtDestination {
  * exports anything, in the jsx's order: create the folder, the name resolves
  * into it, an existing file needs `overwrite`, the folder accepts writes.
  *
- * Returns null — check nothing, forward untouched — whenever an earlier check
- * the jsx makes would decide the call first, or this cannot judge the path:
- * the project was never saved (the jsx refuses that, and before any folder is
- * made), the comp is not in the project, `name` is blank, or `destDir` is not
- * a plain absolute path.
+ * Only for an explicit `destDir`. The default is the .aep's folder, and the
+ * only op in an installed bundle that reports the .aep path,
+ * `get_project_summary`, walks every project item on AE's main thread; asking
+ * it on every export would cost more than these checks save. Without
+ * `destDir` this returns null and the jsx checks everything, as before.
+ *
+ * Also null (check nothing, forward untouched) when `name` is blank, which the
+ * jsx refuses first, or `destDir` is not a plain absolute path.
  *
  * Two of the jsx checks need the template name, which defaults to one read off
  * the comp. When `name` is not passed, those two are left to the jsx, and only
  * the folder is created and probed here.
  *
- * One check precedes all of these in the jsx and cannot run here: an empty
- * Essential Graphics panel (#71). The jsx refused that before making any
- * folder, so the caller runs `rollback` when the forwarded export fails: an
- * empty folder made here for a call After Effects then refused is removed.
+ * Three jsx checks precede all of these and cannot run here without asking
+ * After Effects: the comp exists, the project was saved, and its Essential
+ * Graphics panel is not empty (#71). The caller asks `get_comp` when a check
+ * here refuses, so a missing comp is still reported first. The jsx refused all
+ * three before making any folder, so the caller runs `rollback` when the
+ * forwarded export fails: an empty folder made here for a call After Effects
+ * then refused is removed.
  */
 export function prepareMogrtDestination(
   args: { compId: number; destDir?: string; name?: string; overwrite?: boolean },
-  project: ProjectFacts,
   platform: NodeJS.Platform = process.platform
 ): MogrtDestination | null {
-  if (!project.path) return null;
-  if (!project.items || !project.items.some((it) => it.id === args.compId && it.type === "comp")) return null;
+  const destDir = args.destDir;
+  if (typeof destDir !== "string" || destDir.length === 0) return null;
 
   const hasName = typeof args.name === "string" && args.name.length > 0;
   if (hasName && isBlank(args.name as string)) return null;
-
-  const destDir =
-    typeof args.destDir === "string" && args.destDir.length > 0 ? args.destDir : path.dirname(project.path);
   if (!isPlainAbsolute(destDir, platform)) return null;
 
   const folder = path.resolve(destDir);
