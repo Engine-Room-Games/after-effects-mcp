@@ -28,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo, snapshotLayout, jobFolder, shadowDirs, strayFiles, relocateShadowOutputs, stampOutputs, cancelledPartials } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, duplicateOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo, snapshotLayout, jobFolder, shadowDirs, strayFiles, relocateShadowOutputs, stampOutputs, cancelledPartials } =
   await import(dist("render", "aerender.js"));
 const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin, stopProcessTreeSync, snapshotMarker } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
@@ -1379,9 +1379,13 @@ function makeAe(opts = {}) {
   const dirs = new Set(opts.dirs ?? ["/renders"]);
   const log = [];
   const RQItemStatus = { QUEUED: 3013, UNQUEUED: 3012, NEEDS_OUTPUT: 3011, RENDERING: 3015, WILL_CONTINUE: 3014, USER_STOPPED: 3016, ERR_STOPPED: 3017, DONE: 3018 };
+  // A symlinked or aliased folder: path -> where it leads.
+  const links = opts.links ?? {};
   class MockFolder {
     constructor(p) { this.fsName = p; }
     get exists() { return dirs.has(this.fsName); }
+    get alias() { return Object.prototype.hasOwnProperty.call(links, this.fsName); }
+    resolve() { return this.alias ? new MockFolder(links[this.fsName]) : null; }
   }
   let mtime = 1000;
   class MockFile {
@@ -1405,8 +1409,11 @@ function makeAe(opts = {}) {
   }
   const items = [];
   function makeItem(c, status) {
+    let omFile = null;
     const om = {
-      file: null,
+      // With `forceExt`, After Effects changes the extension to match the format.
+      get file() { return omFile; },
+      set file(f) { omFile = f && opts.forceExt ? new MockFile(f.fsName.replace(/\.[^./]+$/, opts.forceExt)) : f; },
       name: "High Quality",
       templates: ["High Quality", "High Quality with Alpha"],
       applyTemplate(n) { this.name = n; log.push("om:" + n); },
@@ -1429,11 +1436,11 @@ function makeAe(opts = {}) {
     };
     return item;
   }
-  for (const s of opts.existing ?? []) {
+  (opts.existing ?? []).forEach((s, i) => {
     const it = makeItem(comp, RQItemStatus[s]);
-    it.outputModule().file = new MockFile("/renders/existing.mov");
+    it.outputModule().file = new MockFile(opts.existingPaths?.[i] ?? "/renders/existing.mov");
     items.push(it);
-  }
+  });
   const project = {
     file: opts.unsaved ? null : new MockFile("/proj/show.aep"),
     dirty: opts.dirty !== false,
@@ -1511,6 +1518,88 @@ await check("path problems are refused before the queue is touched", () => {
   assert.match(throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/taken.mov" })), /overwrite:true/);
   assert.deepEqual(log, []);
   ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/taken.mov", overwrite: true });
+});
+// Issue #228: aerender refuses a second queued item writing the same file
+// ("output module name already in use"), and only when it renders it.
+await check("add_to_render_queue refuses a path another QUEUED item writes, naming it, and queues nothing (#228)", () => {
+  const { ctx, items, log } = makeAe({ existing: ["QUEUED"] });
+  const msg = throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/existing.mov" }));
+  assert.match(msg, /item 1 \("Lower Third"\) already renders to \/renders\/existing\.mov/);
+  assert.match(msg, /output module name already in use/);
+  assert.match(msg, /remove_render_item/);
+  assert.equal(items.length, 1);
+  assert.deepEqual(log, [], "refused before the queue is touched");
+  // overwrite:true is about a file on disk; it does not lift this.
+  assert.match(throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/existing.mov", overwrite: true })), /already renders to/);
+});
+await check("the same file in another spelling is the same file: case, NFD, a linked folder (#228)", () => {
+  const { ctx, items } = makeAe({
+    existing: ["QUEUED", "QUEUED"],
+    existingPaths: ["/renders/Caf\u00e9.mov", "/private/tmp/out.mov"],
+    dirs: ["/renders", "/RENDERS", "/tmp"], // the mock is case-sensitive; the volume is not
+    links: { "/tmp": "/private/tmp" },
+  });
+  assert.match(throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/RENDERS/cafe\u0301.MOV" })), /item 1 .*Caf\u00e9\.mov, the same file as/);
+  assert.match(throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/tmp/out.mov" })), /item 2 .*\/private\/tmp\/out\.mov/);
+  assert.equal(items.length, 2);
+  // A different file is still fine.
+  ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/cafe.mov" });
+  assert.equal(items.length, 3);
+});
+await check("an item that will not render does not count: re-queueing to the last render's file is fine (#228)", () => {
+  const { ctx, items } = makeAe({ existing: ["UNQUEUED", "DONE"], files: ["/renders/existing.mov"] });
+  ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/existing.mov", overwrite: true });
+  assert.equal(items.length, 3);
+});
+await check("a clash that appears only once After Effects changes the extension is refused, and the item removed (#228)", () => {
+  const { ctx, items, log } = makeAe({ existing: ["QUEUED"], existingPaths: ["/renders/lt.mp4"], forceExt: ".mp4" });
+  const msg = throwsMsg(() => ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/lt.mov" }));
+  assert.match(msg, /item 1 .*\/renders\/lt\.mp4/);
+  assert.equal(items.length, 1);
+  assert.deepEqual(log, ["add", "remove"]);
+});
+await check("the NFC table composes exactly as Node does (#228)", () => {
+  const { ctx } = makeAe();
+  const table = vm.runInContext("__RQ_NFC_PAIRS", ctx);
+  assert.equal(table.length % 3, 0);
+  for (let i = 0; i < table.length; i += 3) {
+    assert.equal((table[i] + table[i + 1]).normalize("NFC"), table[i + 2], `entry ${i / 3}`);
+  }
+  const nfc = (s) => vm.runInContext(`__rqNfc(${JSON.stringify(s)})`, ctx);
+  for (const word of ["Caf\u00e9", "\u1EC7", "\u00c5ngstr\u00f6m", "\u30ac\u30d1", "\ud55c\uae00", "\u0419", "\u1F04", "plain"]) {
+    assert.equal(nfc(word.normalize("NFD")), word.normalize("NFC"), word);
+  }
+});
+await check("_render_prepare lists the QUEUED items it leaves alone, for the duplicate check (#228)", () => {
+  const { ctx } = makeAe({ existing: ["QUEUED", "DONE", "QUEUED"], existingPaths: ["/r/a.mov", "/r/b.mov", "/r/c.mov"] });
+  const plan = ctx.OPS._render_prepare({ indices: [1] });
+  assert.deepEqual(JSON.parse(JSON.stringify(plan.otherQueued)), [
+    { index: 3, compName: "Lower Third", outputs: [{ index: 1, path: "/r/c.mov", template: "High Quality" }] },
+  ]);
+});
+await check("render_queue's plan check: one file written by two QUEUED items is named, rendered or not (#228)", () => {
+  const item = (index, p, compName = "A") => ({ index, compId: 1, compName, status: "QUEUED", frames: 1, outputs: [{ index: 1, path: p }] });
+  const dir = fs.mkdtempSync(path.join(tmp, "dup-"));
+  const link = path.join(tmp, "dup-link");
+  fs.symlinkSync(dir, link);
+  const base = { projectPath: "/p.aep", appPackage: null };
+  // Two rendered items, one file.
+  assert.deepEqual(duplicateOutputs({ ...base, items: [item(1, path.join(dir, "x.mov")), item(2, path.join(dir, "x.mov"), "B")] }), [
+    `${path.join(dir, "x.mov")} is written by item 1 ("A") and item 2 ("B")`,
+  ]);
+  // A rendered item and one left in the queue, through a symlinked folder.
+  const viaLink = duplicateOutputs({ ...base, items: [item(2, path.join(link, "y.mov"))], otherQueued: [item(1, path.join(dir, "y.mov"), "B")] });
+  assert.equal(viaLink.length, 1);
+  assert.match(viaLink[0], /item 1 \("B"\) and item 2 \("A"\) as .*dup-link/);
+  // Unicode spelling and case, as on macOS and Windows.
+  assert.equal(duplicateOutputs({ ...base, items: [item(1, "/r/Caf\u00e9.mov"), item(2, "/r/cafe\u0301.MOV")] }, "darwin").length, 1);
+  assert.equal(duplicateOutputs({ ...base, items: [item(1, "C:\\r\\A.mov"), item(2, "c:/r/a.mov")] }, "win32").length, 1);
+  assert.equal(duplicateOutputs({ ...base, items: [item(1, "/r/A.mov"), item(2, "/r/a.mov")] }, "linux").length, 0);
+  // Two items left alone that clash with each other are not this render's business; distinct files are fine.
+  assert.deepEqual(duplicateOutputs({ ...base, items: [item(1, "/r/a.mov")], otherQueued: [item(2, "/r/b.mov"), item(3, "/r/b.mov")] }), []);
+  // Two output modules of one item writing one file.
+  const twoOms = { ...item(1, "/r/a.mov"), outputs: [{ index: 1, path: "/r/a.mov" }, { index: 2, path: "/r/a.mov" }] };
+  assert.equal(duplicateOutputs({ ...base, items: [twoOms] }).length, 1);
 });
 await check("remove_render_item refuses an index that now renders another comp", () => {
   const { ctx, items } = makeAe({ existing: ["QUEUED"] });

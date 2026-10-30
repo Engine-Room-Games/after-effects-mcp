@@ -23,6 +23,7 @@ import {
   saveAndCheckFootage,
   logRenderStart,
   occupiedOutputs,
+  duplicateOutputs,
   resolveAerender,
   type RenderPlan,
 } from "./render/aerender.js";
@@ -1000,6 +1001,17 @@ async function runRender(
   const plan = (await renderStep("prepare", send("_render_prepare", { indices: args.indices, all: args.all }))) as RenderPlan & {
     readOnly?: boolean | null;
   };
+  // Two queued items writing one file: aerender refuses the later one, but only
+  // when it reaches it (issue #228). overwrite:true does not lift this.
+  const duplicates = duplicateOutputs(plan);
+  if (duplicates.length) {
+    throw new Error(
+      `Nothing was saved or rendered: more than one QUEUED render queue item writes the same file, and aerender ` +
+        `refuses the later one ("output module name already in use"): ${duplicates.join("; ")}. Point all but one ` +
+        `elsewhere, or remove the extra items with remove_render_item (list_render_queue shows the queue), then call ` +
+        `render_queue again.`
+    );
+  }
   // Items the user queued by hand never passed add_to_render_queue's guard.
   if (!args.overwrite) {
     const occupied = occupiedOutputs(plan);

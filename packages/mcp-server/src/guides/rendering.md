@@ -66,6 +66,14 @@ ProRes 4444 with alpha is an **output module template** that already says so.
   the output and look before calling it done.
 - **Existing files are refused** unless `overwrite: true` — that includes an
   item the user queued by hand that points at last week's render.
+- **One file, one queued item.** Two QUEUED items writing the same file are
+  refused — by `add_to_render_queue` when the second is added, and by
+  `render_queue` for items queued by hand — because aerender refuses the later
+  one, and only once it reaches it. `overwrite: true` does not lift this. The
+  refusal names the other item: give one of them another path, or remove it.
+  Paths are compared as the same file, so a different case or a symlinked
+  folder still counts. An item already rendered (Unqueued) does not count, so
+  queueing a comp again to the file its last render wrote is fine.
 - **Edits made while it renders are not in the render.** The render reads a
   private copy in the system temp folder taken at its start, so neither your
   later edits nor a save by the user mid-render change it. After Effects stays
