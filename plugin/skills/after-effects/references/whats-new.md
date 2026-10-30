@@ -45,6 +45,22 @@ it. The distinction worth reading carefully: if it says the panel is *installed*
 but the running one is older, running `setup_panel` again changes nothing and
 only quitting and reopening After Effects will.
 
+## 0.6.0
+
+- **`setup_panel` refuses while After Effects is open, and changes nothing
+  when it does.** Installing into an open After Effects leaves the panel
+  half-updated, so the order is now always: ask the user to quit After
+  Effects, run `setup_panel`, then have them reopen it — every message that
+  names `setup_panel` says it in that order. A render running in `aerender`
+  does not count as After Effects being open. If the tools cannot check
+  whether After Effects is running, `setup_panel` refuses too; once the user
+  confirms it is quit, call it with `afterEffectsClosed: true`. After a
+  successful install the next step is "open After Effects", and
+  `restartAfterEffects` is true only if After Effects was opened mid-install
+  (issue #262).
+  supersedes: run setup_panel, then restart After Effects
+  supersedes: run setup_panel, then ask them to quit and reopen After Effects
+
 ## 0.5.2
 
 Four fixes, all reported from outside the project. Two change what a result

@@ -33,7 +33,10 @@ const {
   afterEffectsUnknownRefusal,
   SIGNED_INSTALL_OVERWRITTEN_NOTE,
 } = await import(dist("setup", "install.js"));
-const { afterEffectsProcess } = await import(dist("setup", "platform.js"));
+const { afterEffectsProcess, afterEffectsFromPgrep, afterEffectsFromTasklist, isAfterEffectsAppCommand } = await import(
+  dist("setup", "platform.js")
+);
+const { checkSetup } = await import(dist("setup", "check.js"));
 const { installedPanelDir } = await import(dist("setup", "paths.js"));
 const { buildNextSteps } = await import(dist("setup", "check.js"));
 const { assessPanel, unknownOpMessage, panelDrivenBatchMessage } = await import(dist("setup", "panelVersion.js"));
@@ -334,6 +337,8 @@ await check("no message anywhere says setup_panel before quitting", async () => 
         if (e.name !== "node_modules" && e.name !== "generated") walk(p);
       } else if (/\.(ts|mjs|js|md)$/.test(e.name)) {
         fs.readFileSync(p, "utf8").split("\n").forEach((line, i) => {
+          // whats-new quotes the old rule on purpose, as a grep target.
+          if (/^\s*supersedes:/.test(line)) return;
           if (OLD_ORDER.test(line)) offenders.push(`${p}:${i + 1}: ${line.trim()}`);
           if (/run setup_panel, then (ask|have|tell)[^.\n]*(quit|restart)/i.test(line)) offenders.push(`${p}:${i + 1}: ${line.trim()}`);
         });
@@ -353,6 +358,81 @@ await check("no message anywhere says setup_panel before quitting", async () => 
     });
   }
   assert.deepEqual(offenders, [], `the old order survives:\n${offenders.join("\n")}`);
+});
+
+// ------------------------------------------- only the application counts
+
+const AE_APP = "/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/MacOS/After Effects";
+const AERENDER = "/Applications/Adobe After Effects 2026/aerender -project /tmp/x.aep -comp Main -output /tmp/x.mov";
+const AERENDERCORE =
+  "/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/aerendercore.app/Contents/MacOS/aerendercore -project /tmp/x.aep";
+const CEP =
+  "/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/Frameworks/CEPHtmlEngine.framework/Versions/A/Helpers/CEPHtmlEngine.app/Contents/MacOS/CEPHtmlEngine";
+
+await check("macOS: the After Effects app counts; aerender, aerendercore and CEP helpers do not", async () => {
+  assert.equal(isAfterEffectsAppCommand(AE_APP), true);
+  assert.equal(isAfterEffectsAppCommand(`${AE_APP} -psn_0_12345`), true, "launch arguments do not hide it");
+  assert.equal(isAfterEffectsAppCommand(`${AE_APP} /Users/me/Projects/spot.aep`), true, "nor does a project path");
+  assert.equal(isAfterEffectsAppCommand("/Applications/Adobe After Effects (Beta)/Adobe After Effects (Beta).app/Contents/MacOS/After Effects (Beta)"), true);
+  for (const other of [AERENDER, AERENDERCORE, CEP, "grep Adobe After Effects", "/Applications/Adobe After Effects 2026/aerender"]) {
+    assert.equal(isAfterEffectsAppCommand(other), false, other);
+  }
+  // pgrep -lf lines are "<pid> <command line>".
+  assert.equal(afterEffectsFromPgrep(`4242 ${AERENDER}\n4243 ${AERENDERCORE}\n`).state, "not-running", "a render alone is not After Effects open");
+  assert.match(afterEffectsFromPgrep(`4242 ${AERENDER}\n`).detail, /not counted/);
+  assert.equal(afterEffectsFromPgrep(`4243 ${CEP}\n`).state, "not-running");
+  const both = afterEffectsFromPgrep(`4242 ${AERENDER}\n777 ${AE_APP}\n4243 ${CEP}\n`);
+  assert.equal(both.state, "running");
+  assert.match(both.detail, /^777 .*MacOS\/After Effects$/);
+  assert.equal(afterEffectsFromPgrep("").state, "not-running");
+});
+
+await check("Windows: only an AfterFX.exe row counts, never aerender.exe", async () => {
+  const row = (img) => `${img.padEnd(25)} 1234 Console                    1    812,345 K`;
+  assert.equal(afterEffectsFromTasklist(`\r\n${row("AfterFX.exe")}\r\n`).state, "running");
+  assert.equal(afterEffectsFromTasklist(`\r\n${row("aerender.exe")}\r\n`).state, "not-running");
+  assert.equal(afterEffectsFromTasklist(`\r\n${row("NotAfterFX.exe")}\r\n`).state, "not-running");
+  assert.equal(afterEffectsFromTasklist("INFO: No tasks are running which match the specified criteria.\r\n").state, "not-running");
+});
+
+await check("a running aerender does not stop setup_panel", async () => {
+  try {
+    const target = fakeHome("aerender");
+    const res = await installPanel({ prefs: prefs([afterEffectsFromPgrep(`4242 ${AERENDER}\n`)]).calls, enableDebugMode: false });
+    assert.equal(res.ok, true);
+    assert.ok(fs.existsSync(path.join(target, "jsx", "bundle.jsx")));
+  } finally { restoreEnv(); }
+});
+
+// ------------------------------- check_setup when the process check failed
+
+await check("check_setup: an unknown process check is not 'not running', and nextSteps match setup_panel", async () => {
+  const unknown = { name: "afterEffectsRunning", ok: false, detail: "could not tell (x)", evidence: "unknown" };
+  const list = steps([unknown, { name: "panelInstalled", ok: false, detail: "" }, { name: "bridgeReachable", ok: false, detail: "" }]);
+  const confirm = list.findIndex((s) => /make sure After Effects is completely quit, and to confirm it/.test(s));
+  const install = list.findIndex((s) => /^Run the setup_panel tool, with afterEffectsClosed:true once the user has confirmed/.test(s));
+  assert.ok(confirm >= 0 && install > confirm, list.join(" | "));
+  assert.ok(list.slice(install + 1).some((s) => /^Open After Effects/.test(s)), list.join(" | "));
+  // A panel answering proves After Effects is open: then it is the ordinary quit → setup_panel → reopen.
+  const open = steps([unknown, { name: "panelUpToDate", ok: false, detail: "" }, { name: "bridgeReachable", ok: true, detail: "" }]);
+  assertStepOrder("unknown but answering", open, true);
+  assert.ok(!open.some((s) => /afterEffectsClosed/.test(s)), open.join(" | "));
+
+  try {
+    fakeHome("check-unknown");
+    const report = await checkSetup({
+      source: path.join(root, "packages", "ae-panel"),
+      debugMode: { on: true, detail: "on" },
+      afterEffectsRunning: "unknown",
+      candidates: [],
+    });
+    const c = report.checks.find((x) => x.name === "afterEffectsRunning");
+    assert.equal(c.ok, false);
+    assert.equal(c.evidence, "unknown");
+    assert.match(c.detail, /^could not tell/);
+    assert.match(c.fix, /afterEffectsClosed:true/);
+    assert.ok(report.nextSteps.some((s) => /afterEffectsClosed:true/.test(s)), report.nextSteps.join(" | "));
+  } finally { restoreEnv(); }
 });
 
 restoreEnv();
