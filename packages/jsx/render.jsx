@@ -761,13 +761,16 @@ OPS._render_save = noUndo(function (args) {
   }
   var file = app.project.file;
   var threw = null;
-  app.beginSuppressDialogs();
+  // dispatch() normally holds dialogs suppressed already (core.jsx, "Dialog
+  // guard"); suppression is begun here only when it does not, never twice.
+  var own = !(typeof __dialogsSuppressed === "function" && __dialogsSuppressed());
+  if (own) app.beginSuppressDialogs();
   try {
     app.project.save();
   } catch (e) {
     threw = e;
   } finally {
-    app.endSuppressDialogs(false);
+    if (own) app.endSuppressDialogs(false);
   }
   var stillDirty = app.project.dirty === true;
   if (threw || stillDirty) {

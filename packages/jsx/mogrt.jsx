@@ -301,7 +301,8 @@ OPS.export_mogrt = noUndo(function (args) {
   var suppressed = false;
   var exported;
   try {
-    if (suppress) { app.beginSuppressDialogs(); suppressed = true; }
+    var already = typeof __dialogsSuppressed === "function" && __dialogsSuppressed();
+    if (suppress && !already) { app.beginSuppressDialogs(); suppressed = true; }
     exported = comp.exportAsMotionGraphicsTemplate(true, folder.fsName);
   } finally {
     // Unconditional: leaving dialogs suppressed would silence every warning in
@@ -387,6 +388,11 @@ OPS.export_mogrt = noUndo(function (args) {
 
   return result;
 });
+// dispatch() leaves dialogs to this op (core.jsx, "Dialog guard"):
+// suppressDialogs:false has to mean the dialog is shown. Inside run_batch the
+// batch's suppression is already on and the export does not begin its own.
+if (!OPS.export_mogrt.__meta) OPS.export_mogrt.__meta = {};
+OPS.export_mogrt.__meta.ownDialogs = true;
 
 // ---------- add_essential_property (issue #177) ----------
 //

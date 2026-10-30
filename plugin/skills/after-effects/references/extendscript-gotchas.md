@@ -342,6 +342,24 @@ output modules anyway.
   mismatch, will attempt to fix." dialog, and After Effects crashed on the next
   Undo. If a script seems to need different grouping, tell the user rather than
   grouping it by hand.
+
+  *The tool already does:* calls written out as `app.beginUndoGroup(...)` /
+  `app.endUndoGroup()` are rerouted through a counter. Inside the open group
+  they do nothing, and under `undoGroup:false` the first one opens a single
+  real group. A stray end is ignored, and a group left open is closed before
+  the call returns. The result then carries `undoGuard`; read its `note`.
+  **Only written-out calls are covered.** A call made through `eval`,
+  `Function`, `$.evalFile`, an alias of `app` or a computed name reaches After
+  Effects uncounted; measured, one stray end that way cost two undo steps. A
+  script that uses `eval`, `Function` or `$.evalFile` gets a note beginning
+  CAUTION. When you see one, check Edit > Undo in After Effects.
+- **A result with `aeWarnings` is not a clean success.** After Effects reported
+  something while its dialogs were held back. Read the state back before going
+  on.
+- **`alert`, `confirm` and `prompt` do not show.** A dialog inside a script
+  would block After Effects and the bridge until someone clicked it. They come
+  back on the result as `suppressedDialogs`. `confirm` answers No and `prompt`
+  answers Cancel.
 - **`copyToComp` needs the group closed**, which is the opposite problem — see
   "Layers and comps".
 
