@@ -92,6 +92,7 @@ held — internal ops never pass the tool path that takes one.
 | Capability | What the server does with it |
 |---|---|
 | `project-path` | Asks `_project_path` for the .aep's path and reads/writes `house-style.md` itself. |
+| `server-images` | Sends `_screenshot_frame`, `_screenshot_layer` and `_export_mogrt`, which answer with ExtendScript's temp paths, and waits for, normalises, tiles and patches the files itself (`frames/pipeline.ts`). The panel's own processing stays for older servers; see "Screenshots and frame integrity" in [fragile-areas-bridge.md](fragile-areas-bridge.md). |
 
 **Install before AE is open.** The panel loads at launch and only at launch, so
 installing while AE is closed costs no restart. `check_setup` reports
