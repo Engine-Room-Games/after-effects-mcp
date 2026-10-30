@@ -296,7 +296,15 @@ move straight back to where the last one started as a return. A run of 20+ keys
 each within 1.5 frames of the last (baked or tracked) is cut out and named;
 the hand keys either side of it on the same property are kept. A path or a text document is not numbers, so the panel sends a short hash of
 it (vertices, tangents and closed; text, font, size and fill) and two equal
-keys read as a hold rather than a move or a step. A bounce is a sharp reversal
+keys read as a hold rather than a move or a step. The hash is the length plus
+two independent 32-bit hashes (djb2 and sdbm), and text style attributes are
+read one by one so a failing read drops only itself. Its cost is bounded
+because `maxKeys` caps keys, not vertices: a path over 1000 vertices is not
+hashed, and one call hashes at most 250,000 characters (refused before the
+string is built). A key past either bound carries no identity, is taken as
+changed, and is counted in the notes. Measured in V8 by the unit test: about
+2 ms per 1000-vertex key and ~40 ms for a whole budget; ExtendScript is
+interpreted and slower, which is what the budget is for. A bounce is a sharp reversal
 that comes back along roughly the axis it arrived on (about 150° or more); a
 sharper-than-90° turn short of that is a corner. A hold keyframe into a different value is a step (a blink, a cut, Source
 Text) — counted with its interval, never a move with eases and never a hold.
@@ -319,7 +327,8 @@ than eight moves come back marked as a hint rather than a pattern.
 Unmeasured live: that `keyTime` answers comp time for a layer whose
 `startTime` is not zero (a stagger built by sliding layers depends on it) and
 descending comp time on a time-reversed layer, with `inPoint` after `outPoint`
-(the fake models both from the scripting reference), and
+(the fake models both from the scripting reference), what the identity
+hashing budget costs in ExtendScript rather than V8, and
 how long the read takes on a large comp — `maxKeys` (default 2000) is the
 bound, and hitting it is reported.
 

@@ -64,7 +64,7 @@ export interface RawComp {
   duration: number;
   numLayers: number;
   props: RawProp[];
-  skipped: { notMotion: number; expressionDriven: number };
+  skipped: { notMotion: number; expressionDriven: number; uncompared?: number };
 }
 
 export interface MotionKeys {
@@ -694,6 +694,7 @@ export function summarizeMotion(raw: MotionKeys) {
   let expressionDriven = 0;
   let notMotion = 0;
   let reordered = 0;
+  let uncompared = 0;
   const baked: string[] = [];
   const rev: Reversals = { impacts: 0, returns: 0, impactsOn: new Map() };
   const walk: Walk = { segments, moves, holds, steps, rev, offscreen: 0 };
@@ -702,6 +703,7 @@ export function summarizeMotion(raw: MotionKeys) {
     fpsSet.add(round(fps, 3));
     expressionDriven += c.skipped?.expressionDriven ?? 0;
     notMotion += c.skipped?.notMotion ?? 0;
+    uncompared += c.skipped?.uncompared ?? 0;
     const before = moves.length;
     let keys = 0;
     const layers = new Set<number>();
@@ -874,6 +876,12 @@ export function summarizeMotion(raw: MotionKeys) {
     const named = baked.slice(0, 3).join(", ") + (baked.length > 3 ? `, and ${baked.length - 3} more` : "");
     result.notes.push(
       `${baked.length} propert${baked.length === 1 ? "y is" : "ies are"} keyed on nearly every frame (baked or tracked) and that part is left out of the statistics: ${named}.`
+    );
+  }
+  if (uncompared) {
+    result.notes.push(
+      `${uncompared} path or text key${uncompared === 1 ? " was" : "s were"} too large to compare cheaply (a path over 1000 vertices, ` +
+        `or past the per-call hashing budget) and ${uncompared === 1 ? "is" : "are"} taken as changed, so an unchanged one may read as a move.`
     );
   }
   if (reordered) {

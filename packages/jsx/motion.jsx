@@ -62,15 +62,34 @@ function __moValue(v) {
   return out;
 }
 
-/** djb2 over a string, as 8 hex digits. ES3: no Math.imul, so kept in range by hand. */
-function __moHash(str) {
-  var h = 5381;
-  for (var i = 0; i < str.length; i++) {
-    h = (h * 33 + str.charCodeAt(i)) % 4294967296;
-  }
-  var hex = h.toString(16);
+// Identity hashing is bounded twice, because maxKeys caps keys and not what
+// is in them: a path over __MO_PATH_MAX_VERTICES vertices is not hashed at
+// all, and once __MO_HASH_BUDGET characters have been hashed in one call no
+// further value is. Either way the key carries no identity, the server takes
+// it as changed (the old, safe reading), and the count comes back in
+// `skipped.uncompared` so the summary can say so.
+var __MO_PATH_MAX_VERTICES = 1000;
+var __MO_HASH_BUDGET = 250000;
+
+function __moHex(h) {
+  var hex = (h >>> 0).toString(16);
   while (hex.length < 8) hex = "0" + hex;
   return hex;
+}
+
+/**
+ * The string's length and two independent 32-bit hashes (djb2 and sdbm), so a
+ * swap that collides in one ("Ez" / "FY" under djb2) does not in both. Bit
+ * operators keep every step a 32-bit integer, which ES3 does exactly.
+ */
+function __moHash(str) {
+  var h1 = 5381, h2 = 0;
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i);
+    h1 = ((h1 << 5) + h1 + c) | 0;
+    h2 = (c + (h2 << 6) + (h2 << 16) - h2) | 0;
+  }
+  return str.length.toString(36) + ":" + __moHex(h1) + __moHex(h2);
 }
 
 function __moPoints(list) {
@@ -83,26 +102,50 @@ function __moPoints(list) {
   return out.join(";");
 }
 
+/** One text-style attribute as a string, or "" when it cannot be read; each read on its own. */
+function __moAttr(v, name) {
+  try {
+    var x = v[name];
+    if (x === undefined || x === null) return "";
+    if (typeof x === "object" && typeof x.length === "number") return x.join(",");
+    return String(x);
+  } catch (e) { return ""; }
+}
+
+var __MO_TEXT_ATTRS = ["font", "fontSize", "applyFill", "fillColor", "applyStroke", "strokeColor", "strokeWidth", "tracking"];
+
 /**
  * A cheap identity for a value that is not numbers, so two keys holding the
  * same shape or the same text are recognised as a hold rather than a move:
- * a hash of a path's vertices, tangents and closed flag, or of a text
- * document's text, font, size and fill. Null when the value is neither.
+ * the hash of a path's vertices, tangents and closed flag, or of a text
+ * document's text and style. Null when the value is neither, or when the
+ * bounds above say not to hash it (`st.skipped.uncompared` counts those).
  */
-function __moIdentity(v) {
+function __moIdentity(v, st) {
   if (!v || typeof v !== "object") return null;
+  var str = null, tag = "";
   try {
     if (v.vertices) {
-      return "s" + __moHash(__moPoints(v.vertices) + "|" + __moPoints(v.inTangents) + "|" +
-        __moPoints(v.outTangents) + "|" + (v.closed ? "1" : "0"));
+      // Refused before the string is built: a vertex prints as about 36
+      // characters across vertices and both tangents.
+      if (v.vertices.length > __MO_PATH_MAX_VERTICES || st.hashed + v.vertices.length * 36 > __MO_HASH_BUDGET) {
+        st.skipped.uncompared += 1;
+        return null;
+      }
+      tag = "s";
+      str = __moPoints(v.vertices) + "|" + __moPoints(v.inTangents) + "|" +
+        __moPoints(v.outTangents) + "|" + (v.closed ? "1" : "0");
+    } else if (typeof v.text === "string") {
+      tag = "t";
+      var parts = [v.text];
+      for (var i = 0; i < __MO_TEXT_ATTRS.length; i++) parts.push(__moAttr(v, __MO_TEXT_ATTRS[i]));
+      str = parts.join("|");
     }
-    if (typeof v.text === "string") {
-      var extra = "";
-      try { extra = "|" + v.font + "|" + v.fontSize + "|" + (v.fillColor ? v.fillColor.join(",") : ""); } catch (eT) {}
-      return "t" + __moHash(v.text + extra);
-    }
-  } catch (e) {}
-  return null;
+  } catch (e) { return null; }
+  if (str === null) return null;
+  if (st.hashed + str.length > __MO_HASH_BUDGET) { st.skipped.uncompared += 1; return null; }
+  st.hashed += str.length;
+  return tag + __moHash(str);
 }
 
 /** [influence, speed] of the first entry of one side, or [null, null]. */
@@ -177,7 +220,7 @@ function __moWalk(group, names, layer, st) {
       try {
         var raw = p.keyValue(k);
         v = __moValue(raw);
-        if (v === null) id = __moIdentity(raw);
+        if (v === null) id = __moIdentity(raw, st);
       } catch (eV) { v = null; }
       keys.push([
         __moRound(kt, 5),
@@ -226,18 +269,19 @@ OPS._motion_keys = noUndo(function (args) {
   var budget = args.maxKeys > 0 ? args.maxKeys : 2000;
   var out = [];
   var st = null;
-  var read = 0, truncated = false, keysNotRead = 0, propsNotRead = 0;
+  var read = 0, truncated = false, keysNotRead = 0, propsNotRead = 0, hashed = 0;
   for (var j = 0; j < comps.length; j++) {
     var comp = comps[j];
     st = {
-      props: [], read: read, budget: budget, truncated: truncated, keysNotRead: 0, propsNotRead: 0,
-      skipped: { notMotion: 0, expressionDriven: 0 }
+      props: [], read: read, budget: budget, truncated: truncated, keysNotRead: 0, propsNotRead: 0, hashed: hashed,
+      skipped: { notMotion: 0, expressionDriven: 0, uncompared: 0 }
     };
     for (var li = 1; li <= comp.numLayers; li++) {
       var layer = comp.layer(li);
       __moWalk(layer, [], layer, st);
     }
     read = st.read;
+    hashed = st.hashed;
     truncated = st.truncated;
     keysNotRead += st.keysNotRead;
     propsNotRead += st.propsNotRead;

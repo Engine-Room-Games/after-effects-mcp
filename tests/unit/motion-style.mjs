@@ -599,12 +599,75 @@ await check("_motion_keys reads every keyed property, compactly, with the first 
   assert.equal(byPath["Transform > Scale"].reversed, false);
   const morph = pops.props.find((p) => p.layerId === 7);
   assert.equal(morph.keys[0][7], null, "a path has no numeric value");
-  assert.match(morph.keys[0][8], /^s[0-9a-f]{8}$/);
+  assert.match(morph.keys[0][8], /^s[0-9a-z]+:[0-9a-f]{16}$/);
   assert.notEqual(morph.keys[0][8], morph.keys[1][8], "different paths, different identities");
   assert.equal(morph.keys[1][8], morph.keys[2][8], "the same path, the same identity");
   assert.equal(byPath["Transform > Scale"].keys[0][8], null, "numeric values carry no identity");
   assert.equal(r.keysRead, 15);
   assert.equal(r.truncated, false);
+});
+
+// Identity hashing is bounded and collision-resistant (focused review of #254).
+await check("identity hash: length and two hashes, so a djb2 swap collision ('Ez' / 'FY') does not collide", () => {
+  const h = ae.json(`[__moHash("Ez"), __moHash("FY"), __moHash("Ez")]`);
+  assert.notEqual(h[0], h[1]);
+  assert.equal(h[0], h[2]);
+  assert.match(h[0], /^[0-9a-z]+:[0-9a-f]{16}$/);
+});
+
+await check("text identity reads each style attribute on its own: one failing read keeps the rest", () => {
+  const ids = ae.json(`(function () {
+    var st = { hashed: 0, skipped: { uncompared: 0 } };
+    function doc(font, stroke) {
+      var d = { text: "Hello", font: font, fillColor: [1, 1, 1], strokeColor: stroke, tracking: 0 };
+      d.__defineGetter__("fontSize", function () { throw new Error("no size here"); });
+      return d;
+    }
+    return [__moIdentity(doc("Inter", [0, 0, 0]), st), __moIdentity(doc("Roboto", [0, 0, 0]), st),
+            __moIdentity(doc("Inter", [1, 0, 0]), st), __moIdentity(doc("Inter", [0, 0, 0]), st)];
+  })()`);
+  assert.notEqual(ids[0], ids[1], "font still compared after fontSize threw");
+  assert.notEqual(ids[0], ids[2], "stroke colour is compared");
+  assert.equal(ids[0], ids[3]);
+});
+
+await check("a path over 1000 vertices is not hashed, and the hashing budget stops a run of big paths; both counted", () => {
+  const r = ae.json(`(function () {
+    function path(n, scale) {
+      var sh = new Shape();
+      for (var i = 0; i < n; i++) {
+        sh.vertices.push([i * scale, (i % 7) * scale]); sh.inTangents.push([1.25, -2.5]); sh.outTangents.push([-1.25, 2.5]);
+      }
+      return sh;
+    }
+    var st = { hashed: 0, skipped: { uncompared: 0 } };
+    var t0 = Date.now();
+    var huge = __moIdentity(path(5000, 1), st);
+    var big = [];
+    for (var k = 0; k < 120; k++) big.push(__moIdentity(path(1000, 1 + k), st));
+    var nulls = 0;
+    for (var j = 0; j < big.length; j++) if (big[j] === null) nulls++;
+    return { huge: huge, nulls: nulls, uncompared: st.skipped.uncompared, hashed: st.hashed, ms: Date.now() - t0 };
+  })()`);
+  assert.equal(r.huge, null, "5000 vertices: not hashed at all");
+  assert.ok(r.nulls > 0 && r.nulls < 120, `${r.nulls} of 120 1000-vertex paths past the budget`);
+  assert.equal(r.uncompared, 1 + r.nulls);
+  assert.ok(r.hashed <= 250000, `hashed ${r.hashed} characters`);
+  console.log(`  motion-style: the whole per-call hashing budget (${r.hashed} characters) plus the walk took ${r.ms} ms in V8`);
+  const s = summarizeMotion(raw([comp([popIn(1, 0)], { skipped: { notMotion: 0, expressionDriven: 0, uncompared: r.uncompared } })]));
+  assert.ok(s.notes.some((n) => /too large to compare cheaply/.test(n)), s.notes.join("\n"));
+});
+
+await check("cost: hashing one 1000-vertex path key, the most a key may cost (measured here in V8; stated, not asserted tight)", () => {
+  const ms = ae.json(`(function () {
+    var sh = new Shape();
+    for (var i = 0; i < 1000; i++) { sh.vertices.push([i * 1.5, i * 0.25]); sh.inTangents.push([1, -2]); sh.outTangents.push([-1, 2]); }
+    var t0 = Date.now();
+    for (var r = 0; r < 50; r++) __moIdentity(sh, { hashed: 0, skipped: { uncompared: 0 } });
+    return (Date.now() - t0) / 50;
+  })()`);
+  console.log(`  motion-style: one 1000-vertex path identity costs ~${ms.toFixed(2)} ms in V8`);
+  assert.ok(ms < 200, `${ms} ms per key`);
 });
 
 await check("_motion_keys stops at maxKeys and counts what it left", () => {
