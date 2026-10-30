@@ -177,6 +177,10 @@ export interface CreateServerOptions {
    * `AE_MCP_RESOURCE_POLL_MS`. Not clamped, so a test can poll fast.
    */
   livePollMs?: number;
+  /** The quiet period after this session's last write before the poll runs again. */
+  liveQuietMs?: number;
+  /** How often the summary is walked in full with nothing else prompting it. */
+  liveSweepMs?: number;
 }
 
 /**
@@ -285,14 +289,18 @@ export function createServer(opts: CreateServerOptions = {}) {
   // new) panel is answering, and the verdict about the old one is void (#156).
   ws.onReopen(() => panelGate.invalidate());
   ws.start();
-  // Live project resources (issue #248). Polls After Effects only while a
-  // client is subscribed, through the same read path a tool read takes, and
-  // never while this session holds or waits on the write lease.
+  // Live project resources (issue #248; resources/live.ts). Polls After
+  // Effects only while a client is subscribed, one constant-time read a tick,
+  // through the panel version gate and the tool path's read — and every poll
+  // read yields to writes: this session's, and any session's at the desk.
   const live = new LiveResources({
-    read: (op, a) => line.runOp(op, a, { write: false }),
+    read: (op, a, background) => line.runOp(op, a, { write: false, yieldToWrites: background }),
     notify: (uri) => server.sendResourceUpdated({ uri }),
     writing: () => writes.held !== null || writes.depth > 0,
+    gate: () => panelGate.check(),
     intervalMs: opts.livePollMs,
+    quietMs: opts.liveQuietMs,
+    sweepMs: opts.liveSweepMs,
   });
   line.start();
   // The event socket and its reconnect timer are what kept an orphaned server
@@ -1187,9 +1195,9 @@ export function createServer(opts: CreateServerOptions = {}) {
       // No-op unless a lease was taken, and deferred by `extendUntil` when a
       // long batch is still running behind the envelope we just returned.
       lease?.release();
-      // A write may have changed what a subscriber is watching; a no-op when
-      // nobody is, and the refresh still waits out a batch's extended lease.
-      if (lease) live.nudge();
+      // A write may have changed what a subscriber is watching. The poll waits
+      // for a quiet period after the last one, and out a batch's extended lease.
+      if (lease) live.noteWrite(name);
     }
   });
 

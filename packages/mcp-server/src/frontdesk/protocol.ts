@@ -1,6 +1,7 @@
 import {
   AeError,
   BridgeAuthError,
+  BridgeBusyError,
   BridgeResetError,
   BridgeTimeoutError,
   BridgeUnreachableError,
@@ -74,6 +75,8 @@ export type WireError =
   | { kind: "queue-wait"; op: string; waitedMs: number; behind: string; behindSession?: string }
   | { kind: "queue-full"; op: string; maxDepth: number; behind: string }
   | { kind: "queue-cancelled"; op: string }
+  /** A read that yields to writes met one; nothing was sent (issue #248). */
+  | { kind: "busy"; op: string; holder?: string }
   | { kind: "error"; message: string };
 
 /**
@@ -95,6 +98,7 @@ export function toWire(e: unknown): WireError {
   if (e instanceof WriteQueueWaitError) return { kind: "queue-wait", op: e.op, waitedMs: e.waitedMs, behind: e.behind };
   if (e instanceof WriteQueueFullError) return { kind: "queue-full", op: e.op, maxDepth: e.maxDepth, behind: e.behind };
   if (e instanceof WriteQueueCancelledError) return { kind: "queue-cancelled", op: e.op };
+  if (e instanceof BridgeBusyError) return { kind: "busy", op: e.op, holder: e.holder };
   return { kind: "error", message: (e as Error)?.message ?? String(e) };
 }
 
@@ -122,6 +126,8 @@ export function fromWire(w: WireError): Error {
       return new WriteQueueFullError(w.op, w.maxDepth, w.behind);
     case "queue-cancelled":
       return new WriteQueueCancelledError(w.op);
+    case "busy":
+      return new BridgeBusyError(w.op, w.holder);
     default:
       return new Error(w.message);
   }

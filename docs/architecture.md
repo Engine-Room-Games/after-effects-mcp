@@ -297,42 +297,86 @@ checks in handlers) stay: a hand-rolled `POST /op` still reaches them.
 ## Live resources (issue #248)
 
 `ae://project/summary` and `ae://project/active-comp` are listed beside the
-guides and answer with `get_project_summary`, and `get_comp` on its
-`activeItemId`. Both ops are in every bundle ever shipped, so the feature needs
-no panel update. The server declares `resources.subscribe`; a guide can be
-subscribed to and never notifies, since it cannot change while the process runs.
+guides. A read answers with `get_project_summary`, and with the active comp's
+`get_comp` summary. The server declares `resources.subscribe`. A guide can be
+subscribed to, but it never notifies, because it cannot change while the
+process runs. Live reads go through the panel version gate like a tool call
+does. A client's own read that fails is thrown with the tool path's sentence,
+so an unreachable panel says to call `check_setup`.
 
 **The panel says nothing when the project changes.** Its event socket carries
-job events only, so change detection is a poll of the two reads, compared as
-JSON text against the last answer. Four rules keep it from costing After
-Effects anything it does not have to:
+job events only, so change detection is a poll. The poll's cost model is the
+whole design.
 
-- **No subscriber, no traffic.** The timer exists only while the subscription
-  set is non-empty; listing costs nothing, and a read is one ordinary read.
-  `tests/unit/live-resources.mjs` fails if an op reaches the stub with nobody
-  subscribed.
-- **Bounded rate.** One refresh at a time, chained `setTimeout` rather than an
-  interval, every `AE_MCP_RESOURCE_POLL_MS` (default 5 s, floor 1 s). A
-  finished write nudges a refresh after 250 ms, still not inside the floor —
-  the change an agent most wants to hear about is usually its own. The timer is
-  `unref`'d, so a subscription never keeps an orphaned server alive (#163).
-- **Never beside a write.** A refresh goes through `line.runOp(..., {write:
-  false})` — the tool path's read, through the front desk when there is one —
-  and is skipped outright while this session holds or waits on the write lease.
-  A long `run_batch` holds the lease for its whole job, so nothing is read
-  between two of its chunks. Another session's writes are not visible here;
-  the panel's evalScript chain still keeps the read from landing *inside* one.
-- **Failures are quiet.** A refresh that fails keeps the last value, notifies
-  nobody, logs once when the bridge goes and once when it is back, and backs
-  off to a minute. A client's own `resources/read` is what reports the failure,
-  thrown with the same sentence a tool call would answer — an unreachable
-  panel says to call `check_setup`.
+**No subscriber, no traffic.** The timer exists only while the subscription
+set is non-empty. Listing costs nothing, and a client's read is one ordinary
+read. `tests/unit/live-resources.mjs` fails if any op reaches the stub panel
+while nobody is subscribed.
 
-What it does not track: edits inside a layer. The summary covers items, names,
-the project path and the active item; the comp read covers the comp's settings
-and layer count. A per-layer fingerprint would be `_comp_fingerprint` on every
-tick, which is the kind of cost the issue ruled out; `snapshot_comp` /
-`diff_comp` remain the tool for that.
+**A tick is constant time.** `_live_probe` (explore.jsx) returns the project
+path, the item count, the active item and the active comp's `__compSummary`.
+It does no walk.
+
+- `ae://project/active-comp` is answered from the probe outright.
+- `ae://project/summary` needs the `get_project_summary` walk, which is linear
+  in project items. It walks only when one of these holds:
+  - the probe's path, count or active item moved;
+  - this session ran a write that can rename an item while leaving the count
+    alone (`RENAMING_OPS`: `set_comp`, `run_jsx`, `run_batch`, the checkpoint
+    ops);
+  - the sweep fell due (60 s), which is what catches a rename made by hand.
+
+  So the writes an agent makes most often (keyframes, transforms, effects)
+  never cause a walk. An op missing from `RENAMING_OPS` delays a rename
+  notification to the sweep; it never causes a wrong answer.
+- A panel without `_live_probe` answers `Unknown op`. The poll then falls back
+  to the full reads for that process. The version gate normally refuses such a
+  panel first.
+- Ticks run every `AE_MCP_RESOURCE_POLL_MS` (default 5 s, floor 1 s), one at a
+  time, on a chained `unref`'d timer. The timer never keeps an orphaned server
+  alive (#163).
+
+**Writes go first.** The poll yields to writes three ways.
+
+- **This session's writes.** No tick runs while this session holds or waits on
+  its write lease. No tick runs until none of its writes has finished for a
+  quiet period (2 s), and each write restarts that period. A steadily writing
+  agent therefore costs nothing until it stops.
+- **Any session's writes.** Every poll read is sent with `yieldToWrites`. The
+  `SessionLine` refuses it unsent, as `BridgeBusyError`, while the local lease
+  is held or queued. Through the front desk, the desk refuses it while *any*
+  session holds the shared write lock. A `run_batch` holds that lock between
+  its chunks, so no poll read lands in the middle of another session's batch.
+  The refusal crosses the wire as `{kind: "busy"}`. The tick is skipped, which
+  is not a failure and causes no backoff. A read an agent asked for never
+  carries the flag. An older desk ignores the field and forwards, which is the
+  behaviour before this change.
+- **The remaining exposure** is one tick's reads already queued in the panel's
+  evalScript chain when a write arrives. That write waits behind them. With the
+  probe, that wait is one constant-time eval. It is a full walk only on the
+  rare tick where a walk is due. The test stub runs ops serially, as the panel
+  does, and asserts that no write waits behind a poll read in either a burst
+  or a paced run of writes.
+
+**Baselines are sequenced.** Every read takes a generation number. A result
+older than the stored baseline is dropped, so a slow tick answering after a
+client's fresher read cannot overwrite it. Before that fix, the late answer
+cost two spurious notifications.
+
+**Failures are quiet.** A tick that fails keeps the last value and notifies
+nobody. It logs once when the bridge goes and once when it comes back, and
+backs off to a minute.
+
+**One poller per subscribing session, not per After Effects.** The poll lives
+in each server process. Two sessions subscribed against one After Effects
+therefore probe twice per interval. The desk could host a shared poller, but
+then it would also have to route notifications to followers' clients. That
+protocol was not worth adding for the cost: one constant-time eval per
+subscribing session every 5 s, which yields to every write.
+
+**What it does not track: edits inside a layer.** A per-layer fingerprint would
+be `_comp_fingerprint` on every tick, which is the cost the issue ruled out.
+`snapshot_comp` / `diff_comp` remain the tool for that.
 
 ## Tool annotations (issue #165)
 

@@ -76,7 +76,8 @@ bounded form is the one to reach for:
 **If your client supports resource subscriptions**, `ae://project/summary` and
 `ae://project/active-comp` are the same answers as `get_project_summary` and
 `get_comp` on the active comp, and a subscription tells you when the user adds,
-renames or switches comps — so you need not re-read them to find out. They track
+renames or switches comps — so you need not re-read them to find out (a
+rename made by hand can take up to a minute to arrive). They track
 the project and the comp's settings, not edits inside a layer; for those it is
 still `snapshot_comp` → `diff_comp`.
 

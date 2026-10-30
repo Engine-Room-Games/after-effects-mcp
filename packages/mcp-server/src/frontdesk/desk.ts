@@ -1,6 +1,7 @@
 import http from "node:http";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { logger } from "../util/logger.js";
+import { BridgeBusyError } from "../util/errors.js";
 import {
   DESK_ID,
   DESK_NONCE_HEADER,
@@ -54,6 +55,13 @@ export interface ForwardRequest {
    * lost and may have re-sent elsewhere. One machine, one monotonic clock.
    */
   deadline?: number;
+  /**
+   * A background read (the live-resource poll, issue #248): refused unsent,
+   * as `BridgeBusyError`, while any session holds the write lock — a
+   * `run_batch` holds it between its chunks, so this is what keeps the poll
+   * from landing in the middle of another session's batch.
+   */
+  yieldToWrites?: boolean;
 }
 
 export interface ForwardHooks {
@@ -236,6 +244,7 @@ export class FrontDesk {
    */
   async forward(req: ForwardRequest, hooks: ForwardHooks = {}): Promise<unknown> {
     if (req.write && (!req.leaseId || !this.lock.isHolder(req.leaseId))) throw new LeaseNotHeldError();
+    if (req.yieldToWrites && this.lock.held) throw new BridgeBusyError(req.op, this.lock.held.op);
     const entry: InFlight = { seq: ++this.seq, sessionId: req.sessionId, session: req.session, op: req.op, since: Date.now() };
     const ahead = () => {
       const now = Date.now();
@@ -264,6 +273,7 @@ export class FrontDesk {
     // from here; the stalled-desk message says so.
     const stillGo = () => {
       if (req.deadline !== undefined && monoMs() > req.deadline) throw new DeadlinePassedError();
+      if (req.yieldToWrites && this.lock.held) throw new BridgeBusyError(req.op, this.lock.held.op);
       if (hooks.stillWanted && !hooks.stillWanted()) throw new CallerGoneError();
       if (req.write && (!req.leaseId || !this.lock.isHolder(req.leaseId))) throw new LeaseNotHeldError();
     };
@@ -429,6 +439,7 @@ export class FrontDesk {
           write: b.write === true,
           leaseId: typeof b.leaseId === "string" ? b.leaseId : undefined,
           deadline: typeof b.deadline === "number" ? b.deadline : undefined,
+          yieldToWrites: b.yieldToWrites === true,
         },
         {
           onStart: (ahead) => {

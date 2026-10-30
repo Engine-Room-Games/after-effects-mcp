@@ -500,6 +500,24 @@ OPS.get_project_summary = noUndo(function (args) {
   };
 });
 
+// The live resources' every-tick read (issue #248). Constant time — no walk
+// of the project's items — so a subscriber's poll costs After Effects almost
+// nothing: the item count, the path and the active item decide whether the
+// full get_project_summary walk is worth running, and the active comp's
+// summary is get_comp's own answer, so ae://project/active-comp never walks.
+OPS._live_probe = noUndo(function (args) {
+  var p = app.project;
+  var a = null;
+  try { a = p.activeItem; } catch (e) {}
+  return {
+    path: p.file ? p.file.fsName : null,
+    numItems: p.numItems,
+    activeItemId: a ? a.id : null,
+    activeType: a ? __itemKind(a) : null,
+    activeComp: a && a instanceof CompItem ? __compSummary(a) : null
+  };
+});
+
 // A search, so the default is the opposite of list_layers: absent `include`
 // means the core alone — id/index/name/sourceType plus the comp — because the
 // reason to call this is to learn which layers exist and what to address them

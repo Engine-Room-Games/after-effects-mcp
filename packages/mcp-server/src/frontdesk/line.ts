@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { HttpClient } from "../bridge/httpClient.js";
 import { opTimeoutMs } from "../bridge/httpClient.js";
 import type { QueueWait, WriteLease, WriteQueue } from "../bridge/writeQueue.js";
-import { BridgeTimeoutError, DeskPlaceLostError, FrontDeskLostError, WriteQueueCancelledError } from "../util/errors.js";
+import { BridgeBusyError, BridgeTimeoutError, DeskPlaceLostError, FrontDeskLostError, WriteQueueCancelledError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { DESK_ID, DESK_NONCE_HEADER, DESK_PROTOCOL, DESK_TOKEN_HEADER, STALL_BEATS, bodyAllowanceMs, monoMs, readDeskFile, sweepStaleDeskFiles, type FrontDeskOptions } from "./config.js";
 import { DeadlinePassedError, FrontDesk, LeaseNotHeldError, deskProof, type DeskForwarder } from "./desk.js";
@@ -248,9 +248,24 @@ export class SessionLine {
 
   // ------------------------------------------------------------ forwarding
 
-  runOp(op: string, args: unknown, o: { write?: boolean; onWait?: OnWait } = {}): Promise<unknown> {
+  /**
+   * `yieldToWrites` marks a background read (the live-resource poll, issue
+   * #248): refused unsent, as `BridgeBusyError`, while this session holds or
+   * waits on its write lease, and — through the desk — while any session holds
+   * the shared write lock. Never set on a read an agent asked for.
+   */
+  runOp(op: string, args: unknown, o: { write?: boolean; onWait?: OnWait; yieldToWrites?: boolean } = {}): Promise<unknown> {
+    const yieldToWrites = o.yieldToWrites === true && o.write !== true;
+    if (yieldToWrites && (this.local.held !== null || this.local.depth > 0)) {
+      return Promise.reject(new BridgeBusyError(op, this.local.held ?? undefined));
+    }
     if (this.mode.kind === "off") return this.bridge.runOp(op, args);
-    return this.send({ kind: "op", op, args, timeoutMs: opTimeoutMs(op) }, o.write === true, o.onWait, () => this.bridge.runOp(op, args));
+    return this.send(
+      { kind: "op", op, args, timeoutMs: opTimeoutMs(op), ...(yieldToWrites ? { yieldToWrites: true } : {}) },
+      o.write === true,
+      o.onWait,
+      () => this.bridge.runOp(op, args)
+    );
   }
 
   async cancel(jobId: string): Promise<{ known: boolean; error?: string }> {
@@ -279,7 +294,7 @@ export class SessionLine {
    * refused before it goes anywhere (`DeskPlaceLostError`, nothing ran).
    */
   private async send(
-    body: { kind: "op" | "cancel"; op: string; args?: unknown; jobId?: string; timeoutMs: number },
+    body: { kind: "op" | "cancel"; op: string; args?: unknown; jobId?: string; timeoutMs: number; yieldToWrites?: boolean },
     write: boolean,
     onWait: OnWait | undefined,
     direct: () => Promise<unknown>
