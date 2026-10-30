@@ -84,6 +84,10 @@ Read `analyze_motion`'s answer as a proposal, not a measurement of taste:
 - **Moves, not keys.** A move is a run of keys with no hold between them, so a
   `0 → 108 → 100` pop is one 0.4s move with an 8% overshoot. Durations and
   overshoot are per move; ease pairs are per segment between two keys.
+- **Steps, bounces and elastic are their own words.** A hold keyframe into a
+  new value (a blink, a cut, a text change) is a step, never a move; a sharp
+  reversal with no ease (a floor hit) is a bounce; an overshoot that crosses
+  the target again before settling is elastic.
 - **Speed 0 is an ease; anything else flows through.** `leaving` / `arriving`
   count the two separately, and influence is read only off sides that stop.
 - **It cannot see** expressions, motion-path shape or per-dimension eases, and

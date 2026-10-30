@@ -35,6 +35,9 @@ export interface RawProp {
   keys: RawKey[];
   /** Set by the panel when the keys came descending (a time-reversed layer) and were reordered. */
   reversed?: boolean;
+  /** The layer's in and out points, low to high; null when the panel could not read them. */
+  inPoint?: number | null;
+  outPoint?: number | null;
 }
 
 export interface RawComp {
@@ -44,7 +47,7 @@ export interface RawComp {
   duration: number;
   numLayers: number;
   props: RawProp[];
-  skipped: { notMotion: number; expressionDriven: number; outsideLayer?: number };
+  skipped: { notMotion: number; expressionDriven: number };
 }
 
 export interface MotionKeys {
@@ -176,7 +179,7 @@ interface Move {
   seconds: number;
   frames: number;
   segments: number;
-  overshoot: { amount: number; settleSeconds: number; bounces: number } | null;
+  overshoot: { amount: number; settleSeconds: number; oscillations: number } | null;
   anticipation: { amount: number; seconds: number } | null;
 }
 
@@ -269,17 +272,47 @@ export interface Reversals {
   impactsOn: Map<string, number>;
 }
 
-/** Split one property's keys into moves, segments and holds. */
-function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[], holds: number[], rev: Reversals): void {
+/** Everything the walk collects across properties. */
+interface Walk {
+  segments: Segment[];
+  moves: Move[];
+  holds: number[];
+  /** How long each value stood before a hold keyframe stepped it to the next (a blink, a step, Source Text). */
+  steps: number[];
+  rev: Reversals;
+  /** Moves, holds and steps wholly outside their layer's in/out: never on screen. */
+  offscreen: number;
+}
+
+/** A hold keyframe into a different value: an instantaneous change, not a move and not a hold. */
+function isStep(a: RawKey, b: RawKey): boolean {
+  if (a[2] !== "h" || b[0] - a[0] <= EPS) return false;
+  // Text and other non-numeric values are hold-keyed by nature: a key is there because something changed.
+  if (a[7] === null || b[7] === null) return true;
+  return !sameValue(a[7], b[7]);
+}
+
+/** Split one property's keys into moves, segments, holds and steps. */
+function walkProperty(p: RawProp, fps: number, w: Walk): void {
   const k = p.keys;
   const label = propertyLabel(p);
+  const lo = typeof p.inPoint === "number" ? p.inPoint : -Infinity;
+  const hi = typeof p.outPoint === "number" ? p.outPoint : Infinity;
+  /** True when [t0, t1] never overlaps the layer's in/out: nothing of it is seen. */
+  const offscreen = (t0: number, t1: number) => t1 < lo - EPS || t0 > hi + EPS;
   let i = 0;
   let prevMoveStart = -1;
   let prevMoveEnd = -1;
+  // Impacts are counted once per key: the walk restarts inside a run after
+  // each move, and a key it has already looked at must not count again.
+  let impactsSeen = 0;
   while (i < k.length - 1) {
     if (!isMove(k[i], k[i + 1])) {
       const d = k[i + 1][0] - k[i][0];
-      if (d > EPS) holds.push(d);
+      if (offscreen(k[i][0], k[i + 1][0])) {
+        if (d > EPS) w.offscreen++;
+      } else if (isStep(k[i], k[i + 1])) w.steps.push(d);
+      else if (d > EPS) w.holds.push(d);
       prevMoveStart = -1;
       i++;
       continue;
@@ -288,18 +321,27 @@ function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[
     // one move by oneMove's rules; the rest of the run is read from there.
     let j = i;
     while (j < k.length - 1 && isMove(k[j], k[j + 1])) j++;
-    for (let m = i + 1; m < j; m++) {
-      if (isImpact(k[m - 1], k[m], k[m + 1])) {
-        rev.impacts++;
-        rev.impactsOn.set(label, (rev.impactsOn.get(label) ?? 0) + 1);
+    for (let m = Math.max(i + 1, impactsSeen); m < j; m++) {
+      if (isImpact(k[m - 1], k[m], k[m + 1]) && !offscreen(k[m][0], k[m][0])) {
+        w.rev.impacts++;
+        w.rev.impactsOn.set(label, (w.rev.impactsOn.get(label) ?? 0) + 1);
       }
     }
+    impactsSeen = Math.max(impactsSeen, j);
     j = moveEnd(k, i, j);
+    if (offscreen(k[i][0], k[j][0])) {
+      // Wholly before the in point or after the out point. A move that is
+      // seen even in part is kept whole.
+      w.offscreen++;
+      prevMoveStart = -1;
+      i = j;
+      continue;
+    }
     for (let m = i; m < j; m++) {
       const a = k[m];
       const b = k[m + 1];
       const seconds = b[0] - a[0];
-      segments.push({
+      w.segments.push({
         seconds,
         frames: seconds * fps,
         kind: segmentKind(a[2], b[1]),
@@ -307,7 +349,7 @@ function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[
         in: easeSide(b[1], b[3], b[4]),
       });
     }
-    if (prevMoveStart >= 0 && prevMoveEnd === i && sameValue(k[j][7], k[prevMoveStart][7])) rev.returns++;
+    if (prevMoveStart >= 0 && prevMoveEnd === i && sameValue(k[j][7], k[prevMoveStart][7])) w.rev.returns++;
     prevMoveStart = i;
     prevMoveEnd = j;
     const seconds = k[j][0] - k[i][0];
@@ -330,22 +372,67 @@ function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[
       if (m === i + 1 && t < -OVERSHOOT_MIN) move.anticipation = { amount: -t, seconds: k[m][0] - k[i][0] };
     }
     if (peak >= 0) {
-      let bounces = 0;
+      let oscillations = 0;
       let above = true;
       for (let m = peak + 1; m < j; m++) {
         const t = travelShare(k[i][7], k[m][7], k[j][7]);
         if (t === null) continue;
         const nowAbove = t > 1;
         if (nowAbove !== above && Math.abs(t - 1) > OVERSHOOT_MIN) {
-          bounces++;
+          oscillations++;
           above = nowAbove;
         }
       }
-      move.overshoot = { amount: peakShare - 1, settleSeconds: k[j][0] - k[peak][0], bounces };
+      move.overshoot = { amount: peakShare - 1, settleSeconds: k[j][0] - k[peak][0], oscillations };
     }
-    moves.push(move);
+    w.moves.push(move);
     i = j;
   }
+}
+
+const SEPARATED_POSITION = ["ADBE Position_0", "ADBE Position_1", "ADBE Position_2"];
+
+/**
+ * A layer's separated X / Y (/ Z) Position keyed at the same times is one
+ * motion, the way the designer sees it, not two or three moves. Those
+ * properties are merged into one Position whose values are the dimensions
+ * side by side, eases taken from X. Keyed at different times, they stay
+ * apart — each is then its own move.
+ */
+export function mergeSeparatedPosition(props: RawProp[]): RawProp[] {
+  const byLayer = new Map<number, RawProp[]>();
+  for (const p of props) {
+    if (!SEPARATED_POSITION.includes(p.matchName)) continue;
+    const list = byLayer.get(p.layerId) ?? [];
+    list.push(p);
+    byLayer.set(p.layerId, list);
+  }
+  const merged = new Map<RawProp, RawProp | null>();
+  for (const dims of byLayer.values()) {
+    if (dims.length < 2) continue;
+    dims.sort((a, b) => SEPARATED_POSITION.indexOf(a.matchName) - SEPARATED_POSITION.indexOf(b.matchName));
+    const first = dims[0];
+    const same = dims.every(
+      (d) => d.keys.length === first.keys.length && d.keys.every((key, n) => Math.abs(key[0] - first.keys[n][0]) <= EPS)
+    );
+    if (!same) continue;
+    const keys = first.keys.map((key, n): RawKey => {
+      const values = dims.map((d) => d.keys[n][7]);
+      const value = values.every((v) => v && v.length === 1) ? values.map((v) => v![0]) : null;
+      return [key[0], key[1], key[2], key[3], key[4], key[5], key[6], value];
+    });
+    const parts = first.path.split(" > ");
+    parts[parts.length - 1] = "Position";
+    merged.set(first, { ...first, matchName: "ADBE Position", path: parts.join(" > "), keys });
+    for (const d of dims.slice(1)) merged.set(d, null);
+  }
+  if (!merged.size) return props;
+  const out: RawProp[] = [];
+  for (const p of props) {
+    if (!merged.has(p)) out.push(p);
+    else if (merged.get(p)) out.push(merged.get(p)!);
+  }
+  return out;
 }
 
 /**
@@ -452,26 +539,26 @@ export function summarizeMotion(raw: MotionKeys) {
   const segments: Segment[] = [];
   const moves: Move[] = [];
   const holds: number[] = [];
+  const steps: number[] = [];
   const staggers: Stagger[] = [];
   const fpsSet = new Set<number>();
   let expressionDriven = 0;
   let notMotion = 0;
-  let outsideLayer = 0;
   let reordered = 0;
   const baked: string[] = [];
   const rev: Reversals = { impacts: 0, returns: 0, impactsOn: new Map() };
+  const walk: Walk = { segments, moves, holds, steps, rev, offscreen: 0 };
   const comps = raw.comps.map((c) => {
     const fps = c.frameRate > 0 ? c.frameRate : 30;
     fpsSet.add(round(fps, 3));
     expressionDriven += c.skipped?.expressionDriven ?? 0;
     notMotion += c.skipped?.notMotion ?? 0;
-    outsideLayer += c.skipped?.outsideLayer ?? 0;
     const before = moves.length;
     let keys = 0;
     const layers = new Set<number>();
     const clean: RawProp[] = [];
-    for (const raw of c.props) {
-      keys += raw.keys.length;
+    for (const raw of c.props) keys += raw.keys.length;
+    for (const raw of mergeSeparatedPosition(c.props)) {
       const { prop: p, reordered: sorted } = inTimeOrder(raw);
       if (sorted || p.reversed) reordered++;
       if (isBaked(p, fps)) {
@@ -480,7 +567,7 @@ export function summarizeMotion(raw: MotionKeys) {
       }
       layers.add(p.layerId);
       clean.push(p);
-      walkProperty(p, fps, segments, moves, holds, rev);
+      walkProperty(p, fps, walk);
     }
     staggers.push(...staggersOf({ ...c, props: clean }));
     return { id: c.id, name: c.name, frameRate: c.frameRate, animatedLayers: layers.size, keys, moves: moves.length - before };
@@ -529,9 +616,10 @@ export function summarizeMotion(raw: MotionKeys) {
         share: share(over.length, moves.length),
         amountPercent: spread(over.map((m) => m.overshoot!.amount * 100), 1),
         settleSeconds: spread(over.map((m) => m.overshoot!.settleSeconds)),
-        withBounces: over.filter((m) => m.overshoot!.bounces > 0).length,
-        /** Crossings of the target after the peak, summed: an elastic settle counts each. */
-        oscillations: over.reduce((n, m) => n + m.overshoot!.bounces, 0),
+        /** Moves that cross the target again after the peak: an elastic settle. */
+        elastic: over.filter((m) => m.overshoot!.oscillations > 0).length,
+        /** Crossings of the target after the peak, summed over every move. */
+        oscillations: over.reduce((n, m) => n + m.overshoot!.oscillations, 0),
         mostOn: [...overByProp.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([p]) => p),
       }
     : { moves: 0, share: 0 };
@@ -591,6 +679,7 @@ export function summarizeMotion(raw: MotionKeys) {
       top: staggers.slice(0, MAX_STAGGERS),
     },
     holds: { count: holds.length, seconds: holdSeconds },
+    steps: { count: steps.length, intervalSeconds: spread(steps) },
     reversals: {
       impacts: rev.impacts,
       impactsOn: [...rev.impactsOn.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([prop]) => prop),
@@ -603,7 +692,7 @@ export function summarizeMotion(raw: MotionKeys) {
       moves: moves.length, moveSeconds, moveFrames, fps, kinds, segments: segments.length, common, pairable,
       overshoot: over.length ? overshoot as OvershootSummary : null,
       anticipation: antic.length ? anticipation as AnticipationSummary : null,
-      staggers, holdSeconds, holds: holds.length, impacts: rev.impacts,
+      staggers, holdSeconds, holds: holds.length, impacts: rev.impacts, steps: steps.length, stepSeconds: spread(steps),
       impactsOn: [...rev.impactsOn.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null,
     }),
     notes: [] as string[],
@@ -615,13 +704,19 @@ export function summarizeMotion(raw: MotionKeys) {
         `(${raw.keysNotRead} keys) did not fit and ${raw.propsNotRead === 1 ? "was" : "were"} not read. Raise maxKeys or pass fewer comps for the whole picture.`
     );
   }
-  if (moves.length === 0) {
+  if (moves.length === 0 && steps.length === 0) {
     result.notes.push("No keyframed moves found in these comps — nothing to learn a motion style from. Is the animation in expressions or in a precomp?");
+  } else if (moves.length === 0) {
+    result.notes.push(`No eased or linear moves: the animation here is ${steps.length} hold-keyed step${steps.length === 1 ? "" : "s"} (blinks, cuts, text changes), summarised under steps.`);
   } else if (moves.length < FEW_MOVES) {
     result.notes.push(`Only ${moves.length} move${moves.length === 1 ? "" : "s"} read — a hint, not a pattern. Read another comp before writing these as rules.`);
   }
   if (expressionDriven) result.notes.push(`${expressionDriven} keyed propert${expressionDriven === 1 ? "y is" : "ies are"} driven by an expression and ${expressionDriven === 1 ? "was" : "were"} skipped.`);
-  if (outsideLayer) result.notes.push(`${outsideLayer} key${outsideLayer === 1 ? "" : "s"} outside ${outsideLayer === 1 ? "its" : "their"} layer's in/out range ${outsideLayer === 1 ? "was" : "were"} ignored — never seen in the render.`);
+  if (walk.offscreen) {
+    result.notes.push(
+      `${walk.offscreen} move${walk.offscreen === 1 ? "" : "s"}, hold${walk.offscreen === 1 ? "" : "s"} or step${walk.offscreen === 1 ? " lies" : "s lie"} wholly outside ${walk.offscreen === 1 ? "its" : "their"} layer's in/out and ${walk.offscreen === 1 ? "was" : "were"} ignored — never on screen. A move seen in part is kept whole.`
+    );
+  }
   if (notMotion) result.notes.push(`${notMotion} keyed Time Remap / audio propert${notMotion === 1 ? "y was" : "ies were"} skipped as not motion.`);
   if (baked.length) {
     const named = baked.slice(0, 3).join(", ") + (baked.length > 3 ? `, and ${baked.length - 3} more` : "");
@@ -640,7 +735,14 @@ export function summarizeMotion(raw: MotionKeys) {
 
 // ---------------------------------------------------------------- lines for the house style
 
-type OvershootSummary = { moves: number; share: number; amountPercent: Spread | null; settleSeconds: Spread | null; mostOn: string[] };
+type OvershootSummary = {
+  moves: number;
+  share: number;
+  amountPercent: Spread | null;
+  settleSeconds: Spread | null;
+  mostOn: string[];
+  elastic: number;
+};
 type AnticipationSummary = { moves: number; share: number; amountPercent: Spread | null; seconds: Spread | null };
 
 interface LineInputs {
@@ -659,6 +761,8 @@ interface LineInputs {
   holds: number;
   impacts: number;
   impactsOn: string | null;
+  steps: number;
+  stepSeconds: Spread | null;
 }
 
 /**
@@ -669,7 +773,11 @@ interface LineInputs {
  */
 export function suggestLines(x: LineInputs): string[] {
   const lines: string[] = [];
-  if (!x.moves || !x.moveSeconds || !x.moveFrames) return lines;
+  const stepLine =
+    x.steps && x.stepSeconds
+      ? `Steps (hold keys — blinks, cuts, text changes): ${x.steps}, typically ${x.stepSeconds.median}s apart`
+      : null;
+  if (!x.moves || !x.moveSeconds || !x.moveFrames) return stepLine ? [stepLine] : lines;
   const at = x.fps ? ` at ${x.fps}fps` : "";
   const range = x.moveSeconds.p25 === x.moveSeconds.p75 ? "" : `; most ${x.moveSeconds.p25}–${x.moveSeconds.p75}s`;
   lines.push(`Typical move: ${x.moveSeconds.median}s (${Math.round(x.moveFrames.median)}f${at})${range}`);
@@ -687,13 +795,14 @@ export function suggestLines(x: LineInputs): string[] {
   }
   if (x.overshoot && x.overshoot.amountPercent && x.overshoot.settleSeconds) {
     const on = x.overshoot.mostOn.length ? ` (mostly ${x.overshoot.mostOn.slice(0, 2).join(", ")})` : "";
+    const elastic = x.overshoot.elastic ? `; ${x.overshoot.elastic} elastic (oscillating before settling)` : "";
     lines.push(
-      `Overshoot on ${pct(x.overshoot.share)}% of moves${on}: ~${Math.round(x.overshoot.amountPercent.median)}% past the target, settling over ${x.overshoot.settleSeconds.median}s`
+      `Overshoot on ${pct(x.overshoot.share)}% of moves${on}: ~${Math.round(x.overshoot.amountPercent.median)}% of the travel past the target, settling over ${x.overshoot.settleSeconds.median}s${elastic}`
     );
   }
   if (x.anticipation && x.anticipation.amountPercent && x.anticipation.seconds) {
     lines.push(
-      `Anticipation on ${pct(x.anticipation.share)}% of moves: ~${Math.round(x.anticipation.amountPercent.median)}% back over ${x.anticipation.seconds.median}s`
+      `Anticipation on ${pct(x.anticipation.share)}% of moves: ~${Math.round(x.anticipation.amountPercent.median)}% of the travel back, over ${x.anticipation.seconds.median}s`
     );
   }
   if (x.staggers.length) {
@@ -703,9 +812,10 @@ export function suggestLines(x: LineInputs): string[] {
     lines.push(`Stagger: ${round(f, 1)}f (${s.offsetSeconds}s) between layers`);
   }
   if (x.impacts) {
-    lines.push(`Bounces: ${x.impacts} sharp reversal${x.impacts === 1 ? "" : "s"} with no ease at contact${x.impactsOn ? ` (mostly ${x.impactsOn})` : ""}`);
+    lines.push(`Bounces (impact and return): ${x.impacts} sharp reversal${x.impacts === 1 ? "" : "s"} with no ease at contact${x.impactsOn ? ` (mostly ${x.impactsOn})` : ""}`);
   }
   if (x.holds >= 3 && x.holdSeconds) lines.push(`Holds between moves: ~${x.holdSeconds.median}s`);
+  if (stepLine) lines.push(stepLine);
   return lines;
 }
 

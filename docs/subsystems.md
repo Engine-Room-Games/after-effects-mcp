@@ -294,9 +294,14 @@ usually longer than its approach. So `0 → 110 → 100` and `0 → 120 → 95 �
 reversal with no ease at the key (a floor hit) is counted as an impact, and a
 move straight back to where the last one started as a return. A property keyed
 on nearly every frame (baked or tracked: 20+ keys, median gap 1.5 frames or
-less) is left out and named. A time-reversed layer's keys arrive descending;
-the panel puts them in comp-time order and swaps each key's ease sides. Keys
-outside a layer's in/out are ignored and counted, markers are passed over, and
+less) is left out and named. A hold keyframe into a different value is a step (a blink, a cut, Source
+Text) — counted with its interval, never a move with eases and never a hold.
+Separated X/Y(/Z) Position keyed at the same times is merged into one move.
+Impacts are counted once per key even though the walk restarts inside a run
+after each move. A time-reversed layer's keys arrive descending;
+the panel puts them in comp-time order and swaps each key's ease sides. A move,
+hold or step wholly outside its layer's in/out is ignored and counted; one
+seen even in part is kept whole, markers are passed over, and
 a separated master Position is not read beside its X/Y/Z. Everything heuristic says
 what it cannot see: expressions are skipped and counted, motion-path shape and
 per-dimension eases are not read, nested precomps are not followed, and fewer

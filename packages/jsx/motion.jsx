@@ -15,17 +15,18 @@
 // is not numbers (a shape path, a text document) — those still count for
 // timing and ease, never for overshoot.
 //
-// Bounded: `maxKeys` caps the keys read across every comp. Hitting it stops
-// the walk and says so (`truncated`, with what was not read) rather than
-// returning a partial read that looks whole.
+// Bounded: `maxKeys` caps the keys read across every comp. A property that no
+// longer fits is skipped and counted (`truncated`, `keysNotRead`,
+// `propsNotRead`) rather than returned as a partial read that looks whole.
 //
 // Skipped, and counted so the summary can name them: Time Remap and audio
-// levels (retiming and mixing, not a motion style), any keyed property whose
-// expression is on, and keys outside the layer's in/out range (neither is what
-// plays). A time-reversed layer's keys are put in comp-time order (with
-// `reversed: true`) rather than dropped. Markers are passed over uncounted,
-// and so is the master Position of
-// a layer whose dimensions are separated — X/Y/Z carry its keys.
+// levels (retiming and mixing, not a motion style), and any keyed property
+// whose expression is on (its keys are not what plays). Passed over uncounted:
+// markers, and the master Position of a layer whose dimensions are separated
+// (X/Y/Z carry its keys). Each property carries its layer's in/out, ordered
+// low to high (null when unreadable), so the server can drop the moves that
+// are never on screen. A time-reversed layer's keys are put in comp-time order
+// with `reversed: true` rather than dropped.
 
 // Markers are not keyframed motion and are passed over without a count.
 var __MO_MARKER = "ADBE Marker";
@@ -119,9 +120,11 @@ function __moWalk(group, names, layer, st) {
     try { lo = layer.inPoint; hi = layer.outPoint; } catch (eIO) {}
     if (lo > hi) { var sw = lo; lo = hi; hi = sw; }
     for (var k = 1; k <= nk; k++) {
-      // A key outside the layer's in/out range never plays: ignored, counted.
+      // Every key is sent, including ones outside the layer's in/out: a move
+      // that starts before the in point is still seen in part, and only the
+      // server knows where a move begins and ends. It drops the moves that
+      // lie wholly outside [inPoint, outPoint], sent below.
       var kt = p.keyTime(k);
-      if (kt < lo - 0.0005 || kt > hi + 0.0005) { st.skipped.outsideLayer += 1; continue; }
       var inE = __moEase(p, k, "in");
       var outE = __moEase(p, k, "out");
       var v = null;
@@ -156,6 +159,8 @@ function __moWalk(group, names, layer, st) {
       matchName: p.matchName,
       spatial: spatial,
       reversed: reversed,
+      inPoint: lo,
+      outPoint: hi,
       keys: keys
     });
   }
@@ -175,7 +180,7 @@ OPS._motion_keys = noUndo(function (args) {
     var comp = comps[j];
     st = {
       props: [], read: read, budget: budget, truncated: truncated, keysNotRead: 0, propsNotRead: 0,
-      skipped: { notMotion: 0, expressionDriven: 0, outsideLayer: 0 }
+      skipped: { notMotion: 0, expressionDriven: 0 }
     };
     for (var li = 1; li <= comp.numLayers; li++) {
       var layer = comp.layer(li);

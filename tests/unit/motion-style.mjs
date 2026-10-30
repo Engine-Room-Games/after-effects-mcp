@@ -106,7 +106,7 @@ await check("a settle with a bounce is one overshoot, not two", () => {
   assert.equal(s.moves, 1);
   assert.equal(s.overshoot.moves, 1);
   assert.equal(s.overshoot.amountPercent.median, 10);
-  assert.equal(s.overshoot.withBounces, 1);
+  assert.equal(s.overshoot.elastic, 1);
   assert.equal(s.overshoot.settleSeconds.median, 0.3);
 });
 
@@ -149,7 +149,7 @@ await check("keyed elastic: 0 → 120 → 95 → 102 → 100 is one move, 20% ov
   assert.equal(s.moves, 1);
   assert.equal(s.overshoot.moves, 1);
   assert.equal(s.overshoot.amountPercent.median, 20);
-  assert.equal(s.overshoot.withBounces, 1);
+  assert.equal(s.overshoot.elastic, 1);
   assert.equal(s.overshoot.oscillations, 2);
   assert.equal(s.reversals.impacts, 0, "eased peaks are not impacts");
 });
@@ -169,7 +169,7 @@ await check("floor bounce: a sharp reversal at the extreme is reported, not hidd
   assert.equal(s.reversals.impacts, 1);
   assert.deepEqual(s.reversals.impactsOn, ["Position"]);
   assert.equal(s.reversals.returns, 1);
-  assert.ok(s.suggestedLines.some((l) => /^Bounces: 1 sharp reversal with no ease at contact \(mostly Position\)/.test(l)), s.suggestedLines.join("\n"));
+  assert.ok(s.suggestedLines.some((l) => /^Bounces \(impact and return\): 1 sharp reversal with no ease at contact \(mostly Position\)/.test(l)), s.suggestedLines.join("\n"));
 });
 
 await check("a baked track on every frame is left out and named; the designer's moves are the statistics", () => {
@@ -206,22 +206,106 @@ await check("one move prints one duration, not a 'most 0.4–0.4s' range", () =>
   assert.equal(s.suggestedLines[0], "Typical move: 0.4s (12f at 30fps)");
 });
 
-await check("keys outside a layer's in/out are named in the notes", () => {
-  const s = summarizeMotion(raw([comp([popIn(1, 0)], { skipped: { notMotion: 0, expressionDriven: 0, outsideLayer: 2 } })]));
-  assert.ok(s.notes.some((n) => /2 keys outside their layer's in\/out range were ignored/.test(n)), s.notes.join("\n"));
-  assert.ok(!s.notes.some((n) => /Time Remap/.test(n)));
+// Round-3 review fixtures (#254).
+const linear = { inI: "l", outI: "l" };
+const hold = { outI: "h" };
+
+await check("a linear zigzag with 17 reversals counts 17 impacts, once each", () => {
+  const keys = [];
+  for (let i = 0; i < 19; i++) keys.push(key(f(i * 4), [i % 2 ? 100 : 0], linear));
+  const s = summarizeMotion(raw([comp([prop(1, "Rotation", "ADBE Rotate Z", keys)])]));
+  assert.equal(s.reversals.impacts, 17);
+  assert.ok(s.suggestedLines.some((l) => /: 17 sharp reversals/.test(l)), s.suggestedLines.join("\n"));
 });
 
-await check("holds split moves: equal values and hold keyframes are not motion", () => {
+await check("a ball with two floor hits counts two impacts", () => {
+  const keys = [
+    key(0, [960, 200]), key(f(12), [960, 900], linear), key(f(20), [960, 500]),
+    key(f(28), [960, 900], linear), key(f(34), [960, 700]),
+  ];
+  const s = summarizeMotion(raw([comp([prop(1, "Position", "ADBE Position", keys)])]));
+  assert.equal(s.reversals.impacts, 2);
+});
+
+await check("hold-keyed blinks are steps, not 'no moves' and not holds", () => {
+  const props = [];
+  for (let l = 0; l < 3; l++) {
+    const keys = [];
+    for (let i = 0; i < 6; i++) keys.push(key(f(i * 8), [i % 2 ? 0 : 100], hold));
+    props.push(prop(l + 1, "Opacity", "ADBE Opacity", keys));
+  }
+  const s = summarizeMotion(raw([comp(props)]));
+  assert.equal(s.moves, 0);
+  assert.equal(s.steps.count, 15);
+  assert.equal(s.steps.intervalSeconds.median, 0.267);
+  assert.equal(s.holds.count, 0, "a step is not a hold");
+  assert.equal(s.eases.segments.eased + s.eases.segments.linear + s.eases.segments.mixed, 0, "no eases on a step");
+  assert.ok(!s.notes.some((n) => /No keyframed moves/.test(n)), s.notes.join("\n"));
+  assert.ok(s.notes.some((n) => /15 hold-keyed steps/.test(n)), s.notes.join("\n"));
+  assert.deepEqual(s.suggestedLines, ["Steps (hold keys — blinks, cuts, text changes): 15, typically 0.267s apart"]);
+});
+
+await check("Source Text style: hold keys on a non-numeric value are steps", () => {
+  const keys = [key(0, null, hold), key(1, null, hold), key(2, null, hold)];
+  const s = summarizeMotion(raw([comp([{ ...prop(1, "Source Text", "ADBE Text Document", keys), path: "Text > Source Text" }])]));
+  assert.equal(s.steps.count, 2);
+  assert.equal(s.moves, 0);
+});
+
+await check("a move that starts before the in point is kept whole; one wholly outside is dropped and counted", () => {
+  const p = {
+    ...prop(1, "Scale", "ADBE Scale", [
+      key(0, [0, 0]), key(f(6), [110, 110]), key(f(20), [100, 100]), // starts before in (f(10)), seen in part
+      key(f(200), [100, 100]), key(f(210), [0, 0]), // wholly after out (f(150))
+    ]),
+    inPoint: f(10), outPoint: f(150),
+  };
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.equal(s.moves, 1);
+  assert.equal(s.durations.moveFrames.median, 20, "the whole move, not the visible part");
+  assert.equal(s.overshoot.moves, 1);
+  assert.ok(s.notes.some((n) => /1 move, hold or step lies wholly outside its layer.s in\/out/.test(n)), s.notes.join("\n"));
+});
+
+await check("separated X and Y keyed together are one move, not two", () => {
+  const x = { ...prop(1, "X Position", "ADBE Position_0", [key(0, [0]), key(f(6), [110]), key(f(20), [100])]) };
+  const y = { ...prop(1, "Y Position", "ADBE Position_1", [key(0, [500]), key(f(6), [500]), key(f(20), [500])]) };
+  const s = summarizeMotion(raw([comp([x, y])]));
+  assert.equal(s.moves, 1);
+  assert.equal(s.byProperty[0].property, "Position");
+  assert.equal(s.overshoot.moves, 1);
+  // Keyed at different times, they stay two moves.
+  const y2 = { ...y, keys: [key(f(30), [500]), key(f(40), [600])] };
+  assert.equal(summarizeMotion(raw([comp([x, y2])])).moves, 2);
+});
+
+await check("an elastic overshoot is worded as elastic, never as a bounce", () => {
+  const p = prop(1, "Scale", "ADBE Scale", [
+    key(0, [0, 0]), key(f(6), [120, 120]), key(f(12), [95, 95]), key(f(17), [102, 102]), key(f(22), [100, 100]),
+  ]);
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.ok(s.suggestedLines.some((l) => /1 elastic \(oscillating before settling\)/.test(l)), s.suggestedLines.join("\n"));
+  assert.ok(!s.suggestedLines.some((l) => /Bounce/.test(l)), s.suggestedLines.join("\n"));
+});
+
+await check("anticipation is worded as a share of the travel", () => {
+  const p = prop(1, "Position", "ADBE Position", [key(0, [100, 500]), key(0.2, [80, 500]), key(0.7, [900, 500])]);
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.ok(s.suggestedLines.some((l) => /~3% of the travel back, over 0\.2s/.test(l)), s.suggestedLines.join("\n"));
+});
+
+await check("holds and steps split moves: equal values hold, a hold keyframe into a new value steps", () => {
   const p = prop(1, "Position", "ADBE Position", [
     key(0, [0, 0]), key(0.5, [100, 0]), // move
     key(2.5, [100, 0], { outI: "h" }), // equal value: a 2s hold
-    key(3, [300, 0]), // after a hold keyframe: still a hold
+    key(3, [300, 0]), // hold keyframe into a new value: a step after 0.5s
     key(3.5, [0, 0]), // move
   ]);
   const s = summarizeMotion(raw([comp([p])]));
   assert.equal(s.moves, 2);
-  assert.equal(s.holds.count, 2);
+  assert.equal(s.holds.count, 1);
+  assert.equal(s.steps.count, 1);
+  assert.equal(s.steps.intervalSeconds.median, 0.5);
   assert.deepEqual(s.durations.moveSeconds, { median: 0.5, p25: 0.5, p75: 0.5, min: 0.5, max: 0.5 });
 });
 
@@ -275,7 +359,7 @@ await check("suggestedLines: numbers first, in the house style's own vocabulary"
   assert.equal(lines[0], "Typical move: 0.5s (15f at 30fps); most 0.4–0.5s");
   assert.ok(lines.some((l) => /^Ease: 33% influence both ends, speed 0/.test(l)), lines.join("\n"));
   assert.ok(lines.some((l) => /^Linear on 3% of segments/.test(l)), lines.join("\n"));
-  assert.ok(lines.some((l) => /^Overshoot on 48% of moves \(mostly Scale\): ~8% past the target, settling over 0\.1s/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /^Overshoot on 48% of moves \(mostly Scale\): ~8% of the travel past the target, settling over 0\.1s/.test(l)), lines.join("\n"));
   assert.ok(lines.some((l) => /^Stagger: 2f \(0\.067s\) between layers/.test(l)), lines.join("\n"));
   assert.ok(!big.notes.some((n) => /a hint/.test(n)), "21 moves is a pattern");
   for (const l of lines) assert.ok(l.length <= 120, `a line for a 240-character digest: ${l}`);
@@ -383,13 +467,14 @@ await check("_motion_keys reads every keyed property, compactly, with the first 
   assert.equal(pops.skipped.notMotion, 0, "a marker is passed over, not reported as Time Remap / audio");
   assert.ok(!pops.props.some((p) => p.layerId === 4), "a separated master Position is not read");
   const short = pops.props.find((p) => p.layerId === 5);
-  assert.deepEqual(short.keys.map((k) => k[0]), [0, 0.5], "the key past the out point is dropped");
-  assert.equal(pops.skipped.outsideLayer, 1);
+  assert.deepEqual(short.keys.map((k) => k[0]), [0, 0.5, 3], "every key is sent; the server drops what is never on screen");
+  assert.deepEqual([short.inPoint, short.outPoint], [0, 1]);
   const rev = pops.props.find((p) => p.layerId === 6);
   assert.ok(rev, "keys inside a reversed layer's swapped in/out range are read");
   assert.equal(rev.reversed, true);
   assert.deepEqual(rev.keys.map((k) => k[0]), [1, 2], "comp-time order");
   assert.deepEqual(rev.keys[1].slice(1, 7), ["b", "b", 80, 0, 20, 0], "the layer-time first key's ease sides swap");
+  assert.deepEqual([rev.inPoint, rev.outPoint], [0, 2], "a reversed layer's in/out arrive low to high");
   assert.equal(byPath["Transform > Scale"].reversed, false);
   assert.equal(r.keysRead, 12);
   assert.equal(r.truncated, false);
