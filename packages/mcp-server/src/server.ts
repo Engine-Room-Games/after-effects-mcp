@@ -680,7 +680,11 @@ export function createServer(opts: CreateServerOptions = {}) {
       // does nothing with it — its WS `progress` events carry a jobId and no
       // token — and progress is delivered on `await_job`, never here; see
       // forwardJobProgress.
-      const result = await bridge.runOp(name, args);
+      // A non-object result that After Effects warned about arrives wrapped
+      // (core.jsx, dialog guard, issue #225); unwrapped here so the value the
+      // agent reads keeps its shape, with the warnings as their own block.
+      const lifted = liftAeWarnings(await bridge.runOp(name, args));
+      const result = lifted.value;
 
       // Async envelope handling for run_batch
       if (ASYNC_OPS.has(name) && isAsyncEnvelope(result)) {
@@ -754,7 +758,7 @@ export function createServer(opts: CreateServerOptions = {}) {
           cellWidth?: number; cellHeight?: number;
           tiles?: unknown[];
         };
-        return imageContent(
+        return withAeWarnings(imageContent(
           {
             width: v.width,
             height: v.height,
@@ -783,7 +787,7 @@ export function createServer(opts: CreateServerOptions = {}) {
             tiles: v.tiles,
           },
           v.base64
-        );
+        ), (result as { aeWarnings?: unknown }).aeWarnings);
       }
 
       // The style guide is read over the bridge and summarised here: the panel
@@ -795,7 +799,7 @@ export function createServer(opts: CreateServerOptions = {}) {
         return textResult(applyHouseStyleDetail(result, detail), wait);
       }
 
-      return textResult(result, wait);
+      return withAeWarnings(textResult(result, wait), lifted.envelopeWarnings);
     } catch (e) {
       // Checked before BridgeUnreachableError because the remedies are
       // opposites: one says restart After Effects, the other says do not.
@@ -1138,16 +1142,61 @@ async function clientRoots(server: Server): Promise<string[] | undefined> {
  * Vision results never come through here with a wait — screenshots are reads
  * and are never queued — so the image envelope cannot be touched by this.
  */
-function textResult(value: unknown, wait?: QueueWait | null) {
+export function textResult(value: unknown, wait?: QueueWait | null) {
   // Compact, not pretty-printed (issue #166). The model reads JSON without the
   // indentation, and every result is re-sent on every later turn of the
   // session, so the whitespace was paid for many times over: 20–40% of a
   // nested read like get_layer_full. Content is unchanged — only whitespace.
   const json = (v: unknown) => ({ type: "text" as const, text: JSON.stringify(v) });
-  if (!wait) return { content: [json(value)] };
+  const warned = (v: { content: { type: "text"; text: string }[] }) =>
+    withAeWarnings(v, findAeWarnings(value));
+  if (!wait) return warned({ content: [json(value)] });
   const merged = mergeWait(value, wait);
-  if (merged) return { content: [json(merged)] };
-  return { content: [json(value), json(wait)] };
+  if (merged) return warned({ content: [json(merged)] });
+  return warned({ content: [json(value), json(wait)] });
+}
+
+// ---------- What After Effects reported under dialog suppression (#225) ----------
+// dispatch() holds AE's dialogs suppressed for every op and collects whatever
+// app.onError is handed. An object result carries it as `aeWarnings`; any other
+// result arrives in an envelope marked with this key. A warning must never read
+// as a clean success, so it gets its own text block, first, in words that send
+// the agent to read the state back.
+export const AE_WARNED_MARK = "__aemcpWarned";
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+// Top level, or one level down under `result` — the shape await_job and get_job
+// return a finished job in, which is where a chunked batch's warnings land.
+export function findAeWarnings(value: unknown): unknown {
+  if (!isPlainRecord(value)) return undefined;
+  if (Array.isArray(value.aeWarnings) && value.aeWarnings.length > 0) return value.aeWarnings;
+  return isPlainRecord(value.result) ? value.result.aeWarnings : undefined;
+}
+
+export function liftAeWarnings(raw: unknown): { value: unknown; envelopeWarnings: unknown } {
+  if (isPlainRecord(raw) && raw[AE_WARNED_MARK] === true && "value" in raw) {
+    return { value: raw.value, envelopeWarnings: raw.aeWarnings };
+  }
+  return { value: raw, envelopeWarnings: undefined };
+}
+
+export function aeWarningsText(warnings: string[]): string {
+  return (
+    `WARNING: After Effects reported ${warnings.length} message(s) through app.onError while this call ran ` +
+    "with its dialogs suppressed: " + warnings.map((w) => JSON.stringify(w)).join("; ") + ". " +
+    "The call itself did not fail, but do not report it as a clean success: some of these may be a warning " +
+    "After Effects would have shown as a dialog, others an error the tool raised and handled itself. Read the " +
+    "affected state back to confirm the change landed as intended before building on it."
+  );
+}
+
+export function withAeWarnings<T extends { content: unknown[] }>(res: T, warnings: unknown): T {
+  if (!Array.isArray(warnings) || warnings.length === 0) return res;
+  const block = { type: "text" as const, text: aeWarningsText(warnings.map((w) => String(w))) };
+  return { ...res, content: [block, ...res.content] };
 }
 
 function errorResult(message: string) {

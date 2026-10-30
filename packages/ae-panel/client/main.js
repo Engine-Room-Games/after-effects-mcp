@@ -636,8 +636,13 @@
     // batch moves past a failed op too.
     var attempted = 0;
     var stepsTaken = 0;
+    // What After Effects reported through app.onError in ANY chunk (core.jsx,
+    // dialog guard, issue #225). Each chunk is its own dispatch, so a warning
+    // raised in chunk 3 of 40 would otherwise be on a result nobody reads.
+    var aeWarnings = [];
     function step() {
       return runOp("_continue_job", { jobId: jobId, chunkSize: size }).then(function (res) {
+        if (res && res.aeWarnings && res.aeWarnings.length) aeWarnings = aeWarnings.concat(res.aeWarnings);
         if (res.total) totalGuess = res.total;
         tracked.total = totalGuess;
         if (!res.done) {
@@ -652,34 +657,32 @@
           // A failed job reaches the server as an error string and nothing else,
           // so what the batch cost has to travel inside it or it is lost: the
           // ops before the failure are applied and stay applied.
-          var failedMsg = (res.error || "batch failed") + (res.note ? " || " + res.note : "");
+          var failedMsg = (res.error || "batch failed") + (res.note ? " || " + res.note : "") +
+            (aeWarnings.length ? " || After Effects also reported, through app.onError while dialogs were suppressed: " +
+              aeWarnings.join(" | ") : "");
           broadcast({ type: "error", jobId: jobId, error: failedMsg });
-          return { done: true, failed: true, jobId: jobId, error: res.error, results: res.results, errors: res.errors, atIndex: res.atIndex, undoSteps: res.undoSteps, note: res.note };
+          var failedOut = { done: true, failed: true, jobId: jobId, error: res.error, results: res.results, errors: res.errors, atIndex: res.atIndex, undoSteps: res.undoSteps, note: res.note };
+          if (aeWarnings.length) failedOut.aeWarnings = aeWarnings;
+          return failedOut;
         }
         // `undoSteps` is the measured number of undo groups the batch opened,
         // and `diff` is the batch's own before/after — both are only ever seen
         // by the agent if they are carried on this event.
-        broadcast({
-          type: "complete",
-          jobId: jobId,
-          result: {
-            results: res.results,
-            errors: res.errors,
-            total: res.total || totalGuess,
-            cancelled: !!res.cancelled,
-            undoSteps: res.undoSteps,
-            undoGroupName: res.undoGroupName,
-            note: res.note,
-            diff: res.diff,
-          },
-        });
-        return {
-          done: true, jobId: jobId,
-          results: res.results, errors: res.errors,
-          total: res.total || totalGuess, cancelled: !!res.cancelled,
-          undoSteps: res.undoSteps, undoGroupName: res.undoGroupName,
-          note: res.note, diff: res.diff,
+        var completed = {
+          results: res.results,
+          errors: res.errors,
+          total: res.total || totalGuess,
+          cancelled: !!res.cancelled,
+          undoSteps: res.undoSteps,
+          undoGroupName: res.undoGroupName,
+          note: res.note,
+          diff: res.diff,
         };
+        if (aeWarnings.length) completed.aeWarnings = aeWarnings;
+        broadcast({ type: "complete", jobId: jobId, result: completed });
+        var doneOut = { done: true, jobId: jobId };
+        for (var k in completed) { if (completed.hasOwnProperty(k)) doneOut[k] = completed[k]; }
+        return doneOut;
       }, function (e) {
         // Any failure of a continuation leaves the chunks before it in the
         // project, and a bare error — "No job: j_…" after a bundle reload, or
@@ -701,8 +704,14 @@
             "in " + stepsTaken + " undo step(s); whatever they changed stays applied (an op that failed under " +
             "continue-on-error may not have changed anything, and its error is lost with the job). " +
             "Do NOT re-run the batch as it was: read the comp back and send only the ops that are missing.";
-        var stopped = new Error("Batch " + jobId + " stopped mid-run: " + cause + " " + landed);
+        // Warnings from chunks that did run are still true of the project.
+        var warned = aeWarnings.length
+          ? " || After Effects also reported, through app.onError while dialogs were suppressed: " +
+            aeWarnings.join(" | ")
+          : "";
+        var stopped = new Error("Batch " + jobId + " stopped mid-run: " + cause + " " + landed + warned);
         stopped.code = e && e.code;
+        if (aeWarnings.length) stopped.aeWarnings = aeWarnings;
         log("error", stopped.message);
         throw stopped;
       });
