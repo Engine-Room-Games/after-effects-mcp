@@ -108,7 +108,7 @@ const PINS = {
   "contact sheet: 5 tiles": "5b2ae5e2766e9fd3d53bafbb3daf30e9fc7b0957a1c3f09c4ed3a1bc4fd0a3ed",
   "contact sheet: 6 tiles": "2fe90b30aba479a05b7b0ef3bfed1df3b128660e33d917c6c5b2912cc2044e7a",
   "contact sheet: times, layouts, budgets": "148c3b6486c074f6e4e4540d6e7f004008c93a064536dfe633eb85935c4fb0ac",
-  ".mogrt thumbnail patches": "fe2d42cbb6fbe49e9f2108d9510a6a403f578f476ca8ab9d59371c05fb8a7c2d",
+  ".mogrt thumbnail patches": "be3e9bc215a904d7fc6e83dc4ba471ce65ff110339a64213248b69f0be903e63",
   "end to end: an opaque 8-bit frame": "72872dfa18b9dcdb92bf67467b211adca10a41d82ae5cc8ab3e4b9ae3d76b265",
   "end to end: premultiplied soft edges, un-premultiplied once (#130)": "36f731cfbf708d0b6af7e756d6bf2bb6aea56c960fae765c7a59415fa1432e1a",
   "end to end: a 16-bit frame, converted to 8-bit": "0bb1c9391f2b37d2cff97c158c499527ee7ab84c2ed2efa1774c0a01b4598834",
@@ -124,9 +124,9 @@ const PINS = {
   "end to end: two corrupt renders": "c0504952735a024e00ed46494d1cac7f5c8f6276a1ea040f5f088baf60877c5d",
   "end to end: the same request after two corrupt renders": "faa78a141c73bab636b3f40c21193b1ac9a3d80a4ebf695501bb52d96ac94195",
   "end to end: corrupt contact-sheet tile": "72024c10ccef54a4db6c45a120562ce55fda535eba7038ee4cda95dd1a5c5c2a",
-  "end to end: export_mogrt, a poster over an RGBA thumbnail": "5383a0e1e95d122e3c6452641fab453b2e40f28337045f84b5082edacf10cb18",
-  "end to end: export_mogrt, a 16-bit poster over an RGB thumbnail": "79a95ac83d087c2eb69be57ee7f687ee89775788ecef03bc2d9d4585e12ab829",
-  "end to end: export_mogrt, no poster: the export is returned as it is": "77e35e8070cc2e28a33a5bdb324f7d4a3516d6cd7aeed123475cad04d49a4d5e",
+  "end to end: export_mogrt, a poster over an RGBA thumbnail": "a1535ba36225ba9c8088577cd6cfd1bada3027b8f51ba65e7cd6cba4bd0ef9bf",
+  "end to end: export_mogrt, a 16-bit poster over an RGB thumbnail": "f8f144093c036696faa906485366ae7fbf488be6f598db2a6b1280772f836051",
+  "end to end: export_mogrt, no poster: the export is returned as it is": "b0f20218be12adaa25637c2cc884184d71c4046d4787dbebcec8d0ffa65a23ab",
   "end to end: export_mogrt, a poster that is not a PNG": "21a3b27f5ce1b07ea552f98edf91f39e90e707d6b336cbb73f1833e3e51aeef1"
 };
 
@@ -165,7 +165,12 @@ function canonZip(buf) {
     const name = buf.toString("utf8", at + 30, at + 30 + nameLen);
     const body = buf.subarray(at + 30 + nameLen + extraLen, at + 30 + nameLen + extraLen + csize);
     const data = method === 8 ? zlib.inflateRawSync(body) : body;
-    entries.push({ name, method, crc: buf.readUInt32LE(at + 14), data: canonBytes(data) });
+    // Not the CRC itself: it is over the entry's stored bytes, and for a PNG
+    // entry those include deflated IDAT, whose exact bytes depend on the zlib
+    // Node was built with (Homebrew's system zlib 1.2.12 vs the official
+    // builds' 1.3.1 fork — the pin moved on every CI runner). Whether the CRC
+    // matches the data is the property; the data itself is pinned decoded.
+    entries.push({ name, method, crcOk: crc32(data) === buf.readUInt32LE(at + 14), data: canonBytes(data) });
     at += 30 + nameLen + extraLen + csize;
   }
   return { zip: entries };
