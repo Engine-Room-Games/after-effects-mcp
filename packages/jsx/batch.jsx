@@ -42,11 +42,13 @@ function __nowMs() {
 // Retire every job no continuation has reached for __JOB_ORPHAN_MS: cut down
 // to a tombstone marked `abandoned`, so `_get_job` still says how far it got.
 // Run where a job is created or continued — the only calls that can find one.
-function __sweepOrphanJobs() {
+// `except` is the job a continuation is for: reaching it proves someone is
+// still driving it, however long the gap (a laptop asleep mid-batch).
+function __sweepOrphanJobs(except) {
   var now = __nowMs();
   var stale = [];
   for (var id in JOBS) {
-    if (!JOBS.hasOwnProperty(id)) continue;
+    if (!JOBS.hasOwnProperty(id) || id === except) continue;
     var j = JOBS[id];
     if (j && !j.finished && typeof j.touchedAt === "number" && now - j.touchedAt > __JOB_ORPHAN_MS) stale.push(id);
   }
@@ -237,7 +239,7 @@ function __batchUndoNote(steps, name, nested, chunked) {
 // `j.undoOpen` flag was for, and it was tracking a group AE had already dropped.
 OPS._continue_job = noUndo(function (args) {
   var jobId = args.jobId;
-  __sweepOrphanJobs();
+  __sweepOrphanJobs(jobId);
   var j = JOBS[jobId];
   if (!j) throw new Error("No job: " + jobId);
   if (j.finished && j.abandoned) {
@@ -340,6 +342,7 @@ OPS._get_job = noUndo(function (args) {
     errorCount: j.finished ? j.errorCount : j.errors.length, undoSteps: j.undoSteps,
     finished: !!j.finished,
     abandoned: !!j.abandoned,
+    failed: !!j.failed,
     idleMs: typeof j.touchedAt === "number" ? __nowMs() - j.touchedAt : null,
   };
 });

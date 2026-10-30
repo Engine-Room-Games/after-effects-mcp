@@ -510,4 +510,36 @@ let passed = 0;
   passed += 11;
 }
 
+// A continuation that reaches its own job proves someone is still driving it,
+// however long since the last chunk — a laptop asleep for an hour mid-batch must
+// not wake to find its batch retired by its own next chunk.
+{
+  const { ctx, call } = load();
+  const env = call("run_batch", { ops: makeOps(ctx, 600) }).result;
+  call("_continue_job", { jobId: env.jobId, chunkSize: env.chunkSize });
+  ctx.JOBS[env.jobId].touchedAt -= 60 * 60 * 1000;
+  const next = call("_continue_job", { jobId: env.jobId, chunkSize: env.chunkSize });
+  assert.equal(next.ok, true, `the driver's own next chunk retired its batch: ${next.error}`);
+  assert.equal(next.result.progress, 50);
+  assert.equal(ctx.JOBS[env.jobId].finished, undefined, "still a live job");
+  passed += 3;
+}
+
+// The tombstone says whether a transactional failure ended the job, so a lost
+// last answer is never reported as having run to the end.
+{
+  const { ctx, call, drive } = load();
+  const ops = makeOps(ctx, 600);
+  ops[580] = { op: "nope", args: {} };
+  const env = call("run_batch", { ops }).result;
+  call("_continue_job", { jobId: env.jobId, chunkSize: env.chunkSize });
+  let r;
+  do { r = call("_continue_job", { jobId: env.jobId, chunkSize: env.chunkSize }).result; } while (!r.done);
+  assert.equal(r.failed, true);
+  const g = call("_get_job", { jobId: env.jobId }).result;
+  assert.equal(g.failed, true);
+  assert.equal(g.finished, true);
+  passed += 3;
+}
+
 console.log(`batch-undo: ${passed} assertions passed`);

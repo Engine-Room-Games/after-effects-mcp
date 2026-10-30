@@ -116,6 +116,8 @@ function __finishJob(jobId, result, abandoned) {
       finished: true,
       cancelled: !!j.cancelled,
       abandoned: abandoned === true,
+      // A transactional failure ended it: "finished" is not "ran to its end".
+      failed: !!(result && result.failed),
       cursor: j.cursor,
       total: j.total,
       errorCount: j.errors ? j.errors.length : 0,

@@ -98,6 +98,7 @@ class AeJobs {
       if (j.failAt === j.cursor) {
         j.errors.push({ index: j.cursor, op: "touch", error: "boom" });
         j.finished = true;
+        j.failed = true;
         const out = { done: true, failed: true, jobId, error: "boom", atIndex: j.cursor, results: [...j.results], errors: [...j.errors], undoSteps: j.undo, note: "Nothing was rolled back." };
         if (warns.length) out.aeWarnings = warns;
         return out;
@@ -119,7 +120,7 @@ class AeJobs {
   record(jobId) {
     const j = this.jobs.get(jobId);
     if (!j) return null;
-    return { cursor: j.cursor, total: j.total, finished: j.finished, cancelled: j.cancelled, abandoned: false, errorCount: j.errors.length, undoSteps: j.undo, idleMs: Date.now() - j.touchedAt };
+    return { cursor: j.cursor, total: j.total, finished: j.finished, cancelled: j.cancelled, abandoned: false, failed: !!j.failed, errorCount: j.errors.length, undoSteps: j.undo, idleMs: Date.now() - j.touchedAt };
   }
   cancel(jobId) {
     const j = this.jobs.get(jobId);
@@ -152,6 +153,12 @@ function bridgeOver(ae, fault = () => null) {
       if (f === "lost-after") throw new errors.FrontDeskLostError(1, "_continue_job", "stalled");
       if (f === "timeout") throw new errors.BridgeTimeoutError(1, 300_000, { op: "_continue_job" });
       if (f === "bad-json") throw new errors.AeError("Bad JSON from ExtendScript");
+      if (f === "abandoned") {
+        throw new errors.AeError(
+          `Job ${jobId} was abandoned: no continuation reached it for 30 minutes, so its record was freed. ` +
+            "25 of 300 ops had been attempted, in 1 undo step(s); they stay applied. Nothing ran now."
+        );
+      }
       return r;
     },
     async getJob(jobId) {
@@ -287,6 +294,26 @@ await check("an error after the chunk ran (Bad JSON) is a may-have-run, never a 
   const st = jobs.get(env.jobId);
   assert.equal(st.status, "failed");
   assert.match(st.message, /may have partly run/);
+});
+
+await check("a job ExtendScript retired as abandoned ran nothing more: no 'may have partly run'", async () => {
+  // Thrown in place of chunk 2, before it touches the table: what batch.jsx does.
+  const { jobs, driver, env } = setup(300, (n) => (n === 2 ? "abandoned" : null));
+  await driver.drive(env);
+  const st = jobs.get(env.jobId);
+  assert.equal(st.status, "failed");
+  assert.match(st.error, /was abandoned: .*Nothing ran now/);
+  assert.equal(st.message, "failed after 25 of 300 ops attempted", st.message);
+});
+
+await check("a transactional failure in the last chunk whose answer was lost is not called 'ran to its end'", async () => {
+  const { jobs, driver, env } = setup(100, (n) => (n === 4 ? "lost-after" : null), { failAt: 90 });
+  await driver.drive(env);
+  const st = jobs.get(env.jobId);
+  assert.equal(st.status, "failed");
+  assert.match(st.error, /failed in its last chunk in After Effects/);
+  assert.doesNotMatch(st.error, /ran to its end/);
+  assert.match(foreignJobText(env.jobId, readAeJobRecord({ cursor: 90, total: 100, finished: true, failed: true })), /stopped on a failed op/);
 });
 
 await check("the bundle reloaded under the job: says so, and what had landed", async () => {
@@ -632,9 +659,11 @@ try {
     assert.equal(rb.res.isError, undefined, rb.text);
     await until("chunk 3 at the panel", () => chunksOf(jobId).some((e) => e.n === 3));
     const hj = begin(J, "run_jsx", { code: "// tag:J1 ms:5\nreturn 1;" });
-    await sleep(150);
+    await until("J to be queued behind the batch", () => hj.progress.length > 0);
     kill(H);
-    await sleep(600);
+    // I has seen the desk go — its lease and the chunk in flight with it — and a new desk is up.
+    await until("I to lose the desk and a new one to start", () =>
+      /re-taking it at the next one/.test(I.log()) && [I.pid, J.pid].includes(readDesk(desk2)?.pid));
     release();
     const rj = await hj.done;
     assert.equal(rj.res.isError, undefined, rj.text);

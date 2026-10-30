@@ -55,6 +55,8 @@ export interface AeJobRecord {
   finished: boolean;
   cancelled?: boolean;
   abandoned?: boolean;
+  /** A transactional failure ended it (bundles from #220 stage 5 on). */
+  failed?: boolean;
   errorCount?: number;
   undoSteps?: number;
   idleMs?: number | null;
@@ -75,6 +77,7 @@ export function readAeJobRecord(raw: unknown): AeJobRecord | null {
     finished: r.finished === true,
     cancelled: r.cancelled === true,
     abandoned: r.abandoned === true,
+    failed: r.failed === true,
     errorCount: num(r.errorCount),
     undoSteps: num(r.undoSteps),
     idleMs: num(r.idleMs) ?? null,
@@ -282,6 +285,8 @@ export class BatchDriver {
       e instanceof WriteQueueWaitError ||
       e instanceof WriteQueueCancelledError ||
       /^No job: /.test(msg) ||
+      // Retired as an orphan: ExtendScript refused before running anything.
+      /^Job \S+ was abandoned: .*Nothing ran now/.test(msg) ||
       /^Internal error: /.test(msg);
     const unsure = surelyUnsent ? 0 : size;
     const landed =
@@ -306,7 +311,15 @@ export class BatchDriver {
  */
 function finishedUnseenMessage(jobId: string, rec: AeJobRecord, e: Error): string {
   const of = rec.total !== undefined ? ` of ${rec.total}` : "";
-  const how = rec.cancelled ? "stopped on a cancel" : rec.abandoned ? "was abandoned" : "ran to its end";
+  const how = rec.cancelled
+    ? "stopped on a cancel"
+    : rec.abandoned
+      ? "was abandoned"
+      : rec.failed
+        ? "failed in its last chunk"
+        : rec.total !== undefined && rec.cursor < rec.total
+          ? "ended before its last op"
+          : "ran to its end";
   return (
     `Batch ${jobId} ${how} in After Effects, but the answer to its last chunk was lost on the way back ` +
     `(${e.message.split("\n")[0]}), so its per-op results, diff and undo note are lost. After Effects' own record: ` +
@@ -328,7 +341,9 @@ export function foreignJobText(jobId: string, rec: AeJobRecord): string {
       ? "was abandoned — no chunk reached it for 30 minutes, which is what a batch whose server stopped looks like"
       : rec.cancelled
         ? "stopped on a cancel"
-        : "has finished";
+        : rec.failed
+          ? "stopped on a failed op"
+          : "has finished";
     return (
       `No job "${jobId}" in this server process, but After Effects knows it: it ${how}. ${counts}; what ran stays ` +
       "applied. Its per-op results were returned only to the server that drove it. Read the comp back rather than re-sending it."
