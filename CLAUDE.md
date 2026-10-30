@@ -113,7 +113,7 @@ One line each. The annotated version — why each file is the way it is — is i
 | `…/tools/policy.ts` | Read-only mode and the `run_jsx` switch: which tools are offered, refused, and noted in the guidance. |
 | `…/tools/whatsNew.ts` | The `since` filter on the whats-new topic: semver compare, splitter, version header. |
 | `…/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing, port candidates, the panel-health test. |
-| `…/bridge/panelGate.ts` | The version-gate verdict and the panel's capabilities, cached and re-checked. |
+| `…/bridge/panelGate.ts` | The version-gate verdict, cached and re-checked. |
 | `…/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` for a lease that outlives its call. |
 | `…/frontdesk/line.ts` | `SessionLine` — every server's one way to AE: own queue, then the desk's lock; election, handover, what may be re-sent. |
 | `…/frontdesk/{desk,lock,config,protocol}.ts` | The desk's loopback server, the cross-session lock, the port and `desk-<port>.json`, the wire format that keeps the bridge failures the same classes. |
