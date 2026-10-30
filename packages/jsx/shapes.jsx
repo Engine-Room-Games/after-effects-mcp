@@ -113,6 +113,44 @@ var __SHAPE_NAMED = {
   "stroke.lineJoin": { miter: 1, round: 2, bevel: 3 }
 };
 
+// The Repeater's Transform group (issue #181): friendly key -> candidates,
+// tried in order like __SHAPE_ALIASES.
+var __REPEATER_TRANSFORM = [
+  ["anchorPoint", ["ADBE Vector Repeater Anchor", "Anchor Point"]],
+  ["position", ["ADBE Vector Repeater Position", "Position"]],
+  ["scale", ["ADBE Vector Repeater Scale", "Scale"]],
+  ["rotation", ["ADBE Vector Repeater Rotation", "Rotation"]],
+  ["startOpacity", ["ADBE Vector Repeater Opacity 1", "Start Opacity"]],
+  ["endOpacity", ["ADBE Vector Repeater Opacity 2", "End Opacity"]]
+];
+
+/** Set each key of a repeater's `transform`; what fails is pushed to `failed` by name. */
+function __applyRepeaterTransform(node, tf, applied, failed) {
+  var group = null;
+  try { group = node.property("ADBE Vector Repeater Transform") || node.property("Transform"); } catch (e) { group = null; }
+  if (!group) { failed.push("transform (no Transform group on the repeater)"); return; }
+  var known = {};
+  for (var i = 0; i < __REPEATER_TRANSFORM.length; i++) {
+    var key = __REPEATER_TRANSFORM[i][0];
+    known[key] = true;
+    if (tf[key] === undefined) continue;
+    var target = null, names = __REPEATER_TRANSFORM[i][1];
+    for (var j = 0; j < names.length && !target; j++) {
+      try { target = group.property(names[j]) || null; } catch (e2) { target = null; }
+    }
+    if (!target) { failed.push("transform." + key); continue; }
+    try {
+      __setValue(target, tf[key]);
+      applied.push("transform." + key);
+    } catch (e3) {
+      failed.push("transform." + key + " (" + e3.message + ")");
+    }
+  }
+  for (var k in tf) {
+    if (tf.hasOwnProperty(k) && !known[k]) failed.push("transform." + k + " (not a Repeater transform key)");
+  }
+}
+
 // Keys consumed by the path builder rather than set as plain properties.
 var __PATH_KEYS = { vertices: 1, points: 1, inTangents: 1, outTangents: 1, closed: 1 };
 
@@ -212,6 +250,10 @@ OPS.add_shape_content = function (args) {
       if (!content.hasOwnProperty(k)) continue;
       if (k === "type") continue;
       if (type === "path" && __PATH_KEYS[k]) continue;
+      if (type === "repeater" && k === "transform") {
+        __applyRepeaterTransform(node, content.transform || {}, applied, failed);
+        continue;
+      }
       // `name` is a node attribute, not a child property.
       if (k === "name") {
         node.name = String(content[k]);

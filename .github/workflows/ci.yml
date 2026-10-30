@@ -230,6 +230,11 @@ jobs:
       - name: Hardening batch (#163) holds
         run: node tests/unit/hardening-163.mjs
 
+      # #181: layer/comp switches, separate dimensions, keyframe flags and
+      # per-dimension ease, box text and the Repeater's Transform group.
+      - name: Capability gaps reach After Effects and are read back
+        run: node tests/unit/capability-gaps.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.

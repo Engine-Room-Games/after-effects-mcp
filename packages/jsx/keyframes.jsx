@@ -183,15 +183,27 @@ function __resolveEaseSides(prop, keyIndex, easeIn, easeOut) {
  */
 function __applyTemporalEase(prop, keyIndex, easeIn, easeOut, resolved) {
   var label = __easeLabel(prop);
+  // A spatial property eases along its path with ONE entry (issue #96); a
+  // per-dimension list (issue #181) cannot mean anything there. Identical pairs
+  // collapse to the one pair they all are; differing ones are refused before
+  // anything is read or written.
+  if (prop.isSpatial) {
+    easeIn = __spatialEaseSpec(easeIn, label, "easeIn");
+    easeOut = __spatialEaseSpec(easeOut, label, "easeOut");
+  }
   var sides = resolved || __resolveEaseSides(prop, keyIndex, easeIn, easeOut);
   var known = sides.known;
   var candidates = __easeArityCandidates(prop);
   // Spatial keeps its derived 1 first: a 3D Position may also accept 3, which
   // means something else (one per axis), so a read-back must not outrank it.
-  if (known !== null && candidates[0] !== known && !prop.isSpatial) {
-    var reordered = [known];
+  // A per-dimension list the caller passed (issue #181) names its own count,
+  // and outranks everything: it is what was asked for.
+  var asked = (easeIn && easeIn.length) ? easeIn.length : ((easeOut && easeOut.length) ? easeOut.length : null);
+  var first = asked !== null ? asked : (known !== null && !prop.isSpatial ? known : null);
+  if (first !== null && candidates[0] !== first) {
+    var reordered = [first];
     for (var c = 0; c < candidates.length; c++) {
-      if (candidates[c] !== known) reordered.push(candidates[c]);
+      if (candidates[c] !== first) reordered.push(candidates[c]);
     }
     candidates = reordered;
   }
@@ -204,11 +216,13 @@ function __applyTemporalEase(prop, keyIndex, easeIn, easeOut, resolved) {
   var keepOut = easeOut ? null : prop.keyOutInterpolationType(keyIndex);
   var lastMessage = "";
   var skipped = [];
+  var tried = [];
   for (var i = 0; i < candidates.length; i++) {
     var n = candidates[i];
     var inArr = __easeSide(sides["in"], n);
     var outArr = __easeSide(sides["out"], n);
     if (!inArr || !outArr) { skipped.push(n); continue; }
+    tried.push(n);
     try {
       prop.setTemporalEaseAtKey(keyIndex, inArr, outArr);
     } catch (e) {
@@ -218,16 +232,48 @@ function __applyTemporalEase(prop, keyIndex, easeIn, easeOut, resolved) {
     __restoreKeptInterpolation(prop, keyIndex, keepIn, keepOut, label);
     return n;
   }
+  // Only the counts actually sent are "rejected"; a skipped count was never
+  // sent, and naming it in both lists contradicts itself (PR #216 live pass).
   var detail = "";
   if (skipped.length) {
-    detail = " Not tried at " + skipped.join(", ") + ": the kept side reads back as " + known +
-      " different per-dimension eases, which cannot be written at another count without changing them.";
+    // Name every side that made a count unwritable, as what it is: a list the
+    // caller passed, or the key's existing ease on a side the caller did not
+    // send — which used to be blamed on the caller's list (PR #216 live pass).
+    var causes = [];
+    var names = { "in": "easeIn", "out": "easeOut" };
+    var other = { "in": "out", "out": "in" };
+    for (var s in names) {
+      if (!names.hasOwnProperty(s)) continue;
+      var blocked = false;
+      for (var k = 0; k < skipped.length; k++) if (!__easeSide(sides[s], skipped[k])) blocked = true;
+      if (!blocked) continue;
+      var list = sides[s];
+      var sent = s === "in" ? easeIn : easeOut;
+      if (sent) {
+        causes.push("the " + list.length + " per-dimension eases passed as " + names[s] + " cannot be written at another count " +
+          "without changing them — pass one pair, or one per dimension this property has");
+      } else {
+        causes.push("the existing " + names[s] + " on this key differs per dimension (" + list.length + " values) and is kept as it is, " +
+          "so only " + list.length + " entries can carry it — pass " + names[s] + " too, or give " + names[other[s]] + " " +
+          list.length + " entries (or one pair)");
+      }
+    }
+    detail = " Not tried at " + skipped.join(", ") + ": " + causes.join("; and ") + ".";
   }
   throw new Error(
-    "Could not set the temporal ease on " + label + " at key " + keyIndex + ": After Effects rejected ease " +
-    "arrays of " + candidates.join(", ") + " entries; the ease was not changed." + detail +
+    "Could not set the temporal ease on " + label + " at key " + keyIndex + ": " +
+    (tried.length ? "After Effects rejected ease arrays of " + tried.join(", ") + " entries" : "no entry count could be tried") +
+    "; the ease was not changed." + detail +
     (lastMessage ? " Last error from AE: " + lastMessage : "")
   );
+}
+
+function __spatialEaseSpec(spec, label, name) {
+  if (!spec || !spec.length) return spec;
+  if (__easeUniform(spec)) return { influence: spec[0].influence, speed: spec[0].speed };
+  throw new Error("set_temporal_ease: " + label + " is spatial and eases along its motion path with one pair, so " + name +
+    " cannot differ per dimension. Nothing was changed. Pass one pair, or separate its dimensions " +
+    "(set_transform separateDimensions:true) and ease X Position and Y Position on their own.");
 }
 
 /**
@@ -332,7 +378,12 @@ OPS.get_keyframes = noUndo(function (args) {
         easeIn: { influence: inE[0].influence, speed: inE[0].speed },
         easeOut: { influence: outE[0].influence, speed: outE[0].speed },
       };
+      // Only when the dimensions differ (issue #181): the first entry alone
+      // would misreport a per-dimension ease as uniform.
+      var inL = __easeList(inE), outL = __easeList(outE);
+      if (!__easeUniform(inL) || !__easeUniform(outL)) ease.perDimension = { easeIn: inL, easeOut: outL };
     } catch (e) {}
+    var flags = __readKeyFlags(prop, i);
     var tangents = null;
     if (prop.isSpatial) {
       try { tangents = { inTangent: prop.keyInSpatialTangent(i), outTangent: prop.keyOutSpatialTangent(i) }; }
@@ -348,6 +399,7 @@ OPS.get_keyframes = noUndo(function (args) {
       },
       ease: ease,
       tangents: tangents,
+      flags: flags,
     });
   }
   return keys;
@@ -360,12 +412,88 @@ function __invInterp(t) {
   return "unknown";
 }
 
+function __easeList(arr) {
+  var out = [];
+  for (var i = 0; i < arr.length; i++) out.push({ influence: arr[i].influence, speed: arr[i].speed });
+  return out;
+}
+
+// Keyframe flags (issue #181): [field, getter, setter, spatial-only].
+var __KEY_FLAGS = [
+  ["temporalContinuous", "keyTemporalContinuous", "setTemporalContinuousAtKey", false],
+  ["temporalAutoBezier", "keyTemporalAutoBezier", "setTemporalAutoBezierAtKey", false],
+  ["spatialContinuous", "keySpatialContinuous", "setSpatialContinuousAtKey", true],
+  ["spatialAutoBezier", "keySpatialAutoBezier", "setSpatialAutoBezierAtKey", true],
+  ["roving", "keyRoving", "setRovingAtKey", true]
+];
+
+/** The key's flags as After Effects reports them; a flag it cannot read is left out. */
+function __readKeyFlags(prop, keyIndex) {
+  var out = {};
+  for (var i = 0; i < __KEY_FLAGS.length; i++) {
+    var f = __KEY_FLAGS[i];
+    if (f[3] && !prop.isSpatial) continue;
+    try {
+      if (typeof prop[f[1]] === "function") out[f[0]] = !!prop[f[1]](keyIndex);
+    } catch (e) {}
+  }
+  return out;
+}
+
 OPS.set_interpolation = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
   var prop = walkProperty(l, args.propertyPath);
-  __applyInterpolationToKey(prop, args.keyIndex, { "in": args["in"], "out": args["out"] });
-  return { ok: true };
+  var label = __easeLabel(prop);
+  var wantsType = args["in"] !== undefined || args["out"] !== undefined;
+  var flags = [];
+  for (var i = 0; i < __KEY_FLAGS.length; i++) {
+    if (args[__KEY_FLAGS[i][0]] !== undefined) flags.push([__KEY_FLAGS[i], !!args[__KEY_FLAGS[i][0]]]);
+  }
+  if (!wantsType && !flags.length) {
+    throw new Error("set_interpolation needs in, out or a keyframe flag — nothing was changed.");
+  }
+  // Every refusal before the first write.
+  var numKeys = prop.numKeys;
+  if (args.keyIndex < 1 || args.keyIndex > numKeys) {
+    throw new Error("set_interpolation: no key " + args.keyIndex + " on " + label + ": it has " + numKeys + " keyframe" +
+      (numKeys === 1 ? "" : "s") + " (key indices start at 1). Nothing was changed.");
+  }
+  for (i = 0; i < flags.length; i++) {
+    var f = flags[i][0];
+    if (f[3] && !prop.isSpatial) {
+      throw new Error("set_interpolation: " + f[0] + " applies only to a spatial property (Position, Anchor Point, an effect point); " +
+        label + " is not one. Nothing was changed.");
+    }
+    if (f[0] === "roving" && flags[i][1] && (args.keyIndex === 1 || args.keyIndex === numKeys)) {
+      throw new Error("set_interpolation: the first and last keys of a property cannot rove; key " + args.keyIndex + " of " +
+        numKeys + " on " + label + " is one of them. Nothing was changed.");
+    }
+    if (typeof prop[f[2]] !== "function") {
+      throw new Error("set_interpolation: this After Effects has no " + f[2] + ", so " + f[0] + " cannot be set. Nothing was changed.");
+    }
+  }
+  var written = [];
+  if (wantsType) {
+    __applyInterpolationToKey(prop, args.keyIndex, { "in": args["in"], "out": args["out"] });
+    written.push("interpolation");
+  }
+  for (i = 0; i < flags.length; i++) {
+    var fl = flags[i][0], want = flags[i][1];
+    var why = null;
+    try {
+      prop[fl[2]](args.keyIndex, want);
+      if (!!prop[fl[1]](args.keyIndex) !== want) why = "After Effects took it but reads " + (want ? "false" : "true") + " afterwards";
+    } catch (eF) {
+      why = (eF && eF.message) ? String(eF.message) : String(eF);
+    }
+    if (why !== null) {
+      throw new Error("set_interpolation could not set " + fl[0] + " " + want + " on key " + args.keyIndex + " of " + label + ": " + why + ". " +
+        (written.length ? "Already written by this call: " + written.join(", ") + "." : "Nothing else in this call was written."));
+    }
+    written.push(fl[0]);
+  }
+  return { ok: true, flags: __readKeyFlags(prop, args.keyIndex) };
 };
 
 OPS.set_temporal_ease = function (args) {

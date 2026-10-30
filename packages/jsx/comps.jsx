@@ -74,7 +74,21 @@ OPS.set_comp = function (args) {
   if (args.workAreaStart !== undefined) c.workAreaStart = args.workAreaStart;
   if (args.workAreaDuration !== undefined) c.workAreaDuration = args.workAreaDuration;
   if (args.bgColor) c.bgColor = [args.bgColor[0], args.bgColor[1], args.bgColor[2]];
-  return __compSummary(c);
+  // The comp switches layer motion blur and frame blending need (issue #181),
+  // read back: a switch that did not land is an error, not a summary.
+  var sw = [["motionBlur", args.motionBlur], ["frameBlending", args.frameBlending]];
+  for (var i = 0; i < sw.length; i++) {
+    if (sw[i][1] === undefined) continue;
+    c[sw[i][0]] = sw[i][1];
+    if (c[sw[i][0]] !== sw[i][1]) {
+      throw new Error("set_comp: asked for " + sw[i][0] + " " + sw[i][1] + " but After Effects reads " + c[sw[i][0]] +
+        " afterwards. The fields before it in this call were written.");
+    }
+  }
+  var out = __compSummary(c);
+  if (args.motionBlur !== undefined) out.motionBlur = c.motionBlur;
+  if (args.frameBlending !== undefined) out.frameBlending = c.frameBlending;
+  return out;
 };
 
 // A solid layer's source is a FootageItem in the project's Solids folder, and

@@ -57,6 +57,7 @@ function installFakeAe(g) {
   g.MaskMode = { NONE: 6812, ADD: 6813, SUBTRACT: 6814, INTERSECT: 6815, LIGHTEN: 6816, DARKEN: 6817, DIFFERENCE: 6818 };
   g.BlendingMode = { NORMAL: 5212, MULTIPLY: 5216, SCREEN: 5220, ADD: 5213, OVERLAY: 5223, DIFFERENCE: 5232 };
   g.TrackMatteType = { NO_TRACK_MATTE: 5012, ALPHA: 5013, ALPHA_INVERTED: 5014, LUMA: 5015, LUMA_INVERTED: 5016 };
+  g.ParagraphJustification = { LEFT_JUSTIFY: 7413, RIGHT_JUSTIFY: 7414, CENTER_JUSTIFY: 7415, FULL_JUSTIFY_LASTLINE_LEFT: 7416 };
   var INTERP = [6612, 6613, 6614];
 
   function fail(msg) { throw new Error("After Effects error: " + msg); }
