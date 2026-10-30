@@ -1,6 +1,6 @@
 ---
 name: after-effects
-description: How to drive Adobe After Effects well through the AE MCP tools — orienting in a project, bounding every read, verifying a write with a diff, screenshots as a one-off diagnostic with their cost in tokens, write ordering, and the three bridge failures whose remedies contradict each other. Load whenever a task involves After Effects, motion graphics, comps, layers, or keyframes; it points at one reference per subject for everything else.
+description: How to drive Adobe After Effects well through the AE MCP tools — orienting in a project, bounding every read, verifying a write with a diff, screenshots as a one-off diagnostic with their cost in tokens, write ordering, and the four bridge failures whose remedies contradict each other. Load whenever a task involves After Effects, motion graphics, comps, layers, or keyframes; it points at one reference per subject for everything else.
 ---
 
 # Driving After Effects
@@ -233,7 +233,7 @@ the middle of work the user asked for as one thing. A call that had to wait says
 so with `queuedBehind` and `waitedMs`. Reads are never queued: `list_*`,
 `get_*`, the screenshots and `await_job` answer while a batch runs.
 
-## Three failures that read alike, with remedies that contradict
+## Four failures that read alike, with remedies that contradict
 
 - **Did not answer in time.** The call reached After Effects, which is
   single-threaded, so a long script or a modal dialog nobody has clicked blocks
@@ -254,4 +254,10 @@ so with `queuedBehind` and `waitedMs`. Reads are never queued: `list_*`,
 - **Waited behind another op for the write queue and was dropped.** Nothing
   reached After Effects and nothing changed. Something in front is slow — usually
   a long `run_batch`; find it with `get_job` or `await_job` — then re-send once
-  it has finished. That is the one of the three where re-sending is right.
+  it has finished. That is the one of the four where re-sending is right.
+- **Dropped the connection mid-call.** Rarer than the first three, and unlike any of them: the call
+  was delivered and the connection broke before any answer came back — After
+  Effects or its panel went away under it. It may or may not have landed. Do
+  not re-send it blind: confirm the panel with `check_setup`, then read the comp
+  or layer back (`diff_comp` against a snapshot, `get_layer_full`) and re-send
+  only if the change is not there.

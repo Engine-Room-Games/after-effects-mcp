@@ -224,6 +224,12 @@ jobs:
       - name: Mask and shape paths apply every field and resolve by match name
         run: node tests/unit/mask-path.mjs
 
+      # Issue #163: the server exits with its stdin, a dropped connection is not
+      # re-sent as a refusal, a finished render does not wait on the write
+      # queue, and the panel escapes U+2028/U+2029 and queues /reload-jsx.
+      - name: Hardening batch (#163) holds
+        run: node tests/unit/hardening-163.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.

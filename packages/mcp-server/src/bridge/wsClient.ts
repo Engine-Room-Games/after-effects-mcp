@@ -47,7 +47,9 @@ export class WsClient {
   stop(): void {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    try { this.ws?.close(); } catch {}
+    // terminate, not close: a graceful close waits up to 30s on a busy panel,
+    // and shutdown (#163) must not sit on it until the fallback exit fires.
+    try { this.ws?.terminate(); } catch {}
   }
 
   /** Drop the current socket and connect to wherever the bridge is now. Resolves on open, or on failure. */

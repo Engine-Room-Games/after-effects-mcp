@@ -96,6 +96,35 @@ function __newJobId() {
   return "j_" + (new Date().getTime()) + "_" + __JOB_SEQ;
 }
 
+// A finished job's entry held every op's args and every op's result for the
+// life of the After Effects session (issue #163) — a long batch is thousands of
+// both, and JOBS was never emptied. On finishing, the entry is cut down to a
+// tombstone of counters, and only the newest __JOBS_FINISHED_MAX tombstones
+// are kept. The tombstone is not decoration: a cancel can arrive after the last
+// chunk ran but before the server has heard the job ended, and "no such job"
+// there would read as After Effects having restarted and the result being lost.
+var __JOBS_FINISHED = __JOBS_FINISHED || [];
+var __JOBS_FINISHED_MAX = 64;
+
+function __finishJob(jobId, result) {
+  var j = JOBS[jobId];
+  if (j && !j.finished) {
+    JOBS[jobId] = {
+      finished: true,
+      cancelled: !!j.cancelled,
+      cursor: j.cursor,
+      total: j.total,
+      errorCount: j.errors ? j.errors.length : 0,
+      undoSteps: j.undoSteps,
+    };
+    __JOBS_FINISHED.push(jobId);
+    while (__JOBS_FINISHED.length > __JOBS_FINISHED_MAX) {
+      delete JOBS[__JOBS_FINISHED.shift()];
+    }
+  }
+  return result;
+}
+
 // ---------- Undo wrapper ----------
 // __UNDO_OPEN tracks whether a group *this bundle* opened is currently open.
 // withUndo() is the only thing that may set it — dispatch and run_batch both

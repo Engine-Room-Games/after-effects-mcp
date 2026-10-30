@@ -625,8 +625,10 @@ await check("SIGTERM and SIGHUP stop a run like Ctrl-C: server killed, restore r
     `import { StdioMcpClient } from ${JSON.stringify(live("lib", "client.mjs"))};
      import fs from "node:fs";
      const c = new StdioMcpClient({ command: process.execPath, args: ["-e", "process.on('SIGTERM',()=>{}); process.on('SIGHUP',()=>{}); setInterval(()=>{},1000)"] }).start();
-     fs.writeFileSync(${JSON.stringify(pidFile)}, String(c.child.pid));
+     // Handlers first: the pid file is the test's cue to signal, and a signal
+     // that lands before them takes the default action and prints nothing.
      for (const s of ["SIGTERM", "SIGHUP"]) process.on(s, () => { process.stdout.write("reminder\\n"); process.exit(1); });
+     fs.writeFileSync(${JSON.stringify(pidFile)}, String(c.child.pid));
      setInterval(() => {}, 1000);`
   );
   for (const sig of ["SIGTERM", "SIGHUP"]) {

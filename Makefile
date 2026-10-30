@@ -26,11 +26,15 @@ help: ## Show this help
 build: ## Compile TypeScript and the ExtendScript bundle
 	@npm run build
 
-jsx: ## Rebuild bundle.jsx only, then hot-reload it into a running AE
+jsx: ## Rebuild bundle.jsx only, then hot-reload it into a running AE (FORCE=1 reloads under a running batch)
 	@npm run build:jsx
-	@curl -fsS -X POST http://127.0.0.1:7777/reload-jsx >/dev/null 2>&1 \
-		&& echo "reloaded into the running panel" \
-		|| echo "panel not reachable — restart After Effects to pick this up"
+	@out=$$(curl -sS -X POST -H "x-ae-mcp-token: $$(cat "$$HOME/.engineroom-ae-mcp/token-7777" 2>/dev/null)" \
+		"http://127.0.0.1:7777/reload-jsx$(if $(FORCE),?force=1,)" 2>&1); \
+	case "$$out" in \
+		*'"ok":true'*) echo "reloaded into the running panel" ;; \
+		*batch_in_flight*) echo "not reloaded: a run_batch is running in After Effects — wait for it, or: make jsx FORCE=1"; echo "$$out" ;; \
+		*) echo "panel not reachable — restart After Effects to pick this up"; echo "$$out" ;; \
+	esac
 
 watch: ## TypeScript watch mode
 	@npm run watch:ts

@@ -8,7 +8,7 @@
 //        |     MCP resources, prompts/get, the ae_guide tool, and the condensed
 //        |     `instructions` sent in the initialize result. Reaches every client.
 //        |
-//        +-> plugin/skills/<name>/SKILL.md                 Claude Code / claude.ai
+//        +-> plugin/skills/<name>/SKILL.md                 Claude Code (the plugin)
 //        +-> plugin/skills/<parent>/references/<name>.md   ditto, for a reference
 //        +-> plugin/commands/<name>.md                     Claude Code only
 //
@@ -57,8 +57,8 @@ every change as it happens and every call is a real undo step in their project.
 Read the guidance before you build. \`ae_guide({topic: "after-effects"})\` is the
 core — orienting, bounded reads, verifying a write, screenshots, the bridge
 failures — and points at one topic per subject (shapes, text, animation, raw
-scripting, sound, …). In Claude Code and claude.ai the \`after-effects\` skill is
-the same text — load one carrier, not both.
+scripting, sound, …). Where this server's Claude Code plugin is installed, the
+\`after-effects\` skill is the same text — load one carrier, not both.
 Topics: __TOPICS__.
 
 Three habits that matter before that call returns:

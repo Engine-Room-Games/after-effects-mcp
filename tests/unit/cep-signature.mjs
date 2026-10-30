@@ -249,6 +249,22 @@ await check("setup_panel warns when it is about to overwrite a signed install", 
     assert.equal(first.ok, true);
     assert.equal(first.signedInstallOverwritten, undefined);
     assert.equal(first.notes.some((n) => /self-signed/.test(n)), false);
+    assert.equal(first.restartAfterEffects, true, "a fresh install is loaded by a restart");
+
+    // Issue #163: running it again over an identical install changes nothing,
+    // so it must not send the user to restart After Effects.
+    const marker = fs.statSync(path.join(target, "CSXS", "manifest.xml")).ino;
+    const again = await installPanel({ enableDebugMode: false });
+    assert.equal(again.restartAfterEffects, false, "nothing changed, yet it asked for a restart");
+    assert.ok(again.actions.some((a) => /already identical/.test(a)), again.actions.join(" | "));
+    assert.ok(again.notes.some((n) => /Nothing this call does needs After Effects restarted/.test(n)));
+    assert.equal(fs.statSync(path.join(target, "CSXS", "manifest.xml")).ino, marker, "an identical install was rewritten");
+
+    // force always replaces, and one changed byte is a change.
+    assert.equal((await installPanel({ enableDebugMode: false, force: true })).restartAfterEffects, true);
+    fs.appendFileSync(path.join(target, "CSXS", "manifest.xml"), " ");
+    const edited = await installPanel({ enableDebugMode: false });
+    assert.equal(edited.restartAfterEffects, true, "a differing install was treated as unchanged");
 
     // The user signs it in place, per the #91 workaround.
     fs.mkdirSync(path.join(target, "META-INF"), { recursive: true });

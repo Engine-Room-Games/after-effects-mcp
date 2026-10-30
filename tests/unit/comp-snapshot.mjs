@@ -556,6 +556,14 @@ const comp = (layers, over = {}) => ({
   ok(/snapshot_comp/.test(msg) && /list_layers/.test(msg), "…and names both ways forward");
   ok(store.ids().every((id) => msg.includes(id)), "the ids that ARE held are listed, so the next call can succeed");
 
+  // Issue #163: a second store — a restarted server — must not resolve the
+  // first one's ids, even though both counted from 1.
+  const restarted = new SnapshotStore(3);
+  const again = restarted.store(fp(9, 1));
+  ok(/^snap_[0-9a-f]{6}_1$/.test(again.id), `ids carry a per-process prefix (${again.id})`);
+  ok(again.id !== first.id, "a new process's first id is not the old process's first id");
+  eq(restarted.get(first.id), undefined, "an id from a previous process does not silently match");
+
   eq(new SnapshotStore(3).missingMessage("snap_1").includes("No snapshots are held"), true,
     "a fresh session says that rather than listing nothing");
 }
