@@ -135,6 +135,11 @@ jobs:
       - name: Panel client hash matches between panel and server
         run: node tests/unit/panel-hash.mjs
 
+      # Since #243 screenshots, run_jsx, the house style and batch chunks reach
+      # After Effects under internal op names; messages must name the tool.
+      - name: Wait and timeout messages name the tool, not the internal op
+        run: node tests/unit/op-names.mjs
+
       # Issue #156: a stale verdict was cached forever, and AE restarts on the
       # same port, so "restart After Effects" outlived the restart.
       - name: A stale panel verdict is re-checked after a restart
