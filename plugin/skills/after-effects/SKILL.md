@@ -233,15 +233,31 @@ the middle of work the user asked for as one thing. A call that had to wait says
 so with `queuedBehind` and `waitedMs`. Reads are never queued: `list_*`,
 `get_*`, the screenshots and `await_job` answer while a batch runs.
 
+That queue is this session's only. **A second AI client connected to the same
+After Effects has its own**, and neither sees the other's. After Effects still
+runs one call at a time, so two calls never mix — but while the other client's
+script runs, After Effects answers nothing to anyone, and your call simply
+takes longer, with nothing in its result to say why. The other client's writes
+can also land between the chunks of a long `run_batch` of yours (measured).
+If the user says another session is working in the same project, re-read what
+you are about to build on rather than trusting what you last saw.
+
 ## Four failures that read alike, with remedies that contradict
 
 - **Did not answer in time.** The call reached After Effects, which is
   single-threaded, so a long script or a modal dialog nobody has clicked blocks
-  every reply. It may still be running: do **not** re-send it, do not restart
+  every reply — and so does another AI client's call on the same After
+  Effects, which this one waits behind. It may still be running, or not yet
+  started, and either way can still land after the error (measured): do **not**
+  re-send it, do not restart
   After Effects, do not run `setup_panel`. Poll `check_setup` for about a
   minute, and ask the user whether a dialog is hiding behind another window. A
   call that legitimately needs longer gets it from `AE_MCP_OP_TIMEOUT_MS` in the
-  server's environment.
+  server's environment. **The one exception is `render_queue`:** its timeout
+  says no render was started — the error comes from its prepare or save step,
+  before the render — so call `render_queue` again once `check_setup` shows
+  the panel answering. At most the project save lands twice, which changes
+  nothing.
 - **Cannot reach After Effects.** The connection was refused, so nothing
   reached After Effects and nothing changed. The server looks again on its own
   first — 7777, then the port file — and follows a panel that has moved, so a
