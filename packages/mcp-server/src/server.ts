@@ -20,6 +20,7 @@ import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge
 import { SessionLine } from "./frontdesk/line.js";
 import type { FrontDeskOptions } from "./frontdesk/config.js";
 import { JobManager, isTerminal, unknownJobMessage } from "./jobs/manager.js";
+import { FollowedJobs } from "./jobs/followedJobs.js";
 import {
   RenderRunner,
   saveAndCheckFootage,
@@ -286,6 +287,16 @@ export function createServer(opts: CreateServerOptions = {}) {
   // the event socket dropping and reopening is the signal that a (possibly
   // new) panel is answering, and the verdict about the old one is void (#156).
   ws.onReopen(() => panelGate.invalidate());
+  // Only for a batch an old panel drives itself (issue #243): followed over
+  // the event socket, and ended as lost once its end can no longer arrive.
+  const followed = new FollowedJobs(jobs, {
+    instance: () => {
+      const port = (bridge as { port?: unknown }).port;
+      return typeof port === "number" && port > 0 ? panelInstanceId(panelToken(port)) : null;
+    },
+  });
+  ws.onClose(() => followed.socketClosed());
+  ws.onReopen(() => followed.socketReopened());
   ws.start();
   // Live project resources (issue #248; resources/live.ts). Polls After
   // Effects only while a client is subscribed, one constant-time read a tick,
@@ -311,6 +322,7 @@ export function createServer(opts: CreateServerOptions = {}) {
   server.onclose = () => {
     // Before the line lets go of the desk: a chunk must never go out without it.
     closing = true;
+    followed.stopAll();
     batches.stopAll("this server is closing (its MCP client disconnected), and a batch is driven by the server that started it.");
     ws.stop();
     live.stop();
@@ -1062,7 +1074,20 @@ export function createServer(opts: CreateServerOptions = {}) {
         if ((result as { driver?: unknown }).driver !== "server") {
           panelGate.invalidate();
           jobs.register(env.jobId, env.total);
-          lease?.extendUntil(jobs.waitFor(env.jobId, writes.holdCeilingMs));
+          followed.follow(env.jobId);
+          const followedEnd = jobs.waitFor(env.jobId, writes.holdCeilingMs);
+          // The lock is let go at the ceiling even if the batch is still
+          // running; that is recorded on the job, not only logged.
+          followedEnd.catch(() => {
+            const st = jobs.get(env.jobId);
+            if (st && !isTerminal(st.status)) {
+              jobs.warn(
+                env.jobId,
+                `The write lock was released after ${Math.round(writes.holdCeilingMs / 1000)}s while this batch may still be running: other writes can now land between its chunks.`
+              );
+            }
+          });
+          lease?.extendUntil(followedEnd);
           lease?.onLost?.((why) => jobs.warn(env.jobId, why));
           return errorResult(panelDrivenBatchMessage(env.jobId));
         }

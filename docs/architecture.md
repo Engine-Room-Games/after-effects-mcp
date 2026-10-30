@@ -776,7 +776,13 @@ end over `/events`, so the server registers the job, holds the write lease
 until it ends (to the ceiling), and fails the call with a message that says
 not to re-send it, to wait on `await_job` with its id — After Effects
 answering between chunks is no sign it is done — and to update the panel only
-after that. Two drivers on one job cannot happen. The event socket also stays
+after that. It is never waited on for ever (`jobs/followedJobs.ts`): if the
+event socket closes and does not return within 15s, comes back to a different
+panel instance, or nothing is heard for five minutes, the job ends as lost —
+last progress seen, may have partly applied, do not re-send, the panel can now
+be updated — and the lock goes with it. A lock released at the hold ceiling
+while the batch may still run is recorded on the job, not only logged.
+`followed-jobs.mjs` and `batch-driver.mjs` pin both. Two drivers on one job cannot happen. The event socket also stays
 because its reopening is how a restarted After Effects is noticed
 (`WsClient.onReopen`).
 

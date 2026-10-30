@@ -32,6 +32,7 @@ export class WsClient {
   private stopped = false;
   private opened = false;
   private reopenListeners: (() => void)[] = [];
+  private closeListeners: (() => void)[] = [];
 
   constructor(private bridge: HttpClient, private jobs: JobManager) {
     // Awaited by `switchPort`, bounded there, so a retried op does not go out
@@ -45,6 +46,16 @@ export class WsClient {
    */
   onReopen(listener: () => void): void {
     this.reopenListeners.push(listener);
+  }
+
+  /**
+   * Called whenever the socket closes without being stopped or replaced —
+   * After Effects quitting, restarting or no longer answering. A failed
+   * reconnect attempt counts too. Used to stop following a batch an old panel
+   * drives (jobs/followedJobs.ts) once its end can no longer arrive.
+   */
+  onClose(listener: () => void): void {
+    this.closeListeners.push(listener);
   }
 
   start(): void {
@@ -106,6 +117,9 @@ export class WsClient {
         // A socket replaced by `reconnect` must not schedule a second connect
         // to the old port on top of the new one.
         if (this.stopped || this.ws !== ws) return;
+        for (const l of this.closeListeners) {
+          try { l(); } catch (e) { logger.warn(`ws close listener failed: ${(e as Error).message}`); }
+        }
         this.reconnectTimer = setTimeout(() => this.connect(), 1500);
       });
       ws.on("error", () => {

@@ -410,6 +410,8 @@ const cancels = [];
 let chain = Promise.resolve();
 let chunkMs = 30;
 let echoDriver = true;
+/** The stub old panel (one that drives its own batch): pace, and whether it goes quiet. */
+const oldPanel = { chunkMs: 5, mode: "finish", ended: new Map() };
 /** `{jobId, n, release}`: hold that job's n-th chunk at the panel until released. */
 let hold = null;
 const chunkCount = new Map();
@@ -457,14 +459,20 @@ const panel = http.createServer((req, res) => {
             // An older panel: drives its own job and reports over /events.
             result = env;
             setTimeout(async () => {
-              for (;;) {
+              for (let n = 1; ; n++) {
+                // "lost": the panel goes quiet mid-batch and never sends the end.
+                if (oldPanel.mode === "lost" && n > 3) {
+                  oldPanel.ended.set(env.jobId, Date.now());
+                  return;
+                }
                 const r = ae.chunk(env.jobId, 25);
                 if (r.done) {
+                  oldPanel.ended.set(env.jobId, Date.now());
                   for (const c of wss.clients) c.send(JSON.stringify({ type: "complete", jobId: env.jobId, result: r }));
                   return;
                 }
                 for (const c of wss.clients) c.send(JSON.stringify({ type: "progress", jobId: env.jobId, progress: r.progress, total: r.total }));
-                await sleep(5);
+                await sleep(oldPanel.chunkMs);
               }
             }, 20);
           }
@@ -507,6 +515,8 @@ async function startSession(name, deskPort) {
     AE_MCP_PORT: String(panelPort),
     AE_MCP_FRONT_DESK_PORT: String(deskPort),
     AE_MCP_FRONT_DESK_BEAT_MS: "200",
+    // A batch an old panel drives is ended as lost after this long unheard.
+    AE_MCP_FOLLOW_SILENCE_MS: "1500",
   };
   delete env.AE_MCP_FRONT_DESK;
   delete env.AE_MCP_OP_TIMEOUT_MS;
@@ -625,6 +635,50 @@ try {
       assert.equal(chunksOf(jobId).length, 0, "the server sent no chunk of a job the panel drives: never two drivers");
     } finally {
       echoDriver = true;
+    }
+  });
+
+  // The safety net for an old panel driving its own batch (#243): the write
+  // lock is held until that batch ends — finished, cancelled, or lost — and
+  // no longer. A write queued behind it runs only after the end.
+  await check("a followed batch holds the write lock until it ends, and lets go when it finishes, is cancelled or is lost", async () => {
+    echoDriver = false;
+    oldPanel.chunkMs = 40;
+    try {
+      for (const mode of ["finish", "cancel", "lost"]) {
+        oldPanel.mode = mode;
+        const rb = await call(A, "run_batch", { ops: batchOps(300) });
+        assert.equal(rb.res.isError, true, rb.text);
+        assert.match(rb.text, /cancel_job/);
+        const jobId = [...ae.jobs.keys()].pop();
+        const w = begin(A, "run_jsx", { code: `// tag:W${mode} ms:1\nreturn 1;` });
+        if (mode === "cancel") {
+          await sleep(100);
+          await call(A, "cancel_job", { jobId });
+        }
+        const aw = await call(A, "await_job", { jobId });
+        const st = (await call(A, "get_job", { jobId })).json();
+        const rw = await w.done;
+        assert.equal(rw.res.isError, undefined, rw.text);
+        const wrote = ran(`W${mode}`)[0];
+        assert.ok(wrote, "the queued write ran");
+        assert.ok(oldPanel.ended.has(jobId), "the stub batch ended");
+        assert.ok(wrote.enteredAt >= oldPanel.ended.get(jobId), `${mode}: the write reached After Effects while the batch was still running`);
+        if (mode === "finish") assert.equal(st.status, "completed", JSON.stringify(st));
+        if (mode === "cancel") assert.equal(st.status, "cancelled", JSON.stringify(st));
+        if (mode === "lost") {
+          assert.equal(st.status, "failed", JSON.stringify(st));
+          assert.ok(wrote.enteredAt - oldPanel.ended.get(jobId) >= 1000, "the lock is held until the job is declared lost, not let go when the panel goes quiet");
+          assert.match(aw.text, /Lost track of batch/);
+          assert.match(aw.text, /Do NOT send the batch again/);
+          assert.match(aw.text, /setup_panel/);
+        }
+        assert.equal(chunksOf(jobId).length, 0, "never two drivers");
+      }
+    } finally {
+      echoDriver = true;
+      oldPanel.chunkMs = 5;
+      oldPanel.mode = "finish";
     }
   });
 

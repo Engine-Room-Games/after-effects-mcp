@@ -149,7 +149,9 @@ export function panelDrivenBatchMessage(jobId: string): string {
     `The After Effects panel started batch ${jobId} and is running it itself. It must not be sent again: it is ` +
     `still applying in After Effects, and a second copy would apply every op twice. Call ` +
     `await_job({jobId: "${jobId}"}) and wait until it reports the batch finished — that is the only sign it is ` +
-    `done; After Effects answering other calls is not. Only a panel older than these tools runs a batch on its ` +
+    `done; After Effects answering other calls is not. If After Effects quits or restarts first, await_job ends ` +
+    `it as lost and says how far it got. To stop it early, call cancel_job({jobId: "${jobId}"}). ` +
+    `Only a panel older than these tools runs a batch on its ` +
     `own, so once await_job reports it finished, and never before: run setup_panel, and ask the user to quit and ` +
     `reopen After Effects.`
   );
