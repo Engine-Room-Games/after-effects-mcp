@@ -37,6 +37,8 @@ export const BATCH_STEP_REFUSALS: Readonly<Record<string, string>> = Object.free
     "the panel finishes the export after After Effects returns (it writes the template's thumbnail); as a step that half would be skipped — call it on its own",
   render_queue:
     "the render runs in a separate aerender process that the server starts, which a batch step never reaches — call it on its own",
+  analyze_motion:
+    "the summary is computed by the server from keys the panel reads, and a batch step only reaches the panel, which has no analyze_motion of its own — call it on its own",
   get_house_style:
     "the server summarises the style guide after it is read; as a step `detail` would be ignored and the whole document returned — call it on its own",
 });

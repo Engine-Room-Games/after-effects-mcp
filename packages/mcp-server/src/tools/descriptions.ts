@@ -115,7 +115,7 @@ export const descriptions: Record<string, string> = {
     "Many ops in one ExtendScript pass — far faster, and far fewer undo steps, than separate calls. " +
     "**Up to 500 ops it is exactly one undo step.** Over 500 it is chunked into a background job: this call returns a jobId at once; finish with await_job (a progressToken goes on THAT call; get_job polls) — and it lands as **one undo step per chunk of 25**, since AE discards an undo group that spans two script calls. Read `undoSteps` and its `note` before telling anyone how to undo the work; never say \"one Cmd-Z\" for a chunked batch. This server sends the chunks, so if it stops mid-batch (client quit or restarted) the batch stops at a chunk boundary: read the comp back, never re-send it whole. " +
     "`singleUndo:true` forces one undo step up to 2000 ops, freezing AE with no progress until done; over 2000 is refused. " +
-    "Each step's `args` are checked as that tool's own; a batch with any bad step is refused whole before anything runs. Not allowed as steps: screenshot_frame, screenshot_layer, snapshot_comp, diff_comp, export_mogrt, render_queue, get_house_style and the server-side tools (ae_guide, await_job, log_issue, …). " +
+    "Each step's `args` are checked as that tool's own; a batch with any bad step is refused whole before anything runs. Not allowed as steps: screenshot_frame, screenshot_layer, snapshot_comp, diff_comp, analyze_motion, export_mogrt, render_queue, get_house_style and the server-side tools (ae_guide, await_job, log_issue, …). " +
     "transactional:true (default) stops at the first error; nothing rolls back either way — read the state back rather than re-running. " +
     "`diff:true` appends a structural diff of what the batch did, also to an error — the cheapest way to find where a half-applied batch stopped.",
 
@@ -181,6 +181,8 @@ export const descriptions: Record<string, string> = {
   // ---------- house style ----------
   get_house_style:
     "The user's palette, type, motion and layout defaults for the open project, from `house-style.md` beside the .aep. Call it once before building anything so your work matches theirs — it is cheap. Default is a few-hundred-token summary; `detail:'full'` returns the whole document, needed before editing it with set_house_style. `found:false`: none exists — use sensible defaults and offer to capture one afterwards.",
+  analyze_motion:
+    "Read how comps the user already animated move, as numbers for the Motion section of their house style: typical move length, common ease influence, overshoot and settle, anticipation, staggers between layers, holds. Reads every keyed property in the named comps (not precomps inside them) and returns a bounded summary plus `suggestedLines` — never the keys. Read-only. Show the user what it found and write it with set_house_style only after they agree. For one property's exact keys use get_keyframes.",
   set_house_style:
     "Write the project's style guide. Replaces the whole file, so read it first and send the merged document — `overwrite:true` is required to replace an existing one. The project must have been saved once, since the file lives beside the .aep. ae_guide topic 'style-guide' covers capturing a style worth writing down.",
 

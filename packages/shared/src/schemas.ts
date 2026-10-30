@@ -511,6 +511,16 @@ export const DiffComp = z
   })
   .strict();
 
+// ---------- motion style (the panel gathers keys, the server summarises; issue #244) ----------
+export const AnalyzeMotion = z
+  .object({
+    compIds: z.array(z.number()).min(1).max(10)
+      .describe("The comps whose animation to read — ones the user says move the way they want. Every keyed property on every layer is read; nested precomps are not followed, so name them too."),
+    maxKeys: z.number().int().min(1).max(20000).optional().meta({ default: 2000 })
+      .describe("Cap on keyframes read across all comps. Reaching it is reported as truncated, with what was left out."),
+  })
+  .strict();
+
 // ---------- layers ----------
 // The sections __layerSummary (layers.jsx) can add to its id/index/name/type
 // core. One list for list_layers and find_layers, because both read through
@@ -1617,6 +1627,7 @@ export const OpSchemas = {
   delete_checkpoints: DeleteCheckpoints,
   snapshot_comp: SnapshotComp,
   diff_comp: DiffComp,
+  analyze_motion: AnalyzeMotion,
   // layers
   list_layers: ListLayers,
   get_layer_full: GetLayerFull,
@@ -1763,6 +1774,9 @@ export const OpMutation = {
   // not queue — the point of a diff is checking on a write that is in flight.
   snapshot_comp: "read",
   diff_comp: "read",
+  // Reads every key of the named comps and summarises them in the server.
+  // Writes nothing, so it does not queue behind a write.
+  analyze_motion: "read",
   // layers
   list_layers: "read",
   get_layer_full: "read",
@@ -1904,6 +1918,8 @@ export const InternalOpMutation = {
   _render_mark_done: "write",
   // snapshot_comp / diff_comp gather a fingerprint; the server keeps it.
   _comp_fingerprint: "read",
+  // analyze_motion's gathering half: raw keys and eases, summarised by the server.
+  _motion_keys: "read",
   // The .aep's path, for the house style the server reads and writes itself
   // (issue #220, stage 3). Sent only to a panel reporting `project-path`.
   _project_path: "read",

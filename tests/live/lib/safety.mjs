@@ -481,7 +481,7 @@ export const FILE_WRITING_TOOLS = {
 export const ALLOWED_TOOLS = new Set([
   "list_comps", "get_comp", "get_comp_tree", "create_comp", "set_comp", "delete_comp", "set_active_comp",
   "duplicate_comp", "checkpoint_comp", "list_checkpoints", "revert_comp", "delete_checkpoints",
-  "snapshot_comp", "diff_comp", "list_layers", "get_layer_full", "create_text_layer", "create_shape_layer",
+  "snapshot_comp", "diff_comp", "analyze_motion", "list_layers", "get_layer_full", "create_text_layer", "create_shape_layer",
   "create_solid_layer", "create_null_layer", "create_adjustment_layer", "create_precomp_layer",
   "create_camera_layer", "create_light_layer", "duplicate_layer", "delete_layer", "set_layer", "parent_layer",
   "reorder_layer", "set_transform", "add_keyframe", "remove_keyframe", "get_keyframes", "set_interpolation",

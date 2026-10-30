@@ -26,9 +26,15 @@ instead of adjectives.
    carry the look: the text, the background, the accent shapes.
 3. Pull out the concrete values — hex colours, font families and sizes, tracking,
    corner radii, stroke widths, the position of things relative to the frame.
-4. Read the keyframes too. `get_keyframes` plus the ease settings tell you the
-   timing signature: how long a standard in-animation takes, whether it
-   overshoots, whether anything is ever linear.
+4. Read the motion with `analyze_motion({compIds})` — the comps they named,
+   plus any precomp that carries the animation, since nested comps are not
+   followed. One call reads every key and answers with the timing signature in
+   numbers: typical move length, the ease influence they reach for, how far
+   things overshoot and how fast they settle, the stagger between layers, and
+   `suggestedLines` drafted for the Motion section. Several comps that move
+   alike make a pattern; one comp, or a result whose `notes` call it a hint,
+   is a guess to check with them. Use `get_keyframes` only to look closer at
+   one property it points at.
 5. Show them what you found, in their language, and ask what to change:
 
    > Here's what I read off that comp: near-black background `#0B0D12`, white
@@ -38,7 +44,8 @@ instead of adjectives.
    > wiggle on the chip. Does that sound like your style, or was that comp a
    > one-off?
 
-6. Write it with `set_house_style`.
+6. Write it with `set_house_style` once they agree — never straight from an
+   analysis they have not seen. Put their corrections in, not the raw lines.
 
 ### 2. Ask, when there is nothing to read
 
@@ -62,6 +69,33 @@ Those are what stop work drifting.
 **Only what you verified.** Do not pad the file with plausible-sounding defaults
 they never asked for. A short guide that is true beats a complete one that is
 half invented. Leave a heading empty rather than filling it with a guess.
+
+## Motion from comps they already animated
+
+When the user says new work "doesn't move like mine", or a guide has no Motion
+section, offer to read it off finished comps rather than ask them to describe
+easing:
+
+> Want me to read the timing off a couple of comps you're happy with? I'll show
+> you what I find before anything goes in the style guide.
+
+Read `analyze_motion`'s answer as a proposal, not a measurement of taste:
+
+- **Moves, not keys.** A move is a run of keys with no hold between them, so a
+  `0 → 108 → 100` pop is one 0.4s move with an 8% overshoot. Durations and
+  overshoot are per move; ease pairs are per segment between two keys.
+- **Steps, bounces and elastic are their own words.** A hold keyframe into a
+  new value (a blink, a cut, a text change) is a step, never a move; a sharp
+  reversal with no ease (a floor hit) is a bounce; an overshoot that crosses
+  the target again before settling is elastic.
+- **Speed 0 is an ease; anything else flows through.** `leaving` / `arriving`
+  count the two separately, and influence is read only off sides that stop.
+- **It cannot see** expressions, motion-path shape or per-dimension eases, and
+  it says how many expression-driven properties it skipped. If most of the
+  animation is in expressions, say so instead of writing numbers from the rest.
+- **Write the rules they confirm, with numbers** — "Standard in: 0.4s, 33/33
+  easy ease, overshoot ~8% settling over 0.1s" — and keep the most telling
+  lines first: the digest keeps about 240 characters of motion.
 
 ## Keep it current
 

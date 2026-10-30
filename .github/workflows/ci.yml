@@ -240,6 +240,12 @@ jobs:
       - name: Hex colours convert, and a missed path lists its children
         run: node tests/unit/hex-colour.mjs
 
+      # analyze_motion: the panel gathers raw keys (run against the fake AE),
+      # the server turns them into moves, eases, overshoot and staggers, and
+      # the agent gets a bounded summary, never the keys (issue #244).
+      - name: A motion style is read off animated comps, bounded
+        run: node tests/unit/motion-style.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.

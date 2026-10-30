@@ -258,6 +258,80 @@ a summary that looks complete and is not:
 So `detail: "full"` is not optional before an edit — read the document, merge,
 send it back.
 
+### Reading a motion style off existing comps
+
+`analyze_motion` (issue #244) turns keys a designer already made into numbers
+for the Motion section: how long a move takes, which ease influence they reach
+for, how far things overshoot and how fast they settle, the stagger between
+layers. It never writes the guide — the style-guide topic has the agent show
+the user what it found and call `set_house_style` only once they agree, the
+same "adjectives from you, numbers in the file" flow as reading colours off a
+layer.
+
+It is split the way `diff_comp` is. `_motion_keys` (`packages/jsx/motion.jsx`)
+does plain reads — one compact array per key, the first ease entry of each
+side, the value only when it is numbers — and `style/motion.ts` computes every
+statistic. Two reasons, both the summary's: the statistics will be tuned, and a
+tuning in the bundle would be dark until a panel reinstall and an AE restart;
+and they are arithmetic over arrays, testable with no AE
+(`tests/unit/motion-style.mjs`, which also drives the gathering op against the
+fake AE). The raw keys never reach the agent: a tool result is re-sent on every
+later request, so the answer is a digest with fixed caps (8 properties, 4 ease
+pairs, 5 staggers), and a `run_batch` step — which would return the raw keys —
+is refused.
+
+The vocabulary is the designer's, not After Effects': a **move** is a run of
+changing keys with no hold between them, so `0 → 108 → 100` is one move with an
+8% overshoot, not two segments. Overshoot is measured against the move's last
+key along the travel from its first, so a bounce (`0 → 110 → 97 → 100`) is one
+overshoot with a bounce rather than two overshoots. A stretch of keys is one
+move when the approach never goes backwards (an optional wind-up at the first
+key, at most half the travel), the first pass is at most half the travel past
+the final value, and every key after it is closer to that value than the one
+before — diminishing amplitude, not segment duration, because a pop's settle is
+usually longer than its approach. So `0 → 110 → 100` and `0 → 120 → 95 → 102 →
+100` are one move each, and `0 → 100 → 50` or `0 → 100 → 0` are two. A
+reversal with no ease at the key (a floor hit) is counted as an impact, and a
+move straight back to where the last one started as a return. A run of 20+ keys
+each within 1.5 frames of the last (baked or tracked) is cut out and named;
+the hand keys either side of it on the same property are kept. A path or a text document is not numbers, so the panel sends a short hash of
+it (vertices, tangents and closed; text, font, size and fill) and two equal
+keys read as a hold rather than a move or a step. The hash is the length plus
+two independent 32-bit hashes (djb2 and sdbm), and text style attributes are
+read one by one so a failing read drops only itself. Its cost is bounded
+because `maxKeys` caps keys, not vertices: a path over 1000 vertices is not
+hashed, and one call hashes at most 250,000 characters (refused before the
+string is built). A key past either bound carries no identity, is taken as
+changed, and is counted in the notes. Measured in V8 by the unit test: about
+2 ms per 1000-vertex key and ~40 ms for a whole budget; ExtendScript is
+interpreted and slower, which is what the budget is for. A bounce is a sharp reversal
+that comes back along roughly the axis it arrived on (about 150° or more); a
+sharper-than-90° turn short of that is a corner. A hold keyframe into a different value is a step (a blink, a cut, Source
+Text) — counted with its interval, never a move with eases and never a hold.
+Separated X/Y(/Z) Position keyed at the same times is merged into one move,
+and separated moves on one layer that overlap or meet within 0.1s are one
+move too. A key where the motion stops (speed 0 both sides) and goes on in
+another direction, or the same one, ends a move; only a stop that turns
+straight back is left for the overshoot rule. Ease shares are of every
+segment, so one eased segment in ten reads as 10%, never "100% of eased".
+Impacts are counted once per key even though the walk restarts inside a run
+after each move. A time-reversed layer's keys arrive descending;
+the panel puts them in comp-time order and swaps each key's ease sides. A move,
+hold or step wholly outside its layer's in/out is ignored and counted; one
+seen even in part is kept whole, markers are passed over, and
+a separated master Position is not read beside its X/Y/Z. Everything heuristic says
+what it cannot see: expressions are skipped and counted, motion-path shape and
+per-dimension eases are not read, nested precomps are not followed, and fewer
+than eight moves come back marked as a hint rather than a pattern.
+
+Unmeasured live: that `keyTime` answers comp time for a layer whose
+`startTime` is not zero (a stagger built by sliding layers depends on it) and
+descending comp time on a time-reversed layer, with `inPoint` after `outPoint`
+(the fake models both from the scripting reference), what the identity
+hashing budget costs in ExtendScript rather than V8, and
+how long the read takes on a large comp — `maxKeys` (default 2000) is the
+bound, and hitting it is reported.
+
 ## Filesystem checks on the server
 
 Three ops check the filesystem before they touch the project, and since issue
