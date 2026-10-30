@@ -1262,11 +1262,14 @@ function alive(pid) {
     for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
     const grandchild = Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8"));
     assert.ok(alive(grandchild), "the fake's grandchild should be running before the cancel");
+    // The fake writes its partial file just after the grandchild's pid: wait
+    // for it, or a fast cancel lands in between (a CI flake, #217).
+    for (let i = 0; i < 100 && !fs.existsSync(out); i++) await sleep(20);
     const report = await runner.cancel(jobId);
     assert.equal(report.stopped, true);
     assert.equal(report.wasRunning, true);
     assert.deepEqual(report.partialFiles, [out]);
-    assert.match(report.note, /INCOMPLETE/);
+    assert.match(report.note, /may be INCOMPLETE/);
     assert.equal(jobs.get(jobId).status, "cancelled");
     assert.equal(jobs.get(jobId).result.stopped, true);
     for (let i = 0; i < 50 && alive(grandchild); i++) await sleep(20);
