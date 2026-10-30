@@ -119,12 +119,11 @@ export function writeHouseStyle(
 
   try {
     // `wx` when there was nothing: a guide that appeared since the stat is not
-    // overwritten without `overwrite`. Written byte for byte as given, which is
-    // what the jsx's `lineFeed = "Unix"` does for "\n" — every newline lands
-    // as LF, never the bare CR of ExtendScript's macOS default. One known
-    // difference: a "\r" the caller sent is kept here; whether ExtendScript's
-    // Unix lineFeed rewrites one is unmeasured. Agents send "\n".
-    fs.writeFileSync(file, content, { encoding: "utf8", flag: existed ? "w" : "wx" });
+    // overwritten without `overwrite`. Every line ending lands as LF, as the
+    // jsx's `lineFeed = "Unix"` writes it — measured on AE 26.5: "\r\n" and a
+    // bare "\r" from the caller both reached disk as "\n". The file is meant
+    // to be hand-edited, and ExtendScript's macOS default would write bare CRs.
+    fs.writeFileSync(file, content.replace(/\r\n?/g, "\n"), { encoding: "utf8", flag: existed ? "w" : "wx" });
   } catch (e) {
     const code = errCode(e);
     if (code === "EEXIST") throw exists();

@@ -186,7 +186,10 @@ Where it is *opened* depends on the panel (issue #220, stage 3):
 
 The server's copy is a port of `style.jsx` with the same sentences and result
 shapes, and `tests/unit/panel-capabilities.mjs` holds them to each other on a
-real folder, BOM, CRLF and non-ASCII included. The jsx copy stays: older
+real folder, BOM, CRLF and non-ASCII included. Both write every line ending
+as LF: measured on AE 26.5, `style.jsx` (`lineFeed = "Unix"`) turns a
+caller's `\r\n` and bare `\r` into `\n`, so the server normalises the same
+way before writing. The jsx copy stays: older
 servers use it, and `set_house_style` as a `run_batch` step goes straight to
 ExtendScript. Change both together.
 

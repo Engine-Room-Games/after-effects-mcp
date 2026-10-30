@@ -64,7 +64,9 @@ function freePort() {
 await check("the server exits when its stdin closes", async () => {
   const port = await freePort();
   const child = spawn(process.execPath, [path.join(root, "packages", "mcp-server", "dist", "index.js")], {
-    env: { ...process.env, AE_MCP_PORT: String(port) },
+    // No front desk: this suite is about one server, and a desk would write
+    // its file into the real ~/.engineroom-ae-mcp (issue #223).
+    env: { ...process.env, AE_MCP_PORT: String(port), AE_MCP_FRONT_DESK: "off" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";

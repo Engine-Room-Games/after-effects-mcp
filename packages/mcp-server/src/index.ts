@@ -2,6 +2,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { runInit } from "./cli/init.js";
 import { createServer } from "./server.js";
+import { frontDeskFromEnv } from "./frontdesk/config.js";
 import { logger } from "./util/logger.js";
 
 const USAGE = `@engine-room/after-effects-mcp — drive Adobe After Effects from an AI agent.
@@ -40,7 +41,9 @@ async function main() {
     process.exit(1);
   }
 
-  const server = createServer();
+  // Every real server joins, or becomes, the front desk shared by every session
+  // on this After Effects (issue #223). AE_MCP_FRONT_DESK=off opts out.
+  const server = createServer({ frontDesk: frontDeskFromEnv() });
   const transport = new StdioServerTransport();
   await server.connect(transport);
   logger.info("MCP server running on stdio");

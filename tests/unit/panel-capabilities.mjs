@@ -237,6 +237,18 @@ await parity(
   () => writeHouseStyle(saved(), { content: "# Style\nÉ — ok\n" })
 );
 await parity(
+  "set: CRLF and a bare CR land as LF (measured on AE 26.5)",
+  () => {},
+  withFile(() => ctx.OPS.set_house_style({ content: "# Style\r\nA\rB\n" })),
+  () => writeHouseStyle(saved(), { content: "# Style\r\nA\rB\n" })
+);
+await check("set: the server writes LF for CRLF and a bare CR", () => {
+  resetDir(dir);
+  fs.writeFileSync(aep, "");
+  writeHouseStyle(saved(), { content: "# Style\r\nA\rB\n" });
+  assert.equal(fs.readFileSync(guide, "utf8"), "# Style\nA\nB\n");
+});
+await parity(
   "set: refuses to replace without overwrite",
   () => fs.writeFileSync(guide, "# Theirs\n"),
   withFile(() => ctx.OPS.set_house_style({ content: "# Mine\n" })),

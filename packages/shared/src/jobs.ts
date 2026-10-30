@@ -14,6 +14,11 @@ export interface JobState {
   message?: string;
   result?: unknown;
   error?: string;
+  /**
+   * What the result cannot show and the agent must know — so far only that a
+   * batch lost the cross-session write lock mid-run (issue #223). Sticky.
+   */
+  warning?: string;
   startedAt: number;
   finishedAt?: number;
 }

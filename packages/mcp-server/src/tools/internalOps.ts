@@ -28,13 +28,13 @@ export class UnleasedInternalWriteError extends Error {
 }
 
 export function internalSender(
-  runOp: (op: string, args: unknown) => Promise<unknown>,
+  runOp: (op: string, args: unknown, write: boolean) => Promise<unknown>,
   writes: { readonly held: string | null }
 ): SendInternal {
   return async (op, args) => {
     const effect = (schemas.InternalOpMutation as Record<string, string | undefined>)[op];
     if (effect === undefined) throw new Error(`Internal error: ${op} is not a classified internal op; nothing was sent.`);
     if (effect === "write" && writes.held === null) throw new UnleasedInternalWriteError(op);
-    return runOp(op, args);
+    return runOp(op, args, effect === "write");
   };
 }
