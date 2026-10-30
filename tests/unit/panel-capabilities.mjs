@@ -311,7 +311,7 @@ async function session(health) {
   const client = new Client({ name: "panel-capabilities-test", version: "0" }, { capabilities: {} });
   const [c, sv] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(sv), client.connect(c)]);
-  servers.push({ bridge, wss });
+  servers.push({ bridge, wss, port });
   s.call = async (name, args) => {
     s.seen.length = 0;
     const res = await client.callTool({ name, arguments: args });
@@ -514,7 +514,12 @@ fs.rmSync(shotDir, { recursive: true, force: true });
 console.log(`panel-capabilities: ${passed} checks passed`);
 resetDir(dir);
 fs.rmSync(dir, { recursive: true, force: true });
-for (const { bridge, wss } of servers) { wss.close(); bridge.close(); }
+for (const { bridge, wss, port } of servers) {
+  wss.close();
+  bridge.close();
+  // The shared stale-frame window these sessions wrote (frames/sharedFrameCache.ts).
+  fs.rmSync(path.join(os.homedir(), ".engineroom-ae-mcp", `frames-${port}.jsonl`), { force: true });
+}
 // Settle before exiting: `process.exit()` straight after a `fetch` crashes
 // Node 24 on Windows with a libuv assertion (nodejs/node#56645).
 await new Promise((r) => setTimeout(r, 200));

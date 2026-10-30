@@ -16,10 +16,10 @@
 // unrelated times, and at different downsample factors, which cannot even be the
 // same number of pixels.
 //
-// The cache is per server process. Two MCP clients sharing one panel therefore
-// no longer see each other's frames, and a direct POST /op bypasses it — but
-// such a caller is handed a raw file path, not a picture, so nothing stale is
-// ever shown to it as an image anyway.
+// This module is the window's logic. On the server the window itself is not
+// held here but in a file per panel port, shared by every server process on
+// that After Effects (sharedFrameCache.ts replays it through this code): the
+// bug is AE's, and AE can hand one session a buffer it rendered for another.
 
 // Enough history to catch the bug — it shows up within a handful of calls — and
 // small enough that a long session cannot turn a linear scan into a cost.

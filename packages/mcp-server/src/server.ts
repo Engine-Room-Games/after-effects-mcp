@@ -59,6 +59,7 @@ import { applyHouseStyleDetail } from "./style/summary.js";
 import { houseStyleOnServer } from "./style/houseStyleFile.js";
 import { internalSender, type SendInternal } from "./tools/internalOps.js";
 import { CAP_PROJECT_PATH, CAP_SERVER_IMAGES } from "./setup/panelCapabilities.js";
+import { createSharedFrameCache, sharedFrameCacheFile } from "./frames/sharedFrameCache.js";
 import { createFramePipeline, RAW_IMAGE_OPS, type ImageTool, type FramePipeline } from "./frames/pipeline.js";
 import {
   checkFootageExists,
@@ -212,9 +213,15 @@ export function createServer(opts: CreateServerOptions = {}) {
   });
   const snapshots = new SnapshotStore();
   // Screenshots, contact sheets and .mogrt thumbnails, finished here on a
-  // panel that hands back paths (issue #220, stage 4). Holds the stale-frame
-  // window, so that window is this server process's.
-  const frames = createFramePipeline();
+  // panel that hands back paths (issue #220, stage 4). The stale-frame window
+  // is one per After Effects: a file per panel port, shared with every other
+  // server on it, because AE re-serves buffers across sessions (#29).
+  const frames = createFramePipeline({
+    frameCache: createSharedFrameCache(() => {
+      const port = (bridge as { port?: unknown }).port;
+      return typeof port === "number" && port > 0 ? sharedFrameCacheFile(port) : null;
+    }),
+  });
   // Follows the bridge's port rather than copying it: see wsClient.ts.
   const ws = new WsClient(bridge, jobs);
   const panelGate = createPanelGate(bridge);

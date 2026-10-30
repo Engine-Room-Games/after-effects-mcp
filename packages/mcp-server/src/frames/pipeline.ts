@@ -16,10 +16,11 @@
  * `tests/unit/image-parity.mjs` runs both on the same renders. The panel keeps
  * its copy for MCP servers that predate this one.
  *
- * Two lifetimes changed with the move, and both are documented in
- * docs/fragile-areas-bridge.md: the stale-frame cache is per server process
- * now rather than per panel, and a frame retry is a second `/op` read rather
- * than a second `evalScript` inside one.
+ * Two things changed shape with the move, both documented in
+ * docs/fragile-areas-bridge.md: the stale-frame window is a file shared by
+ * every server on the same panel port (sharedFrameCache.ts) rather than the
+ * panel's memory, and a frame retry is a second `/op` read rather than a
+ * second `evalScript` inside one.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -34,7 +35,7 @@ import {
   FRAME_RENDER_BUDGET_MS,
   type FrameError,
 } from "./frameReader.js";
-import { createFrameCache } from "./frameCache.js";
+import { createFrameCache, type FrameCacheMatch, type FrameCacheMeta } from "./frameCache.js";
 import {
   composeContactSheet,
   tileBudgetMs,
@@ -63,6 +64,15 @@ export interface FramePipelineOptions {
   frameRead?: { stallMs?: number; pollMs?: number; budgetMs?: number };
   /** Overrides the contact sheet's overall budget; tests only. */
   sheetBudgetMs?: number;
+  /**
+   * The stale-frame window. The server passes the one shared by every server
+   * on the same panel port (sharedFrameCache.ts); the default, a window of
+   * this pipeline's own, is for tests.
+   */
+  frameCache?: {
+    match(key: string, hash: string): FrameCacheMatch | null;
+    remember(key: string, hash: string, meta?: FrameCacheMeta | null): void;
+  };
 }
 
 interface FrameInfo {
@@ -172,14 +182,13 @@ function shortReason(err: unknown): string {
 }
 
 /**
- * One per server. Holds the stale-frame window, which therefore spans every
- * screenshot this server process has delivered — and only those.
+ * One per server. The stale-frame window comes in through `opts.frameCache`.
  */
 export function createFramePipeline(opts: FramePipelineOptions = {}) {
   const warn = opts.warn ?? ((m: string) => logger.warn(m));
   const readOpts = opts.frameRead ?? {};
   const sheetBudget = opts.sheetBudgetMs ?? CONTACT_SHEET_BUDGET_MS;
-  const frameCache = createFrameCache();
+  const frameCache = opts.frameCache ?? createFrameCache();
 
   /**
    * Wait for the PNG, normalise it, and hand back what the result needs. The
@@ -531,8 +540,13 @@ export function createFramePipeline(opts: FramePipelineOptions = {}) {
       // Sibling temp file and rename: an interrupted write cannot leave a
       // half-rewritten template where a valid one was.
       const tmp = info.path + ".tmp-thumb";
-      fs.writeFileSync(tmp, patched.buffer);
-      fs.renameSync(tmp, info.path);
+      try {
+        fs.writeFileSync(tmp, patched.buffer);
+        fs.renameSync(tmp, info.path);
+      } catch (e) {
+        unlinkQuietly(tmp);
+        throw e;
+      }
       return {
         patched: true,
         posterTime: info.posterTime,
