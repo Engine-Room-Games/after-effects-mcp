@@ -624,7 +624,12 @@ export function createServer(opts: CreateServerOptions = {}) {
     // Refuse to forward to a panel that predates this server. Without this the
     // agent gets `Unknown op: …` for anything added since the panel was
     // installed and has no way to know an update is the fix.
+    // Timed from here so a timeout can say what the whole call cost (#175): the
+    // gate's /health probe waits on a busy After Effects too, and was measured
+    // turning a 3s op limit into a 5.0s wait the message never mentioned.
+    const calledAt = Date.now();
     const staleness = await panelGate.check();
+    const gateMs = Date.now() - calledAt;
     if (staleness) return errorResult(staleness);
 
     // Serialize writes. Acquiring *before* runOp is what keeps the op timeout
@@ -781,7 +786,10 @@ export function createServer(opts: CreateServerOptions = {}) {
       // Every branch below goes through `fail`, so a failure the journal already
       // knows about arrives with its pointer attached — that is the push half of
       // the journal, and the error path is the only place it can live.
-      if (e instanceof BridgeTimeoutError) return fail(name, e.message);
+      if (e instanceof BridgeTimeoutError) {
+        e.withTiming({ totalMs: Date.now() - calledAt, gateMs, queueMs: wait?.waitedMs ?? 0 });
+        return fail(name, e.message);
+      }
       if (e instanceof BridgeUnreachableError) return fail(name, e.message);
       if (e instanceof BridgeResetError) return fail(name, e.message);
       if (e instanceof AeError) {
@@ -898,7 +906,17 @@ async function runRender(
         `each render is a whole background copy of After Effects, so they are run one at a time.`
     );
   }
-  const plan = (await bridge.runOp("_render_prepare", { indices: args.indices, all: args.all })) as RenderPlan & {
+  // A timeout in either bridge step escapes before any render starts, so it is
+  // restated as render_queue's, saying what can and cannot still land.
+  const renderStep = async <T>(step: "prepare" | "save", p: Promise<T>): Promise<T> => {
+    try {
+      return await p;
+    } catch (e) {
+      if (e instanceof BridgeTimeoutError) e.asRenderStep(step);
+      throw e;
+    }
+  };
+  const plan = (await renderStep("prepare", bridge.runOp("_render_prepare", { indices: args.indices, all: args.all }))) as RenderPlan & {
     readOnly?: boolean | null;
   };
   // Items the user queued by hand never passed add_to_render_queue's guard.
@@ -924,7 +942,7 @@ async function runRender(
     beforeSave: () => {
       aerender = resolveAerender(aerenderCandidates(plan.appPackage, { installRoots: afterEffectsInstallRoots() }));
     },
-    save: async (force) => (await bridge.runOp("_render_save", { force })) as { saved: boolean },
+    save: async (force) => (await renderStep("save", bridge.runOp("_render_save", { force }))) as { saved: boolean },
   });
   const save = { saved };
   const footageWarnings = plan.items.flatMap((i) => (i.footageWarnings ?? []).map((w) => `item ${i.index}: ${w}`));

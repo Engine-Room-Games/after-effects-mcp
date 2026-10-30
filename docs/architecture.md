@@ -317,8 +317,15 @@ caller reads (#43). Those get a second text content block instead. Vision
 results never carry a note at all, since screenshots are reads.
 
 Two limits worth knowing. The queue is per-server-process, so a second MCP
-client pointed at the same panel is not serialized against the first — the panel
-is a shared resource with no lock of its own. And the queue is bounded
+client pointed at the same panel gets a queue of its own and neither sees the
+other's. Measured on 26.5 (issue #175): After Effects still runs the two
+clients' calls one at a time, with no interleaving inside a call — but a call
+waiting behind the other client's work says nothing about it, the other
+client's writes do land between the chunks of a long `run_batch`, and a timed-out
+call still lands afterwards. Nothing in this repo reports the other client:
+that is left to a shared broker process all sessions go through, which is
+separate work. The details are under "Two MCP clients, one panel" in
+[fragile-areas-bridge.md](fragile-areas-bridge.md). And the queue is bounded
 (`AE_MCP_WRITE_QUEUE_DEPTH`, default 64; `AE_MCP_WRITE_QUEUE_WAIT_MS`, default
 600s) rather than unbounded, because an agent looping writes at a stuck bridge
 would otherwise grow it without limit.

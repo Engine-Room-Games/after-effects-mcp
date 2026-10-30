@@ -329,6 +329,19 @@ output modules anyway.
   success, and the only place the truth is visible is AE's Edit menu. Anything
   spanning calls opens and closes its own group per call. *The tool already
   does:* `run_batch` reports the measured `undoSteps`.
+- **Never call `app.beginUndoGroup` or `app.endUndoGroup` in a `run_jsx`
+  script** — with `undoGroup: false` either. The tool owns the grouping: the
+  script runs inside one group, `AE MCP: run_jsx`, and `withoutUndoGroup(fn)`
+  is the supported way to step outside it for one statement. Measured on 26.5,
+  none of these raised an error. A nested `begin`/`end` pair is absorbed: the
+  call is one undo step named `AE MCP: run_jsx` and the inner name never
+  appears. A `begin` with no `end` broke undo for the project: the next tool
+  call got no undo step of its own, Undo then removed nothing and emptied the
+  undo history, and the history stayed empty after the project was closed and
+  reopened. An extra `endUndoGroup()` after that raised a blocking "Undo group
+  mismatch, will attempt to fix." dialog, and After Effects crashed on the next
+  Undo. If a script seems to need different grouping, tell the user rather than
+  grouping it by hand.
 - **`copyToComp` needs the group closed**, which is the opposite problem — see
   "Layers and comps".
 
