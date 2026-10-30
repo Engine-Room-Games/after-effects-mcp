@@ -15,6 +15,8 @@ import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
 import { createPanelGate } from "./bridge/panelGate.js";
 import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge/writeQueue.js";
+import { SessionLine } from "./frontdesk/line.js";
+import type { FrontDeskOptions } from "./frontdesk/config.js";
 import { JobManager, isTerminal, unknownJobMessage } from "./jobs/manager.js";
 import {
   RenderRunner,
@@ -139,6 +141,12 @@ export interface CreateServerOptions {
    * cancel, for the stop to be reported. A test shortens it.
    */
   cancelSettleMs?: number;
+  /**
+   * The front desk this server joins or runs (issue #223), from
+   * `frontDeskFromEnv()`. Off unless given: the entry point turns it on, and a
+   * test that builds a server in-process never joins a real session's desk.
+   */
+  frontDesk?: FrontDeskOptions | null;
 }
 
 /**
@@ -175,6 +183,14 @@ export function createServer(opts: CreateServerOptions = {}) {
   // One writer at a time. See bridge/writeQueue.ts for why the panel's own
   // evalScript mutex is not enough.
   const writes = new WriteQueue();
+  // Every After Effects-bound call and every write lease goes through this:
+  // straight to `writes` and `bridge` when there is no front desk, through the
+  // desk shared with every other session on this After Effects when there is
+  // (issue #223; frontdesk/line.ts).
+  const line = new SessionLine(bridge, writes, {
+    desk: opts.frontDesk ?? null,
+    sessionLabel: () => `${server.getClientVersion()?.name ?? "an MCP client"}, pid ${process.pid}`,
+  });
   // render_queue's jobs run in an aerender process this server owns; see
   // render/aerender.ts. When a job ends, its verified items are unticked in the
   // live queue so they do not render twice — once, as one named undo step, and
@@ -182,7 +198,7 @@ export function createServer(opts: CreateServerOptions = {}) {
   const renders = new RenderRunner(jobs, {
     // Bounded wait (#163): the job settles after this answers, so an
     // unbounded queue wait held await_job hostage to an unrelated edit.
-    onRendered: (items) => markRendered(writes, (op, a) => bridge.runOp(op, a), items),
+    onRendered: (items) => markRendered(line, (op, a) => line.runOp(op, a, { write: true }), items),
   });
   const snapshots = new SnapshotStore();
   // Follows the bridge's port rather than copying it: see wsClient.ts.
@@ -193,6 +209,7 @@ export function createServer(opts: CreateServerOptions = {}) {
   // new) panel is answering, and the verdict about the old one is void (#156).
   ws.onReopen(() => panelGate.invalidate());
   ws.start();
+  line.start();
   // The event socket and its reconnect timer are what kept an orphaned server
   // alive after its client went (#163). Closing the server releases them, so
   // the process can end by draining its event loop — never by process.exit,
@@ -200,6 +217,8 @@ export function createServer(opts: CreateServerOptions = {}) {
   const priorOnClose = server.onclose;
   server.onclose = () => {
     ws.stop();
+    // Hands the desk on if this server runs it; see frontdesk/line.ts.
+    void line.close();
     priorOnClose?.();
   };
 
@@ -232,7 +251,7 @@ export function createServer(opts: CreateServerOptions = {}) {
     }
     let answer: { known: boolean; error?: string };
     try {
-      answer = await bridge.cancel(jobId);
+      answer = await line.cancel(jobId);
     } catch (e) {
       return fail(
         name,
@@ -643,10 +662,21 @@ export function createServer(opts: CreateServerOptions = {}) {
     // call that timed out having never run would report a bridge failure for a
     // bridge that was working, which is the one way this feature could make
     // things worse than they were.
+    // Told only when this call waits behind *another session* at the front
+    // desk: as progress, when the client asked for progress — this request is
+    // still open, so the notifications are ones it is listening for (#82).
+    let progressStep = 0;
+    const onWait = progressToken === undefined
+      ? undefined
+      : (message: string) => {
+          void extra
+            .sendNotification({ method: "notifications/progress", params: { progressToken, progress: ++progressStep, message } })
+            .catch(() => {});
+        };
     let lease: WriteLease | null = null;
     if (isWriteOp(name)) {
       try {
-        lease = await writes.acquire(name, extra?.signal);
+        lease = await line.acquire(name, extra?.signal, onWait);
       } catch (e) {
         // Full, timed out in the queue, or cancelled — all three mean the call
         // never reached After Effects, and all three say so.
@@ -659,11 +689,12 @@ export function createServer(opts: CreateServerOptions = {}) {
     try {
       // Inside this try so the panel's own error mapping — timeouts, AeError,
       // the Unknown-op backstop — applies to the internal ops these forward.
-      if (SNAPSHOT_OPS.has(name)) return await runSnapshotOp(name, args, bridge, snapshots);
+      const runner: OpRunner = { runOp: (op, a) => line.runOp(op, a, { write: lease !== null, onWait }) };
+      if (SNAPSHOT_OPS.has(name)) return await runSnapshotOp(name, args, runner, snapshots);
       // The render runs outside After Effects; only the prepare and the save
       // cross the bridge. The lease is released when this returns, on purpose
       // — see runRender.
-      if (name === "render_queue") return textResult(await runRender(args as RenderQueueArgs, bridge, renders), wait);
+      if (name === "render_queue") return textResult(await runRender(args as RenderQueueArgs, runner, renders), wait);
 
       // Filesystem checks the server makes itself (issue #220, stage 2), so a
       // refusal costs After Effects nothing. The jsx copies stay in the bundle
@@ -683,7 +714,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       // A non-object result that After Effects warned about arrives wrapped
       // (core.jsx, dialog guard, issue #225); unwrapped here so the value the
       // agent reads keeps its shape, with the warnings as their own block.
-      const lifted = liftAeWarnings(await bridge.runOp(name, args));
+      const lifted = liftAeWarnings(await runner.runOp(name, args));
       const result = lifted.value;
 
       // Async envelope handling for run_batch
@@ -720,6 +751,10 @@ export function createServer(opts: CreateServerOptions = {}) {
         // below it — a shorter one here would release the lock mid-batch while
         // a writer that queued at the same moment was still waiting.
         lease?.extendUntil(jobs.waitFor(env.jobId, writes.holdCeilingMs));
+        // A desk lease can be lost while the batch still runs, if the front
+        // desk changes hands and it cannot be re-taken (issue #223): other
+        // sessions' writes may then land between its chunks, and the job says so.
+        lease?.onLost?.((why) => jobs.warn(env.jobId, why));
         // The undo fields travel with the envelope because this is the only
         // message the agent sees before it starts describing the work to the
         // user; the measured count arrives much later, with the job's result.
@@ -913,9 +948,14 @@ interface RenderQueueArgs {
   saveProject?: boolean;
 }
 
+/** The one thing the helpers below need from the bridge: a way to run an op through the session's line. */
+interface OpRunner {
+  runOp(op: string, args: unknown): Promise<unknown>;
+}
+
 async function runRender(
   args: RenderQueueArgs,
-  bridge: HttpClient,
+  bridge: OpRunner,
   renders: RenderRunner
 ): Promise<Record<string, unknown>> {
   const busy = renders.activeJobId;
@@ -1049,7 +1089,7 @@ function withProgressNote(note: string | undefined, jobId: string): string {
 async function runSnapshotOp(
   name: string,
   args: unknown,
-  bridge: HttpClient,
+  bridge: OpRunner,
   snapshots: SnapshotStore
 ) {
   if (name === "snapshot_comp") {

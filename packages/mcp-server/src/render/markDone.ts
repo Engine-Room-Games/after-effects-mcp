@@ -1,4 +1,10 @@
-import type { WriteQueue } from "../bridge/writeQueue.js";
+import type { WriteLease } from "../bridge/writeQueue.js";
+
+/** What the unticking needs of a write queue: the per-session one, or the session line in front of the desk (#223). */
+export interface WriteLock {
+  acquire(op: string, signal?: AbortSignal): Promise<WriteLease>;
+  readonly held: string | null;
+}
 import type { RenderItemPlan } from "./aerender.js";
 
 /**
@@ -19,7 +25,7 @@ export type MarkAnswer = { index: number; marked: boolean; reason?: string };
  * the render's result stands either way, and only this sentence changes.
  */
 export async function markRendered(
-  writes: WriteQueue,
+  writes: WriteLock,
   runOp: (op: string, args: unknown) => Promise<unknown>,
   items: RenderItemPlan[],
   waitMs: number = MARK_DONE_WAIT_MS

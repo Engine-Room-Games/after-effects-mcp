@@ -165,6 +165,12 @@ export class JobManager {
     return true;
   }
 
+  /** Attach a warning the job's state must carry (issue #223). The first one stands. */
+  warn(jobId: string, warning: string): void {
+    const s = this.jobs.get(jobId);
+    if (s && !s.warning) s.warning = warning;
+  }
+
   get(jobId: string): JobState | undefined { return this.jobs.get(jobId); }
 
   /**

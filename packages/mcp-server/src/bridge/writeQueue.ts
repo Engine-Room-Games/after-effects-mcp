@@ -32,6 +32,11 @@ export interface QueueWait {
   /** The op that held the lock at the moment this one joined the queue. */
   queuedBehind: string;
   waitedMs: number;
+  /**
+   * Present only when the call waited behind *another session's* write at the
+   * front desk (issue #223) — who that session is, as its server describes it.
+   */
+  queuedBehindSession?: string;
 }
 
 export interface WriteLease {
@@ -47,6 +52,11 @@ export interface WriteLease {
   extendUntil(p: Promise<unknown>): void;
   /** Idempotent. A no-op after the first call. */
   release(): void;
+  /**
+   * Told if the lease stops protecting its work before it is released — only a
+   * front-desk lease can (issue #223). Absent on this queue's own leases.
+   */
+  onLost?(listener: (why: string) => void): void;
 }
 
 const DEFAULT_MAX_WAIT_MS = 600_000;
@@ -90,7 +100,8 @@ interface Waiter {
 export class WriteQueue {
   private holder: string | null = null;
   private waiting: Waiter[] = [];
-  private readonly maxWaitMs: number;
+  /** Public for the front desk, which applies this session's limits to its cross-session wait. */
+  readonly maxWaitMs: number;
   private readonly maxDepth: number;
 
   constructor(opts: { maxWaitMs?: number; maxDepth?: number } = {}) {
@@ -101,6 +112,7 @@ export class WriteQueue {
   /** For tests and diagnostics. */
   get depth(): number { return this.waiting.filter((w) => !w.done).length; }
   get held(): string | null { return this.holder; }
+  get maxDepthLimit(): number { return this.maxDepth; }
 
   /**
    * The longest a lease may be held past its call by `extendUntil` — a leak
