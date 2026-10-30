@@ -321,6 +321,7 @@ OPS.add_keyframe = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
   var prop = walkProperty(l, args.propertyPath);
+  var value = __hexValue(prop, args.value, "add_keyframe");
   var interp = args.interpolation;
   // A key already at this time: read the ease side to keep before anything is
   // written, so a refusal there really does leave the property untouched.
@@ -329,7 +330,7 @@ OPS.add_keyframe = function (args) {
     var before = __findKeyIndexAtTime(prop, args.time);
     if (before > 0) resolved = __resolveEaseSides(prop, before, interp.easeIn, interp.easeOut);
   }
-  prop.setValueAtTime(args.time, args.value);
+  prop.setValueAtTime(args.time, value);
   var easeDimensions = null;
   if (interp) {
     var idx = __findKeyIndexAtTime(prop, args.time);

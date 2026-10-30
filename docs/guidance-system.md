@@ -11,7 +11,7 @@ Back to [CLAUDE.md](../CLAUDE.md).
 
 Tool descriptions cover one tool each. The knowledge that actually costs people
 time is cross-cutting — ids not indexes, read then write then verify, which of
-three bridge failures is safe to re-send — and belongs to no single tool. The carriers for it, in
+five bridge failures is safe to re-send — and belongs to no single tool. The carriers for it, in
 descending order of reach:
 
 | Carrier | Reaches | Cost |
@@ -76,7 +76,7 @@ bounded reads (the bounded form leads; "one `get_layer_full` over several
 narrow calls" and "bound every read" are reconciled as *the bound is the
 `include` list, not the number of calls*), read/write/verify with a diff,
 screenshots as a one-off diagnostic with their cost in tokens, write ordering
-and the `run_batch` undo rule in eight lines, and the three bridge failures
+and the `run_batch` undo rule in eight lines, and the five bridge failures
 with contradicting remedies. Everything else is a reference, opened by subject:
 
 | Reference | Holds |

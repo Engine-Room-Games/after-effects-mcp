@@ -35,8 +35,21 @@ A `repeater` takes its Transform group in the same call —
 `{type: "repeater", copies: 5, transform: {position: [40, 0], scale: [90, 90],
 rotation: 15, startOpacity: 100, endOpacity: 20}}` — which is what each copy
 adds to the one before it; After Effects' default position is `[100, 0]`.
-Gradient fills and strokes are not offered: their colour stops are not
-writable from a script.
+Its `composite` is `"below"` (the default: each copy behind the one before,
+so the original is on top) or `"above"` (each copy over the one before).
+
+**Gradient fills and strokes are not offered**, and not because nobody got to
+them: their colour stops cannot be set from a script at all. After Effects
+gives the Colors property no value to read or write and refuses an expression
+on it, so a gradient built by script is stuck at white-to-black.
+`add_shape_content` refuses a gradient type and `set_shape_property` refuses
+`Colors`, each saying so. For a scripted gradient put the **Gradient Ramp**
+effect (`add_effect` with `ADBE Ramp`) on the layer — its colours
+(`ADBE Ramp-0002`, `-0004`) and points (`-0001`, `-0003`, in layer space) are
+ordinary parameters, and it keeps the shapes' alpha, so it colours the artwork
+and nothing around it. If it has to be a real gradient fill or stroke, the
+only way to build one is `run_jsx` (`addProperty("ADBE Vector Graphic -
+G-Fill")`), and then the user sets the stops by hand in the Gradient Editor.
 
 The tool is **all-or-nothing**: if a key cannot be applied, the whole node is
 removed and the error names the bad keys, so a success result means everything

@@ -98,7 +98,8 @@ var __SHAPE_ALIASES = {
   },
   repeater: {
     copies: ["ADBE Vector Repeater Copies", "Copies"],
-    offset: ["ADBE Vector Repeater Offset", "Offset"]
+    offset: ["ADBE Vector Repeater Offset", "Offset"],
+    composite: ["ADBE Vector Repeater Order", "Composite"]
   },
   merge: {
     mode: ["ADBE Vector Merge Type", "Mode"]
@@ -110,8 +111,26 @@ var __SHAPE_ALIASES = {
 var __SHAPE_NAMED = {
   "fill.fillRule": { nonzero: 1, evenodd: 2 },
   "stroke.lineCap": { butt: 1, round: 2, projecting: 3 },
-  "stroke.lineJoin": { miter: 1, round: 2, bevel: 3 }
+  "stroke.lineJoin": { miter: 1, round: 2, bevel: 3 },
+  // Measured on AE 26.5 (issue #181) with sampleImage on two overlapping
+  // stroked copies: 1, the default, draws each copy BEHIND the one before it
+  // (the original on top); 2 draws each copy above it. 0 and 3 are refused by
+  // AE as "out of range 1 to 2".
+  "repeater.composite": { below: 1, above: 2 }
 };
+
+// Gradient colour stops (issue #181). Measured on AE 26.5: "ADBE Vector Grad
+// Colors" on both a Gradient Fill and a Gradient Stroke is
+// PropertyValueType.NO_VALUE, so value, setValue, setValueAtTime and
+// valueAtTime all throw, and canSetExpression is false. Nothing a script can
+// reach sets the stops, so every door that could look like it does refuses
+// with this text rather than build a white-to-black gradient nobody asked for.
+var __GRADIENT_REFUSAL =
+  "Gradient colour stops cannot be set from a script: After Effects exposes 'ADBE Vector Grad Colors' " +
+  "with no value (PropertyValueType.NO_VALUE) and refuses an expression on it, so neither setValue nor an " +
+  "expression can change them. Nothing was changed. For a scripted gradient use the Gradient Ramp effect " +
+  "(add_effect 'ADBE Ramp', whose colours are ordinary parameters) on the layer, or build the gradient with " +
+  "run_jsx and ask the user to set the stops in the Gradient Editor.";
 
 // The Repeater's Transform group (issue #181): friendly key -> candidates,
 // tried in order like __SHAPE_ALIASES.
@@ -187,6 +206,9 @@ OPS.add_shape_content = function (args) {
   var content = args.content || {};
   var type = content.type;
   var match = __SHAPE_MATCH[type];
+  if (!match && /grad|^g-?(fill|stroke)$/i.test(String(type))) {
+    throw new Error("add_shape_content does not offer gradient fills or strokes. " + __GRADIENT_REFUSAL);
+  }
   if (!match) {
     throw new Error("Unknown shape content type: " + String(type) + ". Expected one of: " + __shapeTypeList() + ".");
   }
@@ -301,8 +323,15 @@ OPS.set_shape_property = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
   var node = walkProperty(l, args.contentPath);
-  var pp = node.property(args.property);
-  if (!pp) throw new Error("No property: " + args.property);
+  var pp = null;
+  try { pp = node.property(args.property); } catch (eProp) { pp = null; }
+  if (!pp) {
+    var kids = __childListing(node, __PATH_CHILD_CAP);
+    throw new Error("set_shape_property: no property " + JSON.stringify(args.property) + " on '" + node.name + "' (" +
+      node.matchName + ")." + (kids ? " Its children (name = matchName): " + kids + "." : (kids === "" ? " It has no children." : "")) +
+      " Nothing was changed.");
+  }
+  if (pp.matchName === "ADBE Vector Grad Colors") throw new Error("set_shape_property: " + __GRADIENT_REFUSAL);
   __requireKeyTime(!!args.keyframe, args.time, "set_shape_property");
   __setOrKeyAtTime(pp, args.value, args.time, !!args.keyframe, "set_shape_property");
   return { ok: true };
