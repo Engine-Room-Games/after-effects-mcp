@@ -162,16 +162,24 @@ export class JobManager {
 
   /**
    * `progress`, when the panel knows it, is how many ops had been attempted
-   * when the job stopped. Without it the job keeps the last chunk boundary it
-   * was told of, and the message says that is all it is.
+   * when the job stopped. With `unsureThrough` it is only a lower bound: a
+   * chunk failed outright, and ops `progress + 1` to `unsureThrough` may have
+   * partly or fully run. Without either, the job keeps the last chunk boundary
+   * it was told of, and the message says that is all it is.
    */
-  fail(jobId: string, error: string, progress?: number): boolean {
+  fail(jobId: string, error: string, progress?: number, unsureThrough?: number): boolean {
     const s = this.jobs.get(jobId);
     if (!s || isTerminal(s.status)) return false;
     s.status = "failed";
     s.error = error;
     const of = s.total !== undefined ? ` of ${s.total}` : "";
-    if (typeof progress === "number" && Number.isFinite(progress)) {
+    const known = typeof progress === "number" && Number.isFinite(progress);
+    if (known && typeof unsureThrough === "number" && Number.isFinite(unsureThrough) && unsureThrough > progress) {
+      s.progress = progress;
+      s.message =
+        `failed: at least ${progress}${of} ops ran; the failing chunk (ops ${progress + 1}–${unsureThrough}) ` +
+        "may have partly run, so read back before re-running";
+    } else if (known) {
       s.progress = progress;
       s.message = `failed after ${progress}${of} ops attempted`;
     } else {

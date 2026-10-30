@@ -416,6 +416,21 @@ await check("a failed batch with no stop point says its progress is only the las
   assert.match(st.message, /last point reported/);
 });
 
+await check("a chunk that failed outright reports a lower bound, never a stop point (#222)", async () => {
+  behaviour.set("run_batch", batchEnvelope("j_t4"));
+  await client.callTool({ name: "run_batch", arguments: batchArgs });
+  emit({ type: "progress", jobId: "j_t4", progress: 575, total: 600, message: "running" });
+  emit({ type: "error", jobId: "j_t4", error: "Bad JSON", progress: 575, unsureThrough: 600 });
+  await sleep(30);
+  const st = payload(await client.callTool({ name: "get_job", arguments: { jobId: "j_t4" } }));
+  assert.equal(st.status, "failed");
+  assert.equal(st.progress, 575);
+  assert.equal(
+    st.message,
+    "failed: at least 575 of 600 ops ran; the failing chunk (ops 576–600) may have partly run, so read back before re-running"
+  );
+});
+
 {
   // The manager alone: a cancelled batch reports the ops it ran, a late
   // cancel keeps its "too late" message, and a server-side cancel (a render)

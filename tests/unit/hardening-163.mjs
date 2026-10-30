@@ -262,6 +262,9 @@ function makeDom() {
  * parse), and holds any op named `slow` for `holdMs`.
  */
 let batchCursor = 0;
+// "ok" runs to the end; "failed" fails transactionally in chunk 2 (7 ran, the
+// 8th failed); "throw" has chunk 3 fail outright, as "Bad JSON" would (#222).
+let batchMode = "ok";
 function makeHost(extDir, events) {
   return {
     getSystemPath: () => extDir,
@@ -293,6 +296,11 @@ function makeHost(extDir, events) {
                 return JSON.stringify({ ok: true, result: { async: true, jobId: "j_live", chunkSize: 5, total: 20 } });
               }
               if (op === "_continue_job") {
+                if (batchMode === "failed" && batchCursor === 5) {
+                  return JSON.stringify({ ok: true, result: { done: true, failed: true, jobId: "j_live", error: "op 7 failed",
+                    atIndex: 7, results: [1, 2, 3, 4, 5, 6, 7], errors: [{ index: 7 }], undoSteps: 2 } });
+                }
+                if (batchMode === "throw" && batchCursor === 10) throw new Error("Bad JSON from the host");
                 batchCursor += 5;
                 const done = batchCursor >= 20;
                 return JSON.stringify({ ok: true, result: done
@@ -434,6 +442,44 @@ try {
     const after = await post("/reload-jsx");
     assert.equal(after.status, 200, `still refused after the batch ended: ${await after.text()}`);
   });
+
+  // The panel's error event says where a batch stopped (#222): exactly, for a
+  // batch that failed on an op; as a lower bound with the unsure span, for a
+  // chunk that failed outright and may have partly run.
+  const { default: WebSocket } = await import("ws");
+  const wsEvents = [];
+  const sock = new WebSocket(`ws://127.0.0.1:${PORT}/events`, { headers: { "x-ae-mcp-token": token } });
+  await new Promise((r, j) => { sock.on("open", r); sock.on("error", j); });
+  sock.on("message", (d) => wsEvents.push(JSON.parse(d.toString())));
+  const errorEvent = async () => {
+    for (let i = 0; i < 400; i++) {
+      const e = wsEvents.find((x) => x.type === "error" || x.type === "complete");
+      if (e) return e;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error(`no terminal event: ${JSON.stringify(wsEvents)}`);
+  };
+  try {
+    await check("a batch that fails on an op reports the exact number attempted on its error event", async () => {
+      batchMode = "failed"; wsEvents.length = 0;
+      assert.equal((await (await post("/op", { op: "run_batch", args: { ops: [] } })).json()).ok, true);
+      const e = await errorEvent();
+      assert.equal(e.type, "error");
+      assert.equal(e.progress, 8, "7 succeeded and the 8th failed");
+      assert.equal(e.unsureThrough, undefined, "an op-level failure knows exactly where it stopped");
+    });
+    await check("a chunk that fails outright reports a lower bound and the span that may have run", async () => {
+      batchMode = "throw"; wsEvents.length = 0;
+      assert.equal((await (await post("/op", { op: "run_batch", args: { ops: [] } })).json()).ok, true);
+      const e = await errorEvent();
+      assert.equal(e.type, "error");
+      assert.equal(e.progress, 10, "the last confirmed chunk boundary");
+      assert.equal(e.unsureThrough, 15, "the failing chunk is ops 11-15");
+    });
+  } finally {
+    batchMode = "ok";
+    sock.terminate();
+  }
 } finally {
   panel.close();
   fs.rmSync(dir, { recursive: true, force: true });

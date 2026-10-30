@@ -723,7 +723,10 @@
           : "";
         var stopped = new Error("Batch " + jobId + " stopped mid-run: " + cause + " " + landed + warned);
         stopped.code = e && e.code;
+        // A lower bound, not a stop point: the failing chunk may have partly
+        // or fully run ("Bad JSON" means it did) (issue #222).
         stopped.progress = attempted;
+        stopped.unsureThrough = totalGuess === null ? attempted + size : Math.min(attempted + size, totalGuess);
         if (aeWarnings.length) stopped.aeWarnings = aeWarnings;
         log("error", stopped.message);
         throw stopped;
@@ -1100,6 +1103,7 @@
           driveJob(res.jobId, progressToken, res.chunkSize, res.total).catch(function (e) {
             var stoppedEvt = { type: "error", jobId: res.jobId, error: e.message };
             if (typeof e.progress === "number") stoppedEvt.progress = e.progress;
+            if (typeof e.unsureThrough === "number") stoppedEvt.unsureThrough = e.unsureThrough;
             broadcast(stoppedEvt);
           });
           // The undo fields ride out with the envelope so the agent is told the
