@@ -23,7 +23,9 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (f) => fs.readFileSync(path.join(root, "packages", "jsx", f), "utf8");
 
-function load({ dialogs = false } = {}) {
+// `locked`: an After Effects whose host object ignores assignment to its
+// methods. The guard must notice, fall back to the text rewrite, and say so.
+function load({ dialogs = false, locked = false } = {}) {
   const log = [];
   const state = { depth: 0, maxDepth: 0, strayEnds: 0, onError: null, suppressed: 0 };
   const app = {
@@ -38,6 +40,13 @@ function load({ dialogs = false } = {}) {
       state.depth--;
     },
   };
+  if (locked) {
+    for (const k of ["beginUndoGroup", "endUndoGroup"]) {
+      Object.defineProperty(app, k, { value: app[k], writable: false, enumerable: true });
+    }
+  }
+  state.origBegin = app.beginUndoGroup;
+  state.origEnd = app.endUndoGroup;
   if (dialogs) {
     app.beginSuppressDialogs = () => { log.push("suppress"); state.suppressed++; };
     app.endSuppressDialogs = (a) => { log.push(`unsuppress:${a}`); state.suppressed--; };
@@ -55,6 +64,7 @@ function load({ dialogs = false } = {}) {
     vm.runInContext(read(f), ctx, { filename: f });
   }
   const call = (op, args) => vm.runInContext("dispatch", ctx)(JSON.stringify({ op, args }));
+  state.ctx = ctx;
   return { ctx, log, state, call };
 }
 
@@ -70,6 +80,8 @@ function check(name, fn) {
 
 function balanced(log, state, name) {
   assert.equal(state.depth, 0, `${name}: an undo group was left open after the call`);
+  assert.equal(vm.runInContext("app.beginUndoGroup", state.ctx), state.origBegin, `${name}: app.beginUndoGroup not restored`);
+  assert.equal(vm.runInContext("app.endUndoGroup", state.ctx), state.origEnd, `${name}: app.endUndoGroup not restored`);
   assert.equal(state.strayEnds, 0, `${name}: an endUndoGroup reached AE with nothing open`);
   assert.equal(opens(log), closes(log), `${name}: begins and ends differ`);
 }
@@ -140,7 +152,7 @@ check("with undoGroup:false the script's pair opens one counted group", () => {
   balanced(log, state, "undoGroup:false pair");
   assert.deepEqual(log, ["begin:mine", "end"], "one real group, never a nested one");
   assert.equal(vm.runInContext("__undoGroupsOpened()", ctx), 1, "opened through __beginUndoGroup");
-  assert.match(r.result.undoGuard.note, /opened one real group, "mine"/);
+  assert.match(r.result.undoGuard.note, /opened 1 real undo group\(s\) \(the first named "mine"\)/);
 });
 
 check("with undoGroup:false a begin with no end is closed before returning", () => {
@@ -204,22 +216,67 @@ check("a run_jsx step in a chunked batch stays inside its chunk's group", () => 
   assert.equal(res.result.undoSteps, 3, "one group per chunk, none extra");
 });
 
-// ---------- Spellings the rewrite cannot follow are refused, before running ----------
+// ---------- Every route to the methods is guarded, not just the spelled-out one ----------
+// Each of these got past the first version's text scanner and reached the real
+// endUndoGroup (#226 review). With the methods replaced on `app` itself, the
+// route no longer matters.
 
 for (const [name, code] of [
-  ["computed member", 'app["endUndoGroup"](); return 1;'],
-  ["alias", "var a = app; a.beginUndoGroup('x'); return 1;"],
-  ["method reference off another object", "var f = $.global.app.endUndoGroup; return 1;"],
+  ["eval", 'eval("app.endUndoGroup()");'],
+  ["computed name", 'app["end" + "UndoGroup"]();'],
+  ["escaped name", 'app["end\\x55ndoGroup"]();'],
+  ["Function", 'Function("app.endUndoGroup()")();'],
+  ["alias", "var a = app; a.endUndoGroup();"],
+  ["after ++, where a / is division", "var i = 4; i++ / 2; app.endUndoGroup(); var z = i / 2;"],
 ]) {
-  check(`refused: ${name}`, () => {
-    const { log, call } = load();
-    const r = call("run_jsx", { code: `$.ran = 1; ${code}` });
-    assert.equal(r.ok, false, `${name} must be refused`);
-    assert.match(r.error, /refused this script before running any of it/);
-    assert.match(r.error, /line 1/);
-    assert.deepEqual(log, ["begin:AE MCP: run_jsx", "end"]);
+  check(`guarded: ${name}`, () => {
+    const { log, state, call } = load();
+    const r = call("run_jsx", { code: `${code} return 1;` });
+    assert.equal(r.ok, true, r.error);
+    balanced(log, state, name);
+    assert.deepEqual(log, ["begin:AE MCP: run_jsx", "end"], `${name}: the stray end reached After Effects`);
+    assert.equal(r.result.undoGuard.ignoredEnds, 1);
+    assert.equal(r.result.undoGuard.mode, "override");
+    assert.match(r.result.undoGuard.note, /UNBALANCED/);
   });
 }
+
+check("guarded: an eval'd begin under undoGroup:false is closed in the same call", () => {
+  const { log, state, call } = load();
+  const r = call("run_jsx", { undoGroup: false, code: 'eval("app.beginUndoGroup(\'x\')"); return 1;' });
+  assert.equal(r.ok, true, r.error);
+  balanced(log, state, "eval'd begin");
+  assert.deepEqual(log, ["begin:x", "end"]);
+  assert.equal(r.result.undoGuard.closedForScript, 1);
+});
+
+check("names used as data are not refused", () => {
+  const { log, state, call } = load();
+  const r = call("run_jsx", {
+    code: 'var o = {}; o.s = "endUndoGroup"; o.beginUndoGroup = function () { return 7; }; return o.beginUndoGroup();',
+  });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result, 7, "nothing undo-related happened, so no envelope");
+  balanced(log, state, "data");
+});
+
+check("a run_jsx inside a run_jsx counts its own calls and leaves the methods to the outer one", () => {
+  const { log, state, call } = load();
+  const r = call("run_jsx", {
+    code: 'var inner = OPS.run_jsx({ code: "app.endUndoGroup(); return 1;" }); app.beginUndoGroup("o"); app.endUndoGroup(); return inner;',
+  });
+  assert.equal(r.ok, true, r.error);
+  balanced(log, state, "nested run_jsx");
+  assert.equal(r.result.returned.undoGuard.ignoredEnds, 1);
+  assert.equal(r.result.undoGuard.balanced, true);
+});
+
+check("the bundle's own undo calls inside a script are not counted as the script's", () => {
+  const { log, state, call } = load();
+  const r = call("run_jsx", { code: "withoutUndoGroup(function () {}); return 2;" });
+  assert.equal(r.result, 2, "withoutUndoGroup is the bundle's, not the script's: no report");
+  balanced(log, state, "withoutUndoGroup");
+});
 
 check("names in strings and comments are left alone", () => {
   const { log, state, call } = load();
@@ -237,10 +294,50 @@ check("names in strings and comments are left alone", () => {
   balanced(log, state, "strings and comments");
 });
 
-check("app . beginUndoGroup across lines keeps every later line number", () => {
-  const { ctx, log, state, call } = load();
+check("a library's undo calls are guarded too", () => {
+  const { log, state, call } = load();
+  const r = call("run_jsx", {
+    libraries: [{ path: "/lib/rig.jsx", text: 'function rig() { app.beginUndoGroup("lib"); return 9; }\n' }],
+    code: "return rig();",
+  });
+  assert.equal(r.ok, true, r.error);
+  balanced(log, state, "library");
+  assert.equal(r.result.undoGuard.closedForScript, 1);
+});
+
+// ---------- Fallback: an After Effects that will not take the override ----------
+
+check("fallback: direct calls are still guarded, and the report says only those were", () => {
+  const { log, state, call } = load({ locked: true });
+  const r = call("run_jsx", { code: 'app.beginUndoGroup("x"); app.endUndoGroup(); app.endUndoGroup(); return 1;' });
+  assert.equal(r.ok, true, r.error);
+  balanced(log, state, "fallback direct");
+  assert.equal(r.result.undoGuard.mode, "text");
+  assert.equal(r.result.undoGuard.ignoredEnds, 1);
+  assert.match(r.result.undoGuard.note, /did not accept the guard's method override/);
+  assert.match(r.result.undoGuard.note, /\(3 found\)/);
+});
+
+check("fallback: a route it cannot see is not claimed as guarded", () => {
+  const { call } = load({ locked: true });
+  const r = call("run_jsx", { code: 'eval("app.beginUndoGroup(\'x\')"); return 1;' });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result.undoGuard.beginUndoGroupCalls, 0);
+  assert.match(r.result.undoGuard.note, /CAUTION/);
+  assert.match(r.result.undoGuard.note, /eval, Function, \$\.evalFile/);
+});
+
+check("fallback: a script that never mentions undo gets its bare result", () => {
+  const { log, call } = load({ locked: true });
+  const r = call("run_jsx", { code: "return 5;" });
+  assert.equal(r.result, 5);
+  assert.deepEqual(log, ["begin:AE MCP: run_jsx", "end"]);
+});
+
+check("fallback: app . beginUndoGroup across lines keeps every later line number", () => {
+  const { ctx, log, state, call } = load({ locked: true });
   const code = 'app\n  .beginUndoGroup("x"); // why\napp /* c */ . endUndoGroup();\nreturn 4;';
-  const built = vm.runInContext("__rjBuildSource", ctx)(code, null);
+  const built = vm.runInContext("__rjBuildSource", ctx)(code, null, true);
   const lines = built.wrapper.split("\n");
   assert.equal(lines.length, code.split("\n").length + 1, "one extra line: the wrapper's closer");
   // The name lands where `app` was; the newline that followed it stays put.
@@ -253,15 +350,10 @@ check("app . beginUndoGroup across lines keeps every later line number", () => {
   balanced(log, state, "multi-line member");
 });
 
-check("a library's undo calls are guarded too", () => {
-  const { log, state, call } = load();
-  const r = call("run_jsx", {
-    libraries: [{ path: "/lib/rig.jsx", text: 'function rig() { app.beginUndoGroup("lib"); return 9; }\n' }],
-    code: "return rig();",
-  });
-  assert.equal(r.ok, true, r.error);
-  balanced(log, state, "library");
-  assert.equal(r.result.undoGuard.closedForScript, 1);
+check("override mode leaves the script's text alone", () => {
+  const { ctx } = load();
+  const code = 'app.beginUndoGroup("x");';
+  assert.ok(vm.runInContext("__rjBuildSource", ctx)(code, null, false).wrapper.indexOf(code) > 0);
 });
 
 // ---------- Dialogs the script tries to show ----------
@@ -285,25 +377,34 @@ check("every op runs with dialogs suppressed, the undo group inside it", () => {
   assert.deepEqual(log, ["suppress", "begin:AE MCP: demo", "end", "unsuppress:false"]);
 });
 
-check("a suppressed warning is returned on the result, and onError is restored", () => {
+check("a reported message is a top-level aeWarnings on the result, and onError is restored", () => {
   const { ctx, state, call } = load({ dialogs: true });
   const theirs = () => {};
   state.onError = theirs;
   vm.runInContext('OPS.warns = function () { app.__warn("Auto-orient needs a 3D layer"); return { done: 1 }; }', ctx);
   const r = call("warns", {});
   assert.equal(r.ok, true);
-  assert.deepEqual(plain(r.result.aeSuppressedDialogs), ["Auto-orient needs a 3D layer (severity 2)"]);
-  assert.match(r.result.aeSuppressedDialogsNote, /suppressed/);
+  assert.deepEqual(plain(r.result.aeWarnings), ["Auto-orient needs a 3D layer (severity 2)"]);
+  assert.equal(r.result.done, 1);
   assert.equal(state.onError, theirs, "another script's onError must be put back");
   assert.equal(state.suppressed, 0);
 });
 
-check("a scalar result is wrapped rather than losing the message", () => {
+check("an array or scalar result travels in the marked envelope, its value untouched", () => {
   const { ctx, call } = load({ dialogs: true });
-  vm.runInContext('OPS.warns2 = function () { app.__warn("w"); return 4; }', ctx);
-  const r = call("warns2", {});
-  assert.equal(r.result.returned, 4);
-  assert.equal(r.result.aeSuppressedDialogs.length, 1);
+  vm.runInContext('OPS.warnsA = function () { app.__warn("w"); return [1, 2]; }', ctx);
+  vm.runInContext('OPS.warnsN = function () { app.__warn("w"); return 4; }', ctx);
+  const a = plain(call("warnsA", {}).result);
+  assert.deepEqual(a, { value: [1, 2], aeWarnings: ["w (severity 2)"], __aemcpWarned: true });
+  const n = plain(call("warnsN", {}).result);
+  assert.equal(n.value, 4);
+  assert.equal(n.__aemcpWarned, true);
+});
+
+check("no message, no change: an array result keeps its shape", () => {
+  const { ctx, call } = load({ dialogs: true });
+  vm.runInContext("OPS.arr = function () { return [1, 2]; }", ctx);
+  assert.deepEqual(plain(call("arr", {}).result), [1, 2]);
 });
 
 check("a failing op still ends suppression and carries the message", () => {
@@ -311,7 +412,7 @@ check("a failing op still ends suppression and carries the message", () => {
   vm.runInContext('OPS.fails = function () { app.__warn("mismatch"); throw new Error("boom"); }', ctx);
   const r = call("fails", {});
   assert.equal(r.ok, false);
-  assert.match(r.error, /boom \|\| After Effects also said \(dialog suppressed\): mismatch/);
+  assert.match(r.error, /boom \|\| After Effects also reported, through app\.onError while dialogs were suppressed: mismatch/);
   assert.equal(state.suppressed, 0);
   assert.equal(log[log.length - 1], "unsuppress:false");
 });
@@ -334,5 +435,71 @@ check("an AE without the suppression API runs ops exactly as before", () => {
   call("demo", {});
   assert.deepEqual(log, ["begin:AE MCP: demo", "end"]);
 });
+
+// ---------- A chunked batch carries every chunk's warnings to its result ----------
+// The panel's job driver builds the job result from named fields, so a field it
+// does not name is dropped. Its real source is run against scripted chunks.
+{
+  const mainJs = fs.readFileSync(path.join(root, "packages", "ae-panel", "client", "main.js"), "utf8");
+  const start = mainJs.indexOf("  function driveJobSteps(");
+  const end = mainJs.indexOf("\n  }\n", start) + 4;
+  assert.ok(start > 0 && end > start, "driveJobSteps moved; update this test");
+  const run = async (chunks) => {
+    const events = [];
+    let i = 0;
+    const sandbox = {
+      Promise, setTimeout, String,
+      runOp: () => Promise.resolve(chunks[i++]),
+      broadcast: (e) => events.push(e),
+      log: () => {},
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(mainJs.slice(start, end), sandbox);
+    const out = await vm.runInContext("driveJobSteps", sandbox)("j1", null, 1, 3, {});
+    return { out, events };
+  };
+  const ok = await run([
+    { done: false, progress: 1, total: 3, undoSteps: 1, aeWarnings: ["first"] },
+    { done: false, progress: 2, total: 3, undoSteps: 2 },
+    { done: true, total: 3, results: [1, 2, 3], errors: [], undoSteps: 3, aeWarnings: ["last"] },
+  ]);
+  assert.deepEqual(plain(ok.out.aeWarnings), ["first", "last"], "a warning from an early chunk was dropped");
+  assert.deepEqual(plain(ok.events.find((e) => e.type === "complete").result.aeWarnings), ["first", "last"]);
+  assert.equal(ok.out.undoSteps, 3);
+  passed++;
+
+  const failed = await run([
+    { done: false, progress: 1, total: 2, undoSteps: 1, aeWarnings: ["early"] },
+    { done: true, failed: true, error: "boom", atIndex: 1, undoSteps: 2 },
+  ]);
+  assert.deepEqual(plain(failed.out.aeWarnings), ["early"]);
+  assert.match(failed.events.find((e) => e.type === "error").error, /boom.*app\.onError.*early/);
+  passed++;
+
+  const quiet = await run([{ done: true, total: 1, results: [1], errors: [], undoSteps: 1 }]);
+  assert.equal("aeWarnings" in quiet.out, false, "no warnings, no field");
+  passed++;
+}
+
+// ---------- The server never lets a warning read as a clean success ----------
+{
+  const dist = path.join(root, "packages", "mcp-server", "dist", "server.js");
+  const { liftAeWarnings, withAeWarnings, textResult } = await import(dist);
+  const lifted = liftAeWarnings({ value: [1, 2], aeWarnings: ["w"], __aemcpWarned: true });
+  assert.deepEqual(lifted.value, [1, 2], "the agent reads the array, not the envelope");
+  const res = withAeWarnings(textResult(lifted.value), lifted.envelopeWarnings);
+  assert.equal(res.content.length, 2);
+  assert.match(res.content[0].text, /^WARNING: After Effects reported 1 message/);
+  assert.match(res.content[0].text, /do not report it as a clean success/);
+  assert.match(res.content[0].text, /Read the affected state back/);
+  assert.equal(res.content[1].text, "[1,2]");
+  passed++;
+
+  const obj = textResult({ ok: true, aeWarnings: ["x"] });
+  assert.match(obj.content[0].text, /^WARNING/, "an object result with aeWarnings gets the warning block first");
+  assert.equal(textResult({ ok: true }).content.length, 1, "no warnings, no block");
+  assert.deepEqual(liftAeWarnings([1]).value, [1]);
+  passed++;
+}
 
 console.log(`run-jsx-undo-guard: ${passed} checks passed`);

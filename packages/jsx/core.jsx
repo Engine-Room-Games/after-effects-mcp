@@ -143,10 +143,34 @@ var __UNDO_GROUPS = 0;
 
 function __beginUndoGroup(name) {
   __UNDO_GROUPS += 1;
-  app.beginUndoGroup(name || "AE MCP");
+  __aeBeginUndo(name || "AE MCP");
 }
 
 function __undoGroupsOpened() { return __UNDO_GROUPS; }
+
+// While a run_jsx script runs, app.beginUndoGroup / app.endUndoGroup are the
+// script's counted wrappers (raw.jsx, issue #221) and __UNDO_RAW holds the
+// originals. The bundle's own calls must still reach After Effects, so these
+// two put the original back for exactly one call. Swapping rather than calling
+// the saved function with .call(app): the swap relies only on the assignment
+// the guard already proved works, nothing else about the host object.
+var __UNDO_RAW = null;
+
+function __aeBeginUndo(name) {
+  var o = __UNDO_RAW;
+  if (!o) { app.beginUndoGroup(name); return; }
+  app.beginUndoGroup = o.begin;
+  try { app.beginUndoGroup(name); }
+  finally { app.beginUndoGroup = o.wrapBegin; }
+}
+
+function __aeEndUndo() {
+  var o = __UNDO_RAW;
+  if (!o) { app.endUndoGroup(); return; }
+  app.endUndoGroup = o.end;
+  try { app.endUndoGroup(); }
+  finally { app.endUndoGroup = o.wrapEnd; }
+}
 
 // An undo group must open and close inside ONE evalScript call. After Effects
 // discards one that spans two — see the note in CLAUDE.md; measured, not
@@ -155,7 +179,7 @@ function withUndo(name, fn) {
   __beginUndoGroup(name || "AE MCP");
   __UNDO_OPEN = true;
   try { return fn(); }
-  finally { __UNDO_OPEN = false; app.endUndoGroup(); }
+  finally { __UNDO_OPEN = false; __aeEndUndo(); }
 }
 
 // Run fn with the dispatcher's undo group closed, then reopen it.
@@ -165,7 +189,7 @@ function withUndo(name, fn) {
 // to call. The work inside becomes its own undo step, separate from the rest.
 function withoutUndoGroup(fn) {
   if (!__UNDO_OPEN) return fn();
-  app.endUndoGroup();
+  __aeEndUndo();
   __UNDO_OPEN = false;
   try { return fn(); }
   finally { __beginUndoGroup("AE MCP: continue"); __UNDO_OPEN = true; }
@@ -209,7 +233,7 @@ function __mkError(e) {
 // among the dialogs it suppresses, and whether app.onError receives what was
 // suppressed. The capture below is therefore best-effort: when app.onError
 // takes a handler, whatever it is handed comes back on the result
-// (`aeSuppressedDialogs`) or on the error text; when it does not, nothing is
+// (`aeWarnings`) or on the error text; when it does not, nothing is
 // claimed. An op that manages its own suppression (export_mogrt, whose
 // suppressDialogs:false must still be honoured) opts out with __meta.ownDialogs.
 //
@@ -254,25 +278,35 @@ function __dialogGuardEnd(g) {
   __DIALOGS_SUPPRESSED = false;
 }
 
-// Puts what After Effects said under suppression where the agent will read it.
-// The panel forwards `result` on success and `error` on failure, nothing else,
-// so that is where it has to go.
+// Puts what app.onError was handed where the agent will read it.
+//
+// The labelling is deliberately neutral. Whether app.onError fires only for
+// what would have been a dialog, or also for errors raised and caught inside
+// an op (explore.jsx alone has many such catches, and #129's false
+// "invalid numeric result" is caught on purpose), is not measured — so these
+// are "After Effects reported", never "a dialog was suppressed".
+//
+// The panel forwards `result` on success and `error` on failure, nothing else.
+// An object result gets a top-level `aeWarnings`. Anything else (array, scalar,
+// null) travels in a marked envelope that the server unwraps, so the value the
+// agent reads keeps its shape and the warnings arrive as a separate block.
+var __AE_WARNED_MARK = "__aemcpWarned";
+
 function __dialogGuardReport(out, g) {
   if (!g || g.messages.length === 0) return out;
   var msgs = g.messages;
-  var note = "After Effects raised " + msgs.length + " message(s) during this call that it would have shown " +
-    "as a dialog; they were suppressed so the bridge stayed responsive. Read them — the call may not have " +
-    "done everything it reports.";
   if (!out.ok) {
-    out.error = String(out.error) + " || After Effects also said (dialog suppressed): " + msgs.join(" | ");
+    out.error = String(out.error) + " || After Effects also reported, through app.onError while dialogs were " +
+      "suppressed: " + msgs.join(" | ");
     return out;
   }
   var r = out.result;
   if (r && typeof r === "object" && !(r instanceof Array)) {
-    r.aeSuppressedDialogs = msgs;
-    r.aeSuppressedDialogsNote = note;
+    r.aeWarnings = msgs;
   } else {
-    out.result = { ok: true, returned: r, aeSuppressedDialogs: msgs, aeSuppressedDialogsNote: note };
+    var env = { value: r, aeWarnings: msgs };
+    env[__AE_WARNED_MARK] = true;
+    out.result = env;
   }
   return out;
 }

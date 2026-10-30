@@ -336,9 +336,12 @@ output modules anyway.
   rerouted through a counter. Inside the open group they do nothing. Under
   `undoGroup:false` the first one opens a single real group. A stray end is
   ignored, and a group left open is closed before the call returns. The result
-  then carries `undoGuard`; read its `note`. A spelling the counter cannot
-  follow, such as `app["endUndoGroup"]` or an alias of `app`, is refused before
-  any of the script runs.
+  then carries `undoGuard`; read its `note`. If the note begins CAUTION, only
+  calls written out as `app.beginUndoGroup(...)` were counted. Calls made
+  through `eval` or an alias were not, so check Edit > Undo in After Effects.
+- **A result with `aeWarnings` is not a clean success.** After Effects reported
+  something while its dialogs were held back. Read the state back before going
+  on.
 - **`alert`, `confirm` and `prompt` do not show.** A dialog inside a script
   would block After Effects and the bridge until someone clicked it. They come
   back on the result as `suppressedDialogs`. `confirm` answers No and `prompt`

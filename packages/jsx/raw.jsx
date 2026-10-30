@@ -420,12 +420,12 @@ function __rjCheckLibraryParses(lib) {
 // for a preamble whose length changes from call to call: it can never drift
 // from the string it describes, however many libraries there are.
 //
-// Every piece of text is passed through __rjGuardUndoText first (issue #221):
-// the script's own app.beginUndoGroup / app.endUndoGroup are rerouted to the
-// counted guard below, and a spelling the guard cannot reroute refuses the call
-// before anything runs. The rewrite keeps every newline, so the line map above
-// is untouched, and the lines kept for error text are the caller's own.
-function __rjBuildSource(code, libraries) {
+// `rewriteUndo` is the fallback half of the undo guard below, used only when
+// After Effects refused the method override: each literal
+// `app.beginUndoGroup` / `app.endUndoGroup` is rewritten to the guard
+// functions. The rewrite keeps every newline, so the line map is untouched, and
+// the lines kept for error text are the caller's own.
+function __rjBuildSource(code, libraries, rewriteUndo) {
   var prefix = __RJ_WRAP_PREFIX;
   var segments = [];
   var rewrites = 0;
@@ -433,8 +433,12 @@ function __rjBuildSource(code, libraries) {
     for (var i = 0; i < libraries.length; i++) {
       var lib = __rjLibrarySource(libraries[i]);
       __rjCheckLibraryParses(lib);
-      var guardedLib = __rjGuardUndoText(lib.text, lib.path);
-      rewrites += guardedLib.rewrites;
+      var libText = lib.text;
+      if (rewriteUndo) {
+        var gl = __rjRewriteUndoText(libText);
+        rewrites += gl.rewrites;
+        libText = gl.text;
+      }
       segments.push({
         path: lib.path,
         // The wrapper opener carries no newline, so the first library's line 1
@@ -442,13 +446,17 @@ function __rjBuildSource(code, libraries) {
         firstLine: __rjLines(prefix).length,
         lines: __rjLines(lib.text)
       });
-      prefix = prefix + guardedLib.text;
+      prefix = prefix + libText;
     }
   }
-  var guarded = __rjGuardUndoText(code, null);
-  rewrites += guarded.rewrites;
+  var text = code;
+  if (rewriteUndo) {
+    var gc = __rjRewriteUndoText(code);
+    rewrites += gc.rewrites;
+    text = gc.text;
+  }
   return {
-    wrapper: prefix + guarded.text + __RJ_WRAP_SUFFIX,
+    wrapper: prefix + text + __RJ_WRAP_SUFFIX,
     preambleLines: __rjLines(prefix).length - 1,
     segments: segments,
     undoRewrites: rewrites
@@ -464,32 +472,34 @@ function __rjBuildSource(code, libraries) {
 // the blocking "Undo group mismatch, will attempt to fix." modal, and pressing
 // Undo after dismissing it crashed After Effects in HandleMenu_UndoRedo.
 //
-// So the script never reaches the real methods. Before it is evaluated, each
-// `app.beginUndoGroup` / `app.endUndoGroup` in its text is rewritten to the
-// guard functions below, which count:
+// The guard replaces the two methods ON `app` for the duration of the script,
+// inside the same evalScript, and puts the originals back in a finally. Every
+// route to them — a direct call, eval, Function, $.evalFile, an alias of `app`,
+// app["end" + "UndoGroup"] — then lands in the counted wrappers:
 //
 //  * inside the group run_jsx (or run_batch) already has open, a begin is a
 //    counted no-op and its end pops it — which is what After Effects did with a
 //    nested pair anyway (the inner name never showed);
-//  * with no group open (undoGroup:false), the first begin opens ONE real group
-//    through __beginUndoGroup, and its matching end closes it;
+//  * with no group open (undoGroup:false), a begin opens a real group through
+//    __beginUndoGroup, and its matching end closes it;
 //  * an end with nothing of the script's open is ignored — it would have closed
 //    the dispatcher's group, or nothing at all;
 //  * whatever the script left open is closed for it before the call returns,
 //    inside the same evalScript, whether it returned or threw.
 //
-// Every one of those is reported on the result (`undoGuard`), never applied
-// silently. Rewriting the text rather than patching `app` is deliberate: it
-// needs nothing from the host object model, so it cannot fail differently in
-// After Effects than it does in the unit test. What it cannot see — an aliased
-// `app`, `app["endUndoGroup"]`, a method pulled off another object — is refused
-// before anything runs, naming the line, rather than let through unguarded.
+// The bundle's own undo calls go through __aeBeginUndo / __aeEndUndo in
+// core.jsx, which put the original back around the one call, so they are never
+// counted as the script's.
+//
+// Whether After Effects' host object accepts the assignment is NOT measured.
+// It is feature-detected per call: after assigning, `app.beginUndoGroup` must
+// read back as the wrapper. When it does not, the guard falls back to
+// rewriting the script's text, which covers ACCIDENTAL DIRECT CALLS ONLY —
+// `app.beginUndoGroup(...)` written out in the script or a library. eval,
+// Function, $.evalFile, aliases and computed names then reach After Effects
+// uncounted, and the result says so whenever the source mentions UndoGroup.
 
 var __RJ_UNDO_WORDS = { beginUndoGroup: "__rjUndoBegin", endUndoGroup: "__rjUndoEnd" };
-var __RJ_REGEX_AFTER_WORDS = {
-  "return": 1, "typeof": 1, "instanceof": 1, "in": 1, "new": 1, "delete": 1,
-  "void": 1, "throw": 1, "case": 1, "do": 1, "else": 1
-};
 
 function __rjIsIdentChar(c) {
   return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") ||
@@ -512,33 +522,20 @@ function __rjOnlyNewlines(s) {
   return out;
 }
 
-function __rjUndoWord(w) {
-  return (w === "beginUndoGroup" || w === "endUndoGroup") ? __RJ_UNDO_WORDS[w] : null;
-}
-
-// One pass over the source: string and comment literals are copied untouched,
-// regex literals are recognised by the usual previous-token rule, and every
-// identifier `beginUndoGroup` / `endUndoGroup` in code is either the member of
-// a bare `app` (rewritten) or something the guard cannot follow (refused). A
-// string literal that IS one of the two names is the computed-member spelling,
-// app["endUndoGroup"], and is refused too. No regex literal in this function,
-// for the reason __rjLines gives.
-function __rjGuardUndoText(src, sourceName) {
+// The fallback rewrite. Deliberately small: it skips string and comment
+// literals so a mention in either is left alone, and rewrites `app . name`
+// where `app` is not itself a member. It does not try to recognise regex
+// literals — a `/` is copied as code — so a regex containing a quote or a `//`
+// can hide a later call from it. That is acceptable only because this path is
+// the fallback and its report says it covers direct calls only. No regex
+// literal in this function, for the reason __rjLines gives.
+function __rjRewriteUndoText(src) {
   var s = String(src);
   var n = s.length;
   var out = [];
   var sig = [];          // significant code tokens: {tok, at: index into out}
-  var lastChar = "";     // last significant code character, for regex-vs-divide
-  var lastWord = "";
   var rewrites = 0;
-  var refusals = [];
   var i = 0;
-
-  function refuse(at, what) {
-    var lineNo = __rjLines(s.substring(0, at)).length;
-    refusals.push({ line: lineNo, what: what, text: __rjClip(__rjTrim(__rjLines(s)[lineNo - 1]), 160) });
-  }
-
   while (i < n) {
     var c = s.charAt(i);
     var d = (i + 1 < n) ? s.charAt(i + 1) : "";
@@ -559,105 +556,46 @@ function __rjGuardUndoText(src, sourceName) {
     }
     if (c === "\"" || c === "'") {
       j = i + 1;
-      var closed = false;
       while (j < n) {
         var ch = s.charAt(j);
         if (ch === "\\") { j += 2; continue; }
-        if (ch === c) { j++; closed = true; break; }
+        if (ch === c) { j++; break; }
         if (ch === "\n" || ch === "\r") break;
         j++;
       }
       if (j > n) j = n;
-      var lit = s.substring(i, j);
-      var body = closed ? lit.substring(1, lit.length - 1) : lit.substring(1);
-      if (__rjUndoWord(body)) refuse(i, "a computed reference to " + body);
-      out.push(lit);
-      sig.push({ tok: lit, at: out.length - 1 });
-      lastChar = c;
-      lastWord = "";
+      out.push(s.substring(i, j));
+      sig.push({ tok: "'", at: out.length - 1 });
       i = j;
       continue;
-    }
-    if (c === "/") {
-      var regexHere = lastChar === "" || (!__rjIsIdentChar(lastChar) && lastChar !== ")" && lastChar !== "]") ||
-        (lastWord !== "" && __RJ_REGEX_AFTER_WORDS.hasOwnProperty(lastWord));
-      if (regexHere) {
-        j = i + 1;
-        var inClass = false;
-        while (j < n) {
-          var rc = s.charAt(j);
-          if (rc === "\\") { j += 2; continue; }
-          if (rc === "\n" || rc === "\r") break;
-          if (inClass) { if (rc === "]") inClass = false; }
-          else if (rc === "[") inClass = true;
-          else if (rc === "/") { j++; break; }
-          j++;
-        }
-        while (j < n && __rjIsIdentChar(s.charAt(j))) j++;
-        if (j > n) j = n;
-        out.push(s.substring(i, j));
-        sig.push({ tok: "/regex/", at: out.length - 1 });
-        lastChar = ")";
-        lastWord = "";
-        i = j;
-        continue;
-      }
     }
     if (__rjIsIdentChar(c)) {
       j = i;
       while (j < n && __rjIsIdentChar(s.charAt(j))) j++;
       var word = s.substring(i, j);
-      var target = __rjUndoWord(word);
-      if (target) {
-        var t1 = sig.length > 0 ? sig[sig.length - 1] : null;
-        var t2 = sig.length > 1 ? sig[sig.length - 2] : null;
-        var t3 = sig.length > 2 ? sig[sig.length - 3] : null;
-        if (t1 && t1.tok === "." && t2 && t2.tok === "app" && !(t3 && t3.tok === ".")) {
-          // `app . beginUndoGroup` -> `__rjUndoBegin`, keeping any newline that
-          // sat between the pieces so every later line keeps its number.
-          out[t2.at] = target;
-          for (var k = t2.at + 1; k < out.length; k++) out[k] = __rjOnlyNewlines(out[k]);
-          rewrites++;
-          sig.length = sig.length - 2;
-          out.push("");
-          sig.push({ tok: target, at: out.length - 1 });
-        } else {
-          refuse(i, word + " reached some other way than app." + word);
-          out.push(word);
-          sig.push({ tok: word, at: out.length - 1 });
-        }
+      var target = (word === "beginUndoGroup" || word === "endUndoGroup") ? __RJ_UNDO_WORDS[word] : null;
+      var t1 = sig.length > 0 ? sig[sig.length - 1] : null;
+      var t2 = sig.length > 1 ? sig[sig.length - 2] : null;
+      var t3 = sig.length > 2 ? sig[sig.length - 3] : null;
+      if (target && t1 && t1.tok === "." && t2 && t2.tok === "app" && !(t3 && t3.tok === ".")) {
+        // `app . beginUndoGroup` -> `__rjUndoBegin`, keeping any newline that
+        // sat between the pieces so every later line keeps its number.
+        out[t2.at] = target;
+        for (var k = t2.at + 1; k < out.length; k++) out[k] = __rjOnlyNewlines(out[k]);
+        rewrites++;
+        sig.length = sig.length - 2;
+        out.push("");
+        sig.push({ tok: target, at: out.length - 1 });
       } else {
         out.push(word);
         sig.push({ tok: word, at: out.length - 1 });
       }
-      lastChar = "a";
-      lastWord = word;
       i = j;
       continue;
     }
     out.push(c);
-    if (!__rjIsSpaceChar(c)) {
-      sig.push({ tok: c, at: out.length - 1 });
-      lastChar = c;
-      lastWord = "";
-    }
+    if (!__rjIsSpaceChar(c)) sig.push({ tok: c, at: out.length - 1 });
     i++;
-  }
-
-  if (refusals.length > 0) {
-    var where = [];
-    for (var r = 0; r < refusals.length && r < 5; r++) {
-      where.push("line " + refusals[r].line + " (" + refusals[r].what + "): " + refusals[r].text);
-    }
-    throw new Error(
-      "run_jsx refused this script before running any of it: " +
-      (sourceName ? "the library " + sourceName : "it") +
-      " reaches After Effects' undo-group methods in a way the undo guard cannot follow — " +
-      where.join("; ") + ". A raw beginUndoGroup/endUndoGroup that is left unbalanced breaks undo for " +
-      "the whole project and can crash After Effects (issue #221), so these calls only run when written " +
-      "literally as app.beginUndoGroup(...) / app.endUndoGroup(). Better: drop them — run_jsx already " +
-      "makes the script one undo step, and withoutUndoGroup(fn) is the way to step outside it."
-    );
   }
   return { text: out.join(""), rewrites: rewrites };
 }
@@ -667,21 +605,17 @@ function __rjGuardUndoText(src, sourceName) {
 // not count against the outer one's pairing.
 var __RJ_UNDO_GUARD = null;
 
-function __rjUndoGuardStart() {
-  return { begins: 0, ends: 0, ignoredEnds: 0, closedForScript: 0, opened: 0, firstName: null,
-    stack: [], previous: __RJ_UNDO_GUARD };
-}
-
-function __rjUndoGuardNotActive(what) {
-  // Only reachable from code the script left behind after it returned (a
-  // callback, a stored function reference). Nothing is opened or closed.
-  throw new Error("run_jsx: app." + what + " was called after the script that wrote it had " +
-    "returned, so there was no script undo state to pair it with. Nothing was opened or closed.");
+function __rjUndoGuardStart(mode) {
+  return { mode: mode, begins: 0, ends: 0, ignoredEnds: 0, closedForScript: 0, opened: 0, firstName: null,
+    stack: [], previous: __RJ_UNDO_GUARD, rewrites: 0, mentions: false };
 }
 
 function __rjUndoBegin(name) {
   var g = __RJ_UNDO_GUARD;
-  if (!g) __rjUndoGuardNotActive("beginUndoGroup");
+  // Only reachable with no guard from a reference the script kept and called
+  // after it returned. Passed straight to After Effects: there is no script
+  // pairing left to count it against.
+  if (!g) { __aeBeginUndo(name); return; }
   g.begins++;
   if (__UNDO_OPEN) { g.stack.push(false); return; }
   var groupName = (typeof name === "undefined" || name === null) ? "AE MCP: run_jsx" : String(name);
@@ -696,13 +630,42 @@ function __rjUndoBegin(name) {
 
 function __rjUndoEnd() {
   var g = __RJ_UNDO_GUARD;
-  if (!g) __rjUndoGuardNotActive("endUndoGroup");
+  if (!g) { __aeEndUndo(); return; }
   g.ends++;
   if (g.stack.length === 0) { g.ignoredEnds++; return; }
   if (g.stack.pop()) {
     __UNDO_OPEN = false;
-    app.endUndoGroup();
+    __aeEndUndo();
   }
+}
+
+// Install the wrappers on `app`. Returns true when this call installed them
+// (and must remove them), false when they were already in place (a run_jsx
+// inside a run_jsx), null when After Effects would not take the assignment.
+function __rjUndoInstall() {
+  if (__UNDO_RAW) return false;
+  var ob, oe;
+  try { ob = app.beginUndoGroup; oe = app.endUndoGroup; } catch (e0) { return null; }
+  var wb = function (name) { return __rjUndoBegin(name); };
+  var we = function () { return __rjUndoEnd(); };
+  try { app.beginUndoGroup = wb; app.endUndoGroup = we; } catch (e1) {}
+  var took = false;
+  try { took = (app.beginUndoGroup === wb && app.endUndoGroup === we); } catch (e2) {}
+  if (!took) {
+    try { if (app.beginUndoGroup !== ob) app.beginUndoGroup = ob; } catch (e3) {}
+    try { if (app.endUndoGroup !== oe) app.endUndoGroup = oe; } catch (e4) {}
+    return null;
+  }
+  __UNDO_RAW = { begin: ob, end: oe, wrapBegin: wb, wrapEnd: we };
+  return true;
+}
+
+function __rjUndoUninstall(installedHere) {
+  if (installedHere !== true || !__UNDO_RAW) return;
+  var o = __UNDO_RAW;
+  __UNDO_RAW = null;
+  try { app.beginUndoGroup = o.begin; } catch (e1) {}
+  try { app.endUndoGroup = o.end; } catch (e2) {}
 }
 
 // Close whatever the script left open, inside this same evalScript.
@@ -711,17 +674,21 @@ function __rjUndoGuardFinish(g) {
     g.closedForScript++;
     if (g.stack.pop()) {
       __UNDO_OPEN = false;
-      try { app.endUndoGroup(); } catch (e) {}
+      try { __aeEndUndo(); } catch (e) {}
     }
   }
 }
 
-// null when the script never touched undo; otherwise what happened, in words an
-// agent can repeat. Unbalanced pairing is said first.
+// null when there is nothing to say; otherwise what happened, in words an agent
+// can repeat. Unbalanced pairing is said first.
 function __rjUndoGuardReport(g) {
-  if (!g || (g.begins === 0 && g.ends === 0)) return null;
+  if (!g) return null;
+  var counted = g.begins > 0 || g.ends > 0;
+  var blind = g.mode === "text" && g.mentions;
+  if (!counted && !blind) return null;
   var balanced = g.ignoredEnds === 0 && g.closedForScript === 0;
   var report = {
+    mode: g.mode,
     beginUndoGroupCalls: g.begins,
     endUndoGroupCalls: g.ends,
     balanced: balanced,
@@ -738,12 +705,18 @@ function __rjUndoGuardReport(g) {
       "(issue #221). The script's work itself ran; fix its begin/end pairing before running it again.");
   }
   if (g.opened > 0) {
-    parts.push("No undo group was open, so the script's first app.beginUndoGroup opened one real group, \"" +
-      g.firstName + "\", which was closed inside this call.");
-  } else {
+    parts.push("No undo group was open, so the script's app.beginUndoGroup opened " + g.opened +
+      " real undo group(s) (the first named \"" + g.firstName + "\"); every one was closed inside this call.");
+  } else if (counted) {
     parts.push("Its app.beginUndoGroup/app.endUndoGroup calls were not passed to After Effects: the script already " +
       "ran inside the undo group this call had open (run_jsx's own, or the batch's), and that one group is still " +
       "the only undo step it cost.");
+  }
+  if (g.mode === "text") {
+    parts.push("CAUTION: this After Effects did not accept the guard's method override, so only calls written " +
+      "out as app.beginUndoGroup(...) / app.endUndoGroup() were guarded (" + g.rewrites + " found). Any reached " +
+      "through eval, Function, $.evalFile, an alias of app or a computed name went to After Effects uncounted — " +
+      "if the script does that, check Edit > Undo in After Effects before going on.");
   }
   report.note = parts.join(" ");
   return report;
@@ -768,62 +741,72 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
     );
   }
   if (!code) throw new Error("run_jsx needs `code` — an empty script would report success for nothing.");
-  // We wrap in a function so `return` works, with any libraries inlined ahead
-  // of the script so they share its scope. Assembled and parse-checked before
-  // anything runs, and outside the try below: a library that fails to parse is
-  // not a line in the caller's script and must not be reported as one.
-  var built = __rjBuildSource(code, args.libraries);
-  // Which undo step to look for in AE if the script has to be backed out. The
-  // name mirrors dispatch()'s default ("AE MCP: " + op); false means the caller
-  // asked for no group and the changes landed as whatever steps AE recorded.
-  var undoGroupName = (args.undoGroup === false) ? false : "AE MCP: run_jsx";
-  // diff:true fingerprints the comp before and after, inside this one call —
-  // see snapshot.jsx. Null unless asked for, so the ordinary path is untouched.
-  var __d = __diffStart(args, null);
-  // The script's rewritten undo calls land here (issue #221). Pushed only once
-  // everything that can refuse the call has run, so a refused script leaves no
-  // guard behind.
-  var __g = __rjUndoGuardStart();
+  // The undo guard goes on before anything else, and comes off in the finally
+  // at the bottom whatever happens in between (issue #221).
+  var installed = __rjUndoInstall();
+  var mode = (installed === null) ? "text" : "override";
+  var __g = __rjUndoGuardStart(mode);
   __RJ_UNDO_GUARD = __g;
-  // alert/confirm/prompt are blocking dialogs, and one up inside evalScript
-  // stalls the bridge until someone clicks it. Declared here, they shadow the
-  // globals for the eval'd script — eval resolves names through this
-  // function's scope first (see "Helper libraries" above) — and what the script
-  // tried to say comes back on the result instead of on screen.
-  var __shown = [];
-  var alert = function (m) { __shown.push("alert: " + String(m)); };
-  var confirm = function (m) { __shown.push("confirm (answered No): " + String(m)); return false; };
-  var prompt = function (m) { __shown.push("prompt (answered Cancel): " + String(m)); return null; };
-  var __value;
   try {
-    __value = eval(built.wrapper);
-  } catch (e) {
+    // We wrap in a function so `return` works, with any libraries inlined ahead
+    // of the script so they share its scope. Assembled and parse-checked before
+    // anything runs, and outside the try below: a library that fails to parse
+    // is not a line in the caller's script and must not be reported as one.
+    var built = __rjBuildSource(code, args.libraries, mode === "text");
+    __g.rewrites = built.undoRewrites;
+    if (mode === "text") __g.mentions = built.wrapper.indexOf("UndoGroup") >= 0;
+    // Which undo step to look for in AE if the script has to be backed out. The
+    // name mirrors dispatch()'s default ("AE MCP: " + op); false means the
+    // caller asked for no group and the changes landed as whatever steps AE
+    // recorded.
+    var undoGroupName = (args.undoGroup === false) ? false : "AE MCP: run_jsx";
+    // diff:true fingerprints the comp before and after, inside this one call —
+    // see snapshot.jsx. Null unless asked for, so the ordinary path is untouched.
+    var __d = __diffStart(args, null);
+    // alert/confirm/prompt are blocking dialogs, and one up inside evalScript
+    // stalls the bridge until someone clicks it. Declared here, they shadow the
+    // globals for the eval'd script — eval resolves names through this
+    // function's scope first (see "Helper libraries" above) — and what the
+    // script tried to say comes back on the result instead of on screen.
+    var __shown = [];
+    var alert = function (m) { __shown.push("alert: " + String(m)); };
+    var confirm = function (m) { __shown.push("confirm (answered No): " + String(m)); return false; };
+    var prompt = function (m) { __shown.push("prompt (answered Cancel): " + String(m)); return null; };
+    var __value;
+    try {
+      __value = eval(built.wrapper);
+    } catch (e) {
+      __rjUndoGuardFinish(__g);
+      var __gr = __rjUndoGuardReport(__g);
+      // Annotate before mapping the line: __rjThrowWithSource reads e.message,
+      // so the diff note has to be on it by then, and the source mapping is
+      // what makes the reported line the caller's own (#46).
+      __diffAnnotateError(e, __d);
+      __rjThrowWithSource(e, code, args.scriptPath, built,
+        (__gr ? " || undo: " + __gr.note : "") +
+        (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : ""));
+    }
+    __rjUndoGuardFinish(__g);
+    var __report = __rjUndoGuardReport(__g);
+    var __out = __rjResult(__value, undoGroupName);
+    if (__d) __out = __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
+    if (__report || __shown.length) {
+      // Always an envelope: a script that returned 1 must not read as an
+      // untroubled 1 when its undo calls were changed under it.
+      if (!__d && !__rjIsNullEnvelope(__out)) {
+        __out = { ok: true, returned: __out, undoGroup: undoGroupName };
+      }
+      if (__report) __out.undoGuard = __report;
+      if (__shown.length) __out.suppressedDialogs = __shown;
+    }
+    return __out;
+  } finally {
+    // Idempotent: the paths above have already closed everything, but a throw
+    // from anywhere else in here must not leave a group of the script's open.
     __rjUndoGuardFinish(__g);
     __RJ_UNDO_GUARD = __g.previous;
-    var __gr = __rjUndoGuardReport(__g);
-    // Annotate before mapping the line: __rjThrowWithSource reads e.message,
-    // so the diff note has to be on it by then, and the source mapping is what
-    // makes the reported line the caller's own (#46).
-    __diffAnnotateError(e, __d);
-    __rjThrowWithSource(e, code, args.scriptPath, built,
-      (__gr ? " || undo: " + __gr.note : "") +
-      (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : ""));
+    __rjUndoUninstall(installed);
   }
-  __rjUndoGuardFinish(__g);
-  __RJ_UNDO_GUARD = __g.previous;
-  var __report = __rjUndoGuardReport(__g);
-  var __out = __rjResult(__value, undoGroupName);
-  if (__d) __out = __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
-  if (__report || __shown.length) {
-    // Always an envelope: a script that returned 1 must not read as an
-    // untroubled 1 when its undo calls were rewritten under it.
-    if (!__d && !__rjIsNullEnvelope(__out)) {
-      __out = { ok: true, returned: __out, undoGroup: undoGroupName };
-    }
-    if (__report) __out.undoGuard = __report;
-    if (__shown.length) __out.suppressedDialogs = __shown;
-  }
-  return __out;
 });
 
 function __rjIsNullEnvelope(out) {
