@@ -67,7 +67,7 @@ Three steps, and you only do the first two once.
 
 **You'll need:** After Effects on macOS or Windows. It has been tested on After Effects 2026. The scripting it relies on has been in After Effects since 2022, and the panel is set to accept 2022 or later, but those older versions haven't been tested yet.
 
-**Your AI app has to run on the same computer as After Effects.** The tools talk to After Effects directly on your machine, so they only work in apps you install there: Claude Desktop, Claude Code, Cursor, VS Code and the like. Claude in a web browser (claude.ai) and ChatGPT can't use them — those can only connect to tools hosted on the internet, and they have no way to reach the After Effects on your computer.
+**Your AI app has to start the tools on the same computer as After Effects.** The tools talk to After Effects directly on your machine, so they work in any app that can run an MCP server locally: Claude Desktop, Claude Code, Cursor, VS Code, Codex, Windsurf and the like. ChatGPT, on the web or in its app, and Claude in a web browser (claude.ai) can't use them — they connect only to tools hosted on the internet, which have no way to reach the After Effects on your computer.
 
 ### 1️⃣ Install
 

@@ -20,8 +20,8 @@ descending order of reach:
 | `instructions` (initialize result) | every client that honours it | always resident — keep it short |
 | `ae_guide` tool | every client | on demand |
 | MCP resources (`ae://guide/…`) | clients with resource support | on demand |
-| Claude Code skills | Claude Code, claude.ai | on demand, whole skill at once |
-| Claude Code skill references | Claude Code, claude.ai | on demand, one file at a time |
+| Claude Code skills | Claude Code, with this repo's plugin installed | on demand, whole skill at once |
+| Claude Code skill references | Claude Code, with this repo's plugin installed | on demand, one file at a time |
 
 All of them except the tool descriptions come from
 `packages/mcp-server/src/guides/*.md` via `scripts/build-guides.mjs`. **Edit the

@@ -242,8 +242,8 @@ the old shape gets nothing rather than an error.
   on any task, and each subject is its own topic** — `animation`, `shapes`,
   `text`, `assembly`, `extendscript-gotchas`, `sound`, `mogrt-and-footage`,
   `issue-journal`, `whats-new` — twelve `ae_guide` topics in all with
-  `style-guide` and `ae-setup`. In Claude Code and claude.ai the references
-  are the files in the `after-effects` skill's `references/` folder, opened
+  `style-guide` and `ae-setup`. Where the Claude Code plugin is installed, the
+  references are the files in the `after-effects` skill's `references/` folder, opened
   only when the core points at them. Keyframes, easing and rigging are in
   `animation`; raw scripting, with the ease-arity table, in
   `extendscript-gotchas` and nowhere else.
@@ -501,8 +501,8 @@ that learned the old story will otherwise repeat it to a user.
   every session.** What the server sends is a short pointer rather than a
   summary, because it was resident in every request the user ever made. The
   narrative is `ae_guide({topic: "after-effects"})`, with `extendscript-gotchas`
-  behind it for raw `run_jsx` and this topic for changes. In Claude Code and
-  claude.ai the same text is the `after-effects` skill and the files in its
+  behind it for raw `run_jsx` and this topic for changes. Where the Claude Code
+  plugin is installed, the same text is the `after-effects` skill and the files in its
   `references/` folder — load one carrier, not both.
 - **Rigging is written down**, in the `animation` topic: opacity does not propagate
   through parenting, and a camera null is parented to while it is still at
