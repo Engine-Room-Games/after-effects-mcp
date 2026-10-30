@@ -356,6 +356,12 @@ jobs:
           node tests/unit/destination-checks.mjs
           node tests/unit/file-ops-server.mjs
 
+      # Issue #220, stage 3: the panel's capabilities on /health, and the house
+      # style's file I/O on the server for a panel reporting project-path —
+      # legacy panels keep the old path, and style.jsx parity on real folders.
+      - name: Panel capabilities and the house style on the server
+        run: node tests/unit/panel-capabilities.mjs
+
       # add_essential_property (#177): the panel is read back, never the add's
       # boolean, and a property AE cannot take is refused before anything moves.
       - name: Essential Graphics properties are added honestly
