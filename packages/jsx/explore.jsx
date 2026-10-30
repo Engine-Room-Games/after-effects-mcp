@@ -510,10 +510,24 @@ OPS.get_project_summary = noUndo(function (args) {
 // non-comp whenever the Project panel takes focus, so the server keeps the
 // last active comp "sticky" and needs its summary even then: `comp` is that
 // comp's summary, or null when it no longer exists. Constant time too.
+//
+// Item ids are small numbers per .aep, so an id alone does not say which
+// project it belongs to. `docId` is the project's XMP DocumentID, asked for
+// with `identity`: with the path, it is how the server tells that another
+// project — saved or not — is open, and drops the remembered comp. Null when
+// the packet has none; the server then has only the path to go on.
 OPS._live_probe = noUndo(function (args) {
   var p = app.project;
   var a = null;
   try { a = p.activeItem; } catch (e) {}
+  var docId = null;
+  if (args && args.identity) {
+    try {
+      var x = p.xmpPacket;
+      var m = x ? /DocumentID(?:="|>)([^"<]+)/.exec(x) : null;
+      if (m) docId = m[1];
+    } catch (e3) {}
+  }
   var sticky = null;
   if (args && args.compId) {
     var c = null;
@@ -526,7 +540,8 @@ OPS._live_probe = noUndo(function (args) {
     activeItemId: a ? a.id : null,
     activeType: a ? __itemKind(a) : null,
     activeComp: a && a instanceof CompItem ? __compSummary(a) : null,
-    comp: sticky
+    comp: sticky,
+    docId: docId
   };
 });
 

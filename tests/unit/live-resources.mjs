@@ -472,6 +472,135 @@ await check("guard: the desk re-checks the lock at the last moment before sendin
 });
 
 // ---------------------------------------------------------------------------
+// The remembered comp belongs to one project. Item ids are small numbers per
+// .aep, so the same id in the next project is a different comp.
+// ---------------------------------------------------------------------------
+
+function stickyRig() {
+  // `p` is what After Effects reports; comps are per project, keyed by id.
+  const t = {
+    p: { path: "/a.aep", docId: "xmp.did:A", activeItemId: 2 },
+    comps: { "/a.aep|xmp.did:A": { 2: { id: 2, name: "Main (A)" } } },
+    notes: [],
+    asked: [],
+  };
+  const key = () => `${t.p.path}|${t.p.docId}`;
+  const live = new LiveResources({
+    read: async () => ({}),
+    probe: async (args) => {
+      t.asked.push(args);
+      const comps = t.comps[key()] ?? {};
+      const active = t.p.activeItemId === null ? null : comps[t.p.activeItemId] ?? null;
+      return {
+        path: t.p.path,
+        numItems: Object.keys(comps).length,
+        activeItemId: t.p.activeItemId,
+        activeType: t.p.activeItemId === null ? null : active ? "comp" : "folder",
+        activeComp: active,
+        comp: args.compId ? comps[args.compId] ?? null : null,
+        docId: args.identity ? t.p.docId : null,
+      };
+    },
+    notify: async (uri) => void t.notes.push(uri),
+    writing: () => false,
+    gate: async () => null,
+    intervalMs: 5_000,
+    quietMs: 2_000,
+    now: () => 0,
+    setTimer: () => ({}),
+    clearTimer: () => {},
+  });
+  live.subscribe("ae://project/active-comp");
+  const read = async () => JSON.parse(await live.read("ae://project/active-comp"));
+  return { t, live, read };
+}
+
+await check("sticky: focus away from the comp keeps it, in the same project", async () => {
+  const { t, live, read } = stickyRig();
+  await live.poll();
+  t.p.activeItemId = null;
+  await live.poll();
+  const a = await read();
+  assert.equal(a.compId, 2);
+  assert.equal(a.comp.name, "Main (A)");
+  assert.ok(t.asked.every((x) => x.identity === true), "every probe asks for the project's identity");
+});
+
+await check("sticky: opening another project drops the remembered comp, even where the same id exists", async () => {
+  const { t, live, read } = stickyRig();
+  await live.poll();
+  t.p = { path: "/b.aep", docId: "xmp.did:B", activeItemId: null };
+  t.comps["/b.aep|xmp.did:B"] = { 2: { id: 2, name: "Somebody else's comp (B)" } };
+  await live.poll();
+  assert.deepEqual(t.notes, ["ae://project/active-comp"]);
+  const a = await read();
+  assert.equal(a.compId, null, `served ${JSON.stringify(a)} from the other project`);
+  assert.match(a.reason, /different project/);
+  await live.poll();
+  assert.deepEqual(t.notes, ["ae://project/active-comp"], "the reason must not change on the next tick, or that is a notification too");
+});
+
+await check("sticky: another saved project with no DocumentID is told apart by its path", async () => {
+  const { t, live, read } = stickyRig();
+  t.p = { path: "/a.aep", docId: null, activeItemId: 2 };
+  t.comps["/a.aep|null"] = { 2: { id: 2, name: "Main (A)" } };
+  await live.poll();
+  t.p = { path: "/b.aep", docId: null, activeItemId: null };
+  t.comps["/b.aep|null"] = { 2: { id: 2, name: "Somebody else's comp (B)" } };
+  await live.poll();
+  const a = await read();
+  assert.equal(a.compId, null, `served ${JSON.stringify(a)} from the other project`);
+});
+
+await check("sticky: a new unsaved project drops the remembered comp", async () => {
+  const { t, live, read } = stickyRig();
+  await live.poll();
+  t.p = { path: null, docId: "xmp.did:NEW", activeItemId: null };
+  t.comps["null|xmp.did:NEW"] = { 2: { id: 2, name: "Comp 1 (new)" } };
+  await live.poll();
+  const a = await read();
+  assert.equal(a.compId, null, `served ${JSON.stringify(a)} from the new project`);
+});
+
+await check("sticky: one unsaved project replaced by another is told apart by its DocumentID", async () => {
+  const { t, live, read } = stickyRig();
+  t.p = { path: null, docId: "xmp.did:U1", activeItemId: 2 };
+  t.comps["null|xmp.did:U1"] = { 2: { id: 2, name: "Comp 1 (U1)" } };
+  await live.poll();
+  t.p = { path: null, docId: "xmp.did:U2", activeItemId: null };
+  t.comps["null|xmp.did:U2"] = { 2: { id: 2, name: "Comp 1 (U2)" } };
+  await live.poll();
+  const a = await read();
+  assert.equal(a.compId, null, `served ${JSON.stringify(a)} from the second unsaved project`);
+});
+
+await check("sticky: deleting the remembered comp drops it", async () => {
+  const { t, live, read } = stickyRig();
+  await live.poll();
+  t.p.activeItemId = null;
+  delete t.comps["/a.aep|xmp.did:A"][2];
+  await live.poll();
+  assert.deepEqual(t.notes, ["ae://project/active-comp"]);
+  const a = await read();
+  assert.equal(a.compId, null);
+  assert.match(a.reason, /no longer exists/);
+});
+
+await check("another session's write, seen as a busy tick, earns the summary one walk", async () => {
+  const { t, live } = rig();
+  await live.poll();
+  t.reads.length = 0;
+  t.probe = () => { throw new BridgeBusyError("_live_probe", "set_comp", undefined, true); };
+  await live.poll();
+  t.probe = null;
+  await live.poll();
+  assert.deepEqual(t.reads, ["_live_probe", "_live_probe", "get_project_summary"], "no walk after another session wrote");
+  t.reads.length = 0;
+  await live.poll();
+  assert.deepEqual(t.reads, ["_live_probe"], "one walk, not one per tick");
+});
+
+// ---------------------------------------------------------------------------
 // Nothing listening: a closed port.
 // ---------------------------------------------------------------------------
 

@@ -129,6 +129,28 @@ interface Probe {
   activeComp: unknown;
   /** The sticky comp's summary, asked for by id; null when it is gone. */
   comp: unknown;
+  /** The project's XMP DocumentID, when it has one. */
+  docId?: string | null;
+}
+
+/** A remembered comp, and which project it was remembered in — an id alone is only unique within one .aep. */
+interface Sticky {
+  id: number;
+  path: string | null;
+  docId: string | null;
+}
+
+/**
+ * Whether a probe describes the project the sticky comp was remembered in.
+ * A different path is a different project (another .aep opened, or a new
+ * unsaved one). Two DocumentIDs that differ are too — that is what tells one
+ * unsaved project from the next. With no DocumentID on either side and both
+ * unsaved, the comp lookup by id is the only check left (documented).
+ */
+function sameProject(s: Sticky, p: { path: string | null; docId?: string | null }): boolean {
+  if ((p.path ?? null) !== s.path) return false;
+  const now = p.docId ?? null;
+  return !(now !== null && s.docId !== null && now !== s.docId);
 }
 
 interface Summary {
@@ -141,7 +163,8 @@ interface Summary {
 class GateRefusal extends Error {}
 
 /** What, in a probe, means the item list may have changed. Not the active item: focus is not a change. */
-const summaryKey = (p: { path?: string | null; numItems?: number }) => JSON.stringify([p.path ?? null, p.numItems ?? null]);
+const summaryKey = (p: { path?: string | null; numItems?: number; docId?: string | null }) =>
+  JSON.stringify([p.path ?? null, p.numItems ?? null, p.path ? null : (p.docId ?? null)]);
 
 export class LiveResources {
   private subscribed = new Set<string>();
@@ -153,8 +176,14 @@ export class LiveResources {
    */
   private last = new Map<string, { text: string; gen: number }>();
   private gen = 0;
-  /** The comp last seen active. Kept while focus is elsewhere; cleared only when the comp is gone. */
-  private stickyId: number | null = null;
+  /** The comp last seen active, and its project. Kept while focus is elsewhere; cleared when the comp or the project goes. */
+  private sticky: Sticky | null = null;
+  /**
+   * Why there is no comp, kept until one becomes active: the tick after a
+   * drop must say the same thing as the tick that dropped it, or the reason
+   * changing would itself be a notification.
+   */
+  private noComp: unknown = noActiveComp();
   private walkKey: string | null = null;
   private walkedAt = 0;
   private renamedSinceWalk = false;
@@ -256,7 +285,10 @@ export class LiveResources {
           this.renamedSinceWalk ||
           summaryKey(probe) !== this.walkKey ||
           this.now() - this.walkedAt >= this.sweepMs;
-        if (due) fresh.set(PROJECT_SUMMARY_URI, await this.walkSummary(true));
+        if (due) {
+          fresh.set(PROJECT_SUMMARY_URI, await this.walkSummary(true));
+          if (probe) this.walkKey = summaryKey(probe);
+        }
       }
       if (this.failing) logger.info("Live resources: After Effects is answering again; change notifications resumed.");
       this.failing = false;
@@ -272,8 +304,11 @@ export class LiveResources {
     } catch (e) {
       if (e instanceof BridgeBusyError) {
         // A write — ours or another session's — holds the lock. Nothing was
-        // sent: not a failure, so no warning and no backoff.
+        // sent: not a failure, so no warning and no backoff. Another
+        // session's write may rename an item without moving the probe, so the
+        // next tick that runs walks the summary once.
         busy = true;
+        if (e.otherSession) this.renamedSinceWalk = true;
       } else {
         if (!this.failing) {
           logger.warn(
@@ -317,7 +352,7 @@ export class LiveResources {
 
   private async probe(background: boolean): Promise<Probe | null> {
     try {
-      return (await this.opts.probe(this.stickyId === null ? {} : { compId: this.stickyId }, background)) as Probe;
+      return (await this.opts.probe(this.sticky === null ? { identity: true } : { identity: true, compId: this.sticky.id }, background)) as Probe;
     } catch (e) {
       // A panel older than this server's bundle, behind no version gate: the
       // full reads every panel has still answer.
@@ -341,15 +376,16 @@ export class LiveResources {
   /** The sticky rule, in one place: an active comp replaces the sticky one; nothing else does. */
   private fromProbe(p: Probe): unknown {
     if (p.activeType === "comp" && p.activeItemId !== null && p.activeComp) {
-      this.stickyId = p.activeItemId;
+      this.sticky = { id: p.activeItemId, path: p.path ?? null, docId: p.docId ?? null };
+      this.noComp = noActiveComp();
       return { compId: p.activeItemId, comp: p.activeComp };
     }
-    if (this.stickyId !== null) {
-      if (p.comp) return { compId: this.stickyId, comp: p.comp };
-      this.stickyId = null;
-      return { compId: null, comp: null, reason: "The comp that was last active no longer exists, and no other comp is active." };
+    if (this.sticky !== null) {
+      if (!sameProject(this.sticky, p)) return this.drop(otherProject());
+      if (p.comp) return { compId: this.sticky.id, comp: p.comp };
+      return this.drop(compGone());
     }
-    return noActiveComp();
+    return this.noComp;
   }
 
   private async activeComp(background: boolean): Promise<unknown> {
@@ -359,20 +395,38 @@ export class LiveResources {
     const summary = (await this.opts.read("get_project_summary", {}, background)) as Summary;
     const id = summary?.activeItemId ?? null;
     const item = id === null ? undefined : summary.items?.find((i) => i.id === id);
-    const target = item?.type === "comp" ? id : this.stickyId;
-    if (target === null) return noActiveComp();
+    const path = summary?.path ?? null;
+    if (item?.type !== "comp" && this.sticky && !sameProject(this.sticky, { path })) return this.drop(otherProject());
+    const target = item?.type === "comp" ? id : (this.sticky?.id ?? null);
+    if (target === null) return this.noComp;
     try {
       const comp = await this.opts.read("get_comp", { compId: target }, background);
-      this.stickyId = target;
+      this.sticky = { id: target, path, docId: null };
+      this.noComp = noActiveComp();
       return { compId: target, comp };
     } catch (e) {
-      if (e instanceof AeError && target === this.stickyId) {
-        this.stickyId = null;
-        return noActiveComp();
-      }
+      if (e instanceof AeError && target === this.sticky?.id) return this.drop(compGone());
       throw e;
     }
   }
+
+  private drop(why: unknown): unknown {
+    this.sticky = null;
+    this.noComp = why;
+    return why;
+  }
+}
+
+function compGone(): unknown {
+  return { compId: null, comp: null, reason: "The comp that was last active no longer exists, and no other comp is active." };
+}
+
+function otherProject(): unknown {
+  return {
+    compId: null,
+    comp: null,
+    reason: "A different project is open than the one whose comp was last active, and no comp in it has been active yet.",
+  };
 }
 
 function noActiveComp(): unknown {

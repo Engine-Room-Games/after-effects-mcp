@@ -18,11 +18,24 @@ import { logger } from "../util/logger.js";
 /**
  * The wire protocol. A desk speaking another one is not joined; see line.ts.
  *
- * 2 (issue #248): an op may carry `yieldToWrites`, and the desk may answer it
- * with a `busy` error. A protocol-1 desk would ignore the flag and forward the
- * poll read into another session's batch, so the two never share a desk.
+ * Bumped only for a change that breaks serialization itself: a mismatch sends
+ * every call of the session direct, unserialized against the others. An
+ * additive feature is negotiated instead, through `DESK_FEATURES`.
  */
-export const DESK_PROTOCOL = 2;
+export const DESK_PROTOCOL = 1;
+
+/**
+ * What this desk can do beyond protocol 1, listed in its hello. A follower
+ * uses a feature only when the desk it joined lists it, so a mixed-version
+ * pair shares one desk — and one write queue — in both directions.
+ *
+ * `yield-reads` (issue #248): an op may carry `yieldToWrites`, and the desk
+ * refuses it unsent, as a `busy` error, while any session holds the write
+ * lock. A desk without it would forward such a read straight into another
+ * session's batch, so a follower sends none there (see SessionLine.send).
+ */
+export const DESK_FEATURES: readonly string[] = ["yield-reads"];
+export const FEATURE_YIELD_READS = "yield-reads";
 
 /** What a desk says it is, so a foreign listener on the port is never mistaken for one. */
 export const DESK_ID = "ae-mcp-front-desk";

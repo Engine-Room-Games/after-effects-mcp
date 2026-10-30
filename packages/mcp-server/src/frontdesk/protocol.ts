@@ -76,7 +76,7 @@ export type WireError =
   | { kind: "queue-full"; op: string; maxDepth: number; behind: string }
   | { kind: "queue-cancelled"; op: string }
   /** A read that yields to writes met one; nothing was sent (issue #248). */
-  | { kind: "busy"; op: string; holder?: string }
+  | { kind: "busy"; op: string; holder?: string; otherSession?: boolean }
   | { kind: "error"; message: string };
 
 /**
@@ -98,7 +98,7 @@ export function toWire(e: unknown): WireError {
   if (e instanceof WriteQueueWaitError) return { kind: "queue-wait", op: e.op, waitedMs: e.waitedMs, behind: e.behind };
   if (e instanceof WriteQueueFullError) return { kind: "queue-full", op: e.op, maxDepth: e.maxDepth, behind: e.behind };
   if (e instanceof WriteQueueCancelledError) return { kind: "queue-cancelled", op: e.op };
-  if (e instanceof BridgeBusyError) return { kind: "busy", op: e.op, holder: e.holder };
+  if (e instanceof BridgeBusyError) return { kind: "busy", op: e.op, holder: e.holder, otherSession: e.otherSession };
   return { kind: "error", message: (e as Error)?.message ?? String(e) };
 }
 
@@ -127,7 +127,7 @@ export function fromWire(w: WireError): Error {
     case "queue-cancelled":
       return new WriteQueueCancelledError(w.op);
     case "busy":
-      return new BridgeBusyError(w.op, w.holder);
+      return new BridgeBusyError(w.op, w.holder, undefined, w.otherSession === true);
     default:
       return new Error(w.message);
   }

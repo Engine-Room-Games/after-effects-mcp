@@ -6,6 +6,7 @@ import {
   DESK_ID,
   DESK_NONCE_HEADER,
   DESK_PROTOCOL,
+  DESK_FEATURES,
   DESK_TOKEN_HEADER,
   deskBeatMs,
   deskMaxBodyBytes,
@@ -244,7 +245,9 @@ export class FrontDesk {
    */
   async forward(req: ForwardRequest, hooks: ForwardHooks = {}): Promise<unknown> {
     if (req.write && (!req.leaseId || !this.lock.isHolder(req.leaseId))) throw new LeaseNotHeldError();
-    if (req.yieldToWrites && this.lock.held) throw new BridgeBusyError(req.op, this.lock.held.op);
+    if (req.yieldToWrites && this.lock.held) {
+      throw new BridgeBusyError(req.op, this.lock.held.op, undefined, this.lock.held.sessionId !== req.sessionId);
+    }
     const entry: InFlight = { seq: ++this.seq, sessionId: req.sessionId, session: req.session, op: req.op, since: Date.now() };
     const ahead = () => {
       const now = Date.now();
@@ -273,7 +276,9 @@ export class FrontDesk {
     // from here; the stalled-desk message says so.
     const stillGo = () => {
       if (req.deadline !== undefined && monoMs() > req.deadline) throw new DeadlinePassedError();
-      if (req.yieldToWrites && this.lock.held) throw new BridgeBusyError(req.op, this.lock.held.op);
+      if (req.yieldToWrites && this.lock.held) {
+      throw new BridgeBusyError(req.op, this.lock.held.op, undefined, this.lock.held.sessionId !== req.sessionId);
+    }
       if (hooks.stillWanted && !hooks.stillWanted()) throw new CallerGoneError();
       if (req.write && (!req.leaseId || !this.lock.isHolder(req.leaseId))) throw new LeaseNotHeldError();
     };
@@ -358,6 +363,7 @@ export class FrontDesk {
       return json(res, 200, {
         desk: DESK_ID,
         protocol: DESK_PROTOCOL,
+        features: DESK_FEATURES,
         pid: process.pid,
         beatMs: this.beatMs,
         proof: typeof nonce === "string" ? deskProof(this.opts.token, nonce) : null,
@@ -439,9 +445,9 @@ export class FrontDesk {
           write: b.write === true,
           leaseId: typeof b.leaseId === "string" ? b.leaseId : undefined,
           deadline: typeof b.deadline === "number" ? b.deadline : undefined,
-          // Absent means an agent's own read or a write: forwarded as ever.
-          // Only an explicit true yields, and only protocol-2 followers send
-          // it (config.ts) — a desk never infers it.
+          // Absent means an agent's own read or a write: forwarded as ever —
+          // which is what an older follower, one that never heard of the
+          // feature, always sends. Only an explicit true yields.
           yieldToWrites: b.yieldToWrites === true,
         },
         {

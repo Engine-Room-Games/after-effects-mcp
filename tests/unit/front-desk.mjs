@@ -533,6 +533,74 @@ await check("a leftover desk file costs a lone session nothing; one left by a ru
   await M.close();
 });
 
+// Issue #248: background reads that yield to writes are a negotiated feature,
+// not a protocol bump — a protocol mismatch would send every call of a
+// mixed-version pair direct, unserialized. Both directions stay on one desk.
+const { BridgeBusyError } = await import(dist("util", "errors.js"));
+
+await check("mixed versions, new session + older desk: joined and serialized; yielding reads are not sent there", async () => {
+  const port = await freePort();
+  const token = "fake-old-desk";
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
+  const posted = [];
+  const fake = http.createServer((q, r) => {
+    if (q.url === "/desk/hello") {
+      r.setHeader("content-type", "application/json");
+      // An older desk: protocol 1, and no `features` at all.
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4247, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+    }
+    let body = "";
+    q.on("data", (c) => (body += c));
+    q.on("end", () => {
+      const b = JSON.parse(body || "{}");
+      posted.push(b);
+      r.setHeader("content-type", "application/x-ndjson");
+      r.end(JSON.stringify({ t: "start", ahead: [] }) + "\n" + JSON.stringify({ t: "ok", result: { ok: true, op: b.op }, panelPort: 1 }) + "\n");
+    });
+  });
+  await new Promise((r) => fake.listen(port, "127.0.0.1", r));
+  const L = line(port, "L");
+  assert.equal(await L.ready(), "follower", "a new server must still join an older desk");
+  await assert.rejects(L.runOp("_live_probe", {}, { yieldToWrites: true }), (e) => e instanceof BridgeBusyError);
+  assert.deepEqual(posted, [], "a yielding read went to a desk that would forward it into another session's batch");
+  await L.runOp("list_comps", {});
+  assert.deepEqual(posted.map((b) => b.op), ["list_comps"], "every other call still goes through the shared desk");
+  assert.equal("yieldToWrites" in posted[0], false);
+  assert.deepEqual(L.bridge_.calls, [], "nothing went direct");
+  await L.close();
+  await new Promise((r) => fake.close(r));
+});
+
+await check("mixed versions, older session + new desk: the desk still speaks protocol 1, and an absent flag is an agent read", async () => {
+  const port = await freePort();
+  const L = line(port, "L");
+  assert.equal(await L.ready(), "leader");
+  const token = readDesk(port).token;
+  const hello = await new Promise((resolve, reject) => {
+    http.get({ host: "127.0.0.1", port, path: "/desk/hello", headers: { "x-ae-mcp-desk-token": token, "x-ae-mcp-desk-nonce": "n" } }, (res) => {
+      let t = "";
+      res.on("data", (c) => (t += c));
+      res.on("end", () => resolve(JSON.parse(t)));
+    }).on("error", reject);
+  });
+  // An older follower joins only a desk whose protocol equals its own, 1.
+  assert.equal(hello.protocol, 1, "the protocol moved: every older session would go direct, unserialized");
+  assert.ok(hello.features.includes("yield-reads"));
+  const lease = await L.acquire("run_batch");
+  try {
+    // An older follower's read, sent while another session holds the lock: forwarded as ever.
+    const old = await postDesk(port, token, "/desk/op", { kind: "op", op: "list_comps", sessionId: "old", session: "old, pid 2" });
+    assert.equal(old.at(-1).t, "ok", JSON.stringify(old));
+    // A new follower's yielding read is held back, and says whose write it met.
+    const fresh = await postDesk(port, token, "/desk/op", { kind: "op", op: "_live_probe", sessionId: "new", session: "new, pid 3", yieldToWrites: true });
+    assert.equal(fresh.at(-1).error?.kind, "busy", JSON.stringify(fresh));
+    assert.equal(fresh.at(-1).error.otherSession, true);
+  } finally {
+    lease.release();
+  }
+  await L.close();
+});
+
 await check("a request too large for the desk is its own error, not four handovers", async () => {
   const port = await freePort();
   const token = "fake-desk-413";

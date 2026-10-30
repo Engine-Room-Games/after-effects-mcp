@@ -739,8 +739,17 @@ export class DeskPlaceLostError extends WriteQueueWaitError {
  * such reads skips the tick and tries again later.
  */
 export class BridgeBusyError extends Error {
-  constructor(public op: string, public holder?: string) {
-    super(`\`${op}\` was not sent: ${holder ? `\`${holder}\`` : "a write"} holds the After Effects write lock, and this read yields to writes.`);
+  /**
+   * `otherSession`: the write in the way is another session's, seen at the
+   * front desk — the one sign this session gets that someone else is editing
+   * the project (the poll walks the summary once afterwards).
+   */
+  constructor(public op: string, public holder?: string, why?: string, public otherSession = false) {
+    super(
+      why
+        ? `\`${op}\` was not sent: ${why}.`
+        : `\`${op}\` was not sent: ${holder ? `\`${holder}\`` : "a write"} holds the After Effects write lock, and this read yields to writes.`
+    );
     this.name = "BridgeBusyError";
   }
 }

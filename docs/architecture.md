@@ -326,7 +326,19 @@ every click in that panel would flip both resources and cost a walk. So:
 
 - the active comp is **sticky**. It changes only when another comp becomes
   active. While focus is elsewhere, the probe reads the sticky comp by id, so
-  its settings are still tracked. It clears only when that comp is deleted.
+  its settings are still tracked.
+- a sticky comp is remembered **with its project**, because item ids are
+  small numbers per .aep. The next project often has a different comp under
+  the same id. The probe returns the project's path and, when asked for
+  `identity`, its XMP `DocumentID`. The remembered comp is dropped when the
+  path changes (another .aep opened, or a new unsaved one), when two
+  DocumentIDs differ (one unsaved project replaced by another), or when the
+  comp no longer exists. The reason it was dropped is kept until a comp
+  becomes active, so the tick after a drop does not notify a second time. Two
+  unsaved projects that both lack a DocumentID can be told apart only by the
+  id lookup failing. Whether After Effects writes a DocumentID into an unsaved
+  project's packet, and what reading `xmpPacket` costs, are listed for live
+  verification.
 - the active item is **kept out of the summary**, from both the body and the
   key that decides whether to walk.
 
@@ -362,16 +374,33 @@ every click in that panel would flip both resources and cost a walk. So:
   its chunks, so no poll read lands in the middle of another session's batch.
   The refusal crosses the wire as `{kind: "busy"}`. The tick is skipped, which
   is not a failure and causes no backoff. A read an agent asked for never
-  carries the flag. The flag is why `DESK_PROTOCOL` is 2: a protocol-1 desk
-  would ignore it and forward the read into another session's batch, so mixed
-  versions never share a desk. A desk treats an absent flag as an agent's read,
-  never as one that yields.
+  carries the flag. The flag is a negotiated feature (`yield-reads` in the
+  desk's hello, `DESK_FEATURES`), **not** a protocol bump. A protocol mismatch
+  sends every call of the session direct, unserialized against the other
+  sessions, which would have been a regression for anyone mid-upgrade with
+  several sessions. Both mixed-version directions still share one desk:
+  - A new session behind an older desk joins it, and sends that desk no
+    yielding read at all. The poll's ticks are refused locally as busy, so
+    live notifications pause, with one log line, while every other call stays
+    serialized.
+  - An older session behind a new desk never sends the flag. The desk reads an
+    absent flag as an agent's read and forwards it as before.
+
+  `tests/unit/front-desk.mjs` pins both directions.
 - **The remaining exposure** is one tick's reads already queued in the panel's
   evalScript chain when a write arrives. That write waits behind them. With the
   probe, that wait is one constant-time eval. It is a full walk only on the
   rare tick where a walk is due. The test stub runs ops serially, as the panel
   does, and asserts that no write waits behind a poll read in either a burst
   or a paced run of writes.
+
+**Another session's renames.** The probe cannot see a rename. This session
+knows its own renaming writes, but not other sessions'. When a tick is refused
+because *another* session holds the desk lock (`BridgeBusyError.otherSession`),
+the next tick that runs walks the summary once. Another session's write that no
+tick happened to run into still waits for the 60 s sweep. The desk could send a
+"write finished" signal to followers, but followers have no channel from the
+desk except the answers to their own calls, so the sweep was judged enough.
 
 **Baselines are sequenced.** Every read takes a generation number. A result
 older than the stored baseline is dropped, so a slow tick answering after a
