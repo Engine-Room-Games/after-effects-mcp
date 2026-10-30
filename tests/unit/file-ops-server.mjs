@@ -2,15 +2,12 @@
 // agent meets them through tools/call.
 //
 // This drives the real MCP server over an in-memory transport against a stub
-// bridge, and pins three things the parity suite (destination-checks.mjs)
-// cannot see:
-//   - A refused path never reaches After Effects, and a passing call costs no
-//     extra round trip: the server never asks `get_project_summary`, which
-//     walks every project item on AE's main thread.
-//   - The comp is still refused first. The jsx looked it up before its path
-//     checks; the server asks `get_comp` on its refusal path only.
-//   - A folder made for a refused export is removed; one made for a successful
-//     export sets `createdDir`.
+// bridge, and pins what the parity suite (destination-checks.mjs) cannot see:
+//   - A refused call never reaches After Effects, and a passing call costs no
+//     extra round trip: the server asks nothing else first, `get_project_summary`
+//     (which walks every project item on AE's main thread) least of all.
+//   - The server's checks have no side effects: a refused export leaves no
+//     folder, and a new destination is left for the panel to create.
 //
 //   node tests/unit/file-ops-server.mjs
 
@@ -29,13 +26,7 @@ const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
 const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ae-mcp-fileops-")));
 
 /** What the stub answers, per op. */
-const answers = {
-  // getCompById's own refusal, as every op that takes a compId gives it.
-  get_comp: (args) =>
-    args.compId === 7
-      ? { ok: true, result: { id: 7, name: "LT" } }
-      : { ok: false, error: `No comp with id ${args.compId}`, line: 12 },
-};
+const answers = {};
 const seen = [];
 
 // Never port 7777 — a real panel may hold that on this machine.
@@ -92,13 +83,8 @@ answers.add_to_render_queue = { ok: true, result: { index: 1, status: "QUEUED" }
 r = await call("add_to_render_queue", { compId: 7, outputPath: path.join(dir, "missing", "x.mov") });
 assert.equal(r.isError, true);
 assert.match(r.text, /^AE: The folder for outputPath does not exist: /);
-assert.deepEqual(ops(), ["get_comp"], "refused without adding anything; the comp is checked first");
-passed++;
-
-r = await call("add_to_render_queue", { compId: 99, outputPath: path.join(dir, "missing", "x.mov") });
-assert.equal(r.isError, true);
-assert.equal(r.text.split("\n")[0], "AE: No comp with id 99 (line 12)", "a bad comp is still the first refusal, word for word");
-assert.deepEqual(ops(), ["get_comp"]);
+assert.deepEqual(ops(), [], "refused without asking After Effects anything");
+assert.equal(fs.existsSync(path.join(dir, "missing")), false);
 passed++;
 
 r = await call("add_to_render_queue", { compId: 7, outputPath: path.join(dir, "x.mov") });
@@ -116,37 +102,41 @@ passed++;
 
 // ---------- export_mogrt ----------
 
-const out = path.join(dir, "templates", "lt");
 answers.export_mogrt = (args) => ({
   ok: true,
-  result: { ok: true, path: args.destDir + "/" + args.name + ".mogrt", bytes: 3, createdDir: false },
+  result: { ok: true, path: args.destDir + "/" + args.name + ".mogrt", bytes: 3, createdDir: true },
 });
-r = await call("export_mogrt", { compId: 7, name: "LT", destDir: out });
+
+// A new destination is the panel's to create: the server checks the name and
+// forwards, and makes nothing on the way.
+const fresh = path.join(dir, "templates", "new");
+r = await call("export_mogrt", { compId: 7, name: "LT", destDir: fresh });
 assert.equal(r.isError, false, r.text);
 assert.deepEqual(ops(), ["export_mogrt"]);
-assert.equal(JSON.parse(r.text).createdDir, true, "the folder the server made is reported as made");
-assert.ok(fs.existsSync(out));
+assert.equal(fs.existsSync(path.join(dir, "templates")), false, "the server created no folder");
+assert.equal(JSON.parse(r.text).createdDir, true, "createdDir is the panel's answer, untouched");
 passed++;
 
+// Refused by the server: nothing reaches AE, and nothing is left on disk.
+r = await call("export_mogrt", { compId: 7, name: "a/b", destDir: fresh });
+assert.equal(r.isError, true);
+assert.match(r.text, /^AE: The template name "a\/b" is used as the \.mogrt filename/);
+assert.deepEqual(ops(), []);
+assert.equal(fs.existsSync(path.join(dir, "templates")), false, "a refused export leaves no folder");
+passed++;
+
+const out = path.join(dir, "out");
+fs.mkdirSync(out);
 fs.writeFileSync(path.join(out, "LT.mogrt"), "zip");
 r = await call("export_mogrt", { compId: 7, name: "LT", destDir: out });
 assert.equal(r.isError, true);
 assert.match(r.text, /^AE: A template already exists at /);
-assert.deepEqual(ops(), ["get_comp"], "refused before After Effects is asked to export");
+assert.deepEqual(ops(), [], "refused before After Effects is asked to export");
+assert.deepEqual(fs.readdirSync(out), ["LT.mogrt"], "no write probe left behind");
 passed++;
 
 r = await call("export_mogrt", { compId: 7, name: "LT" });
 assert.deepEqual(ops(), ["export_mogrt"], "no destDir: no project walk to find the .aep; the jsx checks it");
-passed++;
-
-// After Effects refuses (an empty Essential Graphics panel, say): the folder
-// the server made for it goes again, as the jsx never made one.
-answers.export_mogrt = { ok: false, error: "This comp has 0 Essential Graphics controllers, and …", line: 1 };
-const fresh = path.join(dir, "templates", "never");
-r = await call("export_mogrt", { compId: 7, name: "LT", destDir: fresh });
-assert.equal(r.isError, true);
-assert.match(r.text, /0 Essential Graphics controllers/);
-assert.equal(fs.existsSync(fresh), false, "an empty folder made for a refused export is removed");
 passed++;
 
 assert.ok(!seen.some((s) => s.op === "get_project_summary"));

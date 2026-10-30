@@ -57,8 +57,7 @@ import { applyHouseStyleDetail } from "./style/summary.js";
 import {
   checkFootageExists,
   checkRenderOutput,
-  prepareMogrtDestination,
-  type MogrtDestination,
+  checkMogrtDestination,
 } from "./files/destinations.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
@@ -670,38 +669,18 @@ export function createServer(opts: CreateServerOptions = {}) {
       // refusal costs After Effects nothing. The jsx copies stay in the bundle
       // and run again after these: older servers and `run_batch` steps rely on
       // them. See "Filesystem checks on the server" in docs/subsystems.md.
-      let destination: MogrtDestination | null = null;
-      try {
-        if (name === "add_to_render_queue") checkRenderOutput(args as { outputPath: string; overwrite?: boolean });
-        if (name === "import_footage") checkFootageExists(args as { path: string });
-        if (name === "export_mogrt") {
-          destination = prepareMogrtDestination(args as { compId: number; destDir?: string; name?: string; overwrite?: boolean });
-        }
-      } catch (e) {
-        // The jsx looks the comp up before any of these checks, so a missing
-        // comp is what it refused first. Asked only on this refusal path, so
-        // a call that passes costs no extra round trip.
-        if (name === "add_to_render_queue" || name === "export_mogrt") await refuseMissingComp(bridge, args);
-        throw e;
+      // None of them has a side effect: a refusal leaves nothing behind.
+      if (name === "add_to_render_queue") checkRenderOutput(args as { outputPath: string; overwrite?: boolean });
+      if (name === "import_footage") checkFootageExists(args as { path: string });
+      if (name === "export_mogrt") {
+        checkMogrtDestination(args as { compId: number; destDir?: string; name?: string; overwrite?: boolean });
       }
 
       // The request's progressToken is deliberately not forwarded. The panel
       // does nothing with it — its WS `progress` events carry a jobId and no
       // token — and progress is delivered on `await_job`, never here; see
       // forwardJobProgress.
-      let result: unknown;
-      try {
-        result = await bridge.runOp(name, args);
-      } catch (e) {
-        // A folder made above for an export After Effects then refused goes
-        // again, empty: the jsx refused before making one (#71's check runs first).
-        destination?.rollback();
-        throw e;
-      }
-      // The folder existed by the time the jsx looked, because it was made here.
-      if (destination && destination.created.length > 0 && result && typeof result === "object") {
-        (result as { createdDir?: boolean }).createdDir = true;
-      }
+      const result = await bridge.runOp(name, args);
 
       // Async envelope handling for run_batch
       if (ASYNC_OPS.has(name) && isAsyncEnvelope(result)) {
@@ -855,24 +834,6 @@ export function createServer(opts: CreateServerOptions = {}) {
   });
 
   return server;
-}
-
-/**
- * Throw the jsx's own "no such comp" refusal if `args.compId` is not a comp.
- *
- * `get_comp` resolves the id through the same `getCompById` as
- * `add_to_render_queue` and `export_mogrt`, so its refusal is the one those
- * ops gave before the server's filesystem checks ran ahead of them, word for
- * word. Returns quietly when the comp exists, and the caller's own refusal
- * stands. Any other failure (a busy or absent bridge) is not this check's to
- * report, and the caller's refusal stands then too.
- */
-async function refuseMissingComp(bridge: HttpClient, args: unknown): Promise<void> {
-  try {
-    await bridge.runOp("get_comp", { compId: (args as { compId: number }).compId });
-  } catch (e) {
-    if (e instanceof AeError && !e.code && !/^Unknown op: /.test(e.message)) throw e;
-  }
 }
 
 /**

@@ -224,21 +224,27 @@ Three ops check the filesystem before they touch the project, and since issue
 |---|---|---|
 | `add_to_render_queue` | `outputPath` is absolute, its folder exists, an existing file needs `overwrite` | `render.jsx` |
 | `import_footage` | the file exists | `footage.jsx` |
-| `export_mogrt`, with an explicit `destDir` | the folder is created, the name resolves into it, an existing template needs `overwrite`, the folder accepts a write | `mogrt.jsx` |
+| `export_mogrt`, with an explicit `destDir` | the name resolves into the folder; and, when the folder already exists, an existing template needs `overwrite` and the folder accepts a write | `mogrt.jsx` |
 
-**The jsx checks were not removed, and they still run.** The panel does not
-update itself, and the bundle hash is half the version gate, so editing a jsx
-file would tell every user to reinstall the panel and restart AE. The server
-makes the same checks first, with the same sentences, and the jsx repeats them
-for the cost of a stat or two. As a result, a refusal now comes from the server
-and its wording can be fixed without a restart. The server's check can only
-make a refusal *earlier*, never different, and that holds only while each port
-refuses exactly when its jsx does. `tests/unit/destination-checks.mjs` holds
-them to that on real folders, and its header lists the `File` behaviour only a
-live AE can confirm. The jsx copies also still guard these ops as `run_batch`
-steps, which go straight to ExtendScript. A server refusal reads
+**The aim is for these checks to end up on the server only.** For now the jsx
+checks stay and still run, because the panel does not update itself and the
+bundle hash is half the version gate: editing a jsx file would tell every user
+to reinstall the panel and restart AE. So the server makes the same checks
+first, with the same sentences, and the jsx repeats them for the cost of a stat
+or two. A refusal now comes from the server and its wording can be fixed
+without a restart. `tests/unit/destination-checks.mjs` holds each port to its
+jsx on real folders, and its header lists the `File` behaviour only a live AE
+can confirm. The jsx copies also still guard these ops as `run_batch` steps,
+which go straight to ExtendScript. A server refusal reads
 `AE: <the same sentence>` without the old `(line N)`, which was a line in the
 concatenated bundle.
+
+**No side effects.** A server check never creates, moves or leaves anything.
+`export_mogrt`'s write probe is a test file removed on every path, and a
+destination folder that does not exist yet is not created by the server. It is
+left to the jsx, which creates it after its own earlier checks, exactly as
+before. A refused call therefore leaves nothing on disk that the jsx alone
+would not have left.
 
 **A check runs only where Node and ExtendScript's `File` read the path the same
 way.** `File` decodes `%XX` escapes, reads `~` as the home folder, and on
@@ -246,25 +252,34 @@ Windows reads a leading `/c/` as a drive. A path that could mean two things is
 not judged by the server at all: it is forwarded untouched, and the jsx decides
 as it always did. A skipped check is never a refusal.
 
-**No extra round trip on a call that passes.** Every check here is a stat or a
-write probe on the server. The one AE question that would help,
+**No extra round trip.** Every check is a stat or a probe on the server, and
+nothing is asked of After Effects first. The one AE question that would help,
 "where is the .aep?", has no cheap answer in an installed bundle (see the house
 style above), so `export_mogrt` without `destDir`, which defaults to the .aep's
 folder, is left entirely to the jsx.
 
-**The order of refusals is the jsx's.** The jsx looked the comp up before any
-path check, so when a server check refuses, the server first asks `get_comp`
-(the same `getCompById`, so the same sentence). A missing comp is still the
-first thing reported, and a call that passes never pays for the question.
-Two jsx checks in `export_mogrt` still cannot go first: an unsaved project, and
-an empty Essential Graphics panel (#71). With one of those *and* a bad
-destination, the destination is now reported first; each sentence is
-unchanged. The jsx refused both before making any folder, so a folder the
-server made for an export AE then refuses is removed again if it is still
-empty. When the export succeeds, `createdDir` is set to true on the answer,
-because the jsx found the folder already there. When `name` is omitted, the
-template name is read off the comp, so the server creates and probes the folder
-and leaves the name and overwrite checks to the jsx.
+**Refusal order: what changed.** Every sentence is unchanged. What can change is
+which refusal comes *first* when a call has more than one fault, because the
+server's checks now run before checks only After Effects can make. In full:
+
+- **`add_to_render_queue`:** the jsx looked the comp up first. A `compId` that
+  is not a comp *and* a bad `outputPath` now reports the path, then the comp
+  once the path is fixed.
+- **`export_mogrt` with `destDir`:** the jsx refused three things before any
+  destination check: a comp that does not exist, a project never saved, and an
+  empty Essential Graphics panel (#71). Any of those *and* a bad destination
+  now reports the destination first.
+- **`export_mogrt` with `destDir` and no `name`:** the template name is read
+  off the comp, so the server cannot make the two name checks and runs only
+  the write probe. The jsx ran the probe *last*. A read-only folder now reports
+  "cannot write" before the "is not inside" refusal for a comp-derived name
+  containing a separator, and before "A template already exists".
+- **`export_mogrt` into a folder that does not exist yet:** the jsx created the
+  folder first and reported "Could not create the destination folder" before
+  checking the name. The server checks the name without creating anything, so
+  a name that escapes the folder *and* a folder that cannot be created now
+  reports the name first.
+- **`import_footage`:** no change. The file-existence check was already first.
 
 **The SVG viewBox check (#33) did not move.** It compares the viewBox against
 the *imported item's* size and removes the item when they disagree, and both of

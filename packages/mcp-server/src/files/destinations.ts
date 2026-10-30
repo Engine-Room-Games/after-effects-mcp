@@ -159,80 +159,47 @@ export function folderIsWritable(folder: string): boolean {
   return opened;
 }
 
-export interface MogrtDestination {
-  /** Folders this call created, deepest last. Removed again if After Effects then refuses the export. */
-  created: string[];
-  /** Undo `created`, emptiest first. Never removes a folder with anything in it. */
-  rollback(): void;
-}
-
 /**
  * The destination checks `export_mogrt` makes before it renames, saves or
- * exports anything, in the jsx's order: create the folder, the name resolves
- * into it, an existing file needs `overwrite`, the folder accepts writes.
+ * exports anything: the name resolves into the folder, an existing file needs
+ * `overwrite`, the folder accepts writes. Throws the jsx's own refusal;
+ * returns quietly when every check it could make passed.
+ *
+ * **No side effects.** It never creates the destination folder. A folder that
+ * does not exist yet is left for the jsx to create, after its own checks, so a
+ * refusal here never leaves a folder behind. In that case the only check made
+ * here is the one that needs no folder, that the name resolves into it; the
+ * existing-template check is moot and the write probe has nowhere to run. The
+ * probe's test file is removed on every path.
  *
  * Only for an explicit `destDir`. The default is the .aep's folder, and the
  * only op in an installed bundle that reports the .aep path,
  * `get_project_summary`, walks every project item on AE's main thread; asking
  * it on every export would cost more than these checks save. Without
- * `destDir` this returns null and the jsx checks everything, as before.
+ * `destDir` nothing is checked here and the jsx checks everything, as before.
  *
- * Also null (check nothing, forward untouched) when `name` is blank, which the
- * jsx refuses first, or `destDir` is not a plain absolute path.
+ * Nothing is checked either when `name` is blank, which the jsx refuses
+ * first, or `destDir` is not a plain absolute path. When `name` is omitted,
+ * the template name is read off the comp, so the two name checks are left to
+ * the jsx and only the probe runs here.
  *
- * Two of the jsx checks need the template name, which defaults to one read off
- * the comp. When `name` is not passed, those two are left to the jsx, and only
- * the folder is created and probed here.
- *
- * Three jsx checks precede all of these and cannot run here without asking
- * After Effects: the comp exists, the project was saved, and its Essential
- * Graphics panel is not empty (#71). The caller asks `get_comp` when a check
- * here refuses, so a missing comp is still reported first. The jsx refused all
- * three before making any folder, so the caller runs `rollback` when the
- * forwarded export fails: an empty folder made here for a call After Effects
- * then refused is removed.
+ * The refusals reach the caller in a different order from the jsx's in some
+ * cases; "Filesystem checks on the server" in docs/subsystems.md lists them.
  */
-export function prepareMogrtDestination(
+export function checkMogrtDestination(
   args: { compId: number; destDir?: string; name?: string; overwrite?: boolean },
   platform: NodeJS.Platform = process.platform
-): MogrtDestination | null {
+): void {
   const destDir = args.destDir;
-  if (typeof destDir !== "string" || destDir.length === 0) return null;
+  if (typeof destDir !== "string" || destDir.length === 0) return;
 
   const hasName = typeof args.name === "string" && args.name.length > 0;
-  if (hasName && isBlank(args.name as string)) return null;
-  if (!isPlainAbsolute(destDir, platform)) return null;
+  if (hasName && isBlank(args.name as string)) return;
+  if (!isPlainAbsolute(destDir, platform)) return;
 
   const folder = path.resolve(destDir);
-  const created: string[] = [];
-  const rollback = () => {
-    for (let i = created.length - 1; i >= 0; i--) {
-      try {
-        fs.rmdirSync(created[i]);
-      } catch {
-        return;
-      }
-    }
-  };
+  const folderExists = fs.existsSync(folder);
 
-  if (!fs.existsSync(folder)) {
-    let first: string | undefined;
-    try {
-      first = fs.mkdirSync(folder, { recursive: true });
-    } catch {
-      throw new AeError("Could not create the destination folder " + destDir);
-    }
-    if (first) {
-      for (let d = folder; ; d = path.dirname(d)) {
-        created.unshift(d);
-        if (d === first || path.dirname(d) === d) break;
-      }
-    }
-  }
-
-  // A refusal below leaves a folder it just made, exactly as the jsx did: the
-  // jsx creates the folder first too, and its refusals never removed it.
-  //
   // A name the two path readers might split differently is left to the jsx.
   const templateName = hasName ? (args.name as string) : null;
   const judgeable =
@@ -247,7 +214,7 @@ export function prepareMogrtDestination(
           "a `destDir` if you want it written somewhere else."
       );
     }
-    if (fs.existsSync(outPath) && args.overwrite !== true) {
+    if (folderExists && fs.existsSync(outPath) && args.overwrite !== true) {
       throw new AeError(
         "A template already exists at " + outPath + ". Pass overwrite: true to replace it, or a " +
           "different `name`."
@@ -255,13 +222,11 @@ export function prepareMogrtDestination(
     }
   }
 
-  if (!folderIsWritable(folder)) {
+  if (folderExists && !folderIsWritable(folder)) {
     throw new AeError(
       "After Effects cannot write into " + folder + " — a test file could not be created there. " +
         "Nothing was exported. Pass a `destDir` the user can write to, or ask them to fix the folder's " +
         "permissions."
     );
   }
-
-  return { created, rollback };
 }

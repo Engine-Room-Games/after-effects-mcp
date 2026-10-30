@@ -171,67 +171,101 @@ passed++;
 const aep = at("proj", "show.aep");
 const saved = () => { fs.mkdirSync(at("proj"), { recursive: true }); fs.writeFileSync(aep, "aep"); };
 
-
 function mogrt(args) {
   return [
     () => { ctx.app.project.file = new EsFile(aep); return ctx.OPS.export_mogrt({ compId: 7, ...args }); },
-    () => D.prepareMogrtDestination({ compId: 7, ...args }),
+    () => D.checkMogrtDestination({ compId: 7, ...args }),
   ];
 }
 
-assert.equal(D.prepareMogrtDestination({ compId: 7, name: "LT" }), null, "no destDir: the jsx checks the .aep folder, as before"); passed++;
+/**
+ * The port against the jsx where the folder does not exist yet. The jsx makes
+ * it; the port must not. So the verdicts must agree, the port must leave the
+ * disk exactly as it found it, and the jsx may differ only by the folder.
+ */
+function parityNoFolder(name, setup, runJsx, runTs, expect) {
+  resetDir(dir);
+  setup();
+  const j = jsxResult(runJsx);
+  resetDir(dir);
+  setup();
+  const before = snapshotTree(dir);
+  const t = result(runTs);
+  const after = snapshotTree(dir);
+  resetDir(dir);
+  try {
+    assert.equal(t, j, "the port and the jsx reach the same verdict, in the same words");
+    assert.deepEqual(after, before, "the port has no side effect: no folder, no probe");
+    if (expect) assert.match(t, expect);
+  } catch (e) {
+    console.error(`destination-checks FAILED: ${name}`);
+    throw e;
+  }
+  passed++;
+}
+
 parity("mogrt: destDir exists", and(saved, () => fs.mkdirSync(at("out"))), ...mogrt({ name: "LT", destDir: at("out") }), /^PASSED$/);
-parity("mogrt: destDir is created", saved, ...mogrt({ name: "LT", destDir: at("new", "deeper") }), /^PASSED$/);
-parity("mogrt: trailing separator on destDir", saved, ...mogrt({ name: "LT", destDir: at("out") + "/" }), /^PASSED$/);
-parity("mogrt: a slash in the name escapes the folder", saved, ...mogrt({ name: "a/b", destDir: at("out") }), /resolves to .* which is not inside/);
-parity("mogrt: a dot-dot name escapes the folder", saved, ...mogrt({ name: "../up", destDir: at("out") }), /is not inside/);
+parity("mogrt: trailing separator on destDir", and(saved, () => fs.mkdirSync(at("out"))), ...mogrt({ name: "LT", destDir: at("out") + "/" }), /^PASSED$/);
+parity("mogrt: a slash in the name escapes the folder", and(saved, () => fs.mkdirSync(at("out"))), ...mogrt({ name: "a/b", destDir: at("out") }), /resolves to .* which is not inside/);
+parity("mogrt: a dot-dot name escapes the folder", and(saved, () => fs.mkdirSync(at("out"))), ...mogrt({ name: "../up", destDir: at("out") }), /is not inside/);
 parity("mogrt: existing template, no overwrite", and(saved, touch("out", "LT.mogrt")), ...mogrt({ name: "LT", destDir: at("out") }), /^A template already exists at /);
 parity("mogrt: existing template, overwrite", and(saved, touch("out", "LT.mogrt")), ...mogrt({ name: "LT", destDir: at("out"), overwrite: true }), /^PASSED$/);
+parity("mogrt: no name, folder exists", and(saved, () => fs.mkdirSync(at("auto"))), ...mogrt({ destDir: at("auto") }), /^PASSED$/);
 if (canChmod) {
   parity("mogrt: a folder that refuses writes", and(saved, () => { fs.mkdirSync(at("ro")); fs.chmodSync(at("ro"), 0o555); }),
     ...mogrt({ name: "LT", destDir: at("ro") }), /cannot write into .* a test file could not be created/);
-  parity("mogrt: a folder that cannot be created", and(saved, () => { fs.mkdirSync(at("ro")); fs.chmodSync(at("ro"), 0o555); }),
-    ...mogrt({ name: "LT", destDir: at("ro", "sub") }), /^Could not create the destination folder /);
 }
-// No name: the port creates and probes the folder, and leaves the name checks to the jsx.
-parity("mogrt: no name, new folder", saved, ...mogrt({ destDir: at("auto") }), /^PASSED$/);
 
-// The write probe never outlives the call.
+// A destination that does not exist yet: the port makes nothing.
+parityNoFolder("mogrt: new destDir passes, and is left to the jsx to create", saved, ...mogrt({ name: "LT", destDir: at("new", "deeper") }), /^PASSED$/);
+parityNoFolder("mogrt: new destDir, a slash in the name", saved, ...mogrt({ name: "a/b", destDir: at("new") }), /is not inside/);
+parityNoFolder("mogrt: new destDir, no name", saved, ...mogrt({ destDir: at("auto") }), /^PASSED$/);
+
+// The one disagreement a missing folder allows, and the reason it is allowed:
+// the jsx fails to create the folder; the port, which creates nothing, passes
+// and leaves that refusal to the jsx, word for word, after it.
+if (canChmod) {
+  const ro = and(saved, () => { fs.mkdirSync(at("ro")); fs.chmodSync(at("ro"), 0o555); });
+  resetDir(dir);
+  ro();
+  assert.match(jsxResult(mogrt({ name: "LT", destDir: at("ro", "sub") })[0]), /^Could not create the destination folder /);
+  resetDir(dir);
+  ro();
+  assert.equal(result(mogrt({ name: "LT", destDir: at("ro", "sub") })[1]), PASSED);
+  assert.equal(fs.existsSync(at("ro", "sub")), false);
+  resetDir(dir);
+  passed++;
+}
+
+// No side effects on any refusal, nor on a pass: the write probe never
+// outlives the call, and a refused call leaves the folder as it was.
 resetDir(dir);
 saved();
 fs.mkdirSync(at("out"));
-D.prepareMogrtDestination({ compId: 7, name: "LT", destDir: at("out") });
-assert.deepEqual(fs.readdirSync(at("out")), []);
+fs.writeFileSync(at("out", "LT.mogrt"), "zip");
+const beforeRefusal = snapshotTree(dir);
+assert.match(result(() => D.checkMogrtDestination({ compId: 7, name: "LT", destDir: at("out") })), /already exists/);
+assert.match(result(() => D.checkMogrtDestination({ compId: 7, name: "a/b", destDir: at("nowhere", "deep") })), /is not inside/);
+assert.deepEqual(snapshotTree(dir), beforeRefusal, "a refusal leaves no folder and no probe");
+assert.equal(result(() => D.checkMogrtDestination({ compId: 7, name: "LT", destDir: at("out"), overwrite: true })), PASSED);
+assert.deepEqual(fs.readdirSync(at("out")), ["LT.mogrt"], "the probe is gone after a pass");
 passed++;
 
-// Declined: no destDir, a blank name the jsx refuses first, or a path the two
-// might read differently. Nothing is created for any of them.
+// Not judged: no destDir, a blank name the jsx refuses first, or a path the
+// two might read differently. Nothing is created for any of them.
 resetDir(dir);
 saved();
 const declined = [
   [{ name: "LT" }, "no destDir"],
   [{ name: "LT", destDir: "" }, "empty destDir"],
   [{ name: "   ", destDir: at("x4") }, "blank name"],
-  [{ name: "LT", destDir: "relative/x5" }, "relative destDir"],
-  [{ name: "LT", destDir: at("x%206") }, "escape in destDir"],
+  [{ name: "a/b", destDir: "relative/x5" }, "relative destDir"],
+  [{ name: "a/b", destDir: at("x%206") }, "escape in destDir"],
 ];
 for (const [args, why] of declined) {
-  assert.equal(D.prepareMogrtDestination({ compId: 7, ...args }), null, why);
+  assert.equal(result(() => D.checkMogrtDestination({ compId: 7, ...args })), PASSED, why);
 }
 assert.deepEqual(fs.readdirSync(dir), ["proj"], "a declined check makes no folder");
-passed++;
-
-// rollback() removes the folders it made, deepest first, and nothing with content.
-resetDir(dir);
-saved();
-let made = D.prepareMogrtDestination({ compId: 7, name: "LT", destDir: at("r1", "r2") });
-assert.deepEqual(made.created, [at("r1"), at("r1", "r2")]);
-made.rollback();
-assert.equal(fs.existsSync(at("r1")), false);
-made = D.prepareMogrtDestination({ compId: 7, name: "LT", destDir: at("r3") });
-fs.writeFileSync(at("r3", "LT.mogrt"), "zip");
-made.rollback();
-assert.equal(fs.existsSync(at("r3", "LT.mogrt")), true, "a folder with the export in it is never removed");
 passed++;
 
 // The ported helpers match the jsx's on the inputs they exist for.
