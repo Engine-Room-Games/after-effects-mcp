@@ -617,7 +617,11 @@ try {
       assert.match(rb.text, /must not be sent again/);
       assert.doesNotMatch(rb.text, /does not recognise/, "the panel did recognise run_batch: it started the batch");
       const jobId = [...ae.jobs.keys()].pop();
-      await sleep(300);
+      assert.match(rb.text, new RegExp(`await_job\\(\\{jobId: "${jobId}"\\}\\)`), "names the completion signal");
+      // The old panel reports over /events; await_job follows it to the end.
+      const st = (await call(A, "await_job", { jobId })).json();
+      assert.equal(st.status, "completed", JSON.stringify(st));
+      assert.equal(st.progress, 300);
       assert.equal(chunksOf(jobId).length, 0, "the server sent no chunk of a job the panel drives: never two drivers");
     } finally {
       echoDriver = true;

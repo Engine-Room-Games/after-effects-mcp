@@ -182,7 +182,10 @@ check("no source, no health", assessPanel(null, null, { shipped: null }).state, 
   // The batch is still applying: nothing may tell the agent to retry it, or the
   // user to quit After Effects before it has finished.
   assert.doesNotMatch(m, /retry/i);
-  assert.match(m, /never while the batch is still applying/);
+  // The completion signal is await_job on this job, and the update comes after.
+  assert.match(m, /await_job\(\{jobId: "j_1"\}\)/);
+  assert.match(m, /once await_job reports it finished, and never before/);
+  assert.doesNotMatch(m, /responds again/, "After Effects answering is not a completion signal");
   assert.match(m, /older than these tools/);
   assert.match(m, /setup_panel/);
   assert.doesNotMatch(m, /does not recognise/);

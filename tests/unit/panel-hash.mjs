@@ -134,6 +134,26 @@ check("bundle.jsx, node_modules, .DS_Store, Thumbs.db, desktop.ini and the root 
   assert.equal(both(dir), SHIPPED.client);
 });
 
+check("the install diff skips the same file-browser litter as the hash, at any depth", () => {
+  // panelInstallDiff walks the *source* side, so the litter goes there: a
+  // source carrying it must still match a clean install, exactly as it hashes
+  // the same. If one list grows without the other, this fails.
+  const litter = [".DS_Store", "Thumbs.db", "desktop.ini"];
+  const src = installCopy();
+  const clean = installCopy();
+  for (const name of litter) {
+    fs.writeFileSync(path.join(src, name), "x");
+    fs.writeFileSync(path.join(src, "client", name), "x");
+    fs.writeFileSync(path.join(src, "CSXS", name), "x");
+  }
+  assert.deepEqual(panelInstallDiff(src, clean), [], "the install diff counted litter as a missing file");
+  assert.equal(both(src), both(clean), "the hash counted litter");
+  // And a real file in the same places is still seen by both.
+  fs.writeFileSync(path.join(src, "client", "Thumbs.db.js"), "x");
+  assert.deepEqual(panelInstallDiff(src, clean), ["client/Thumbs.db.js"]);
+  assert.notEqual(both(src), both(clean));
+});
+
 check("the manifest's version attributes are ignored; the rest of it is not", () => {
   const dir = installCopy();
   const manifest = path.join(dir, "CSXS", "manifest.xml");

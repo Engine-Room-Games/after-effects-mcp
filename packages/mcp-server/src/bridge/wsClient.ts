@@ -14,9 +14,12 @@ type WsEvent =
 /**
  * The /events socket a long `run_batch` reported progress and completion on
  * while the panel drove batches itself. Since issue #243 this server drives
- * every batch (jobs/batchDriver.ts) and the panel sends no job events; the
- * socket stays because its reopening is how a restarted After Effects is
- * noticed (`onReopen`, which drops the panel gate's verdict).
+ * every batch (jobs/batchDriver.ts) and a current panel sends no job events.
+ * They are still handled, for a panel older than #220 that drives its own
+ * batch past the gate: the server registers that job and follows it here, so
+ * await_job can report when it ends. The socket's reopening is also how a
+ * restarted After Effects is noticed (`onReopen`, which drops the panel gate's
+ * verdict).
  *
  * It follows the HTTP client's port rather than keeping a copy of its own: a
  * copy taken at startup is exactly the stale value issue #92 is about, and a

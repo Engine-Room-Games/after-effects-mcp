@@ -137,19 +137,21 @@ const CAPABILITY_WORDS: Readonly<Record<string, string>> = {
 
 /**
  * A long `run_batch` the panel started and is driving itself — only a panel
- * from before issue #220 does that, and since #243 nothing in the server
- * follows such a job. The batch is real and running, so the message says so
+ * from before issue #220 does that. Such a panel reports the job's progress
+ * and end over its event socket, and the server registers the job, so
+ * `await_job` is a real completion signal (After Effects answering between
+ * chunks is not one). The batch is real and running, so the message says so
  * before it says to update; it never claims the panel did not recognise the
  * op, which it plainly did.
  */
 export function panelDrivenBatchMessage(jobId: string): string {
   return (
-    `The After Effects panel started batch ${jobId} and is running it itself, so these tools cannot follow it or ` +
-    `report when it finishes — get_job and await_job do not know it. It must not be sent again: it is still ` +
-    `applying in After Effects, and a second copy would apply every op twice. Tell the user it is running, and wait ` +
-    `until After Effects responds again before doing anything else in it. Only then, because only a panel older than ` +
-    `these tools runs a batch on its own: run setup_panel, and ask the user to quit and reopen After Effects — never ` +
-    `while the batch is still applying.`
+    `The After Effects panel started batch ${jobId} and is running it itself. It must not be sent again: it is ` +
+    `still applying in After Effects, and a second copy would apply every op twice. Call ` +
+    `await_job({jobId: "${jobId}"}) and wait until it reports the batch finished — that is the only sign it is ` +
+    `done; After Effects answering other calls is not. Only a panel older than these tools runs a batch on its ` +
+    `own, so once await_job reports it finished, and never before: run setup_panel, and ask the user to quit and ` +
+    `reopen After Effects.`
   );
 }
 

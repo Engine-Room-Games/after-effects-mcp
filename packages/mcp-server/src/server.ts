@@ -1051,11 +1051,19 @@ export function createServer(opts: CreateServerOptions = {}) {
         };
         // Every current panel hands a chunked batch back for this server to
         // drive. One that did not is driving it itself — a panel older than
-        // #220 behind a gate that could not tell — and since #243 nothing here
-        // follows a panel-driven job any more. Say what happened rather than
-        // return a job that would never report.
+        // #220 behind a gate that could not tell. Such a panel reports the
+        // job's progress and end over /events, which WsClient still feeds into
+        // JobManager, so the job is registered and await_job is the agent's
+        // completion signal: After Effects answering between chunks is not
+        // one. The lease is held until the job ends (to the ceiling), so no
+        // write of ours lands between its chunks. The call itself is still an
+        // error — the panel is out of date — and says to update only after
+        // await_job reports the batch finished.
         if ((result as { driver?: unknown }).driver !== "server") {
           panelGate.invalidate();
+          jobs.register(env.jobId, env.total);
+          lease?.extendUntil(jobs.waitFor(env.jobId, writes.holdCeilingMs));
+          lease?.onLost?.((why) => jobs.warn(env.jobId, why));
           return errorResult(panelDrivenBatchMessage(env.jobId));
         }
         jobs.register(env.jobId, env.total);

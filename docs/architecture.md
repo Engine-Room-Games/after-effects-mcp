@@ -770,11 +770,15 @@ it), sends no chunk of its own, and answers the envelope with
 `driver: "server"`. Until issue #243 an envelope without that was driven by
 the panel and followed over the event socket; that path is gone from both
 sides. The version gate keeps a panel that would drive its own batch from
-being asked, and if one answers anyway the call fails saying the batch is
-running in After Effects and the panel is out of date — the server never
-returns a job it would not hear from. Two drivers on one job cannot happen.
-The event socket stays only because its reopening is how a restarted After
-Effects is noticed (`WsClient.onReopen`).
+being asked. If one answers anyway, its batch is already running and is
+followed rather than abandoned: such a panel still reports progress and the
+end over `/events`, so the server registers the job, holds the write lease
+until it ends (to the ceiling), and fails the call with a message that says
+not to re-send it, to wait on `await_job` with its id — After Effects
+answering between chunks is no sign it is done — and to update the panel only
+after that. Two drivers on one job cannot happen. The event socket also stays
+because its reopening is how a restarted After Effects is noticed
+(`WsClient.onReopen`).
 
 **The lease.** The driver owns the batch's lease outright and releases it once
 the batch is over in After Effects, cancel included. Every chunk is an internal
