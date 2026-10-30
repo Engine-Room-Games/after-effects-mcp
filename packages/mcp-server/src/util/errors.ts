@@ -602,3 +602,72 @@ export function invalidArgsText(op: string, e: unknown): string {
       : `Invalid arguments for ${op} (${issues.length} problems):`;
   return [head, ...lines].join("\n");
 }
+
+/**
+ * A write-queue wait that ran out behind *another session's* write (issue #223).
+ *
+ * Still a `WriteQueueWaitError` — the same kind, with the same remedy: nothing
+ * ran, so re-sending is safe. What changes is the honest half of the story.
+ * The work in front belongs to another AI session on the same After Effects,
+ * so `get_job` and `await_job` cannot see it, and the user is the one who can
+ * decide which session should give way.
+ */
+export class DeskWaitError extends WriteQueueWaitError {
+  constructor(op: string, waitedMs: number, behind: string, public behindSession: string) {
+    super(op, waitedMs, behind);
+    this.name = "DeskWaitError";
+    this.message = DeskWaitError.text(op, waitedMs, behind, behindSession);
+  }
+  static text(op: string, waitedMs: number, behind: string, behindSession: string): string {
+    const secs = Math.round(waitedMs / 1000);
+    return [
+      `\`${op}\` waited ${secs}s behind another session's \`${behind}\` (${behindSession}) for the After Effects write queue and was dropped without running.`,
+      "",
+      "Another AI session is connected to the same After Effects, and its writes and",
+      "this session's writes take turns. This call never reached After Effects, so",
+      "nothing in the project was changed.",
+      "",
+      "What to do, in order:",
+      "1. Nothing was written, so re-sending this call is safe — unlike a bridge timeout.",
+      "   Let the other session's work finish first, or it will just queue again.",
+      "2. get_job and await_job only know this session's own jobs, so they cannot show",
+      "   the other session's work. Reads are not queued: list_/get_ calls still work.",
+      "3. Tell the user another session is writing to the same After Effects, and ask",
+      "   whether to wait for it or to stop one of the two.",
+      "4. If that work is legitimately this long, raise the limit: start the server with",
+      "   AE_MCP_WRITE_QUEUE_WAIT_MS set to a larger number of milliseconds.",
+    ].join("\n");
+  }
+}
+
+/**
+ * The front desk went away after it had handed a call to After Effects (issue #223).
+ *
+ * A reset in every sense that matters — the call reached AE and may have run —
+ * so it is one, and `server.ts` handles it as one. Only the first paragraph
+ * differs, because the thing that dropped the connection is the other server
+ * process that was running the desk, not the panel, and "confirm the panel is
+ * back" would send the reader to check something that never left.
+ */
+export class FrontDeskLostError extends BridgeResetError {
+  constructor(port: number, op: string) {
+    super(port, op);
+    this.name = "FrontDeskLostError";
+    this.message = FrontDeskLostError.text(op);
+  }
+  static text(op: string): string {
+    return [
+      `The front desk this session shares with other AI sessions on the same After Effects went away in the middle of \`${op}\` — the server process running it exited.`,
+      "",
+      "The call had already been handed to After Effects, so it may or may not have",
+      "taken effect; no answer came back to say which. Another session's server takes",
+      "the desk over, and the next call goes through it.",
+      "",
+      "What to do, in order:",
+      "1. Do not blindly re-send it. A write could land twice.",
+      "2. Read the affected comp or layer back (diff_comp against a snapshot,",
+      "   get_layer_full, list_layers) to learn whether this call landed, and only",
+      "   send it again if it did not.",
+    ].join("\n");
+  }
+}

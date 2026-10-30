@@ -1,0 +1,351 @@
+import http from "node:http";
+import { timingSafeEqual } from "node:crypto";
+import { logger } from "../util/logger.js";
+import { DESK_ID, DESK_PROTOCOL, DESK_TOKEN_HEADER } from "./config.js";
+import { DeskClosedError, DeskLock, UPDATE_EVERY_MS, type LockRequest } from "./lock.js";
+import { toWire, type DeskAhead, type LockLine, type OpLine } from "./protocol.js";
+
+/**
+ * The front desk itself (issue #223): run by whichever MCP server bound the desk
+ * port first, used in-process by that server's own session and over loopback
+ * HTTP by every other session on the same After Effects.
+ *
+ * It does two things and nothing else. It holds the one cross-session write lock
+ * (`DeskLock`), and it forwards every After Effects-bound call — keeping an
+ * ordered record of what it has handed to the panel and not yet heard back
+ * about, which is what lets it tell a waiting session the truth. It does not
+ * gate on the panel version, apply read-only mode, or own jobs: each session
+ * does those for itself before anything reaches the desk (see line.ts).
+ */
+
+/** What the desk needs from the session that runs it: its own way to the panel. */
+export interface DeskForwarder {
+  runOp(op: string, args: unknown, opts: { timeoutMs?: number }): Promise<unknown>;
+  cancel(jobId: string): Promise<{ known: boolean; error?: string }>;
+  /** The panel port the forwarder is on now — followers' event sockets follow it. */
+  readonly port: number;
+}
+
+export interface ForwardRequest {
+  sessionId: string;
+  session: string;
+  kind: "op" | "cancel";
+  op: string;
+  args?: unknown;
+  jobId?: string;
+  timeoutMs?: number;
+}
+
+export interface ForwardHooks {
+  /**
+   * Called — and awaited — immediately before the call is posted to the panel.
+   * Over HTTP this writes and flushes the `start` line; if it throws, the call
+   * is not sent, which is what makes a lost caller safe to re-send.
+   */
+  onStart?: (ahead: DeskAhead[]) => Promise<void> | void;
+  onAhead?: (ahead: DeskAhead[]) => void;
+}
+
+interface InFlight {
+  seq: number;
+  sessionId: string;
+  session: string;
+  op: string;
+  since: number;
+}
+
+/** A request body larger than this is refused. A run_batch of 2000 steps is a few MB. */
+const MAX_BODY_BYTES = 256 * 1024 * 1024;
+
+export class FrontDesk {
+  readonly lock: DeskLock;
+  private server: http.Server | null = null;
+  private inflight: InFlight[] = [];
+  private seq = 0;
+  /** Open /desk/lock responses, so `close()` can tell each one the desk is moving. */
+  private lockStreams = new Set<http.ServerResponse>();
+  private closing = false;
+
+  constructor(
+    private forwarder: DeskForwarder,
+    readonly opts: { port: number; token: string; graceMs?: number }
+  ) {
+    this.lock = new DeskLock({ graceMs: opts.graceMs });
+  }
+
+  /** Bind the desk port. Rejects with the bind error — `EADDRINUSE` means another server holds it. */
+  listen(): Promise<void> {
+    const server = http.createServer((req, res) => {
+      this.handle(req, res).catch((e) => {
+        logger.warn(`front desk: request failed: ${(e as Error).message}`);
+        try { res.destroy(); } catch {}
+      });
+    });
+    // A follower's lock connection is a lifeline that may legitimately stay
+    // open for a whole long batch; Node's default timeouts would cut it.
+    server.requestTimeout = 0;
+    server.headersTimeout = 10_000;
+    server.keepAliveTimeout = 1000;
+    return new Promise<void>((resolve, reject) => {
+      const onError = (e: Error) => {
+        server.removeListener("listening", onListening);
+        reject(e);
+      };
+      const onListening = () => {
+        server.removeListener("error", onError);
+        server.on("error", (e) => logger.warn(`front desk: ${(e as Error).message}`));
+        this.server = server;
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen({ port: this.opts.port, host: "127.0.0.1", exclusive: true });
+    });
+  }
+
+  status() {
+    const now = Date.now();
+    return {
+      desk: DESK_ID,
+      protocol: DESK_PROTOCOL,
+      pid: process.pid,
+      port: this.opts.port,
+      panelPort: this.forwarder.port,
+      lock: this.lock.status(),
+      inFlight: this.inflight.map((f) => ({ op: f.op, session: f.session, runningMs: now - f.since })),
+    };
+  }
+
+  /**
+   * Hand one call to After Effects, and keep track of it until it answers.
+   *
+   * Never queued here: the write lock is taken before a write gets this far,
+   * and reads do not take it — a screenshot must never stall a write (see
+   * docs/architecture.md, "Serializing writes"). The panel's own evalScript
+   * chain is a FIFO, so calls forwarded in this order run in this order; the
+   * record is how the desk can say what is running ahead of whom.
+   */
+  async forward(req: ForwardRequest, hooks: ForwardHooks = {}): Promise<unknown> {
+    const entry: InFlight = { seq: ++this.seq, sessionId: req.sessionId, session: req.session, op: req.op, since: Date.now() };
+    const ahead = () => {
+      const now = Date.now();
+      return this.inflight
+        .filter((f) => f.seq < entry.seq && f.sessionId !== req.sessionId)
+        .map((f) => ({ op: f.op, session: f.session, forMs: now - f.since }));
+    };
+    const before = ahead();
+    await hooks.onStart?.(before);
+    entry.since = Date.now();
+    this.inflight.push(entry);
+    let ticker: NodeJS.Timeout | null = null;
+    if (hooks.onAhead && before.length > 0) {
+      ticker = setInterval(() => {
+        const now = ahead();
+        if (now.length === 0) {
+          clearInterval(ticker!);
+          ticker = null;
+          return;
+        }
+        try { hooks.onAhead!(now); } catch {}
+      }, UPDATE_EVERY_MS);
+      ticker.unref?.();
+    }
+    try {
+      if (req.kind === "cancel") return await this.forwarder.cancel(req.jobId ?? "");
+      return await this.forwarder.runOp(req.op, req.args, { timeoutMs: req.timeoutMs });
+    } finally {
+      if (ticker) clearInterval(ticker);
+      this.inflight = this.inflight.filter((f) => f !== entry);
+    }
+  }
+
+  /**
+   * Stop being the desk. The port is released at once, so another server can
+   * take over while calls already handed to After Effects finish and answer
+   * here. Waiters and lock holders are told the desk is moving: nothing was
+   * granted to a waiter, and a holder re-takes its lock at the next desk.
+   */
+  async close(): Promise<void> {
+    if (this.closing) return;
+    this.closing = true;
+    this.lock.close();
+    for (const res of this.lockStreams) {
+      try { if (!res.writableEnded) res.end(line({ t: "moved" })); } catch {}
+    }
+    this.lockStreams.clear();
+    const server = this.server;
+    this.server = null;
+    if (!server) return;
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeIdleConnections?.();
+      // Resolve once the port is released; in-flight answers keep their sockets.
+      setTimeout(resolve, 50).unref?.();
+    });
+  }
+
+  // ---------------------------------------------------------------- HTTP
+
+  private authorised(req: http.IncomingMessage): boolean {
+    const sent = req.headers[DESK_TOKEN_HEADER];
+    if (typeof sent !== "string") return false;
+    const a = Buffer.from(sent);
+    const b = Buffer.from(this.opts.token);
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
+  private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    // A browser always sends Origin, and nothing of ours does: a request
+    // carrying one is a web page, whatever token it has (as on the panel, #106).
+    if (req.headers.origin !== undefined) return json(res, 403, { desk: DESK_ID, error: "origin" });
+    // Refused before the body is read, and the 401 still says it is a desk, so a
+    // server starting up can tell "a desk whose file I read too early" from a
+    // foreign process on the port.
+    if (!this.authorised(req)) return json(res, 401, { desk: DESK_ID, error: "token" });
+    const url = (req.url ?? "").split("?")[0];
+    if (req.method === "GET" && url === "/desk/hello") {
+      return json(res, 200, { desk: DESK_ID, protocol: DESK_PROTOCOL, pid: process.pid });
+    }
+    if (req.method === "GET" && url === "/desk/status") return json(res, 200, this.status());
+    if (req.method !== "POST") return json(res, 405, { error: "POST only" });
+    const body = await readBody(req);
+    if (body === null) return json(res, 413, { error: "body too large" });
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(body) as Record<string, unknown>; }
+    catch { return json(res, 400, { error: "bad json" }); }
+    if (url === "/desk/lock") return this.handleLock(parsed, req, res);
+    if (url === "/desk/op") return this.handleOp(parsed, res);
+    return json(res, 404, { error: "unknown route" });
+  }
+
+  private handleLock(b: Record<string, unknown>, req: http.IncomingMessage, res: http.ServerResponse): void {
+    stream(res);
+    if (this.closing) {
+      res.end(line({ t: "moved" }));
+      return;
+    }
+    const abort = new AbortController();
+    let grantedId: string | null = null;
+    let finished = false;
+    this.lockStreams.add(res);
+    // The connection is the lease: when it closes — released, or the session's
+    // server died — the lock is freed. A waiter that goes is dropped unrun.
+    res.on("close", () => {
+      finished = true;
+      this.lockStreams.delete(res);
+      abort.abort();
+      if (grantedId) this.lock.release(grantedId);
+    });
+    const request: LockRequest = {
+      op: String(b.op ?? "write"),
+      sessionId: String(b.sessionId ?? ""),
+      session: String(b.session ?? "another session"),
+      maxWaitMs: num(b.maxWaitMs, 600_000),
+      maxDepth: num(b.maxDepth, 64),
+      resume: b.resume === true,
+      holdCeilingMs: num(b.holdCeilingMs, 1_200_000),
+      onUpdate: (l) => { if (!finished && !res.writableEnded) res.write(line(l)); },
+    };
+    this.lock.acquire(request, abort.signal).then(
+      (grant) => {
+        if (finished) {
+          this.lock.release(grant.id);
+          return;
+        }
+        grantedId = grant.id;
+        res.write(line({ t: "granted", id: grant.id, wait: grant.wait }));
+      },
+      (e) => {
+        if (finished || res.writableEnded) return;
+        this.lockStreams.delete(res);
+        res.end(line(e instanceof DeskClosedError ? { t: "moved" } : { t: "err", error: toWire(e) }));
+      }
+    );
+  }
+
+  private async handleOp(b: Record<string, unknown>, res: http.ServerResponse): Promise<void> {
+    stream(res);
+    const leaseId = typeof b.leaseId === "string" ? b.leaseId : null;
+    // A write claims the lease it was issued under. If that lease is not the
+    // one holding the lock — it died with a previous desk — nothing is sent,
+    // and the caller re-takes the lock first. This is what makes the lock a
+    // guarantee across a handover rather than a courtesy.
+    if (leaseId !== null && !this.lock.isHolder(leaseId)) {
+      res.end(line({ t: "lost" }));
+      return;
+    }
+    let gone = false;
+    res.on("close", () => { gone = true; });
+    const panelPort = () => this.forwarder.port;
+    try {
+      const result = await this.forward(
+        {
+          sessionId: String(b.sessionId ?? ""),
+          session: String(b.session ?? "another session"),
+          kind: b.kind === "cancel" ? "cancel" : "op",
+          op: String(b.op ?? ""),
+          args: b.args,
+          jobId: typeof b.jobId === "string" ? b.jobId : undefined,
+          timeoutMs: typeof b.timeoutMs === "number" && b.timeoutMs > 0 ? b.timeoutMs : undefined,
+        },
+        {
+          onStart: async (ahead) => {
+            // The caller went before anything was sent: send nothing.
+            if (gone || res.destroyed) throw new CallerGoneError();
+            await new Promise<void>((resolve, reject) => {
+              res.write(line({ t: "start", ahead }), (err) => (err ? reject(err) : resolve()));
+            });
+            if (gone || res.destroyed) throw new CallerGoneError();
+          },
+          onAhead: (ahead) => { if (!gone) res.write(line({ t: "ahead", ahead })); },
+        }
+      );
+      if (!gone) res.end(line({ t: "ok", result, panelPort: panelPort() }));
+    } catch (e) {
+      if (e instanceof CallerGoneError) return;
+      if (!gone) res.end(line({ t: "err", error: toWire(e), panelPort: panelPort() }));
+    }
+  }
+}
+
+class CallerGoneError extends Error {}
+
+function line(l: LockLine | OpLine): string {
+  return JSON.stringify(l) + "\n";
+}
+
+function stream(res: http.ServerResponse): void {
+  res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store" });
+  // Each line is a message the caller is waiting on; never let Nagle sit on one.
+  res.socket?.setNoDelay(true);
+  res.flushHeaders();
+}
+
+function json(res: http.ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+}
+
+function num(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : fallback;
+}
+
+function readBody(req: http.IncomingMessage): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let over = false;
+    req.on("data", (c: Buffer) => {
+      if (over) return;
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        over = true;
+        resolve(null);
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => { if (!over) resolve(Buffer.concat(chunks).toString("utf8")); });
+    req.on("error", reject);
+  });
+}

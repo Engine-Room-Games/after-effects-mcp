@@ -41,6 +41,10 @@ Numbered recipes referenced below are in [verification-recipes.md](verification-
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. `discovery.ts` holds the candidate ports (`AE_MCP_PORT` alone if pinned; otherwise 7777 *then* the port file) and `isPanelHealth`, the test that decides whether something on a port is the panel — mirrored by `isOurHealth` in the panel's `main.js`; keep the two in step. `httpClient.ts` re-runs discovery when a call is **refused** (never on a timeout) and re-sends once if a different port answers as the panel; `wsClient.ts` follows the client's port through `onPortChange` instead of keeping a copy. `discovery.ts` also owns `panelToken`/`authHeaders`, read from disk on **every** call rather than cached — a panel that rebinds mints a new token, and a cached one would outlive it (issue #106). |
 | `packages/mcp-server/src/bridge/panelGate.ts` | The panel-version gate: caches the verdict from the *running* bundle hash on `/health`. Healthy is re-checked every minute, stale every 5s — never cached for good, because restarting AE rebinds the same port and no port change fires (issue #156). Invalidated on port change, `setup_panel` and `WsClient.onReopen`; concurrent callers share one in-flight probe, and a generation counter stops a probe that started before an invalidate from restoring the old verdict. Unreachable drops the verdict; a timeout keeps it and waits 5s before probing again. |
 | `packages/mcp-server/src/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` — the lease that outlives its own call so a long `run_batch` keeps the lock while the panel drives it. Classification comes from `OpMutation` in `schemas.ts`. |
+| `packages/mcp-server/src/frontdesk/line.ts` | `SessionLine` — every server's one way to After Effects when several sessions share it (issue #223): the session's own `WriteQueue`, then the desk's cross-session lock; `runOp`/`cancel` through the desk; the election, and the handover rule. With no desk configured every method is a plain pass-through. See "The front desk" below. |
+| `packages/mcp-server/src/frontdesk/desk.ts` | `FrontDesk` — the loopback HTTP server the leading session runs: token-gated, NDJSON answers, the in-flight record, the `start` line flushed before a call is posted to the panel. |
+| `packages/mcp-server/src/frontdesk/lock.ts` | `DeskLock` — the cross-session write lock: positions, who is in front and for how long, resumed leases first, the takeover grace period, a hold ceiling. |
+| `packages/mcp-server/src/frontdesk/{config,protocol}.ts` | The desk port and its file (`desk-<port>.json`, 0600); the wire format, and the error round-trip that keeps the five bridge failures five. |
 | `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool, and the progress emitters `await_job` binds for exactly the span of its own call — `bindProgressEmitter` hands back the unbind, and the caller must use it. See "Long batch" under "Special return shapes" and the #82 entry in [fragile-areas-server.md](fragile-areas-server.md). |
 | `packages/mcp-server/src/snapshots/diff.ts` | `diff_comp`'s diff — a line-for-line port of `snapshot.jsx`'s, kept byte-for-byte identical to it by a parity sweep in `tests/unit/comp-snapshot.mjs` until `diff:true` moves too (#220). Change one, change both. |
 | `packages/mcp-server/src/snapshots/store.ts` | In-memory comp fingerprints for `snapshot_comp` / `diff_comp`. Bounded ring; `missingMessage()` is the whole reason it is a class rather than a `Map`. |
@@ -322,13 +326,85 @@ other's. Measured on 26.5 (issue #175): After Effects still runs the two
 clients' calls one at a time, with no interleaving inside a call — but a call
 waiting behind the other client's work says nothing about it, the other
 client's writes do land between the chunks of a long `run_batch`, and a timed-out
-call still lands afterwards. Nothing in this repo reports the other client:
-that is left to a shared broker process all sessions go through, which is
-separate work. The details are under "Two MCP clients, one panel" in
+call still lands afterwards. The front desk, below, is the shared broker that
+fixes all three (issue #223). The details are under "Two MCP clients, one panel" in
 [fragile-areas-bridge.md](fragile-areas-bridge.md). And the queue is bounded
 (`AE_MCP_WRITE_QUEUE_DEPTH`, default 64; `AE_MCP_WRITE_QUEUE_WAIT_MS`, default
 600s) rather than unbounded, because an agent looping writes at a stuck bridge
 would otherwise grow it without limit.
+
+## The front desk: one queue for every session (issue #223)
+
+Measured on AE 26.5: while ExtendScript runs, the panel answers nothing, not
+even `/health`; two sessions' writes interleaved between the chunks of a
+`run_batch`, because each server had its own queue; and a wait measured inside
+the panel read 0–2 ms while the real one was seconds, because the panel's clock
+does not run while it is blocked. So the one place that can serialize sessions
+*and* tell a waiting one the truth is outside After Effects — in a server.
+
+**The first server to start becomes the desk.** It binds `127.0.0.1:17777`
+(`P+10000` under `AE_MCP_PORT=P`, so two pinned After Effects never share one;
+`AE_MCP_FRONT_DESK_PORT` overrides; `AE_MCP_FRONT_DESK=off` opts out) and writes
+`~/.engineroom-ae-mcp/desk-<port>.json` — pid, protocol, a fresh token — 0600,
+atomically. The bind *is* the election, and that choice is the whole stale-lock
+story: a port is exclusive on macOS and Windows and the OS releases it when the
+holder dies, so there is never a lock to clean up; the file only carries the
+token, and nobody believes it without the port answering with it. A port held
+by something that is not a desk, or a desk speaking another protocol (a
+different server version), sends the server direct — today's behaviour — with a
+warning that says the sessions are not serialized.
+
+**What goes through it.** `server.ts` talks to a `SessionLine` instead of the
+`WriteQueue` and `HttpClient` directly. A write takes the session's own queue
+first — unchanged, so the session's own calls keep the order the agent issued
+them — then the desk's lock, and holds both for a `run_batch`'s whole job.
+Every `runOp` and `cancel` is forwarded by the desk, reads included, but reads
+take no lock: a screenshot must never stall another session's write, for the
+reason in "Serializing writes" above. The desk records what it has handed the
+panel, in order — the panel's evalScript chain is a FIFO, so that is the order
+it runs in — and that record is what "AE is still running session X's
+`run_jsx` ahead of you, 12 s so far" is read from.
+
+**What a waiting session is told.** Its position, what is in front, whose, and
+for how long — as `notifications/progress` while it waits, when the client asked
+for progress (the request is still open, so #82 does not apply), and in the
+result as `queuedBehind`/`waitedMs` plus `queuedBehindSession`. A queue timeout
+behind another session is a `DeskWaitError`: still a `WriteQueueWaitError`, same
+remedy, but it says `get_job` cannot see the other session's work. None of this
+appears unless the call waited behind **another** session, so a single session's
+results are byte-identical to before; `DeskLock` never reports a session waiting
+behind itself, and the composite lease lets go of the desk before the session's
+own queue so that cannot happen at the seam either.
+
+**Handover.** A follower that loses the desk — refused, reset, `moved` — tries
+the bind itself; one wins and the rest join it. What happens to a call in
+transit hangs on one line: the desk writes and flushes `start` *before* it posts
+to the panel. Lost before `start`, the call never reached After Effects and is
+sent again to the new desk. Lost after it, a write fails with
+`FrontDeskLostError` — a `BridgeResetError` subclass, so the may-have-run remedy
+and `server.ts`'s handling are the reset's — and is never re-sent; a read is.
+A lock is an open connection: it frees itself when its holder's process dies.
+A session whose lease dies with the desk while its batch is still running
+re-takes it at the new desk with `resume`, which is granted ahead of everything,
+and a desk that took over grants nothing else for 1.5 s — long enough for that
+owner to reconnect. A write always names the lease it runs under; a desk that
+does not recognise it answers `lost` without sending anything, and the session
+re-takes the lease first. A graceful exit releases the port first and lets calls
+already at After Effects answer, so a successor can bind while they finish.
+
+**Decided, not inherited.** Jobs stay with the session that started them —
+`await_job`, `get_job`, `cancel_job` and the event socket are per server as
+before, and each server still hears every completion from the panel directly, so
+a handover loses no job. The panel version gate stays per session and reads
+`/health` directly: every server judges the same running panel against the same
+disk, and `/health` is not work the desk could queue. Read-only mode stays per
+client: each server refuses before anything reaches the desk, and a read-only
+leader still forwards another session's writes. The op timeout is the issuing
+session's, sent with the call and applied by the desk, and its clock still starts
+at `start` — never in the queue. `createServer` leaves the desk off unless
+`frontDesk` is passed; only `index.ts` passes it, so no in-process test ever
+joins a real session's desk. `tests/unit/front-desk.mjs` runs real server
+processes against a fake panel for all of it.
 
 
 ## Tool switches: read-only mode and `run_jsx` (issue #135)
