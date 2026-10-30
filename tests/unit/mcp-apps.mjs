@@ -21,7 +21,7 @@ const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "
 
 const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
 const apps = await import(dist("apps", "compTimeline.js"));
-const { UI_EXTENSION, UI_MIME, COMP_TIMELINE_URI, VIEW_DATA_KEY, MAX_VIEW_LAYERS, COMP_TIMELINE_HTML } = apps;
+const { UI_EXTENSION, UI_MIME, COMP_TIMELINE_URI, VIEW_DATA_KEY, MAX_VIEW_LAYERS, MAX_VIEW_MARKERS, MAX_VIEW_REMOVED, COMP_TIMELINE_HTML } = apps;
 
 const layer = (id, index, over = {}) => ({
   id, name: "L" + id, index, type: "shape",
@@ -124,7 +124,7 @@ check("snapshot_comp and diff_comp link the timeline view, and nothing else does
   for (const name of linked) {
     const m = ui.tools.find((t) => t.name === name)._meta;
     assert.equal(m.ui.resourceUri, COMP_TIMELINE_URI);
-    assert.equal(m["ui/resourceUri"], COMP_TIMELINE_URI, "the draft-era flat key rides along");
+    assert.deepEqual(m, { ui: { resourceUri: COMP_TIMELINE_URI } }, "the spec's nested form only; the flat ui/resourceUri is deprecated");
   }
 });
 check("tool schemas, descriptions and annotations are identical for both clients", () => {
@@ -177,6 +177,7 @@ check("snapshot_comp carries the fingerprint for the view on _meta", () => {
   assert.equal(v.kind, "snapshot");
   assert.deepEqual(v.fingerprint, states[0]);
   assert.equal(v.layersOmitted, 0);
+  assert.equal(v.markersOmitted, 0);
 });
 check("diff_comp carries the fresh fingerprint and the diff by layer id", () => {
   const v = ui.diff._meta[VIEW_DATA_KEY];
@@ -186,6 +187,7 @@ check("diff_comp carries the fresh fingerprint and the diff by layer id", () => 
   assert.deepEqual(Object.keys(v.diff.changed), ["498"]);
   assert.deepEqual(v.diff.removed, [{ id: 499, name: "L499", type: "shape", inPoint: 1, outPoint: 3 }],
     "a removed layer keeps its old timing, from the previous snapshot, to draw as a ghost");
+  assert.equal(v.diff.changesOmitted, 0);
 });
 check("the view asked After Effects for nothing new", () => {
   assert.ok(ops.every((o) => o === "_comp_fingerprint"), `ops seen: ${ops.join(", ")}`);
@@ -201,12 +203,47 @@ check("a comp past the layer cap is drawn truncated and says how many it left ou
   assert.equal(v.layersOmitted, 37);
   assert.equal(many.layers.length, MAX_VIEW_LAYERS + 37, "the stored fingerprint is not mutated");
 });
+check("comp markers are capped, drawn once, and the remainder counted", () => {
+  const fp = fingerprint([layer(1, 1)]);
+  fp.markers = Array.from({ length: MAX_VIEW_MARKERS + 900 }, (_, i) => `${(i % 100) / 10}|m${i}|0`);
+  const v = apps.snapshotViewData(fp);
+  assert.equal(v.fingerprint.markers.length, MAX_VIEW_MARKERS);
+  assert.equal(v.markersOmitted, 900);
+  assert.equal(fp.markers.length, MAX_VIEW_MARKERS + 900, "the stored fingerprint is not mutated");
+  const script = COMP_TIMELINE_HTML.match(/<script>([\s\S]*)<\/script>/)[1];
+  assert.doesNotMatch(script, /underlay\(/, "markers are not redrawn inside every row");
+  assert.match(script, /var over=el\("div","over"\)/, "markers go into one shared overlay");
+  assert.match(script, /markersOmitted/, "the view says how many markers it left out");
+});
+check("a diff's changes are bounded by the same cut as the layers, and the rest counted", () => {
+  const n = MAX_VIEW_LAYERS + 50;
+  const before = fingerprint(Array.from({ length: n + MAX_VIEW_REMOVED + 7 }, (_, i) => layer(1 + i, i + 1)));
+  const after = fingerprint(Array.from({ length: n }, (_, i) => layer(1 + i, i + 1, { keyCounts: { Opacity: 2 } })));
+  after.layers.push(layer(99999, n + 1)); // added past the cut
+  const diff = {
+    summary: "s", changeCount: 0,
+    added: [{ id: 99999 }],
+    changed: after.layers.slice(0, n).map((l) => ({ id: l.id, name: l.name, changes: { keyCounts: {} } })),
+    removed: before.layers.slice(n).map((l) => ({ id: l.id, name: l.name, type: l.type })),
+  };
+  const v = apps.diffViewData(before, after, diff);
+  assert.equal(v.fingerprint.layers.length, MAX_VIEW_LAYERS);
+  assert.deepEqual(v.diff.added, [], "an added layer past the cut is not sent");
+  assert.equal(Object.keys(v.diff.changed).length, MAX_VIEW_LAYERS, "only changes to drawn layers travel");
+  assert.equal(v.diff.removed.length, MAX_VIEW_REMOVED);
+  assert.equal(v.diff.changesOmitted, 1 + 50 + 7, "added + changed past the cut + removed past the cap");
+  assert.match(COMP_TIMELINE_HTML, /diff\.changesOmitted/, "the view names what it left out");
+});
+check("a text-fallback diff is not labelled a snapshot", () => {
+  assert.ok(COMP_TIMELINE_HTML.includes('kind:j.changeCount!==undefined?"diff-text":"snapshot"'));
+});
 check("clientSupportsApps reads the declared capability and nothing else", () => {
   assert.equal(apps.clientSupportsApps(undefined), false);
   assert.equal(apps.clientSupportsApps({}), false);
   assert.equal(apps.clientSupportsApps({ extensions: {} }), false);
   assert.equal(apps.clientSupportsApps({ extensions: { [UI_EXTENSION]: { mimeTypes: [UI_MIME] } } }), true);
   assert.equal(apps.clientSupportsApps({ extensions: { [UI_EXTENSION]: { mimeTypes: ["text/html"] } } }), false);
+  assert.equal(apps.clientSupportsApps({ extensions: { [UI_EXTENSION]: {} } }), false, "mimeTypes is required by the spec");
 });
 
 console.log(`mcp-apps: ${passed} checks passed`);

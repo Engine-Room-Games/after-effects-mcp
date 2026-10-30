@@ -37,6 +37,10 @@ export const COMP_TIMELINE_URI = "ui://after-effects/comp-timeline.html";
 export const VIEW_DATA_KEY = "engineroom.games/compTimeline";
 /** A comp with more layers than this is drawn truncated, and the view says so. */
 export const MAX_VIEW_LAYERS = 500;
+/** Comp markers past this many are not drawn; the view says how many. Drawn once, not per row. */
+export const MAX_VIEW_MARKERS = 100;
+/** Removed layers drawn as ghosts after a diff; the rest are counted. */
+export const MAX_VIEW_REMOVED = 100;
 
 /** Tools whose result the timeline can draw. */
 export const APP_TOOLS: ReadonlySet<string> = new Set(["snapshot_comp", "diff_comp"]);
@@ -50,20 +54,19 @@ export function clientSupportsApps(caps: unknown): boolean {
     | { mimeTypes?: unknown }
     | undefined;
   if (!ext || typeof ext !== "object") return false;
-  // The spec makes mimeTypes required; a client that sent the extension
-  // without it is read as supporting the only type there is.
-  if (!Array.isArray(ext.mimeTypes)) return true;
-  return ext.mimeTypes.includes(UI_MIME);
+  // The spec makes mimeTypes required: a client that did not name this type
+  // has not said it can render it.
+  return Array.isArray(ext.mimeTypes) && ext.mimeTypes.includes(UI_MIME);
 }
 
 /**
- * The tool `_meta` linking a tool to the view. `ui.resourceUri` is the spec's
- * form; the flat `ui/resourceUri` is the earlier one, still read by hosts
- * built against the draft, and costs nothing beside it.
+ * The tool `_meta` linking a tool to the view, in the spec's nested form. The
+ * flat `ui/resourceUri` key was the draft's and the stable spec (2026-01-26)
+ * deprecates it, so it is not sent.
  */
 export function toolUiMeta(name: string): Record<string, unknown> | undefined {
   if (!APP_TOOLS.has(name)) return undefined;
-  return { ui: { resourceUri: COMP_TIMELINE_URI }, "ui/resourceUri": COMP_TIMELINE_URI };
+  return { ui: { resourceUri: COMP_TIMELINE_URI } };
 }
 
 export const COMP_TIMELINE_RESOURCE = {
@@ -79,18 +82,24 @@ export const COMP_TIMELINE_RESOURCE = {
 /* eslint-disable @typescript-eslint/no-explicit-any -- fingerprints are JSON from ExtendScript */
 type Fp = Record<string, any>;
 
-function boundLayers(fp: Fp): { fingerprint: Fp; layersOmitted: number } {
-  const layers = Array.isArray(fp.layers) ? fp.layers : [];
-  if (layers.length <= MAX_VIEW_LAYERS) return { fingerprint: fp, layersOmitted: 0 };
+/**
+ * The fingerprint as drawn: at most MAX_VIEW_LAYERS layers and MAX_VIEW_MARKERS
+ * comp markers, each remainder counted so the view can say what it left out.
+ * The stored fingerprint is never mutated.
+ */
+function bound(fp: Fp): { fingerprint: Fp; layersOmitted: number; markersOmitted: number } {
+  const layers: Fp[] = Array.isArray(fp.layers) ? fp.layers : [];
+  const markers: unknown[] = Array.isArray(fp.markers) ? fp.markers : [];
   return {
-    fingerprint: { ...fp, layers: layers.slice(0, MAX_VIEW_LAYERS) },
-    layersOmitted: layers.length - MAX_VIEW_LAYERS,
+    fingerprint: { ...fp, layers: layers.slice(0, MAX_VIEW_LAYERS), markers: markers.slice(0, MAX_VIEW_MARKERS) },
+    layersOmitted: Math.max(0, layers.length - MAX_VIEW_LAYERS),
+    markersOmitted: Math.max(0, markers.length - MAX_VIEW_MARKERS),
   };
 }
 
 /** What the view draws for a snapshot. */
 export function snapshotViewData(fingerprint: Fp): Record<string, unknown> {
-  return { kind: "snapshot", ...boundLayers(fingerprint) };
+  return { kind: "snapshot", ...bound(fingerprint) };
 }
 
 /**
@@ -99,22 +108,36 @@ export function snapshotViewData(fingerprint: Fp): Record<string, unknown> {
  * timing comes from the previous one, to draw as a ghost.
  */
 export function diffViewData(before: Fp, after: Fp, diff: Record<string, any>): Record<string, unknown> {
+  const drawn = bound(after);
+  // Only changes to layers the view draws travel with it, so the payload is
+  // bounded by the same cap as the layers; the rest are counted.
+  const shown = new Set<unknown>((drawn.fingerprint.layers as Fp[]).map((l) => l.id));
+  let changesOmitted = 0;
+  const keep = (list: Fp[] | undefined): Fp[] => {
+    const all = list ?? [];
+    const kept = all.filter((x) => shown.has(x.id));
+    changesOmitted += all.length - kept.length;
+    return kept;
+  };
   const old = new Map<unknown, Fp>();
   for (const l of (before.layers as Fp[]) ?? []) old.set(l.id, l);
-  const removed = ((diff.removed as Fp[]) ?? []).slice(0, MAX_VIEW_LAYERS).map((r) => {
+  const allRemoved: Fp[] = diff.removed ?? [];
+  changesOmitted += Math.max(0, allRemoved.length - MAX_VIEW_REMOVED);
+  const removed = allRemoved.slice(0, MAX_VIEW_REMOVED).map((r) => {
     const l = old.get(r.id) ?? {};
     return { id: r.id, name: r.name, type: r.type, inPoint: l.inPoint, outPoint: l.outPoint };
   });
   return {
     kind: "diff",
-    ...boundLayers(after),
+    ...drawn,
     diff: {
       summary: diff.summary,
       changeCount: diff.changeCount,
-      added: ((diff.added as Fp[]) ?? []).map((a) => a.id),
-      changed: Object.fromEntries(((diff.changed as Fp[]) ?? []).map((c) => [c.id, c.changes])),
-      reordered: ((diff.reordered as Fp[]) ?? []).map((r) => r.id),
+      added: keep(diff.added).map((a) => a.id),
+      changed: Object.fromEntries(keep(diff.changed).map((c) => [c.id, c.changes])),
+      reordered: keep(diff.reordered).map((r) => r.id),
       removed,
+      changesOmitted,
       comp: diff.comp ?? null,
     },
   };
@@ -147,7 +170,7 @@ export const COMP_TIMELINE_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Comp timeline</title>
 <style>
-:root{--bg:#fff;--fg:#1d1d1f;--muted:#6e6e73;--line:#e3e3e8;--bar:#5b7bd5;--wa:rgba(91,123,213,.10);--add:#2e9d5b;--chg:#c98a12;--del:#c94040;--mk:#8a5cd1;
+:root{--namew:clamp(110px,32%,220px);--bg:#fff;--fg:#1d1d1f;--muted:#6e6e73;--line:#e3e3e8;--bar:#5b7bd5;--wa:rgba(91,123,213,.10);--add:#2e9d5b;--chg:#c98a12;--del:#c94040;--mk:#8a5cd1;
 font:12px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;color-scheme:light}
 :root[data-theme=dark]{--bg:#1e1e20;--fg:#ececf0;--muted:#9a9aa2;--line:#35353a;--bar:#7d97e8;--wa:rgba(125,151,232,.14);--add:#4cc27f;--chg:#e0a93a;--del:#e06666;--mk:#b08ae8;color-scheme:dark}
 body{margin:0;padding:12px;background:var(--bg);color:var(--fg)}
@@ -155,7 +178,8 @@ h1{font-size:14px;margin:0 0 2px}.meta{color:var(--muted);margin-bottom:8px}
 .summary{margin:0 0 8px;padding:6px 8px;border-left:3px solid var(--chg);background:var(--wa)}
 .tools{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
 .tools input[type=search]{flex:1;min-width:120px;padding:3px 6px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg)}
-.grid{display:grid;grid-template-columns:minmax(120px,32%) 1fr;align-items:center}
+.grid{position:relative;display:grid;grid-template-columns:var(--namew) 1fr;align-items:center}
+.over{position:absolute;top:0;bottom:0;left:var(--namew);right:0;pointer-events:none}
 .ruler,.row{display:contents}
 .name{padding:3px 6px 3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid var(--line)}
 .name .idx{color:var(--muted);display:inline-block;min-width:2.2em}
@@ -199,7 +223,7 @@ window.addEventListener("message",function(ev){
 function fromResult(r){
   if(!r)return;
   var d=r._meta&&r._meta[KEY];
-  if(!d&&r.content){for(var i=0;i<r.content.length;i++){var c=r.content[i];if(c&&c.type==="text"){try{var j=JSON.parse(c.text);if(j&&j.fingerprint){d={kind:"snapshot",fingerprint:j.fingerprint,layersOmitted:0};break;}}catch(e){}}}}
+  if(!d&&r.content){for(var i=0;i<r.content.length;i++){var c=r.content[i];if(c&&c.type==="text"){try{var j=JSON.parse(c.text);if(j&&j.fingerprint){d={kind:j.changeCount!==undefined?"diff-text":"snapshot",fingerprint:j.fingerprint};var mk=d.fingerprint.markers;if(mk&&mk.length>${MAX_VIEW_MARKERS}){d.markersOmitted=mk.length-${MAX_VIEW_MARKERS};d.fingerprint.markers=mk.slice(0,${MAX_VIEW_MARKERS});}break;}}catch(e){}}}}
   if(!d){var a=el("div","empty");a.textContent=r.isError?"The call failed; nothing to draw.":"This result carries no timeline data. Call snapshot_comp with includeFingerprint:true to draw it here.";mount(a);return;}
   data=d;selected=null;render();
 }
@@ -214,9 +238,14 @@ function render(){
   var byId={};layers.forEach(function(l){byId[l.id]=l;});
   var root=el("div");
   root.appendChild(el("h1",null,fp.name||"Comp"));
-  root.appendChild(el("div","meta",[fp.width+"\\u00d7"+fp.height,secs(num(fp.duration,0)),num(fp.frameRate,0)+" fps",(fp.numLayers!==undefined?fp.numLayers:layers.length)+" layers",data.kind==="diff"?"after the diff":"snapshot"].join(" \\u00b7 ")));
+  root.appendChild(el("div","meta",[fp.width+"\\u00d7"+fp.height,secs(num(fp.duration,0)),num(fp.frameRate,0)+" fps",(fp.numLayers!==undefined?fp.numLayers:layers.length)+" layers",data.kind==="snapshot"?"snapshot":"after the diff"].join(" \\u00b7 ")));
   if(diff&&diff.summary)root.appendChild(el("p","summary",diff.summary));
-  if(data.layersOmitted)root.appendChild(el("p","summary","Showing the first "+layers.length+" layers; "+data.layersOmitted+" more are not drawn."));
+  var left=[];
+  if(data.layersOmitted)left.push("the first "+layers.length+" layers are drawn; "+data.layersOmitted+" more are not");
+  if(data.markersOmitted)left.push((fp.markers||[]).length+" comp markers are drawn; "+data.markersOmitted+" more are not");
+  if(diff&&diff.changesOmitted)left.push(diff.changesOmitted+" added, changed or removed layers are not marked here (the text result lists them)");
+  if(data.kind==="diff-text")left.push("drawn from the text result, so changes are not marked");
+  if(left.length)root.appendChild(el("p","summary","Left out: "+left.join("; ")+"."));
   var tools=el("div","tools"),q=el("input");q.type="search";q.placeholder="Filter layers by name";q.value=filter;
   q.addEventListener("input",function(){filter=q.value;render();var n=document.querySelector("input[type=search]");if(n){n.focus();n.setSelectionRange(n.value.length,n.value.length);}});
   tools.appendChild(q);
@@ -224,11 +253,11 @@ function render(){
   root.appendChild(tools);
   var grid=el("div","grid");
   function pct(t){return Math.max(0,Math.min(100,num(t,0)/dur*100));}
-  function underlay(track){
-    var ws=num(fp.workAreaStart,0),wd=num(fp.workAreaDuration,dur);
-    if(ws>0||wd<dur){var w=el("div","wa");w.style.left=pct(ws)+"%";w.style.width=(pct(ws+wd)-pct(ws))+"%";track.appendChild(w);}
-    (fp.markers||[]).forEach(function(s){var t=parseFloat(String(s).split("|")[0]);if(isFinite(t)){var m=el("div","mk");m.style.left=pct(t)+"%";m.title=String(s).split("|")[1]||"marker";track.appendChild(m);}});
-  }
+  // Work area and markers are drawn once, in one overlay across every row.
+  var over=el("div","over");
+  var ws=num(fp.workAreaStart,0),wd=num(fp.workAreaDuration,dur);
+  if(ws>0||wd<dur){var wa=el("div","wa");wa.style.left=pct(ws)+"%";wa.style.width=(pct(ws+wd)-pct(ws))+"%";over.appendChild(wa);}
+  (fp.markers||[]).forEach(function(s){var t=parseFloat(String(s).split("|")[0]);if(isFinite(t)){var m=el("div","mk");m.style.left=pct(t)+"%";over.appendChild(m);}});
   var ruler=el("div","ruler");ruler.appendChild(el("div","name",""));var rt=el("div","track");
   var step=dur<=2?0.5:dur<=10?1:dur<=30?5:dur<=120?10:60;
   for(var t=0;t<dur-step*0.3;t+=step){var k=el("div","tick",secs(t));k.style.left=pct(t)+"%";rt.appendChild(k);}
@@ -239,7 +268,7 @@ function render(){
     var n=el("div","name");n.appendChild(el("span","idx",l.index!==undefined?String(l.index):"\\u2013"));n.appendChild(document.createTextNode(l.name||("Layer "+l.id)));
     if(l.parentId!==null&&l.parentId!==undefined&&byId[l.parentId])n.appendChild(el("span","par"," \\u21b3 "+byId[l.parentId].name));
     n.title=info;r.appendChild(n);
-    var tr=el("div","track");underlay(tr);
+    var tr=el("div","track");
     var b=el("div","bar");var a=pct(l.inPoint),z=pct(l.outPoint);b.style.left=a+"%";b.style.width=Math.max(z-a,0.4)+"%";tr.appendChild(b);
     var bs=el("div","badges"),kc=l.keyCounts||{};
     Object.keys(kc).forEach(function(p){bs.appendChild(el("span","b",p+" "+kc[p]));});
@@ -264,7 +293,7 @@ function render(){
     row(l,cls,describe(l,ch)+(isAdd?"\\nadded":"")+(reordered[l.id]?"\\nreordered":""));shown++;
   });
   if(diff)(diff.removed||[]).forEach(function(l){if(f&&String(l.name||"").toLowerCase().indexOf(f)<0)return;row({id:l.id,name:l.name,type:l.type,inPoint:l.inPoint,outPoint:l.outPoint,parentId:null},"del",describe(l)+"\\nremoved");shown++;});
-  root.appendChild(grid);
+  grid.insertBefore(over,grid.firstChild);root.appendChild(grid);
   if(!shown)root.appendChild(el("p","empty",layers.length?"No layer matches.":"This comp has no layers."));
   var det=el("div","detail");det.textContent=selected!==null&&byId[selected]?describe(byId[selected],changed[selected]):"Click a layer to see its timing and its parent and children; hover for details.";
   root.appendChild(det);
