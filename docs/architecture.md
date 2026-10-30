@@ -413,7 +413,9 @@ and an SDK client with and without the capability.
   support elicitation" run `delete_comp` unasked.
 - **No answer is never a yes.** Decline, cancel, no answer in time
   (`confirmTimeoutMs`, below; the SDK's 60s default is a timeout for
-  machines), a failed prompt and the tool call being cancelled all return
+  machines — measured by `confirmWithUser`'s own timer, with the SDK's request
+  timeout set a minute above it, so a client that answers with the
+  request-timeout code is a failed prompt, never "nobody answered"), a failed prompt and the tool call being cancelled all return
   `isError` with "was not run … Nothing in the After Effects project was
   changed". Not routed through `fail()`: it is the person's answer, and no
   journal entry applies to it.
@@ -425,7 +427,13 @@ and an SDK client with and without the capability.
   issued after a `revert_comp` cannot land before it and then be wiped by it —
   while no *other* session on the same After Effects waits on a dialog. The
   cost falls only on this session: its later writes wait for the answer.
-  The prompt's limit is derived from this session's queue wait
+  While the person decides, the queue clocks of this session's writes queued
+  behind the confirmation are stopped (`WriteLease.pauseWaiters`): a write
+  that queued *before* the prompt began — behind an earlier write, alongside
+  the confirmation — must not time out because someone took a minute to read
+  a dialog, nor blame the op in front for it. A write that waited through a
+  prompt says so, in `queuedBehind` or in its queue-timeout message. On top of
+  that, the prompt's limit is derived from this session's queue wait
   (`AE_MCP_WRITE_QUEUE_WAIT_MS`, 600s by default): at most 5 minutes, and at
   most 90% of that wait minus the time already spent since the reservation,
   so the prompt always gives up before a write queued behind it would — a
@@ -464,6 +472,10 @@ and an SDK client with and without the capability.
   batch, can do anything and is not asked about: this is a convenience for the
   person, not a security boundary, and the client's own tool approval is the
   gate for raw scripts.
+- **One session's prompt never holds another's writes.** Pinned with the
+  front desk on and two sessions: session B's write goes through while
+  session A's prompt is open, which fails the moment the desk lock is taken
+  before the prompt.
 - **A timeout does not bill the person's reading time.** The timeout message
   says how much of a call went on "earlier steps"; the span the prompt was
   open is subtracted (`promptMs`), so a person who took a minute to answer

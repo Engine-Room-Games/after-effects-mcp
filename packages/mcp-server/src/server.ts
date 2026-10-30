@@ -850,11 +850,16 @@ export function createServer(opts: CreateServerOptions = {}) {
       }
       if (prompt && prompt.ask !== false) {
         const promptStarted = Date.now();
+        // This session's writes queued behind the prompt stop their queue
+        // clocks while a person decides, and are told what they waited for.
+        const resumeWaiters = reserved.pauseWaiters?.() ?? (() => {});
         const outcome = await confirmWithUser(
           name,
           args as Record<string, unknown>,
           prompt,
-          (params, timeout) => server.elicitInput(params, { relatedRequestId: extra.requestId, signal: extra.signal, timeout }),
+          // The SDK's own timeout sits a minute above confirmWithUser's timer,
+          // which is the only one allowed to mean "nobody answered".
+          (params, signal, timeout) => server.elicitInput(params, { relatedRequestId: extra.requestId, signal, timeout: timeout + 60_000 }),
           extra.signal,
           (m) => logger.warn(m),
           confirmTimeoutMs(promptStarted - reservedAt, writes.maxWaitMs)
@@ -862,6 +867,7 @@ export function createServer(opts: CreateServerOptions = {}) {
         // Time spent by a person reading a dialog is not time this call spent
         // on After Effects, and a timeout's "earlier steps" must not count it.
         promptMs = Date.now() - promptStarted;
+        resumeWaiters();
         if (!outcome.proceed) {
           reserved.release();
           return errorResult(outcome.message);

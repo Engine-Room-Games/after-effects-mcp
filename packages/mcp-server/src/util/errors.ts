@@ -445,14 +445,22 @@ export function aeErrorText(e: AeError): string {
  * bridge that is answering perfectly well.
  */
 export class WriteQueueWaitError extends Error {
-  constructor(public op: string, public waitedMs: number, public behind: string) {
-    super(WriteQueueWaitError.message(op, waitedMs, behind));
+  constructor(public op: string, public waitedMs: number, public behind: string, public confirmation?: string) {
+    super(WriteQueueWaitError.message(op, waitedMs, behind, confirmation));
     this.name = "WriteQueueWaitError";
   }
-  static message(op: string, waitedMs: number, behind: string): string {
+  static message(op: string, waitedMs: number, behind: string, confirmation?: string): string {
     const secs = Math.round(waitedMs / 1000);
     return [
       `\`${op}\` waited ${secs}s behind \`${behind}\` for the After Effects write queue and was dropped without running.`,
+      // Its clock was stopped while that op waited on a person (issue #245),
+      // so the seconds above are all spent on work, never on the dialog.
+      ...(confirmation
+        ? [
+            `It also waited while \`${confirmation}\` waited for the user to answer a confirmation prompt; that time is not`,
+            "counted in the figure above.",
+          ]
+        : []),
       "",
       "This is neither a lost connection nor a busy bridge. The panel is fine and this",
       "call never reached After Effects, so nothing in the project was changed.",

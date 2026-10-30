@@ -115,7 +115,7 @@ function spanText(ms: number): string {
     const m = Math.round(ms / 60_000);
     return `${m} minute${m === 1 ? "" : "s"}`;
   }
-  const sec = Math.round(ms / 1000);
+  const sec = Math.max(1, Math.round(ms / 1000));
   return `${sec} second${sec === 1 ? "" : "s"}`;
 }
 
@@ -258,7 +258,13 @@ export async function buildPrompt(name: string, args: Record<string, unknown>, r
   return null;
 }
 
-export type Elicit = (params: ElicitRequestFormParams, timeoutMs: number) => Promise<ElicitResult>;
+/**
+ * Send the prompt. `signal` aborts it — the tool call was cancelled, or this
+ * module's own timer ran out; the SDK then tells the client to withdraw it.
+ * Whatever request timeout the sender sets must sit above `timeoutMs`, so
+ * that the only "no answer in time" is the one measured here.
+ */
+export type Elicit = (params: ElicitRequestFormParams, signal: AbortSignal, timeoutMs: number) => Promise<ElicitResult>;
 
 export type ConfirmOutcome =
   | { proceed: true; args: Record<string, unknown> }
@@ -273,10 +279,13 @@ export function notRunMessage(
   return `${tool} was not run: ${why}. Nothing in the After Effects project was changed. ${next}`;
 }
 
-function isTimeout(e: unknown): boolean {
-  // McpError carries ErrorCode.RequestTimeout (-32001) when the SDK's own
-  // request timeout fires.
-  return typeof e === "object" && e !== null && (e as { code?: unknown }).code === -32001;
+/**
+ * An error's message without the SDK's prefix repeated: an McpError the
+ * client raised arrives wrapped again ("MCP error -32603: MCP error -32603: …").
+ */
+function errorText(e: unknown): string {
+  const m = (e as Error)?.message ?? String(e);
+  return m.replace(/^(MCP error -?\d+: )(?:MCP error -?\d+: )+/, "$1");
 }
 
 /**
@@ -328,11 +337,18 @@ export async function confirmWithUser(
   timeoutMs: number = CONFIRM_TIMEOUT_MAX_MS
 ): Promise<ConfirmOutcome> {
   let answer: ElicitResult;
+  // "No answer in time" is this timer and nothing else. An error code from the
+  // wire is the client's to choose: a client answering -32001 (the SDK's
+  // request-timeout code) is a failed prompt, not a person who never looked.
+  const expiry = new AbortController();
+  const timer = setTimeout(() => expiry.abort(), timeoutMs);
+  timer.unref?.();
+  const both = signal ? AbortSignal.any([signal, expiry.signal]) : expiry.signal;
   try {
-    answer = await elicit({ mode: "form", message: prompt.message, requestedSchema: prompt.requestedSchema }, timeoutMs);
+    answer = await elicit({ mode: "form", message: prompt.message, requestedSchema: prompt.requestedSchema }, both, timeoutMs);
   } catch (e) {
     if (signal?.aborted) return { proceed: false, message: notRunMessage(tool, "the call was cancelled while the confirmation prompt was open") };
-    if (isTimeout(e)) {
+    if (expiry.signal.aborted) {
       return {
         proceed: false,
         message: notRunMessage(tool, `nobody answered the confirmation prompt within ${spanText(timeoutMs)}`),
@@ -342,10 +358,12 @@ export async function confirmWithUser(
       // The client said it could show a prompt and then turned out not to
       // implement it. Refusing would make the tool unusable on that client for
       // good; going on is exactly what every client without elicitation gets.
-      log(`${tool}: the client advertised elicitation but does not implement it (${(e as Error).message}); running without a prompt.`);
+      log(`${tool}: the client advertised elicitation but does not implement it (${errorText(e)}); running without a prompt.`);
       return { proceed: true, args };
     }
-    return { proceed: false, message: notRunMessage(tool, `the confirmation prompt failed (${(e as Error)?.message ?? String(e)})`) };
+    return { proceed: false, message: notRunMessage(tool, `the confirmation prompt failed (${errorText(e)})`) };
+  } finally {
+    clearTimeout(timer);
   }
   if (answer.action === "accept") {
     const content = (answer.content ?? {}) as Record<string, unknown>;

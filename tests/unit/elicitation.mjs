@@ -20,10 +20,18 @@
 //   node tests/unit/elicitation.mjs
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocketServer } from "ws";
+
+// The front-desk check below elects a desk, which writes a file in the home
+// folder; never the real one.
+process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), "ae-mcp-elicit-"));
+process.env.USERPROFILE = process.env.HOME;
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
@@ -49,6 +57,7 @@ const bridge = http.createServer((req, res) => {
     seen.push({ op, args });
     if (op === "get_comp" && args.compId === 666) await new Promise((r) => setTimeout(r, 1000));
     if (op === "delete_comp" && args.compId === 777) await new Promise((r) => setTimeout(r, 1500));
+    if (op === "set_comp" && args.compId === 99) await new Promise((r) => setTimeout(r, 1000));
     let result = { ok: true, op };
     if (op === "get_comp") result = { id: args.compId, name: "Hero Title" };
     if (op === "purge_unused_footage" && args.dryRun) {
@@ -82,14 +91,15 @@ assert.notEqual(port, 7777, "must not bind the panel's port");
 process.env.AE_MCP_PORT = String(port);
 
 const { createServer } = await import(dist("server.js"));
+const { WriteQueue } = await import(dist("bridge", "writeQueue.js"));
 const { confirmWithUser, notRunMessage, cannotElicit, confirmTimeoutMs, CONFIRMED_OPS } = await import(dist("tools", "confirm.js"));
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { ElicitRequestSchema, McpError, ErrorCode } = await import("@modelcontextprotocol/sdk/types.js");
 
 /** A connected pair; `answer(params)` is the person, when the client can ask one. */
-async function connect(capabilities, answer) {
-  const server = createServer();
+async function connect(capabilities, answer, opts = {}) {
+  const server = createServer(opts);
   const client = new Client({ name: "elicitation-test", version: "0" }, { capabilities });
   if (answer) client.setRequestHandler(ElicitRequestSchema, (req) => answer(req.params));
   const [c, s] = InMemoryTransport.createLinkedPair();
@@ -391,6 +401,7 @@ for (const [label, thrown] of [
     reply = { action: "accept", content: {} };
     assert.equal(res.isError, true, text(res));
     assert.ok(!ops().includes("delete_comp"), `delete_comp ran unasked: ${ops()}`);
+    assert.ok((text(res).match(/MCP error -32603:/g) ?? []).length <= 1, `the error prefix repeats: ${text(res)}`);
   });
 }
 
@@ -420,6 +431,54 @@ await check("the prompt gives up before a write queued behind it would", async (
   await slow.client.close();
 });
 
+await check("a write queued earlier than the confirmation does not time out while the prompt is open", async () => {
+  process.env.AE_MCP_WRITE_QUEUE_WAIT_MS = "4000";
+  const slow = await connect({ elicitation: {} }, () => new Promise(() => {}));
+  delete process.env.AE_MCP_WRITE_QUEUE_WAIT_MS;
+  seen.length = 0;
+  // W0 holds the queue for 1s; the confirmation and S queue behind it at once,
+  // so S's queue clock starts a second before the prompt does.
+  const w0 = slow.client.callTool({ name: "set_comp", arguments: { compId: 99, name: "w0" } });
+  await new Promise((r) => setTimeout(r, 20));
+  const d = slow.client.callTool({ name: "delete_comp", arguments: { compId: 10 } });
+  await new Promise((r) => setTimeout(r, 20));
+  const sCall = slow.client.callTool({ name: "set_comp", arguments: { compId: 11, name: "s" } });
+  const [w0r, dr, sr] = await Promise.all([w0, d, sCall]);
+  assert.equal(w0r.isError, undefined, text(w0r));
+  assert.equal(dr.isError, true);
+  assert.match(text(dr), /nobody answered/);
+  assert.equal(sr.isError, undefined, `the write queued behind the prompt timed out: ${text(sr)}`);
+  assert.match(text(sr), /waited for the user to answer a confirmation/);
+  await slow.client.close();
+});
+
+await check("front desk: a pending prompt in one session does not hold another session's writes", async () => {
+  const deskPort = await new Promise((r) => {
+    const t = net.createServer().listen(0, "127.0.0.1", () => { const p = t.address().port; t.close(() => r(p)); });
+  });
+  let release;
+  const held = new Promise((r) => (release = r));
+  const a = await connect({ elicitation: {} }, async () => { await held; return { action: "accept", content: {} }; }, { frontDesk: { port: deskPort } });
+  const b = await connect({}, null, { frontDesk: { port: deskPort } });
+  // Let both elect: one leads the desk, the other joins it.
+  await b.client.callTool({ name: "list_comps", arguments: {} });
+  await a.client.callTool({ name: "list_comps", arguments: {} });
+  seen.length = 0;
+  const pending = a.client.callTool({ name: "delete_comp", arguments: { compId: 10 } });
+  while (!seen.some((s) => s.op === "get_comp")) await new Promise((r) => setTimeout(r, 5));
+  const other = await Promise.race([
+    b.client.callTool({ name: "set_comp", arguments: { compId: 11, name: "b" } }),
+    new Promise((_, rej) => setTimeout(() => rej(new Error("session B's write waited behind session A's prompt")), 3000)),
+  ]);
+  assert.equal(other.isError, undefined, text(other));
+  release();
+  const res = await pending;
+  assert.equal(res.isError, undefined, text(res));
+  assert.deepEqual(ops(), ["get_comp", "set_comp", "delete_comp"]);
+  await a.client.close();
+  await b.client.close();
+});
+
 await check("the call cancelled while the prompt is open runs nothing", async () => {
   seen.length = 0;
   let release;
@@ -443,11 +502,35 @@ await check("the call cancelled while the prompt is open runs nothing", async ()
 const prompt = { message: "Delete?", requestedSchema: { type: "object", properties: {} } };
 
 await check("no answer in time is a refusal, never a yes", async () => {
-  const timeout = Object.assign(new Error("Request timed out"), { code: -32001 });
-  const out = await confirmWithUser("delete_comp", { compId: 1 }, prompt, async () => { throw timeout; });
+  const waitForAbort = (_p, sig) => new Promise((_, rej) => sig.addEventListener("abort", () => rej(new Error("aborted"))));
+  const out = await confirmWithUser("delete_comp", { compId: 1 }, prompt, waitForAbort, undefined, undefined, 50);
   assert.equal(out.proceed, false);
-  assert.match(out.message, /nobody answered/);
+  assert.match(out.message, /nobody answered the confirmation prompt within 1 second/);
   assert.match(out.message, /Nothing in the After Effects project was changed/);
+});
+
+await check("a client answering -32001 is a failed prompt, not 'nobody answered'", async () => {
+  const out = await confirmWithUser("delete_comp", { compId: 1 }, prompt, async () => {
+    throw new McpError(ErrorCode.RequestTimeout, "Request timed out");
+  });
+  assert.equal(out.proceed, false);
+  assert.match(out.message, /confirmation prompt failed/);
+  assert.doesNotMatch(out.message, /nobody answered/);
+});
+
+await check("the queue clock behind a confirmation stops, and the timeout says what it waited for", async () => {
+  const q = new WriteQueue({ maxWaitMs: 300, maxDepth: 8 });
+  const a = await q.acquire("delete_comp");
+  const resume = a.pauseWaiters();
+  let settled = null;
+  const b = q.acquire("set_comp").then(() => (settled = "granted"), (e) => (settled = e));
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(settled, null, "a waiter timed out while the holder waited on a person");
+  resume();
+  await b;
+  assert.ok(settled instanceof Error, "the waiter should time out once the clock runs again");
+  assert.match(settled.message, /waited for the user to answer a confirmation prompt/);
+  a.release();
 });
 
 await check("any other prompt failure refuses", async () => {
