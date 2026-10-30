@@ -104,3 +104,5 @@ it, but never present it as a render. Items in `rendered` finished before the
 cancel and are good. A file that was at the output path before the render (an
 earlier render, with `overwrite:true`) is never listed in `partialFiles` and is
 not replaced by the cancel; the partial is then named at its temp-folder path.
+Each partial file is named exactly — delete by those names, never by a
+`[####]` pattern or a folder.

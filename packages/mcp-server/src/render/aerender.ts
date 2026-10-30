@@ -759,8 +759,8 @@ export function relocateShadowOutputs(
   /**
    * A cancelled render's partial output must never replace a file that was
    * there before the render: when this says so for a destination, the file
-   * stays in the job folder and is named in `kept` (a sequence's frames by
-   * their pattern) instead of being moved.
+   * stays in the job folder and is named in `kept` — each file exactly, a
+   * sequence's frames one by one — instead of being moved.
    */
   keep?: (dest: string) => boolean
 ): { moved: string[]; problems: string[]; kept: string[] } {
@@ -781,8 +781,7 @@ export function relocateShadowOutputs(
     if (owners.length !== 1) continue;
     const to = path.join(path.dirname(owners[0].o.path), name);
     if (keep?.(to)) {
-      const named = owners[0].seq ? path.join(path.dirname(f), path.basename(owners[0].o.path)) : f;
-      if (!kept.includes(named)) kept.push(named);
+      if (!kept.includes(f)) kept.push(f);
       continue;
     }
     try {
@@ -855,8 +854,9 @@ export function unchangedSince(f: string, before: Map<string, FileStamp>): boole
  * asked path counts only when this render wrote it — a file that was there
  * before and is unchanged is a previous render's, complete, and never a
  * partial — plus anything `kept` in the job folder because the asked path
- * held such a file. A sequence is named by its pattern when any frame of it
- * is new or changed.
+ * held such a file. Every file is named exactly — a sequence's frames one by
+ * one, never by its pattern, which would also cover frames from an earlier
+ * render that are left as they were (#217 review).
  */
 export function cancelledPartials(
   outputs: RenderOutputPlan[],
@@ -866,7 +866,9 @@ export function cancelledPartials(
   const found: string[] = [];
   for (const o of outputs) {
     if (!o.path) continue;
-    if (outputFiles(o.path).some((f) => !!stampOf(f) && !unchangedSince(f, before))) found.push(o.path);
+    for (const f of outputFiles(o.path)) {
+      if (stampOf(f) && !unchangedSince(f, before) && !found.includes(f)) found.push(f);
+    }
   }
   for (const k of kept) if (!found.includes(k)) found.push(k);
   return found;
@@ -1919,6 +1921,18 @@ export class RenderRunner {
         note: `This render had already finished (${status}) — there was nothing to cancel. await_job or get_job returns its outcome.`,
       };
     }
+    if (r.settled) {
+      // The job's outcome is already decided — every item rendered, or the
+      // job failed — and only its last steps (unticking the queue) remain.
+      // Nothing is rendering, and nothing it wrote is partial (#217 review).
+      return {
+        jobId,
+        stopped: false,
+        wasRunning: false,
+        status: "finishing",
+        note: "This render had already finished and was only tidying up the Render Queue — there was nothing to cancel. await_job or get_job returns its outcome.",
+      };
+    }
     if (r.cancelDone) {
       // A second cancel while the first is still stopping: wait for it, then
       // answer from where things stand (finished, or this cancel tries again).
@@ -1937,7 +1951,10 @@ export class RenderRunner {
   private async cancelRunning(r: Running): Promise<CancelReport> {
     const jobId = r.jobId;
     r.cancelled = true;
-    const item = r.plan.items[r.itemPos];
+    // An item already verified and listed in `rendered` is not interrupted,
+    // whatever itemPos still says: its files are finished work.
+    const pos = r.plan.items[r.itemPos];
+    const item = pos && !r.rendered.some((x) => x.index === pos.index) ? pos : undefined;
     const child = r.child;
     const exited = r.exited;
     let aerenderGone = true;
@@ -1960,19 +1977,17 @@ export class RenderRunner {
       await this.signalEngines(r, true);
       survivors = await this.engineSurvivors(r, this.graceMs);
     }
-    let stopped = aerenderGone && survivors.length === 0;
-    if (!stopped) {
-      // From here on the late exit, if it ever comes, is run()'s to settle.
-      // It may already have come in the instant since the last check, in
-      // which case run() has finished and this report can say so honestly.
-      r.cancelGaveUp = true;
-      if (this.current !== r && survivors.length === 0) stopped = true;
-    }
+    const stopped = aerenderGone && survivors.length === 0;
+    // From here on the late exit, if it ever comes, is run()'s to settle —
+    // run() waits for this cancel to finish before it looks (cancelDone).
+    if (!stopped) r.cancelGaveUp = true;
     // run() relocates as aerender exits; this catches what an engine that
     // outlived aerender wrote after that (#215).
     if (item) this.relocate(r, item);
     const partialFiles = item ? cancelledPartials(item.outputs, r.before, r.kept) : [];
     const leftAlone = item ? [...r.before.keys()].filter((f) => unchangedSince(f, r.before)) : [];
+    const moved = partialFiles.filter((f) => !r.kept.includes(f));
+    const list = (fs_: string[]) => fs_.slice(0, 10).join(", ") + (fs_.length > 10 ? ` and ${fs_.length - 10} more` : "");
     const report: CancelReport = {
       jobId,
       stopped,
@@ -1985,13 +2000,15 @@ export class RenderRunner {
       note: stopped
         ? "aerender and its render engine were stopped and have exited; no later item was started. " +
           (partialFiles.length
-            ? `The interrupted item's output is INCOMPLETE and was left on disk: ${partialFiles.join(", ")} — tell the user, or delete it, rather than presenting it as a render. `
+            ? `The interrupted item's output is INCOMPLETE: exactly the ${partialFiles.length} file(s) in \`partialFiles\` — tell the user, or delete those files by name (never by a folder or a [####] pattern), rather than presenting them as a render. `
             : "No partial output was found on disk. ") +
+          (moved.length ? `At the asked location: ${list(moved)}. ` : "") +
           (r.kept.length
-            ? `The output path already held a file from before this render, which was NOT replaced; the partial output was left in the temp folder instead (${r.kept.join(", ")}), where it is cleared after a day. `
+            ? `In the temp folder, because a file from before this render was at the asked path and was NOT replaced: ${list(r.kept)}. ` +
+              "These are cleared by the first render_queue started a day or more from now. "
             : "") +
           (leftAlone.length
-            ? `${leftAlone.slice(0, 5).join(", ")}${leftAlone.length > 5 ? ` and ${leftAlone.length - 5} more` : ""} existed before this render and ${leftAlone.length === 1 ? "is" : "are"} unchanged — not partial output; do not delete ${leftAlone.length === 1 ? "it" : "them"}. `
+            ? `Not partial — these existed before this render and are unchanged; do not delete them: ${list(leftAlone)}. `
             : "") +
           (r.relocateProblems.length
             ? `Part of the output could not be moved out of the render's private copy folder, which is deleted: ${r.relocateProblems.join("; ")}. `
@@ -2071,7 +2088,8 @@ export class RenderRunner {
 /**
  * The end of a job: its folder goes, copy and chain — unless a cancelled
  * item's partial output was kept in it (see Running.kept), in which case only
- * the copy goes and the folder is left for the stale sweep, a day later.
+ * the copy goes and the folder is left for the stale sweep of the first render
+ * started a day or more later.
  */
 function removeJobFolder(r: Running): void {
   if (!r.kept.length) {
