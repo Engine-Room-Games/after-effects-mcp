@@ -671,7 +671,13 @@ export function createServer(opts: CreateServerOptions = {}) {
         }
         if (name === "setup_panel") {
           const a = schemas.StrictOpSchemas.setup_panel.parse(rawArgs);
-          const installed = await installPanel({ enableDebugMode: a.enableDebugMode, force: a.force });
+          // Throws, changing nothing, while After Effects is open (issue #262);
+          // the catch below hands that refusal over as the error it is.
+          const installed = await installPanel({
+            enableDebugMode: a.enableDebugMode,
+            force: a.force,
+            afterEffectsClosed: a.afterEffectsClosed,
+          });
           // The panel on disk just changed; whatever was cached about the
           // running one is now the wrong half of the comparison.
           panelGate.invalidate();

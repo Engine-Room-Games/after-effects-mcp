@@ -41,7 +41,7 @@ export type PanelState =
   | "current"
   /** Panel files have been updated but AE is still running the old code. */
   | "restart-needed"
-  /** The installed panel predates this server; setup_panel then restart. */
+  /** The installed panel predates this server; quit AE, setup_panel, reopen. */
   | "update-needed"
   /** Files on disk are a mix of versions; no restart can resolve it. */
   | "partial-install"
@@ -124,8 +124,9 @@ function sameHashes(a: PanelHashes, b: PanelHashes | null | undefined): boolean 
 
 const STALE_PANEL_ADVICE =
   "Tell the user this in plain language, then do it: the After Effects panel is older than these tools and does not " +
-  "understand everything they can do now. Run setup_panel, then ask them to quit and reopen After Effects. " +
-  "Do not retry the failed call until they confirm it has restarted.";
+  "understand everything they can do now. Ask them to quit After Effects completely; once they confirm it is " +
+  "closed, run setup_panel (it refuses while After Effects is open), then ask them to reopen After Effects. " +
+  "Do not retry the failed call until they confirm it is open again.";
 
 /** What each capability lets the server do, in words a user would recognise. */
 const CAPABILITY_WORDS: Readonly<Record<string, string>> = {
@@ -152,8 +153,8 @@ export function panelDrivenBatchMessage(jobId: string): string {
     `done; After Effects answering other calls is not. If After Effects quits or restarts first, await_job ends ` +
     `it as lost and says how far it got. To stop it early, call cancel_job({jobId: "${jobId}"}). ` +
     `Only a panel older than these tools runs a batch on its ` +
-    `own, so once await_job reports it finished, and never before: run setup_panel, and ask the user to quit and ` +
-    `reopen After Effects.`
+    `own, so once await_job reports it finished, and never before: ask the user to quit After Effects completely, ` +
+    `then run setup_panel, then ask them to reopen After Effects.`
   );
 }
 

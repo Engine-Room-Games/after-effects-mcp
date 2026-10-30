@@ -97,8 +97,12 @@ Effects is open does not work.** So the order is fixed:
 - **After Effects is closed** — install now. When they open it, the panel is
   simply there. On a first-time setup, do the install *before* asking them to
   open AE.
-- **After Effects is open** — do not call `setup_panel` yet. Ask them to quit
-  After Effects first, then install, then have them reopen it.
+- **After Effects is open** — do not call `setup_panel` yet: it refuses while
+  After Effects is open and changes nothing. Ask them to quit After Effects
+  first, then install, then have them reopen it.
+- **`setup_panel` says it could not tell whether After Effects is open** — ask
+  the user to make sure it is completely quit; once they confirm, call it again
+  with `afterEffectsClosed: true`. Never pass that on a guess.
 
 `check_setup` reports `afterEffectsRunning`, so you always know which case you
 are in before you say anything.

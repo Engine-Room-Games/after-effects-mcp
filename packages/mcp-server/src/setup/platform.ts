@@ -70,18 +70,59 @@ export async function enableDebugMode(): Promise<number[]> {
   return enabled;
 }
 
-export async function isAfterEffectsRunning(): Promise<boolean> {
+/**
+ * Whether After Effects is running, as one of three answers. "unknown" is when
+ * the question itself could not be asked — the command missing, refused, or
+ * failing in some way other than "nothing matched". setup_panel refuses on
+ * "running" and on "unknown" (issue #262), so the two must never be folded
+ * into "not-running" the way a bare boolean does.
+ *
+ *   macOS:   `pgrep -lf "Adobe After Effects"` — exit 0 with the matches,
+ *            exit 1 when nothing matches; any other outcome is a failure.
+ *   Windows: `tasklist /FI "IMAGENAME eq AfterFX.exe" /NH` — the image name is
+ *            in its output when AE runs. A plain non-zero exit with no match is
+ *            read as "nothing matched", as this check always has; a command
+ *            that could not run at all is a failure.
+ *
+ * `detail` names what was found, so a false positive — a leftover
+ * CEPHtmlEngine, an `aerender` from the same install folder — can be
+ * recognised by the person asked to quit it.
+ */
+export interface AfterEffectsProcess {
+  state: "running" | "not-running" | "unknown";
+  detail: string;
+}
+
+export async function afterEffectsProcess(): Promise<AfterEffectsProcess> {
+  const win = process.platform === "win32";
   try {
-    if (process.platform === "win32") {
+    if (win) {
       const { stdout } = await exec("tasklist", ["/FI", "IMAGENAME eq AfterFX.exe", "/NH"]);
-      return /AfterFX\.exe/i.test(stdout);
+      const line = stdout.split(/\r?\n/).find((l) => /AfterFX\.exe/i.test(l));
+      return line
+        ? { state: "running", detail: line.trim().replace(/\s+/g, " ") }
+        : { state: "not-running", detail: "no AfterFX.exe process" };
     }
-    const { stdout } = await exec("pgrep", ["-f", "Adobe After Effects"]);
-    return stdout.trim().length > 0;
-  } catch {
-    // pgrep exits non-zero when nothing matches; tasklist can too.
-    return false;
+    const { stdout } = await exec("pgrep", ["-lf", "Adobe After Effects"]);
+    const first = stdout.split("\n").map((l) => l.trim()).find(Boolean);
+    return first
+      ? { state: "running", detail: first.length > 160 ? `${first.slice(0, 160)}…` : first }
+      : { state: "not-running", detail: "no After Effects process" };
+  } catch (e) {
+    const err = e as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: string };
+    // pgrep's "nothing matched" is exit status 1: an answer, not a failure.
+    if (!win && err.code === 1) return { state: "not-running", detail: "no After Effects process" };
+    if (win && err.code === 1 && !/AfterFX\.exe/i.test(String(err.stdout ?? ""))) {
+      return { state: "not-running", detail: "no AfterFX.exe process" };
+    }
+    const why = (typeof err.stderr === "string" && err.stderr.trim()) || err.message || String(e);
+    return { state: "unknown", detail: `${win ? "tasklist" : "pgrep"} failed: ${why.split("\n")[0].trim()}` };
   }
+}
+
+/** check_setup's yes/no view. "unknown" reads as not running there, as it always has. */
+export async function isAfterEffectsRunning(): Promise<boolean> {
+  return (await afterEffectsProcess()).state === "running";
 }
 
 /**

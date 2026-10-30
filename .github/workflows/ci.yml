@@ -169,6 +169,9 @@ jobs:
       - name: A half-written panel install is detected
         run: node tests/unit/panel-install.mjs
 
+      - name: setup_panel refuses while After Effects is running (#262)
+        run: node tests/unit/setup-panel-ae-running.mjs
+
       # A busy AE and a dead bridge are the same event at the socket layer, and
       # the only difference the user sees is which remedy we prescribe.
       - name: Bridge timeouts are diagnosed apart from disconnections
