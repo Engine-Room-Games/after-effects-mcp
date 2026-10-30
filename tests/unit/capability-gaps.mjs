@@ -6,7 +6,9 @@
 //   - keyframe flags on set_interpolation (continuous, auto-bezier, roving),
 //     read back by get_keyframes, and a per-dimension ease on set_temporal_ease
 //   - box (paragraph) text on create_text_layer and set_text
-//   - the Repeater's Transform group on add_shape_content
+//   - the Repeater's Transform group and composite on add_shape_content
+//   - gradient fills/strokes, refused with the measured reason (their colour
+//     stops have no value type in After Effects)
 //
 // Every one of these was reachable only through run_jsx before. Each test
 // fails without the feature: the field was stripped or refused by the strict
@@ -105,15 +107,33 @@ const EXTEND = `
     };
   }
 
-  // A shape layer whose Contents can hold a Repeater with its Transform group.
+  // A shape layer whose Contents can hold a Repeater with its Transform group,
+  // or a Gradient Fill whose Colors cannot be written.
+  var GRAD_WRITES = 0;
   function shapeLayer(c, id) {
     var l = c.addLayer(id, "Shape", "shape");
     var T = PropertyValueType;
     var contents = l._root._add(new FakeGroup("Contents", "ADBE Root Vectors Group", true, function (mn) {
-      if (mn !== "ADBE Vector Filter - Repeater") throw new Error("fake: only repeaters");
+      if (mn === "ADBE Vector Graphic - G-Fill") {
+        // Measured on AE 26.5: Colors has no value type and takes no expression.
+        var gf = new FakeGroup("Gradient Fill 1", mn, false);
+        var colors = gf._add(new FakeProperty("Colors", "ADBE Vector Grad Colors", undefined, T.NO_VALUE, { canSetExpression: false }));
+        colors.setValue = function () { GRAD_WRITES++; throw new Error("Can not get or set a value from this property. This property's propertyValueType is PropertyValueType.NO_VALUE."); };
+        colors.setValueAtTime = colors.setValue;
+        gf._add(new FakeProperty("Start Point", "ADBE Vector Grad Start Pt", [0, 0], T.TwoD_SPATIAL));
+        return gf;
+      }
+      if (mn !== "ADBE Vector Filter - Repeater") throw new Error("fake: only repeaters and gradient fills");
       var r = new FakeGroup("Repeater 1", mn, false);
       r._add(new FakeProperty("Copies", "ADBE Vector Repeater Copies", 3, T.OneD));
       r._add(new FakeProperty("Offset", "ADBE Vector Repeater Offset", 0, T.OneD));
+      // 1 = Below (default), 2 = Above; AE refuses anything else (measured, 26.5).
+      var order = r._add(new FakeProperty("Composite", "ADBE Vector Repeater Order", 1, T.OneD));
+      var setOrder = order.setValue;
+      order.setValue = function (v) {
+        if (v !== 1 && v !== 2) throw new Error("Value " + v + " out of range 1 to 2.");
+        setOrder.call(order, v);
+      };
       var tf = r._add(new FakeGroup("Transform", "ADBE Vector Repeater Transform", false));
       tf._add(new FakeProperty("Anchor Point", "ADBE Vector Repeater Anchor", [0, 0], T.TwoD_SPATIAL));
       tf._add(new FakeProperty("Position", "ADBE Vector Repeater Position", [100, 0], T.TwoD_SPATIAL));
@@ -490,6 +510,52 @@ check("add_shape_content sets a Repeater's Transform group", () => {
     return [t.property("ADBE Vector Repeater Position").value, t.property("ADBE Vector Repeater Scale").value,
       t.property("ADBE Vector Repeater Rotation").value, t.property("ADBE Vector Repeater Opacity 2").value];})()`);
   assert.deepEqual(tf, [[40, 0], [90, 90], 15, 20]);
+});
+
+check("add_shape_content maps a Repeater's composite name to AE's 1 = below, 2 = above", () => {
+  const ae = scene();
+  ae.run(`var SH = shapeLayer(C, 9);`);
+  const order = (i) => ae.json(`SH.property("Contents").property(${i}).property("ADBE Vector Repeater Order").value`);
+  ok(ae.call("add_shape_content", { compId: 100, layerId: 9, content: { type: "repeater", composite: "above" } }), "above");
+  assert.equal(order(1), 2);
+  ok(ae.call("add_shape_content", { compId: 100, layerId: 9, content: { type: "repeater", composite: "Below" } }), "below");
+  assert.equal(order(2), 1);
+  ok(ae.call("add_shape_content", { compId: 100, layerId: 9, content: { type: "repeater", composite: 2 } }), "bare 2");
+  assert.equal(order(3), 2);
+  // Past the schema (run_jsx, a raw bridge call) a wrong name is refused and the node removed.
+  refused(ae.call("add_shape_content", { compId: 100, layerId: 9, content: { type: "repeater", composite: "front" } }),
+    /composite \('front' is not a known name\)/, "unknown composite name");
+  assert.equal(ae.json(`SH.property("Contents").numProperties`), 3);
+});
+
+check("the schema takes composite as below/above or 1/2 and nothing else", () => {
+  const rep = (composite) => S.AddShapeContent.safeParse({ compId: 1, layerId: 2, content: { type: "repeater", composite } });
+  assert.equal(rep("ABOVE").data.content.composite, "above");
+  assert.equal(rep(1).success, true);
+  assert.equal(rep(3).success, false);
+  assert.equal(rep("front").success, false);
+});
+
+check("a gradient fill or stroke is refused with the measured reason, not as an unknown type", () => {
+  const ae = scene();
+  ae.run(`var SH = shapeLayer(C, 9);`);
+  for (const type of ["gradientFill", "gradient-stroke", "gfill", "G-Stroke"]) {
+    refused(ae.call("add_shape_content", { compId: 100, layerId: 9, content: { type } }),
+      /does not offer gradient.*NO_VALUE.*Nothing was changed.*ADBE Ramp/, type);
+  }
+  refused(ae.call("add_shape_content", { compId: 100, layerId: 9, content: { type: "blob" } }), /Unknown shape content type: blob/, "blob");
+  assert.equal(ae.json(`SH.property("Contents").numProperties`), 0);
+  assert.equal(S.AddShapeContent.safeParse({ compId: 1, layerId: 2, content: { type: "gradientFill" } }).success, false);
+});
+
+check("set_shape_property refuses a gradient's Colors before writing, and still sets its other properties", () => {
+  const ae = scene();
+  ae.run(`var SH = shapeLayer(C, 9); SH.property("Contents").addProperty("ADBE Vector Graphic - G-Fill");`);
+  refused(ae.call("set_shape_property", { compId: 100, layerId: 9, contentPath: ["Contents", "Gradient Fill 1"], property: "Colors", value: [0, 1, 0, 0, 1, 0, 0, 1] }),
+    /colour stops cannot be set from a script.*Nothing was changed/, "colors");
+  assert.equal(ae.json(`GRAD_WRITES`), 0, "the refusal comes before any setValue");
+  ok(ae.call("set_shape_property", { compId: 100, layerId: 9, contentPath: ["Contents", "Gradient Fill 1"], property: "Start Point", value: [-50, 0] }), "start point");
+  assert.deepEqual(ae.json(`SH.property("Contents").property(1).property("ADBE Vector Grad Start Pt").value`), [-50, 0]);
 });
 
 check("an unknown Repeater transform key is refused by the schema", () => {

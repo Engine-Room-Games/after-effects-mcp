@@ -1022,6 +1022,8 @@ export const ShapeContent = z.discriminatedUnion("type", [
     name: z.string().optional(),
     copies: z.number().optional(),
     offset: z.number().optional(),
+    composite: z.union([namedEnum(["below", "above"]), z.literal(1), z.literal(2)]).optional()
+      .describe("below (After Effects' 1, the default: each copy behind the one before) or above (2)."),
     // The Repeater's own Transform group (issue #181): what each copy adds to
     // the one before it.
     transform: z.object({
