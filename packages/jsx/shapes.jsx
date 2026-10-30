@@ -323,8 +323,14 @@ OPS.set_shape_property = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
   var node = walkProperty(l, args.contentPath);
-  var pp = node.property(args.property);
-  if (!pp) throw new Error("No property: " + args.property);
+  var pp = null;
+  try { pp = node.property(args.property); } catch (eProp) { pp = null; }
+  if (!pp) {
+    var kids = __childListing(node, __PATH_CHILD_CAP);
+    throw new Error("set_shape_property: no property " + JSON.stringify(args.property) + " on '" + node.name + "' (" +
+      node.matchName + ")." + (kids ? " Its children (name = matchName): " + kids + "." : (kids === "" ? " It has no children." : "")) +
+      " Nothing was changed.");
+  }
   if (pp.matchName === "ADBE Vector Grad Colors") throw new Error("set_shape_property: " + __GRADIENT_REFUSAL);
   __requireKeyTime(!!args.keyframe, args.time, "set_shape_property");
   __setOrKeyAtTime(pp, args.value, args.time, !!args.keyframe, "set_shape_property");

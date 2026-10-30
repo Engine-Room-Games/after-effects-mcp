@@ -51,6 +51,13 @@ not be read as a spec and its opening text is returned instead; `found: false`
 means there is none — build with sensible defaults and offer once, at the end,
 to capture one from what you made. Do not nag about it.
 
+Pass the palette's hexes as they are. Every colour field takes `"#ff8800"` or
+`"#f80"` as well as RGB 0..1, and so does a `value` aimed at a colour property;
+a hex `value` aimed at anything else is refused, not converted. There is no
+alpha form: After Effects ignores a colour's alpha channel when it renders, so
+`#ff8800cc` is refused — set transparency with Opacity, the layer's or a shape
+fill's or stroke's.
+
 ## Orient before you touch anything
 
 Never guess at project state. Cheap reads exist for exactly this, and the

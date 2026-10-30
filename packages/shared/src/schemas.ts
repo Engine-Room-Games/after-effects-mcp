@@ -7,11 +7,44 @@ import { z } from "zod";
  */
 
 // ---------- primitives ----------
-export const Color = z.tuple([z.number(), z.number(), z.number()]).describe("RGB 0..1");
-export const ColorRGBA = z.tuple([z.number(), z.number(), z.number(), z.number()]);
 export const Vec2 = z.tuple([z.number(), z.number()]);
 export const Vec3 = z.tuple([z.number(), z.number(), z.number()]);
 export const VecAny = z.union([z.number(), Vec2, Vec3, z.array(z.number())]);
+/**
+ * Hex colours (issue #170). A house style's palette is written in hex, and an
+ * agent converting `#FF8800` to `[1, 0.533, 0]` by hand is a place to get it
+ * wrong. `#` is optional; 3 or 6 digits.
+ *
+ * No alpha form (`#rrggbbaa`, `#rgba`). Measured on AE 26.5: a shape Fill
+ * Color, an effect's Color and a text animator's Fill Color all STORE an alpha
+ * of 0 and render exactly as with 1 — so accepting it would answer ok:true for
+ * transparency that never shows. The refusal says where transparency lives.
+ */
+export const HEX_RGB = /^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const HEX_MESSAGE =
+  "Hex colour is '#rrggbb' or '#rgb'. After Effects ignores a colour's alpha, so '#rrggbbaa' is refused: " +
+  "set transparency with Opacity (the layer's, or a shape fill's/stroke's).";
+const Hex = z.string().regex(HEX_RGB, HEX_MESSAGE);
+/**
+ * `#f80` -> [1, 0x88/255, 0]. Channels 0..1, unrounded. `__hexToRgb` in
+ * values.jsx is the same arithmetic, and tests/unit/hex-colour.mjs holds the
+ * two to the same answers.
+ */
+export function hexToRgb(hex: string): [number, number, number] {
+  let h = hex.replace(/^#/, "");
+  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255) as [number, number, number];
+}
+const RGB = z.tuple([z.number(), z.number(), z.number()]);
+export const Color = z.union([RGB, Hex.transform(hexToRgb)]).describe("RGB 0..1, or hex '#ff8800'.");
+export const ColorRGBA = z.tuple([z.number(), z.number(), z.number(), z.number()]);
+/**
+ * The `value` of a write aimed at any property. A hex string is checked for
+ * form here and converted in After Effects (`__hexValue`, values.jsx), where
+ * the property's type is known: only a colour property takes it, so a hex
+ * aimed at Position is refused instead of landing as three small numbers.
+ */
+const PropertyValue = z.union([VecAny, Hex]).describe("A colour property also takes hex '#ff8800'.");
 
 /**
  * A closed set of names, matched without regard to case and forwarded in the
@@ -720,7 +753,7 @@ export const AddKeyframe = z.object({
   layerId: z.number(),
   propertyPath: PropertyPath,
   time: z.number().describe("Comp seconds."),
-  value: VecAny,
+  value: PropertyValue,
   interpolation: Interpolation.optional(),
 });
 export const RemoveKeyframe = z.object({
@@ -882,7 +915,7 @@ const SetEffectParamBase = crossField(
       .describe("The parameter's display name as list_effects reports it, in After Effects' UI language — 'Blurriness' on an English install, not on a localised one. Prefer paramMatchName."),
     paramMatchName: z.string().optional()
       .describe("Preferred. The parameter's matchName, e.g. 'ADBE Gaussian Blur 2-0001' — the same in every UI language. Tried before paramName when both are given."),
-    value: VecAny,
+    value: PropertyValue,
     time: z.number().optional().describe("Comp seconds."),
     keyframe: z.boolean().optional().meta({ default: false }),
   }),
@@ -954,7 +987,7 @@ export const SetShapePath = z.object({
  * as a silently-missing property and produce an empty shape that still reports
  * success.
  */
-const ShapeColor = z.union([Color, ColorRGBA]);
+const ShapeColor = z.union([RGB, ColorRGBA, Hex.transform(hexToRgb)]).describe("RGB 0..1, or hex '#ff8800'.");
 
 /** Matches a content type that names a gradient fill or stroke. Kept in step with shapes.jsx. */
 export const GRADIENT_TYPE = /grad|^g-?(fill|stroke)$/i;
@@ -1075,7 +1108,7 @@ export const SetShapeProperty = crossField(z.object({
   layerId: z.number(),
   contentPath: PropertyPath,
   property: z.string(),
-  value: VecAny,
+  value: PropertyValue,
   time: z.number().optional().describe("Comp seconds."),
   keyframe: z.boolean().optional().meta({ default: false }),
 }), keyframeNeedsTime);

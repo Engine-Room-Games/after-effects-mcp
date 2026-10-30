@@ -229,6 +229,10 @@ function installFakeAe(g) {
     root._add(new Group("Effects", "ADBE Effect Parade", true, effect));
     root._add(new Property("Marker", "ADBE Marker", null, T.MARKER, { canSetExpression: false }));
     self._root = root;
+    // A Layer is a PropertyGroup in AE: it has a matchName and counts its children.
+    self.matchName = kind === "text" ? "ADBE Text Layer" : kind === "shape" ? "ADBE Vector Layer" : "ADBE AV Layer";
+    self.propertyType = g.PropertyType.NAMED_GROUP;
+    Object.defineProperty(self, "numProperties", { get: function () { return root.numProperties; } });
     self.property = function (key) { return root.property(key); };
     self.sourceRectAtTime = function () { return { left: -50, top: -25, width: 100, height: 50 }; };
     self.remove = function () { comp._layers.splice(comp._layers.indexOf(self), 1); };
