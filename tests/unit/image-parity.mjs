@@ -1,28 +1,37 @@
-// The panel's image code and the server's copy of it must give identical
-// answers (issue #220, stage 4).
+// The server's image code, pinned to the bytes the panel's copy produced
+// (issues #220 stage 4, #243).
 //
 // Stage 4 moved the screenshot, contact-sheet and .mogrt-thumbnail work from
 // the panel (`packages/ae-panel/client/*.js`) to the server
-// (`packages/mcp-server/src/frames/*.ts`). The panel keeps its copy, because an
-// MCP server older than this one still asks it for base64 — so there are two
-// implementations of the same measured behaviour, and this file is what holds
-// them together:
+// (`packages/mcp-server/src/frames/*.ts`), and for a while both copies shipped
+// and this file compared them fixture by fixture. Issue #243 deleted the
+// panel's copy. What this file holds now is the result of that comparison:
+// every output below is pinned by sha256 to what both copies agreed on, so a
+// change to the server's image code that moves a single byte — PNG bytes,
+// decoded samples, sheet and zip bytes, frame-error and stale-frame text —
+// fails here and has to be re-pinned on purpose.
 //
-//   * module by module: the same fixtures through both, compared byte for byte
-//     (PNG bytes, decoded samples, the stale-check hash input, sheet and zip
-//     bytes) and message for message (frame errors, stale and timeout text);
+//   * module by module: the fixtures through the server's modules;
 //   * end to end: the real `client/main.js`, booted against a stub CEP host,
-//     answers the public op the way it always has, and the server's pipeline
-//     answers the same render through the raw op the panel passes through. The
-//     two results must be equal — the image, the metadata, the refusals.
+//     passes the raw ops through untouched, and the server's pipeline finishes
+//     each render — the image, the metadata, the refusals.
+//
+// Each scene also asserts what its answer means, so the pins are never the
+// only thing standing between a wrong answer and a pass.
 //
 // The measured traps each get a fixture: a 16-bit frame, premultiplied soft
 // edges (#130), an empty frame, partial writes and a corrupt file (#45), a
 // re-served render buffer (#29), and a static comp inside one contact sheet.
 //
 //   node tests/unit/image-parity.mjs
+//
+// Re-pinning after a deliberate change: IMAGE_PARITY_RECORD=1 prints the new
+// PINS table instead of checking it. IMAGE_PARITY_OLD_PANEL=<dir> additionally
+// compares the module checks against a directory holding the deleted panel
+// modules (`git show 6063cd6:packages/ae-panel/client/<file>`).
 
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -38,13 +47,6 @@ const clientDir = path.join(panelSrc, "client");
 const framesDist = path.join(root, "packages", "mcp-server", "dist", "frames");
 const load = (f) => import(pathToFileURL(path.join(framesDist, f)).href);
 
-const old = {
-  png: nodeRequire(path.join(clientDir, "pngcodec.js")),
-  reader: nodeRequire(path.join(clientDir, "framereader.js")),
-  cache: nodeRequire(path.join(clientDir, "framecache.js")),
-  sheet: nodeRequire(path.join(clientDir, "contactsheet.js")),
-  mogrt: nodeRequire(path.join(clientDir, "mogrt.js")),
-};
 const neu = {
   png: await load("pngCodec.js"),
   reader: await load("frameReader.js"),
@@ -53,6 +55,161 @@ const neu = {
   mogrt: await load("mogrtThumbnail.js"),
 };
 const { createFramePipeline } = await load("pipeline.js");
+
+const RECORD = process.env.IMAGE_PARITY_RECORD === "1";
+const OLD_DIR = process.env.IMAGE_PARITY_OLD_PANEL;
+const old = OLD_DIR
+  ? {
+      png: nodeRequire(path.join(OLD_DIR, "pngcodec.js")),
+      reader: nodeRequire(path.join(OLD_DIR, "framereader.js")),
+      cache: nodeRequire(path.join(OLD_DIR, "framecache.js")),
+      sheet: nodeRequire(path.join(OLD_DIR, "contactsheet.js")),
+      mogrt: nodeRequire(path.join(OLD_DIR, "mogrt.js")),
+    }
+  : null;
+
+// sha256 of each output, recorded with the old panel modules loaded and equal.
+const PINS = {
+  "normalizePng: 8-bit RGBA opaque": "3283f66686c2a61535b36762ca22f6cdfe1aa1555905662ed0c5b1f48fccde2a",
+  "decodePng8: 8-bit RGBA opaque": "b38a318cf2f5a271006ba940a05f59e5c176918b34f2c9877398fc84da069ece",
+  "normalizePng: 8-bit RGBA premultiplied soft edges": "7821fef3bcda3c685f224855948b1d7491fe8119f014ccd961e6c2971d984db7",
+  "decodePng8: 8-bit RGBA premultiplied soft edges": "3ff65faf1752da2223fe06dca841996c5258faddfa122a7c1c1d1ea6e9f856cf",
+  "normalizePng: 8-bit RGB": "24c5f3c68ee6d4838e474b24f0f66bb889d006ddeb67cfae385dae925e1c52c7",
+  "decodePng8: 8-bit RGB": "01978decc7af76997adb7a49fc3b45a2da1b6021e7944cc3430cc88cd895173b",
+  "normalizePng: 8-bit grey+alpha": "91bbca59f4a8d0caff2b19111ee0f9d6f4f067d31518b69b62522c09cc8f3153",
+  "decodePng8: 8-bit grey+alpha": "40feacb31086a8b8cc1a534823f356e4527c036cc10cda755b93e8fbf1e64dd5",
+  "normalizePng: 16-bit RGBA premultiplied": "878e5e38cdb99372cac89a65f911521ce76d0529a0182ef0c64ef4d4777f3961",
+  "decodePng8: 16-bit RGBA premultiplied": "e9da960b3fe30437aed82cbb9a61453b112e0bfa6b43432fcbe06e4a0c8a193d",
+  "normalizePng: 16-bit RGBA opaque": "7b2bda06ffdeb70684e6accc4026d7469500892d0b1a1ff6b7354eace9c9c77c",
+  "decodePng8: 16-bit RGBA opaque": "d153402cf101012ab48086466b43c269fa284e5c97bde5fd9cb4834f0469cabe",
+  "normalizePng: 16-bit RGB": "cbdbf0723a0414135f69ea99e8c614c7935bc9289efc0a8361dfabaa0e4ab7c5",
+  "decodePng8: 16-bit RGB": "b68e6b1245ed7146cbc2fc94f306db5aae5d1aa6a842dff3ff61fcddb766b829",
+  "normalizePng: empty (every pixel clear)": "ef31318e66af13008ab1ca48ee40c33643cb2cf951f2a525c61b6e4363a885a6",
+  "decodePng8: empty (every pixel clear)": "5e268ad4799c6609a93b62ee94b73b67b1217cb5df6ae9d6f07a3a2349abadfc",
+  "normalizePng: 16-bit empty": "e9e36c38948860be92a2eae8b4680fd29f8903dc912d9fdb6f24d31b40929eb3",
+  "decodePng8: 16-bit empty": "f9e295ae71e28b20045da38264f0c3e983d67621f4628e65aaf010b13cc39864",
+  "normalizePng: interlaced (passed through)": "3ee48f044b96d437fa16efe3deae329db3c69cf29d2f30d36238700014fca9c3",
+  "decodePng8: interlaced (passed through)": "31ee743dd74cb8737ad47b550aa3440a1c5e0378685b9181393d074cc1e14d94",
+  "normalizePng: indexed (passed through)": "fcea27bbb5bcb5675816c9f06011f596427ec01aacc6d9dc1add4080e962bbe3",
+  "decodePng8: indexed (passed through)": "e717a5b101733603bcafebef1bb30f41b4aaa95bbb6138d64a3e0322b8e00138",
+  "normalizePng: with ancillary chunk": "d890d3f368b115c68481e9ef25f596691c17e59afcadd24a6a9fe702c96cecc2",
+  "decodePng8: with ancillary chunk": "8bb569799a475b5bfdc338cb1d6976325b2fc6ed9b0ce1ed4792ca17254250e6",
+  "normalizePng: refusals": "480d4db69b7b197460ad546a1b4495309185d586157823df21b6d5a7505b19b3",
+  "inspectPngStructure": "176a65c201ad5ac45cdec6fad30cc289ca95c4082f4acf48e3c239990368b11c",
+  "encodePng8 + crc32": "fc63918f89cefc9aa224334cb9e4d85943c4df13d255b7c62a586ed4a7c1401c",
+  "waitForCompletePng: stalled": "9e127faae75edd07ca4e51cb0cb6ae6ec74f60399a75491f05815ea6a7e2873d",
+  "waitForCompletePng: not a PNG, and a timeout": "156f70de8b2121b09ca33e70d92665e142706aefdc82cbacc0996c6752c351e5",
+  "dressFrameError": "4aa3031eb1c75c1cd33449e67750ba7ebec910c3fa75d81202f3ff2277743b2d",
+  "frame cache sequence": "03b219fc85546aa54a1f5c9b0da309cf8431585b84200c21274641f837717509",
+  "contact sheet: 1 tiles": "6964902fdd3ad955b8a5e56ccddb0022782c61e7c6df909e884094fd78d2f3ac",
+  "contact sheet: 2 tiles": "2e59bd99695a85716df209ca51f61e0d4db04362581af192ae42b6261c4262e2",
+  "contact sheet: 3 tiles": "2a3f4e4021f63c5e2af6bcb6a81058b806e5d5fa4429fbfc33f6b4658eb873a2",
+  "contact sheet: 4 tiles": "61d3107fed268bf7e4a87afc717c874751c94686f277cd5af494c67823a4e2cb",
+  "contact sheet: 5 tiles": "5b2ae5e2766e9fd3d53bafbb3daf30e9fc7b0957a1c3f09c4ed3a1bc4fd0a3ed",
+  "contact sheet: 6 tiles": "2fe90b30aba479a05b7b0ef3bfed1df3b128660e33d917c6c5b2912cc2044e7a",
+  "contact sheet: times, layouts, budgets": "148c3b6486c074f6e4e4540d6e7f004008c93a064536dfe633eb85935c4fb0ac",
+  ".mogrt thumbnail patches": "fe2d42cbb6fbe49e9f2108d9510a6a403f578f476ca8ab9d59371c05fb8a7c2d",
+  "end to end: an opaque 8-bit frame": "72872dfa18b9dcdb92bf67467b211adca10a41d82ae5cc8ab3e4b9ae3d76b265",
+  "end to end: premultiplied soft edges, un-premultiplied once (#130)": "36f731cfbf708d0b6af7e756d6bf2bb6aea56c960fae765c7a59415fa1432e1a",
+  "end to end: a 16-bit frame, converted to 8-bit": "0bb1c9391f2b37d2cff97c158c499527ee7ab84c2ed2efa1774c0a01b4598834",
+  "end to end: an empty frame: reported, never shipped": "679f2f35db70e9226b25239394dbbba5a5783ef746e1fbd7e418da45977a837f",
+  "end to end: an indexed frame, passed through with a warning": "e2bfa0d10d0a7690e0298163a8af377c9b380b0f56ba005c8d4fa78dc9711ef8",
+  "end to end: a solo'd layer": "68442cdeb69b980444d72ade5c47412f2ed694fd490e60cebfae6f2b66f09101",
+  "end to end: the same request again is not stale": "72872dfa18b9dcdb92bf67467b211adca10a41d82ae5cc8ab3e4b9ae3d76b265",
+  "end to end: a different request with identical pixels is refused as stale (#29)": "687c5de8ed7f47e381e9b4b5ace4db1381ffcf72d0c6069a622ea21c4f9ab157",
+  "end to end: a contact sheet: ok, 16-bit, empty, failed-in-AE, stale and a static pair": "7933187e1a9fe50d870a79aeac71c4735313c5aa1a01051c8511746cbe93adf0",
+  "end to end: a contact sheet whose every tile is a block": "5b6e840a41446666c97bfd6e5aa753d90a65a3453be425c89dfdad851448106d",
+  "end to end: a static pair inside one sheet is flagged, not refused": "3ec91047f751c3e0629cbda4591e740200c829fe66fd8d2f1dd051cb3c852a6d",
+  "end to end: corrupt render retried": "7fa398b81f8f5c375afed4e9941b4e97e922f0ddc3bc41f0346653e9d7c48baa",
+  "end to end: two corrupt renders": "c0504952735a024e00ed46494d1cac7f5c8f6276a1ea040f5f088baf60877c5d",
+  "end to end: the same request after two corrupt renders": "faa78a141c73bab636b3f40c21193b1ac9a3d80a4ebf695501bb52d96ac94195",
+  "end to end: corrupt contact-sheet tile": "72024c10ccef54a4db6c45a120562ce55fda535eba7038ee4cda95dd1a5c5c2a",
+  "end to end: export_mogrt, a poster over an RGBA thumbnail": "5383a0e1e95d122e3c6452641fab453b2e40f28337045f84b5082edacf10cb18",
+  "end to end: export_mogrt, a 16-bit poster over an RGB thumbnail": "79a95ac83d087c2eb69be57ee7f687ee89775788ecef03bc2d9d4585e12ab829",
+  "end to end: export_mogrt, no poster: the export is returned as it is": "77e35e8070cc2e28a33a5bdb324f7d4a3516d6cd7aeed123475cad04d49a4d5e",
+  "end to end: export_mogrt, a poster that is not a PNG": "21a3b27f5ce1b07ea552f98edf91f39e90e707d6b336cbb73f1833e3e51aeef1"
+};
+
+const recorded = {};
+const seen = new Set();
+// Compressed bytes are not pinned as bytes. Node's zlib picks its match-finding
+// hash by CPU, so the same deflate can come out differently on an x64 Windows
+// runner and an arm64 Mac while inflating to the same thing. A PNG is pinned
+// by its chunks with IDAT inflated, a zip by its entries inflated, and byte
+// counts (file sizes, sizes quoted in messages) are left out.
+const PNG_SIG = "89504e470d0a1a0a";
+function canonPng(buf) {
+  const chunks = [];
+  const idat = [];
+  let at = 8;
+  while (at + 8 <= buf.length) {
+    const len = buf.readUInt32BE(at);
+    const type = buf.toString("ascii", at + 4, at + 8);
+    const data = buf.subarray(at + 8, at + 8 + len);
+    if (type === "IDAT") idat.push(data);
+    else chunks.push([type, data.toString("hex")]);
+    at += 12 + len;
+  }
+  let pixels;
+  try { pixels = zlib.inflateSync(Buffer.concat(idat)).toString("hex"); } catch (e) { pixels = "uninflatable"; }
+  return { png: chunks, pixels, trailing: buf.length - at };
+}
+function canonZip(buf) {
+  const entries = [];
+  let at = 0;
+  while (at + 30 <= buf.length && buf.readUInt32LE(at) === 0x04034b50) {
+    const method = buf.readUInt16LE(at + 8);
+    const csize = buf.readUInt32LE(at + 18);
+    const nameLen = buf.readUInt16LE(at + 26);
+    const extraLen = buf.readUInt16LE(at + 28);
+    const name = buf.toString("utf8", at + 30, at + 30 + nameLen);
+    const body = buf.subarray(at + 30 + nameLen + extraLen, at + 30 + nameLen + extraLen + csize);
+    const data = method === 8 ? zlib.inflateRawSync(body) : body;
+    entries.push({ name, method, crc: buf.readUInt32LE(at + 14), data: canonBytes(data) });
+    at += 30 + nameLen + extraLen + csize;
+  }
+  return { zip: entries };
+}
+function canonBytes(buf) {
+  const hex = buf.toString("hex", 0, 8);
+  if (hex === PNG_SIG) return canonPng(buf);
+  if (hex.startsWith("504b0304")) return canonZip(buf);
+  return buf.toString("hex");
+}
+function canon(x) {
+  if (typeof x === "string") {
+    if (x.startsWith(PNG_SIG) || x.startsWith("504b0304")) return canonBytes(Buffer.from(x, "hex"));
+    if (x.startsWith("iVBORw0KGgo")) return canonBytes(Buffer.from(x, "base64"));
+    return x.replace(/\d+ bytes/g, "N bytes");
+  }
+  if (Array.isArray(x)) return x.map(canon);
+  if (x && typeof x === "object") {
+    const o = {};
+    for (const [k, v] of Object.entries(x)) if (k !== "bytes") o[k] = canon(v);
+    return o;
+  }
+  return x;
+}
+function digest(v) {
+  return crypto.createHash("sha256").update(JSON.stringify(canon(JSON.parse(JSON.stringify(v, (k, x) =>
+    x && x.type === "Buffer" && Array.isArray(x.data) ? Buffer.from(x.data).toString("hex") : x))))).digest("hex");
+}
+/**
+ * Pin `value` under `label`. With the old panel modules loaded, `oldValue()`
+ * must equal it first — that is how the pins were made.
+ */
+function pin(label, value, oldValue) {
+  if (old && oldValue) assert.deepEqual(value, oldValue(), `${label}: server and the panel's old copy differ`);
+  seen.add(label);
+  const d = digest(value);
+  if (RECORD) {
+    assert.equal(recorded[label], undefined, `duplicate pin label ${label}`);
+    recorded[label] = d;
+    return;
+  }
+  assert.ok(PINS[label], `no pin for "${label}" — re-record with IMAGE_PARITY_RECORD=1`);
+  assert.equal(d, PINS[label], `${label}: the server's output moved from the pinned bytes`);
+}
 
 let passed = 0;
 async function check(name, fn) {
@@ -132,7 +289,8 @@ function makePng({ w, h, depth = 8, colorType = 6, sample, interlace = 0, idatSp
   ihdr[8] = depth;
   ihdr[9] = colorType;
   ihdr[12] = interlace;
-  const z = zlib.deflateSync(Buffer.concat(rows));
+  // Stored blocks (level 0): the same fixture bytes on every CPU, see canon() above.
+  const z = zlib.deflateSync(Buffer.concat(rows), { level: 0 });
   const parts = [];
   const step = Math.ceil(z.length / idatSplit);
   for (let i = 0; i < z.length; i += step) parts.push(chunk("IDAT", z.subarray(i, i + step)));
@@ -180,22 +338,22 @@ function plainNorm(r) {
 }
 
 // ---------------------------------------------------------------------------
-// Module parity
+// Modules
 // ---------------------------------------------------------------------------
+const attempt = (fn) => {
+  try { return { r: fn() }; } catch (e) { return { e: e.message }; }
+};
+
 for (const [name, buf] of Object.entries(FIXTURES)) {
   await check(`normalizePng: ${name}`, () => {
-    assert.deepEqual(plainNorm(neu.png.normalizePng(buf)), plainNorm(old.png.normalizePng(buf)));
+    pin(`normalizePng: ${name}`, plainNorm(neu.png.normalizePng(buf)), () => plainNorm(old.png.normalizePng(buf)));
   });
   await check(`decodePng8: ${name}`, () => {
-    let a, b, ea, eb;
-    try { a = plainNorm(old.png.decodePng8(buf)); } catch (e) { ea = e.message; }
-    try { b = plainNorm(neu.png.decodePng8(buf)); } catch (e) { eb = e.message; }
-    assert.equal(eb, ea);
-    assert.deepEqual(b, a);
+    pin(`decodePng8: ${name}`, attempt(() => plainNorm(neu.png.decodePng8(buf))), () => attempt(() => plainNorm(old.png.decodePng8(buf))));
   });
 }
 
-await check("normalizePng: the 16-bit and soft-edge fixtures really are converted (the parity is not vacuous)", () => {
+await check("normalizePng: the 16-bit and soft-edge fixtures really are converted (the pins are not vacuous)", () => {
   const r16 = neu.png.normalizePng(FIXTURES["16-bit RGBA premultiplied"]);
   assert.equal(r16.converted, true);
   assert.equal(r16.unpremultiplied, true);
@@ -211,31 +369,30 @@ await check("normalizePng: the same refusal for what is not a readable PNG", () 
     FIXTURES["8-bit RGB"].subarray(0, 40),
     Buffer.concat([SIG, chunk("IHDR", Buffer.alloc(12))]),
   ];
-  for (const b of bad) {
-    let ea, eb;
-    try { old.png.normalizePng(b); } catch (e) { ea = e.message; }
-    try { neu.png.normalizePng(b); } catch (e) { eb = e.message; }
-    assert.ok(ea, "the panel accepted a broken file");
-    assert.equal(eb, ea);
-  }
+  const run = (m) => bad.map((b) => attempt(() => m.normalizePng(b)));
+  const got = run(neu.png);
+  for (const g of got) assert.ok(g.e, "a broken file was accepted");
+  pin("normalizePng: refusals", got, () => run(old.png));
 });
 
 await check("inspectPngStructure: every prefix of a frame, and garbage, read the same (#45)", () => {
   const whole = FIXTURES["16-bit RGBA premultiplied"];
-  for (let n = 0; n <= whole.length; n++) {
-    const p = whole.subarray(0, n);
-    assert.deepEqual(neu.png.inspectPngStructure(p), old.png.inspectPngStructure(p), `prefix of ${n} bytes`);
-  }
-  for (const g of [Buffer.from("After Effects wrote this"), Buffer.concat([SIG, chunk("IDAT", Buffer.alloc(3))])]) {
-    assert.deepEqual(neu.png.inspectPngStructure(g), old.png.inspectPngStructure(g));
-  }
+  const run = (m) => {
+    const out = [];
+    for (let n = 0; n <= whole.length; n++) out.push(m.inspectPngStructure(whole.subarray(0, n)));
+    for (const g of [Buffer.from("After Effects wrote this"), Buffer.concat([SIG, chunk("IDAT", Buffer.alloc(3))])]) {
+      out.push(m.inspectPngStructure(g));
+    }
+    return JSON.parse(JSON.stringify(out));
+  };
+  pin("inspectPngStructure", run(neu.png), () => run(old.png));
 });
 
-await check("encodePng8 and crc32: identical bytes", () => {
+await check("encodePng8 and crc32: pinned bytes", () => {
   const px = Buffer.alloc(7 * 5 * 4);
   for (let i = 0; i < px.length; i++) px[i] = (i * 31) & 0xff;
-  assert.ok(neu.png.encodePng8(7, 5, 6, px).equals(old.png.encodePng8(7, 5, 6, px)));
-  assert.equal(neu.png.crc32(px), old.png.crc32(px));
+  const run = (m) => ({ png: m.encodePng8(7, 5, 6, px).toString("hex"), crc: m.crc32(px) });
+  pin("encodePng8 + crc32", run(neu.png), () => run(old.png));
 });
 
 // --- frame reader: partial writes, corrupt files, timeouts ---
@@ -249,12 +406,11 @@ function writeInPieces(bytes, pieces, gapMs) {
   const step = Math.ceil(bytes.length / pieces);
   let at = 0;
   fs.writeFileSync(file, bytes.subarray(0, 0));
-  const timers = [];
   for (let i = 0; i < pieces; i++) {
-    timers.push(setTimeout(() => {
+    setTimeout(() => {
       fs.appendFileSync(file, bytes.subarray(at, at + step));
       at += step;
-    }, gapMs * (i + 1)));
+    }, gapMs * (i + 1));
   }
   return file;
 }
@@ -264,99 +420,91 @@ async function outcome(p) {
     const buf = await p;
     return { ok: true, hex: buf.toString("hex") };
   } catch (e) {
-    return { ok: false, code: e.code, detail: e.detail.replace(/f-\d+\.png/g, "f-N.png") };
+    // The stall length is measured, so it may differ by a rounding step.
+    return { ok: false, code: e.code, detail: e.detail.replace(/f-\d+\.png/g, "f-N.png").replace(/\d+s/g, "Ns") };
   }
 }
 
-await check("waitForCompletePng: a frame written in pauses longer than the poll arrives whole on both", async () => {
+await check("waitForCompletePng: a frame written in pauses longer than the poll arrives whole", async () => {
   const bytes = FIXTURES["8-bit RGBA premultiplied soft edges"];
-  const o = { stallMs: 2000, pollMs: 10 };
-  const [a, b] = await Promise.all([
-    outcome(old.reader.waitForCompletePng(writeInPieces(bytes, 4, 60), o)),
-    outcome(neu.reader.waitForCompletePng(writeInPieces(bytes, 4, 60), o)),
-  ]);
-  assert.deepEqual(b, a);
+  const a = await outcome(neu.reader.waitForCompletePng(writeInPieces(bytes, 4, 60), { stallMs: 2000, pollMs: 10 }));
   assert.equal(a.ok, true);
   assert.equal(a.hex, bytes.toString("hex"));
 });
 
-await check("waitForCompletePng: a write that stalls short of IEND is FRAME_INCOMPLETE on both, with the same detail", async () => {
+await check("waitForCompletePng: a write that stalls short of IEND is FRAME_INCOMPLETE, and the file is removed", async () => {
   const cut = FIXTURES["8-bit RGBA opaque"].subarray(0, FIXTURES["8-bit RGBA opaque"].length - 30);
-  const fa = tmpFile();
-  const fb = tmpFile();
-  fs.writeFileSync(fa, cut);
-  fs.writeFileSync(fb, cut);
-  const o = { stallMs: 150, pollMs: 10 };
-  const [a, b] = await Promise.all([
-    outcome(old.reader.waitForCompletePng(fa, o)),
-    outcome(neu.reader.waitForCompletePng(fb, o)),
-  ]);
+  const run = async (m) => {
+    const f = tmpFile();
+    fs.writeFileSync(f, cut);
+    const r = await outcome(m.waitForCompletePng(f, { stallMs: 150, pollMs: 10 }));
+    assert.ok(!fs.existsSync(f), "a failed read must remove the temp file");
+    return r;
+  };
+  const a = await run(neu.reader);
   assert.equal(a.code, "FRAME_INCOMPLETE");
-  assert.equal(b.code, a.code);
-  // The stall length is measured, so it may differ by a rounding step.
-  assert.equal(b.detail.replace(/\d+s/, "Ns"), a.detail.replace(/\d+s/, "Ns"));
-  assert.ok(!fs.existsSync(fa) && !fs.existsSync(fb), "a failed read must remove the temp file");
+  const b = old ? await run(old.reader) : null;
+  pin("waitForCompletePng: stalled", a, b && (() => b));
 });
 
 await check("waitForCompletePng: not a PNG is refused at once, and nothing arriving is RENDER_TIMEOUT", async () => {
-  const fa = tmpFile();
-  const fb = tmpFile();
-  fs.writeFileSync(fa, "not a png at all");
-  fs.writeFileSync(fb, "not a png at all");
-  const [a, b] = await Promise.all([
-    outcome(old.reader.waitForCompletePng(fa, { pollMs: 10 })),
-    outcome(neu.reader.waitForCompletePng(fb, { pollMs: 10 })),
-  ]);
-  assert.deepEqual(b, a);
-  assert.equal(a.code, "FRAME_INCOMPLETE");
-  const [ta, tb] = await Promise.all([
-    outcome(old.reader.waitForCompletePng(tmpFile(), { budgetMs: 120, pollMs: 10 })),
-    outcome(neu.reader.waitForCompletePng(tmpFile(), { budgetMs: 120, pollMs: 10 })),
-  ]);
-  assert.deepEqual(tb, ta);
-  assert.equal(ta.code, "RENDER_TIMEOUT");
+  const run = async (m) => {
+    const f = tmpFile();
+    fs.writeFileSync(f, "not a png at all");
+    const notPng = await outcome(m.waitForCompletePng(f, { pollMs: 10 }));
+    const timeout = await outcome(m.waitForCompletePng(tmpFile(), { budgetMs: 120, pollMs: 10 }));
+    return { notPng, timeout };
+  };
+  const a = await run(neu.reader);
+  assert.equal(a.notPng.code, "FRAME_INCOMPLETE");
+  assert.equal(a.timeout.code, "RENDER_TIMEOUT");
+  const b = old ? await run(old.reader) : null;
+  pin("waitForCompletePng: not a PNG, and a timeout", a, b && (() => b));
 });
 
-await check("dressFrameError: the same message for both failures and both attempt counts", () => {
-  for (const code of ["FRAME_INCOMPLETE", "RENDER_TIMEOUT"]) {
-    for (const n of [1, 2]) {
-      const a = old.reader.dressFrameError(old.reader.frameError(code, "a detail"), n);
-      const b = neu.reader.dressFrameError(neu.reader.frameError(code, "a detail"), n);
-      assert.equal(b.message, a.message);
-      assert.equal(b.code, a.code);
-      assert.doesNotMatch(b.message, /restart After Effects|setup_panel/);
+await check("dressFrameError: pinned messages for both failures and both attempt counts", () => {
+  const run = (m) => {
+    const out = [];
+    for (const code of ["FRAME_INCOMPLETE", "RENDER_TIMEOUT"]) {
+      for (const n of [1, 2]) {
+        const e = m.dressFrameError(m.frameError(code, "a detail"), n);
+        out.push({ message: e.message, code: e.code });
+      }
     }
-  }
+    return { out, budget: m.FRAME_RENDER_BUDGET_MS, stall: m.FRAME_STALL_MS };
+  };
+  const a = run(neu.reader);
+  for (const e of a.out) assert.doesNotMatch(e.message, /restart After Effects|setup_panel/);
   const other = new Error("ExtendScript said no");
   assert.equal(neu.reader.dressFrameError(other, 1), other);
-  assert.equal(neu.reader.FRAME_RENDER_BUDGET_MS, old.reader.FRAME_RENDER_BUDGET_MS);
-  assert.equal(neu.reader.FRAME_STALL_MS, old.reader.FRAME_STALL_MS);
+  pin("dressFrameError", a, () => run(old.reader));
 });
 
-await check("frame cache: the same answers over the same sequence (#29)", () => {
-  let t = 0;
-  const now = () => t;
-  const a = old.cache.createFrameCache({ limit: 3, ttlMs: 1000, now });
-  const b = neu.cache.createFrameCache({ limit: 3, ttlMs: 1000, now });
-  const steps = [
-    ["remember", "k1", "h1"], ["match", "k2", "h1"], ["match", "k1", "h1"], ["remember", "k2", "h2"],
-    ["remember", "k3", "h3"], ["remember", "k4", "h4"], ["match", "k9", "h1"], ["match", "k9", "h2"],
-    ["tick", 2000], ["match", "k9", "h4"], ["remember", "k1", "h1"], ["remember", "k1", "h5"], ["match", "k2", "h1"],
-  ];
-  for (const s of steps) {
-    if (s[0] === "tick") { t += s[1]; continue; }
-    t += 10;
-    if (s[0] === "remember") {
-      a.remember(s[1], s[2], { label: s[1], bytes: 5 });
-      b.remember(s[1], s[2], { label: s[1], bytes: 5 });
-    } else {
-      assert.deepEqual(b.match(s[1], s[2]), a.match(s[1], s[2]), JSON.stringify(s));
+await check("frame cache: pinned answers over a fixed sequence (#29)", () => {
+  const run = (m) => {
+    let t = 0;
+    const c = m.createFrameCache({ limit: 3, ttlMs: 1000, now: () => t });
+    const steps = [
+      ["remember", "k1", "h1"], ["match", "k2", "h1"], ["match", "k1", "h1"], ["remember", "k2", "h2"],
+      ["remember", "k3", "h3"], ["remember", "k4", "h4"], ["match", "k9", "h1"], ["match", "k9", "h2"],
+      ["tick", 2000], ["match", "k9", "h4"], ["remember", "k1", "h1"], ["remember", "k1", "h5"], ["match", "k2", "h1"],
+    ];
+    const out = [];
+    for (const s of steps) {
+      if (s[0] === "tick") { t += s[1]; continue; }
+      t += 10;
+      if (s[0] === "remember") c.remember(s[1], s[2], { label: s[1], bytes: 5 });
+      else out.push(c.match(s[1], s[2]) ?? null);
+      out.push(c.size());
     }
-    assert.equal(b.size(), a.size());
-  }
+    return JSON.parse(JSON.stringify(out));
+  };
+  const a = run(neu.cache);
+  assert.ok(a.some((x) => x && typeof x === "object"), "no step matched: the sequence no longer exercises a stale verdict");
+  pin("frame cache sequence", a, () => run(old.cache));
 });
 
-await check("contact sheet: identical sheet bytes and tile map for ok, empty, stale and failed cells", () => {
+await check("contact sheet: pinned sheet bytes and tile map for ok, empty, stale and failed cells", () => {
   const tile = (seed, w = 30, h = 20) => {
     const n = neu.png.normalizePng(makePng({ w, h, sample: soft8(seed) }));
     return { pixels: n.pixels, channels: n.channels, width: w, height: h };
@@ -371,18 +519,20 @@ await check("contact sheet: identical sheet bytes and tile map for ok, empty, st
       specs.push(spec);
     }
     const opts = { cellWidth: 30, cellHeight: 20 };
-    const a = old.sheet.composeContactSheet(specs, opts);
-    const b = neu.sheet.composeContactSheet(specs, opts);
-    assert.ok(b.buffer.equals(a.buffer), `${count}-tile sheet bytes differ`);
-    assert.deepEqual({ ...b, buffer: null }, { ...a, buffer: null });
+    const run = (m) => {
+      const s = m.composeContactSheet(specs, opts);
+      return JSON.parse(JSON.stringify({ ...s, buffer: s.buffer.toString("hex") }));
+    };
+    pin(`contact sheet: ${count} tiles`, run(neu.sheet), () => run(old.sheet));
   }
-  for (const t of [0, 0.04, 1, 59.999, 61.5, 3600.25]) assert.equal(neu.sheet.formatTime(t), old.sheet.formatTime(t));
-  for (const n of [1, 2, 3, 4, 5, 6, 7, 9]) assert.deepEqual(neu.sheet.layoutFor(n), old.sheet.layoutFor(n));
-  assert.equal(neu.sheet.CONTACT_SHEET_BUDGET_MS, old.sheet.CONTACT_SHEET_BUDGET_MS);
-  assert.equal(neu.sheet.RETRY_MIN_MS, old.sheet.RETRY_MIN_MS);
-  for (const left of [0, 500, 1500, 60000, 500000]) {
-    assert.equal(neu.sheet.tileBudgetMs(left, 0, 120000), old.sheet.tileBudgetMs(left, 0, 120000));
-  }
+  const misc = (m) => ({
+    times: [0, 0.04, 1, 59.999, 61.5, 3600.25].map((t) => m.formatTime(t)),
+    layouts: [1, 2, 3, 4, 5, 6, 7, 9].map((n) => m.layoutFor(n)),
+    budget: m.CONTACT_SHEET_BUDGET_MS,
+    retryMin: m.RETRY_MIN_MS,
+    tileBudgets: [0, 500, 1500, 60000, 500000].map((left) => m.tileBudgetMs(left, 0, 120000)),
+  });
+  pin("contact sheet: times, layouts, budgets", misc(neu.sheet), () => misc(old.sheet));
 });
 
 // --- .mogrt: a zip with a thumbnail, built here ---
@@ -391,7 +541,7 @@ function makeZip(entries) {
   const centrals = [];
   let offset = 0;
   for (const { name, data, deflate } of entries) {
-    const body = deflate ? zlib.deflateRawSync(data) : data;
+    const body = deflate ? zlib.deflateRawSync(data, { level: 0 }) : data;
     const nameBuf = Buffer.from(name, "utf8");
     const lh = Buffer.alloc(30);
     lh.writeUInt32LE(0x04034b50, 0);
@@ -434,32 +584,33 @@ const MOGRT_RGB = makeZip([
   { name: "definition.json", data: Buffer.from("{}"), deflate: true },
 ]);
 
-await check(".mogrt thumbnail: identical archive bytes for every poster/thumbnail pairing", () => {
+await check(".mogrt thumbnail: pinned archive bytes for every poster/thumbnail pairing", () => {
   const posters = [
     FIXTURES["8-bit RGBA premultiplied soft edges"],
     FIXTURES["16-bit RGBA premultiplied"],
     FIXTURES["8-bit RGB"],
     makePng({ w: 64, h: 18, sample: soft8(4) }),
   ];
-  for (const zip of [MOGRT_RGBA, MOGRT_RGB]) {
-    for (const poster of posters) {
-      const a = old.mogrt.patchThumbnail(zip, poster);
-      const b = neu.mogrt.patchThumbnail(zip, poster);
-      assert.ok(b.buffer.equals(a.buffer), "patched archive bytes differ");
-      assert.deepEqual({ ...b, buffer: null }, { ...a, buffer: null });
+  const run = (m) => {
+    const out = [];
+    for (const zip of [MOGRT_RGBA, MOGRT_RGB]) {
+      for (const poster of posters) {
+        const r = m.patchThumbnail(zip, poster);
+        out.push(JSON.parse(JSON.stringify({ ...r, buffer: r.buffer.toString("hex") })));
+      }
     }
-  }
-  let ea, eb;
-  const noThumb = makeZip([{ name: "definition.json", data: Buffer.from("{}"), deflate: true }]);
-  try { old.mogrt.patchThumbnail(noThumb, posters[0]); } catch (e) { ea = e.message; }
-  try { neu.mogrt.patchThumbnail(noThumb, posters[0]); } catch (e) { eb = e.message; }
-  assert.ok(ea);
-  assert.equal(eb, ea);
+    const noThumb = makeZip([{ name: "definition.json", data: Buffer.from("{}"), deflate: true }]);
+    out.push(attempt(() => m.patchThumbnail(noThumb, posters[0])));
+    return out;
+  };
+  const a = run(neu.mogrt);
+  assert.ok(a[a.length - 1].e, "an archive with no thumbnail was patched");
+  pin(".mogrt thumbnail patches", a, () => run(old.mogrt));
 });
 
 // ---------------------------------------------------------------------------
-// End to end: the real panel answering the public op, against the server's
-// pipeline answering the raw op through the same panel.
+// End to end: the real panel passing the raw op through, and the server's
+// pipeline finishing it.
 // ---------------------------------------------------------------------------
 const W = 40;
 const H = 24;
@@ -649,14 +800,9 @@ await check("the panel passes the raw ops through untouched: a path, no image", 
   fs.rmSync(body.result.path, { force: true });
 });
 
-/** The legacy path: the panel does everything and answers the public op. */
-async function viaPanel(op, args) {
-  const body = await post(op, args);
-  return body.ok ? { ok: true, result: body.result } : { ok: false, code: body.code, error: body.error };
-}
 
 const pipeline = createFramePipeline({ warn: () => {} });
-/** The new path: the panel answers the raw op, the server finishes it. */
+/** The panel answers the raw op, the server finishes it. */
 async function viaServer(op, args) {
   const send = async (raw, a) => {
     const body = await post(raw, a);
@@ -671,7 +817,7 @@ async function viaServer(op, args) {
 }
 
 /** Comparable form: drop the volatile parts (temp paths, ages in seconds). */
-function comparable(r, opts = {}) {
+function comparable(r) {
   const s = JSON.parse(JSON.stringify(r));
   if (s.result && s.result.path) s.result.path = "<mogrt>";
   if (s.error) s.error = s.error.replace(/\d+s ago/g, "Ns ago").replace(/\d+s earlier/g, "Ns earlier");
@@ -679,27 +825,19 @@ function comparable(r, opts = {}) {
     for (const t of s.result.tiles) if (t.note) t.note = t.note.replace(/\d+s earlier/g, "Ns earlier");
   }
   if (s.result && s.result.warning) s.result.warning = s.result.warning.replace(/\d+s earlier/g, "Ns earlier");
-  if (opts.dropBytes && s.result) delete s.result.bytes;
   return s;
 }
 
-/**
- * Run one call down both paths, the panel first. Each path holds its own
- * stale-frame cache (the panel's, the server's), and both see the same
- * sequence of calls, so their verdicts must match too.
- */
-async function both(op, args, overrides = []) {
+/** One call, with `overrides` as the planned renders it must consume. */
+async function serve(op, args, overrides = []) {
   plan.overrides = [...overrides];
-  const a = await viaPanel(op, args);
-  assert.equal(plan.overrides.length, 0, "the panel path did not consume its planned renders");
-  plan.overrides = [...overrides];
-  const b = await viaServer(op, args);
-  assert.equal(plan.overrides.length, 0, "the server path did not consume its planned renders");
-  return { a, b };
+  const r = await viaServer(op, args);
+  assert.equal(plan.overrides.length, 0, "the call did not consume its planned renders");
+  return r;
 }
 
-// Each scene also states what the panel's answer is, so two paths failing
-// the same wrong way cannot pass as parity.
+// Each scene also states what its answer means, so a pin re-recorded over a
+// wrong answer still fails.
 const SCENES = [
   ["an opaque 8-bit frame", "screenshot_frame", { compId: COMP.id, time: 0 },
     (a) => assert.ok(a.ok && a.result.base64 && !a.result.converted)],
@@ -728,33 +866,33 @@ const SCENES = [
 
 for (const [name, op, args, expect] of SCENES) {
   await check(`end to end: ${name}`, async () => {
-    const { a, b } = await both(op, args);
+    const a = await serve(op, args);
     expect(a);
-    assert.deepEqual(comparable(b), comparable(a));
+    pin(`end to end: ${name}`, comparable(a));
   });
 }
 
-await check("end to end: a corrupt render is re-rendered once and the retry delivered, on both (#45)", async () => {
-  const { a, b } = await both("screenshot_frame", { compId: COMP.id, time: 0.5, downsample: 3 }, ["garbage"]);
+await check("end to end: a corrupt render is re-rendered once and the retry delivered (#45)", async () => {
+  const a = await serve("screenshot_frame", { compId: COMP.id, time: 0.5, downsample: 3 }, ["garbage"]);
   assert.ok(a.ok, a.error);
-  assert.deepEqual(comparable(b), comparable(a));
+  pin("end to end: corrupt render retried", comparable(a));
 });
 
-await check("end to end: two corrupt renders are FRAME_INCOMPLETE with the same message, and nothing is cached", async () => {
-  const { a, b } = await both("screenshot_frame", { compId: COMP.id, time: 1, downsample: 5 }, ["garbage", "garbage"]);
+await check("end to end: two corrupt renders are FRAME_INCOMPLETE, and nothing is cached", async () => {
+  const a = await serve("screenshot_frame", { compId: COMP.id, time: 1, downsample: 5 }, ["garbage", "garbage"]);
   assert.equal(a.ok, false);
   assert.equal(a.code, "FRAME_INCOMPLETE");
-  assert.deepEqual(comparable(b), comparable(a));
+  pin("end to end: two corrupt renders", comparable(a));
   // Nothing was remembered from the failure: the same request now succeeds.
-  const again = await both("screenshot_frame", { compId: COMP.id, time: 1, downsample: 5 });
-  assert.ok(again.a.ok && again.b.ok);
-  assert.deepEqual(comparable(again.b), comparable(again.a));
+  const again = await serve("screenshot_frame", { compId: COMP.id, time: 1, downsample: 5 });
+  assert.ok(again.ok, again.error);
+  pin("end to end: the same request after two corrupt renders", comparable(again));
 });
 
-await check("end to end: a corrupt contact-sheet tile is re-rendered on its own, on both", async () => {
-  const { a, b } = await both("screenshot_frame", { compId: COMP.id, times: [0.5, 1], downsample: 2 }, [undefined, "garbage"]);
+await check("end to end: a corrupt contact-sheet tile is re-rendered on its own", async () => {
+  const a = await serve("screenshot_frame", { compId: COMP.id, times: [0.5, 1], downsample: 2 }, [undefined, "garbage"]);
   assert.ok(a.ok, a.error);
-  assert.deepEqual(comparable(b), comparable(a));
+  pin("end to end: corrupt contact-sheet tile", comparable(a));
 });
 
 for (const [name, args] of [
@@ -763,30 +901,27 @@ for (const [name, args] of [
   ["no poster: the export is returned as it is", { compId: COMP.id }],
 ]) {
   await check(`end to end: export_mogrt, ${name}`, async () => {
-    plan.overrides = [];
     const before = mogrtSeq;
-    const { a, b } = await both("export_mogrt", args);
-    assert.ok(a.ok && b.ok);
-    assert.deepEqual(comparable(b), comparable(a));
-    const fa = fs.readFileSync(path.join(renderDir, `t-${before}.mogrt`));
-    const fb = fs.readFileSync(path.join(renderDir, `t-${before + 1}.mogrt`));
-    assert.ok(fb.equals(fa), "the patched .mogrt files differ");
+    const a = await serve("export_mogrt", args);
+    assert.ok(a.ok, a.error);
     assert.equal(a.result.posterPngPath, undefined);
     if (args.posterTime !== undefined) assert.equal(a.result.thumbnail.patched, true);
+    const file = fs.readFileSync(path.join(renderDir, `t-${before}.mogrt`));
+    pin(`end to end: export_mogrt, ${name}`, { result: comparable(a), file: file.toString("hex") });
   });
 }
 
-await check("end to end: a poster that is not a PNG leaves AE's thumbnail, on both", async () => {
+await check("end to end: a poster that is not a PNG leaves AE's thumbnail", async () => {
   const before = mogrtSeq;
   // The stall window would make this slow; garbage is refused at once.
-  const { a, b } = await both("export_mogrt", { compId: COMP.id, posterTime: 0 }, ["garbage"]);
+  const a = await serve("export_mogrt", { compId: COMP.id, posterTime: 0 }, ["garbage"]);
   assert.equal(a.result.thumbnail.patched, false);
-  assert.deepEqual(comparable(b), comparable(a));
+  pin("end to end: export_mogrt, a poster that is not a PNG", comparable(a));
   const fa = fs.readFileSync(path.join(renderDir, `t-${before}.mogrt`));
   assert.ok(fa.equals(MOGRT_RGBA), "a failed patch must leave the template untouched");
 });
 
-await check("no temp frame is left behind on either path", () => {
+await check("no temp frame is left behind", () => {
   const left = fs.readdirSync(renderDir).filter((f) => f.endsWith(".png"));
   assert.deepEqual(left, []);
 });
@@ -794,6 +929,12 @@ await check("no temp frame is left behind on either path", () => {
 panel.close();
 fs.rmSync(tmp, { recursive: true, force: true });
 fs.rmSync(renderDir, { recursive: true, force: true });
+if (RECORD) {
+  console.log("const PINS = " + JSON.stringify(recorded, null, 2) + ";");
+} else {
+  const unused = Object.keys(PINS).filter((k) => !seen.has(k));
+  assert.deepEqual(unused, [], "pins nothing checked any more — remove them or re-record");
+}
 console.log(`image-parity: ${passed} checks passed`);
 // A pause before exiting: an immediate exit after fetch has crashed
 // Node 24 on Windows with a libuv assertion (nodejs/node#56645).

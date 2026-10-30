@@ -35,7 +35,7 @@ const serverEntry = path.join(root, "packages", "mcp-server", "dist", "index.js"
 const { BatchDriver, foreignJobText, readAeJobRecord } = await import(dist("jobs", "batchDriver.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
 const errors = await import(dist("util", "errors.js"));
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 const { CAP_SERVER_DRIVES_JOBS } = await import(dist("setup", "panelCapabilities.js"));
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
@@ -417,7 +417,7 @@ const chunkCount = new Map();
 const panel = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, port: panelPort, bundleLoaded: true, bundleHash: sourceBundleHash(), capabilities: ["project-path", CAP_SERVER_DRIVES_JOBS] }));
+    res.end(JSON.stringify({ ok: true, port: panelPort, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash(), capabilities: ["project-path", CAP_SERVER_DRIVES_JOBS] }));
     return;
   }
   let body = "";
@@ -441,7 +441,9 @@ const panel = http.createServer((req, res) => {
     const { op, args } = parsed;
     // One at a time, like the real panel's evalScript chain.
     chain = chain.then(async () => {
-      const tag = op === "run_jsx" ? /tag:(\w+)/.exec(args.code)?.[1] : op;
+      // run_jsx arrives as `_run_jsx`, with the server-built wrapper (#220, #243).
+      const jsxSource = op === "run_jsx" || op === "_run_jsx" ? String(args.code ?? args.built?.wrapper ?? "") : null;
+      const tag = jsxSource !== null ? /tag:(\w+)/.exec(jsxSource)?.[1] : op;
       const entry = { op, tag, jobId: args?.jobId, enteredAt: Date.now() };
       seen.push(entry);
       try {
@@ -475,8 +477,8 @@ const panel = http.createServer((req, res) => {
           result = ae.chunk(args.jobId, args.chunkSize);
         } else if (op === "_get_job") {
           result = ae.record(args.jobId);
-        } else if (op === "run_jsx") {
-          await sleep(Number(/ms:(\d+)/.exec(args.code)?.[1] ?? 5));
+        } else if (jsxSource !== null) {
+          await sleep(Number(/ms:(\d+)/.exec(jsxSource)?.[1] ?? 5));
           result = { tag };
         } else {
           result = [];
@@ -603,16 +605,19 @@ try {
     chunkMs = 30;
   });
 
-  await check("a panel that lists the capability but drives its own job is followed over its event socket, as before", async () => {
+  // Since #243 nothing follows a panel-driven job: a panel that drives its own
+  // batch is an old one, and the agent is told so instead of handed a job id.
+  await check("a panel that drives its own job is reported as out of date, and never sent a chunk", async () => {
     echoDriver = false;
     try {
       const rb = await call(A, "run_batch", { ops: batchOps(300) });
-      const { jobId } = rb.json();
-      const st = (await call(A, "await_job", { jobId })).json();
-      assert.equal(st.status, "completed");
-      assert.equal(st.progress, 300);
+      assert.equal(rb.res.isError, true, rb.text);
+      assert.match(rb.text, /older than these tools/);
+      assert.match(rb.text, /setup_panel/);
+      assert.match(rb.text, /Do not send the batch again/);
+      const jobId = [...ae.jobs.keys()].pop();
+      await sleep(300);
       assert.equal(chunksOf(jobId).length, 0, "the server sent no chunk of a job the panel drives: never two drivers");
-      ae.assertOnce(jobId, 300);
     } finally {
       echoDriver = true;
     }

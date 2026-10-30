@@ -1,10 +1,8 @@
 // contactSheet.ts — tile several rendered frames into one labelled sheet.
 //
-// This is the MCP server's copy of `packages/ae-panel/client/contactsheet.js`
-// (issue #220 stage 4: the server now composes contact sheets itself). The
-// panel keeps its copy for legacy MCP servers that still ask it to, and the two
-// must produce identical bytes — tests/unit/image-parity.mjs holds them
-// together. Change both or neither.
+// Ported from the panel's `client/contactsheet.js` when the server took over
+// composing contact sheets (issue #220 stage 4). The panel's copy was deleted
+// in issue #243; this is the only one.
 //
 // Judging motion is one visual question — "does it move the way I think it
 // does" — and answering it used to cost three `screenshot_frame` calls. Three

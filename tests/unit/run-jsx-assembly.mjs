@@ -42,7 +42,8 @@ const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "
 
 const { AeError, aeErrorText } = await import(dist("util", "errors.js"));
 const asm = await import(dist("tools", "runJsxAssembly.js"));
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { resolveRunJsxSource } = await import(dist("tools", "runJsxSource.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 const { CAP_SERVER_RUN_JSX } = await import(dist("setup", "panelCapabilities.js"));
 
 let passed = 0;
@@ -288,7 +289,7 @@ async function runNew(args, opts) {
   };
   const fallback = async () => { throw new Error("fell back to run_jsx"); };
   try {
-    const result = await asm.runJsxViaServer(args, send, fallback, () => {});
+    const result = await asm.runJsxViaServer(args, send, fallback);
     return { body: { ok: true, result: plain(result) }, err: null, log: e.log, sent };
   } catch (err) {
     if (!(err instanceof AeError)) throw err;
@@ -435,19 +436,19 @@ await check("unchanged libraries are not sent twice; a rewritten one is", async 
   assert.equal(payload.built.libraries[1].text, "function u(){ app.endUndoGroup(); }\n");
 });
 
-await check("Unknown op: _run_jsx falls back to run_jsx with the args it always had; a script's own error never does", async () => {
-  const args = { code: "return 1;", undoGroup: false };
-  let withdrew = 0;
+await check("Unknown op: _run_jsx is thrown as it came, never retried as run_jsx (#243); a script's own error is mapped", async () => {
+  // A panel that does not know `_run_jsx` predates this server; the caller's
+  // backstop tells the user to update it. Nothing is re-sent under another name.
   const legacy = [];
-  const r = await asm.runJsxViaServer(
-    args,
-    async () => { throw new AeError("Unknown op: _run_jsx"); },
-    async (op, a) => { legacy.push([op, a]); return 1; },
-    () => withdrew++
+  await assert.rejects(
+    asm.runJsxViaServer(
+      { code: "return 1;", undoGroup: false },
+      async () => { throw new AeError("Unknown op: _run_jsx"); },
+      async (op, a) => { legacy.push([op, a]); return 1; }
+    ),
+    (err) => err instanceof AeError && /^Unknown op: _run_jsx/.test(err.message)
   );
-  assert.equal(r, 1);
-  assert.equal(withdrew, 1);
-  assert.deepEqual(legacy, [["run_jsx", args]]);
+  assert.deepEqual(legacy, [], "fell back to run_jsx");
 
   // The same words thrown by the script itself come back mapped, so they are
   // the script's failure and are never re-run.
@@ -456,14 +457,18 @@ await check("Unknown op: _run_jsx falls back to run_jsx with the args it always 
     asm.runJsxViaServer(
       { code: "throw {message: 'Unknown op: _run_jsx', line: 1};" },
       async (op, a) => { const b = overTheBridge(e.dispatch(op, a)); throw toAeError(b); },
-      async () => assert.fail("a script that ran must not run again"),
-      () => assert.fail("no withdrawal")
+      async () => assert.fail("a script that ran must not run again")
     ),
     (err) => err instanceof AeError && err.source?.sourceLine === 1
   );
 });
 
-// ---------- 3. through tools/call, legacy panel against server-run-jsx ----------
+// ---------- 3. through tools/call, against OPS.run_jsx as the reference ----------
+//
+// Since #243 every server sends `_run_jsx`. The reference session's panel
+// answers that by running OPS.run_jsx on the args the server resolved — what
+// a server before #220 forwarded — so the agent-visible text of the two paths
+// is still compared end to end.
 
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -476,7 +481,7 @@ async function session(health, opts = {}) {
   const bridge = http.createServer((req, res) => {
     res.setHeader("content-type", "application/json");
     if (req.url === "/health") {
-      res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), ...health }));
+      res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash(), ...health }));
       return;
     }
     let body = "";
@@ -489,7 +494,8 @@ async function session(health, opts = {}) {
         return;
       }
       const e = es();
-      const out = overTheBridge(e.dispatch(op, args));
+      const reference = opts.reference && op === "_run_jsx";
+      const out = overTheBridge(reference ? e.dispatch("run_jsx", s.referenceArgs) : e.dispatch(op, args));
       s.logs.push(e.log);
       res.end(JSON.stringify(out));
     });
@@ -513,8 +519,8 @@ async function session(health, opts = {}) {
   return s;
 }
 
-const legacyPanel = await session({ capabilities: ["project-path", "server-images"] });
-const capablePanel = await session({ capabilities: ["project-path", "server-images", "server-run-jsx"] });
+const referencePanel = await session({}, { reference: true });
+const capablePanel = await session({});
 
 const fileDir = fs.mkdtempSync(path.join(os.tmpdir(), "ae-rjx-asm-"));
 const writeFile = (name, text) => {
@@ -537,26 +543,25 @@ const toolFixtures = callFixtures
 
 for (const [name, args] of toolFixtures) {
   await check(`tools/call parity: ${name}`, async () => {
-    const before = await legacyPanel.call("run_jsx", args);
-    assert.deepEqual(legacyPanel.seen, ["run_jsx"], "a panel without the capability gets run_jsx, as before");
+    referencePanel.referenceArgs = resolveRunJsxSource(args);
+    const before = await referencePanel.call("run_jsx", args);
     const after = await capablePanel.call("run_jsx", args);
-    assert.deepEqual(capablePanel.seen, ["_run_jsx"], "a capable panel gets the built op and nothing else");
+    assert.deepEqual(capablePanel.seen, ["_run_jsx"], "the panel gets the built op and nothing else");
     // The library and script paths are the only thing that differ by fixture
     // file, and they are the same files on both sides.
     assert.equal(after.isError, before.isError);
     assert.equal(after.text, before.text);
-    assert.deepEqual(capablePanel.logs, legacyPanel.logs, "the same undo calls");
+    assert.deepEqual(capablePanel.logs, referencePanel.logs, "the same undo calls");
   });
 }
 
-await check("tools/call: a capable panel that does not know _run_jsx falls back once, then stays on run_jsx", async () => {
-  const forgetful = await session({ capabilities: ["server-run-jsx"] }, { unknown: ["_run_jsx"] });
-  const r = await forgetful.call("run_jsx", { code: "return 1;" });
-  assert.equal(r.isError, false, r.text);
-  assert.equal(r.text, "1");
-  assert.deepEqual(forgetful.seen, ["_run_jsx", "run_jsx"]);
-  await forgetful.call("run_jsx", { code: "return 1;" });
-  assert.deepEqual(forgetful.seen, ["run_jsx"], "the capability is withdrawn");
+await check("tools/call: a panel that does not know _run_jsx is told to update, and nothing is re-sent (#243)", async () => {
+  const old = await session({}, { unknown: ["_run_jsx"] });
+  const r = await old.call("run_jsx", { code: "return 1;" });
+  assert.equal(r.isError, true, r.text);
+  assert.match(r.text, /older than these tools/);
+  assert.match(r.text, /setup_panel/);
+  assert.deepEqual(old.seen, ["_run_jsx"], "retried under the public name");
 });
 
 await check("tools/call: run_batch steps still go to OPS.run_jsx inside the batch", async () => {

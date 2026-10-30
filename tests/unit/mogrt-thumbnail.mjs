@@ -1,4 +1,4 @@
-// The panel's .mogrt thumbnail surgery: reading a zip, resampling a rendered
+// The server's .mogrt thumbnail surgery (frames/mogrtThumbnail.ts; the panel's copy went in #243): reading a zip, resampling a rendered
 // frame into the thumbnail's exact dimensions, and writing the archive back.
 //
 // This rewrites a real user artefact in place, and there is no After Effects on
@@ -12,14 +12,12 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import zlib from "node:zlib";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const require = createRequire(import.meta.url);
-const clientDir = path.join(root, "packages", "ae-panel", "client");
-const mogrt = require(path.join(clientDir, "mogrt.js"));
-const { decodePng8, encodePng8 } = require(path.join(clientDir, "pngcodec.js"));
+const frames = (f) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "frames", f)).href;
+const mogrt = await import(frames("mogrtThumbnail.js"));
+const { decodePng8, encodePng8 } = await import(frames("pngCodec.js"));
 
 let passed = 0;
 function check(name, fn) {

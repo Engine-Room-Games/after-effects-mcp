@@ -1,10 +1,8 @@
 // pngCodec.ts — the server's PNG normaliser.
 //
-// This is the MCP server's copy of `packages/ae-panel/client/pngcodec.js`
-// (issue #220 stage 4: the server now post-processes frames itself). The panel
-// keeps its copy for legacy MCP servers that still ask it to, and the two must
-// produce identical bytes — tests/unit/image-parity.mjs holds them together.
-// Change both or neither.
+// Ported from the panel's `client/pngcodec.js` when the server took over
+// post-processing frames (issue #220 stage 4). The panel's copy was deleted in
+// issue #243; this is the only one.
 //
 // After Effects writes screenshot frames at the project's colour depth, so a
 // 16-bit project produces 16-bit-per-channel PNGs. Plenty of decoders — the ones

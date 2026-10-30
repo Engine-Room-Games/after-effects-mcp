@@ -4,7 +4,7 @@ import { authHeaders } from "./discovery.js";
 import type { JobManager } from "../jobs/manager.js";
 import type { HttpClient } from "./httpClient.js";
 
-/** What the panel broadcasts on /events (`broadcast` in packages/ae-panel/client/main.js). */
+/** What a panel driving its own batches broadcast on /events, before issue #243. */
 type WsEvent =
   | { type: "progress"; jobId: string; progress: number; total?: number; message?: string }
   | { type: "complete"; jobId: string; result: unknown }
@@ -12,12 +12,16 @@ type WsEvent =
   | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string };
 
 /**
- * The /events socket a long `run_batch` reports progress and completion on.
+ * The /events socket a long `run_batch` reported progress and completion on
+ * while the panel drove batches itself. Since issue #243 this server drives
+ * every batch (jobs/batchDriver.ts) and the panel sends no job events; the
+ * socket stays because its reopening is how a restarted After Effects is
+ * noticed (`onReopen`, which drops the panel gate's verdict).
  *
  * It follows the HTTP client's port rather than keeping a copy of its own: a
  * copy taken at startup is exactly the stale value issue #92 is about, and a
- * socket left reconnecting to a port nobody listens on would lose every
- * completion event — which is what releases the write lease a batch holds.
+ * socket left reconnecting to a port nobody listens on would never see the
+ * reopen that a restarted panel is recognised by.
  */
 export class WsClient {
   private ws?: WebSocket;

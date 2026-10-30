@@ -20,14 +20,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const require = createRequire(import.meta.url);
-const client = path.join(root, "packages", "ae-panel", "client");
-const { inspectPngStructure } = require(path.join(client, "pngcodec.js"));
-const { waitForCompletePng, dressFrameError } = require(path.join(client, "framereader.js"));
+const frames = (f) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "frames", f)).href;
+const { inspectPngStructure } = await import(frames("pngCodec.js"));
+const { waitForCompletePng, dressFrameError } = await import(frames("frameReader.js"));
 
 let passed = 0;
 async function check(name, fn) {

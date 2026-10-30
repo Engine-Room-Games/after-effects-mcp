@@ -460,21 +460,17 @@ let passed = 0;
 }
 
 // ---------------------------------------------------------------------------
-// 10. The chunk size the panel drives with comes off the envelope, so the two
-//     sides cannot drift into a different number of undo steps.
+// 10. The chunk size the server drives with comes off the envelope, so the
+//     two sides cannot drift into a different number of undo steps. (The
+//     panel drove batches itself until issue #243; it now only passes the
+//     envelope's chunkSize through.)
 // ---------------------------------------------------------------------------
 {
   const main = fs.readFileSync(path.join(root, "packages", "ae-panel", "client", "main.js"), "utf8");
-  assert.match(
-    main,
-    /driveJob\(res\.jobId, progressToken, res\.chunkSize[,)]/,
-    "the panel must take its chunk size from the job envelope"
-  );
-  assert.match(main, /chunkSize: size/, "and drive _continue_job with it");
-  // The server drives with the same number (issue #220, stage 5).
+  assert.match(main, /chunkSize: res\.chunkSize/, "the panel must hand the envelope's chunk size to the server");
   const driver = fs.readFileSync(path.join(root, "packages", "mcp-server", "src", "jobs", "batchDriver.ts"), "utf8");
-  assert.match(driver, /env\.chunkSize/, "the server's driver takes its chunk size from the envelope too");
-  passed += 3;
+  assert.match(driver, /env\.chunkSize/, "the server's driver takes its chunk size from the envelope");
+  passed += 2;
 }
 
 // ---------------------------------------------------------------------------

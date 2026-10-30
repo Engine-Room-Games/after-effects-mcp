@@ -1,10 +1,8 @@
 // frameCache.ts — recent screenshot identity, for spotting a stale render.
 //
-// This is the MCP server's copy of `packages/ae-panel/client/framecache.js`
-// (issue #220 stage 4: the server now does the stale-frame check itself). The
-// panel keeps its copy for legacy MCP servers that still ask it to, and the two
-// must behave identically — tests/unit/image-parity.mjs holds them together.
-// Change both or neither.
+// Ported from the panel's `client/framecache.js` when the server took over
+// the stale-frame check (issue #220 stage 4). The panel's copy was deleted in
+// issue #243; this is the only one.
 //
 // After Effects' render path sometimes answers a screenshot request with a
 // buffer it produced for an earlier one, and reports success either way. Nothing

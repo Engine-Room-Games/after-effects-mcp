@@ -129,6 +129,12 @@ jobs:
       - name: Panel version mismatches are diagnosed correctly
         run: node tests/unit/panel-version.mjs
 
+      # Issue #243: the gate compared bundle.jsx only, so a current bundle
+      # beside stale client code passed. The panel and the server compute the
+      # client hash separately and must agree; a signed install must match.
+      - name: Panel client hash matches between panel and server
+        run: node tests/unit/panel-hash.mjs
+
       # Issue #156: a stale verdict was cached forever, and AE restarts on the
       # same port, so "restart After Effects" outlived the restart.
       - name: A stale panel verdict is re-checked after a restart

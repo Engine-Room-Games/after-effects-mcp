@@ -4,7 +4,8 @@
 // Written because it did not. CEP anchors `__dirname` at the *extension root*,
 // not at the folder holding main.js — which is why `require("ws")` resolves
 // (node_modules is at the root) while a require of a file sitting right next to
-// main.js does not. The panel's screenshot modules were loaded the second way,
+// main.js does not. The panel's screenshot modules (since moved to the server)
+// were loaded the second way,
 // so on a real install the panel refused to start with "cannot start —
 // pngcodec.js … is missing", naming a path with the `client/` segment missing.
 // Nothing caught it: there is no After Effects on a CI runner, the unit tests
@@ -24,11 +25,14 @@ import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const nodeRequire = createRequire(import.meta.url);
 const panelSrc = path.join(root, "packages", "ae-panel");
+const { panelClientHash } = await import(
+  pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "setup", "panelHash.js")).href
+);
 
 let passed = 0;
 function check(name, fn) {
@@ -49,7 +53,8 @@ function installLayout() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ae-panel-boot-"));
   fs.mkdirSync(path.join(dir, "client"), { recursive: true });
   fs.mkdirSync(path.join(dir, "jsx"), { recursive: true });
-  for (const f of ["main.js", "csinterface.js", "pngcodec.js", "framecache.js", "mogrt.js", "contactsheet.js", "framereader.js", "index.html"]) {
+  // Whatever the panel ships in client/, so a module added there is loaded here.
+  for (const f of fs.readdirSync(path.join(panelSrc, "client"))) {
     fs.copyFileSync(path.join(panelSrc, "client", f), path.join(dir, "client", f));
   }
   fs.copyFileSync(path.join(panelSrc, "jsx", "bundle.jsx"), path.join(dir, "jsx", "bundle.jsx"));
@@ -267,6 +272,11 @@ await check("serves /health on the port it announced", async () => {
   // server uses `_project_path` only when this lists `project-path`.
   assert.ok(Array.isArray(body.capabilities), "health must list the panel's capabilities");
   assert.ok(body.capabilities.includes("project-path"), "the panel must report project-path");
+  // Issue #243: the other half of the version gate — every panel file but the
+  // bundle, hashed at launch. It must be exactly what the server computes over
+  // the same folder, or no panel would ever be "current".
+  assert.match(String(body.clientHash), /^[0-9a-f]{64}$/, "health must report a clientHash");
+  assert.equal(body.clientHash, panelClientHash(dir), "the panel's clientHash must equal the server's over the same folder");
 });
 
 await check("wrote the port file the MCP server discovers it by", () => {
@@ -299,34 +309,7 @@ await check("sends every op through __AEMCP, and reloads the bundle once when an
   assert.match(logText(booted.dom), /__AEMCP is missing/);
 });
 
-await check("a batch lost to a bundle reload fails saying what was already applied, not bare 'No job'", async () => {
-  const port = Number(booted.dom.nodes.port.textContent);
-  const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
-  let turns = 0;
-  booted.host.answer = (op) => {
-    if (op === "run_batch") return { async: true, jobId: "j_1_1", total: 100, chunkSize: 25 };
-    if (op === "_continue_job") {
-      turns += 1;
-      if (turns === 1) return { done: false, jobId: "j_1_1", progress: 25, total: 100, undoSteps: 1 };
-      throw new Error("No job: j_1_1");
-    }
-    return {};
-  };
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/op`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-ae-mcp-token": token },
-      body: JSON.stringify({ op: "run_batch", args: { ops: [] } }),
-    }).then((r) => r.json());
-    assert.equal(res.result.jobId, "j_1_1");
-    const text = await logLine(booted.dom, /Batch j_1_1 stopped mid-run/);
-    assert.match(text, /bundle was reloaded/);
-    assert.match(text, /25 of 100 ops had already been attempted, in 1 undo step/);
-    assert.match(text, /Do NOT re-run the batch/);
-  } finally { booted.host.answer = null; }
-});
-
-// Issue #220, stage 5: a server that asks drives the batch itself. The panel
+// Issue #220, stage 5, and #243: the server drives every batch. The panel
 // answers the envelope, sends no chunk of its own, keeps the flag away from
 // ExtendScript, and still refuses a reload while the batch runs.
 await check("a run_batch the server asked to drive: no panel loop, no flag in ExtendScript, a reload still refused", async () => {
@@ -374,51 +357,16 @@ await check("a run_batch the server asked to drive: no panel loop, no flag in Ex
     const ok = await post("/reload-jsx", {});
     assert.equal(ok.status, 200, "a finished batch no longer blocks a reload");
 
-    // A server that does not ask still gets the panel's own loop.
+    // Without the flag too: the panel no longer has a loop of its own (#243).
     continued = 0;
-    await post("/op", { op: "run_batch", args: { ops: [] } });
+    const bare = await (await post("/op", { op: "run_batch", args: { ops: [] } })).json();
+    assert.equal(bare.result.driver, "server", "every chunked batch is handed back to the server");
     await new Promise((r) => setTimeout(r, 150));
-    assert.equal(continued, 2, "an older server's batch is still driven by the panel");
+    assert.equal(continued, 0, "the panel never drives a batch itself");
+    // Let the second job finish so it does not block the reloads below.
+    await post("/op", { op: "_continue_job", args: { jobId: "j_5_1", chunkSize: 25 } });
+    await post("/op", { op: "_continue_job", args: { jobId: "j_5_1", chunkSize: 25 } });
   } finally { booted.host.answer = null; }
-});
-
-await check("a batch whose heal is refused mid-run says what landed, never that nothing ran", async () => {
-  const port = Number(booted.dom.nodes.port.textContent);
-  const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
-  const bundleFile = path.join(dir, "jsx", "bundle.jsx");
-  const original = fs.readFileSync(bundleFile);
-  let turns = 0;
-  booted.host.answer = (op) => {
-    if (op === "run_batch") return { async: true, jobId: "j_2_1", total: 90, chunkSize: 30 };
-    if (op === "_continue_job") {
-      turns += 1;
-      if (turns === 2) {
-        // After this chunk lands, another script removes __AEMCP and a newer
-        // setup_panel install sits on disk, so the heal must refuse.
-        booted.host.namespaceGone = true;
-        fs.writeFileSync(bundleFile, Buffer.concat([original, Buffer.from("\n// newer install\n")]));
-      }
-      return { done: false, jobId: "j_2_1", progress: 30 * turns, total: 90, undoSteps: turns };
-    }
-    return {};
-  };
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/op`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-ae-mcp-token": token },
-      body: JSON.stringify({ op: "run_batch", args: { ops: [] } }),
-    }).then((r) => r.json());
-    assert.equal(res.result.jobId, "j_2_1");
-    const line = (await logLine(booted.dom, /Batch j_2_1 stopped mid-run/))
-      .split("\n").filter((l) => /Batch j_2_1/.test(l)).join("\n");
-    assert.match(line, /newer version than this running panel/);
-    assert.match(line, /60 of 90 ops had already been attempted, in 2 undo step/);
-    assert.doesNotMatch(line, /Nothing ran/, "chunks had landed; 'Nothing ran' is false of the batch");
-  } finally {
-    booted.host.answer = null;
-    booted.host.namespaceGone = false;
-    fs.writeFileSync(bundleFile, original);
-  }
 });
 
 await check("the heal will not load a newer installed bundle into a running panel: the gate keeps saying restart", async () => {
@@ -458,7 +406,7 @@ await check("also boots if a host build anchors __dirname at the client folder",
 
 await check("says which paths it tried when a sibling module really is missing", async () => {
   const broken = installLayout();
-  fs.unlinkSync(path.join(broken, "client", "pngcodec.js"));
+  fs.unlinkSync(path.join(broken, "client", "panelhash.js"));
   const b = bootPanel(broken, { dirnameAt: broken });
   try {
     const status = await settled(b.dom);
@@ -466,7 +414,7 @@ await check("says which paths it tried when a sibling module really is missing",
     const log = logText(b.dom);
     // The failure that shipped named one path and left the reader guessing
     // which layout was wrong. Every candidate has to be in the log.
-    assert.match(log, /pngcodec\.js/);
+    assert.match(log, /panelhash\.js/);
     assert.match(log, /client/, "the log should show the client-dir candidate that was tried");
     assert.match(log, /Quit After Effects/, "should name the fix");
   } finally { b.close(); }

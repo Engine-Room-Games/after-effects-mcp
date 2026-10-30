@@ -21,7 +21,7 @@ import { WebSocketServer } from "ws";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 
 const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ae-mcp-fileops-")));
 
@@ -33,7 +33,7 @@ const seen = [];
 const bridge = http.createServer((req, res) => {
   res.setHeader("content-type", "application/json");
   if (req.url === "/health") {
-    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash() }));
+    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash() }));
     return;
   }
   let body = "";
@@ -68,12 +68,14 @@ async function call(name, args) {
 const ops = () => seen.map((s) => s.op);
 let passed = 0;
 
-// ---------- the house style stays on the panel ----------
+// ---------- the house style: one cheap path question, the file read here ----------
 
-answers.get_house_style = { ok: true, result: { found: true, projectSaved: true, path: "/p/house-style.md", content: "# Style\n", bytes: 8 } };
+fs.writeFileSync(path.join(dir, "p.aep"), "aep");
+fs.writeFileSync(path.join(dir, "house-style.md"), "# Style\n");
+answers._project_path = { ok: true, result: { projectSaved: true, path: path.join(dir, "p.aep"), unsavedChanges: false } };
 let r = await call("get_house_style", { detail: "full" });
 assert.equal(r.isError, false, r.text);
-assert.deepEqual(ops(), ["get_house_style"], "read on the panel: no project walk to find the .aep");
+assert.deepEqual(ops(), ["_project_path"], "no project walk to find the .aep, and no file I/O on the panel");
 assert.equal(JSON.parse(r.text).detail, "full");
 passed++;
 
@@ -102,7 +104,7 @@ passed++;
 
 // ---------- export_mogrt ----------
 
-answers.export_mogrt = (args) => ({
+answers._export_mogrt = (args) => ({
   ok: true,
   result: { ok: true, path: args.destDir + "/" + args.name + ".mogrt", bytes: 3, createdDir: true },
 });
@@ -112,7 +114,7 @@ answers.export_mogrt = (args) => ({
 const fresh = path.join(dir, "templates", "new");
 r = await call("export_mogrt", { compId: 7, name: "LT", destDir: fresh });
 assert.equal(r.isError, false, r.text);
-assert.deepEqual(ops(), ["export_mogrt"]);
+assert.deepEqual(ops(), ["_export_mogrt"]);
 assert.equal(fs.existsSync(path.join(dir, "templates")), false, "the server created no folder");
 assert.equal(JSON.parse(r.text).createdDir, true, "createdDir is the panel's answer, untouched");
 passed++;
@@ -136,7 +138,7 @@ assert.deepEqual(fs.readdirSync(out), ["LT.mogrt"], "nothing written into the fo
 passed++;
 
 r = await call("export_mogrt", { compId: 7, name: "LT" });
-assert.deepEqual(ops(), ["export_mogrt"], "no destDir: no project walk to find the .aep; the jsx checks it");
+assert.deepEqual(ops(), ["_export_mogrt"], "no destDir: no project walk to find the .aep; the jsx checks it");
 passed++;
 
 assert.ok(!seen.some((s) => s.op === "get_project_summary"));

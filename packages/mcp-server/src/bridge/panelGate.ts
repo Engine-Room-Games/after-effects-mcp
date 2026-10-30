@@ -1,8 +1,7 @@
 import type { HttpClient } from "./httpClient.js";
 import { BridgeUnreachableError } from "../util/errors.js";
-import { assessPanel, installedBundleHash, type PanelAssessment } from "../setup/panelVersion.js";
+import { assessPanel, installedPanelHashes, type PanelAssessment } from "../setup/panelVersion.js";
 import { installedPanelDir, panelInstallDiff, panelSourceDir } from "../setup/paths.js";
-import { LEGACY_CAPABILITIES, panelCapabilities, type PanelCapabilities } from "../setup/panelCapabilities.js";
 import { logger } from "../util/logger.js";
 
 /** How often a healthy verdict is re-checked. */
@@ -27,7 +26,7 @@ export interface PanelGateOptions {
   now?: () => number;
 }
 
-/** The real assessment: the running hash against what is installed on disk. */
+/** The real assessment: the running hashes against what is installed on disk. */
 function assessFromDisk(health: Health): PanelAssessment {
   // The gate is what every failed call quotes, so it has to know whether the
   // files on disk are internally consistent. Without this it tells the user to
@@ -35,7 +34,7 @@ function assessFromDisk(health: Health): PanelAssessment {
   // restarts can resolve.
   const installed = installedPanelDir();
   const source = panelSourceDir();
-  return assessPanel(health.bundleHash, installedBundleHash(installed), {
+  return assessPanel(health, installedPanelHashes(installed), {
     installComplete: source ? panelInstallDiff(source, installed).length === 0 : undefined,
   });
 }
@@ -56,6 +55,11 @@ function assessFromDisk(health: Health): PanelAssessment {
  * verdict was about is not answering, and "cannot reach After Effects" is
  * `runOp`'s error to report, with a much better message than this. A *timeout*
  * keeps the stale verdict — a busy After Effects is still running the old code.
+ *
+ * Since issue #243 the server has one path per tool, and every one of them
+ * needs the current panel; there is no older path a stale panel could be sent
+ * down instead. So nothing but "current" (and "unknown", see below) is let
+ * through.
  */
 export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions = {}) {
   const assess = opts.assess ?? assessFromDisk;
@@ -67,19 +71,10 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
   let generation = 0;
   /** The probe in flight, shared by every caller that arrives while it runs. */
   let inflight: Promise<string | null> | null = null;
-  /**
-   * What the panel on the last /health said it supports (#220, stage 3).
-   * Cleared with the verdict, so a panel that has not been asked is legacy.
-   */
-  let capabilities: PanelCapabilities = LEGACY_CAPABILITIES;
-  /** Capabilities the panel turned out not to honour; kept until invalidate. */
-  const withdrawn = new Set<string>();
 
   const invalidate = () => {
     generation++;
     verdict = null;
-    capabilities = LEGACY_CAPABILITIES;
-    withdrawn.clear();
     nextCheckAt = 0;
     inflight = null;
   };
@@ -93,13 +88,13 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
     try {
       const health = await bridge.health();
       if (gen !== generation) return verdict;
-      capabilities = panelCapabilities(health);
       const assessment = assess(health);
       verdict = assessment.state === "current" || assessment.state === "unknown" ? null : assessment.message;
       nextCheckAt = now() + (verdict !== null ? STALE_RECHECK_MS : HEALTHY_RECHECK_MS);
-      // "unknown" covers a panel too old to report a hash. Its message is a
-      // warning rather than a certainty, so it is logged, not enforced — the
-      // Unknown-op backstop catches it the moment it actually matters.
+      // "unknown" is the one state besides "current" let through: this server
+      // has no shipped panel to hash, and the running panel lists every
+      // capability the server relies on (setup/panelVersion.ts). Logged, so
+      // the packaging fault behind it is seen.
       if (assessment.state === "unknown" && assessment.message) logger.warn(assessment.message);
       return verdict;
     } catch (e) {
@@ -130,21 +125,5 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
       return inflight;
     },
     invalidate,
-    /**
-     * What the panel last reported supporting; legacy until a probe has
-     * answered. Call after `check()`, which is what keeps it current.
-     */
-    capabilities: (): PanelCapabilities =>
-      withdrawn.size === 0
-        ? capabilities
-        : { legacy: capabilities.legacy, has: (n) => capabilities.has(n) && !withdrawn.has(n), list: capabilities.list.filter((n) => !withdrawn.has(n)) },
-    /**
-     * Stop using a capability the panel listed but did not honour (it answered
-     * `Unknown op:`), so the fallback's extra round trip is paid once. Lasts
-     * until the verdict is dropped — a restart or a port change.
-     */
-    withdraw: (name: string) => {
-      withdrawn.add(name);
-    },
   };
 }

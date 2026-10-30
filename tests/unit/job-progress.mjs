@@ -27,7 +27,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const dist = (...p) =>
   pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
 
 let passed = 0;
@@ -63,25 +63,49 @@ let passed = 0;
 
 // ---------------------------------------------------------------------------
 // Stub bridge, never on 7777 — a real panel may hold that on this machine.
-// `run_batch` always answers with an async envelope; the WS side is driven
-// by hand from each check, standing in for the panel's driveJob loop.
+// `run_batch` always answers with an async envelope handed to the server to
+// drive (`driver: "server"`, issue #243), and the server then sends one
+// `_continue_job` per chunk. Each check scripts those answers by hand with
+// `emit`, one step per chunk, so it decides exactly what the server sees.
 // ---------------------------------------------------------------------------
 
 /** op -> what the stub answers. */
 const behaviour = new Map();
+/** jobId -> scripted chunk answers not yet asked for, and chunk requests not yet answered. */
+const steps = new Map();
+const waiting = new Map();
+
+function nextChunk(jobId) {
+  const q = steps.get(jobId);
+  if (q && q.length) return Promise.resolve(q.shift());
+  return new Promise((resolve) => {
+    if (!waiting.has(jobId)) waiting.set(jobId, []);
+    waiting.get(jobId).push(resolve);
+  });
+}
 
 const bridge = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash() }));
+    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash() }));
     return;
   }
   let body = "";
   req.on("data", (c) => (body += c));
-  req.on("end", () => {
-    const { op } = JSON.parse(body || "{}");
-    const result = behaviour.get(op) ?? { ok: true, op };
+  req.on("end", async () => {
+    const { op, args } = JSON.parse(body || "{}");
     res.setHeader("content-type", "application/json");
+    if (op === "_continue_job") {
+      const step = await nextChunk(args.jobId);
+      if (step.error) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ ok: false, error: step.error }));
+      } else {
+        res.end(JSON.stringify({ ok: true, result: step.result }));
+      }
+      return;
+    }
+    const result = behaviour.get(op) ?? { ok: true, op };
     res.end(JSON.stringify({ ok: true, result }));
   });
 });
@@ -91,9 +115,27 @@ const port = bridge.address().port;
 assert.notEqual(port, 7777, "must not bind the panel's port");
 process.env.AE_MCP_PORT = String(port);
 
-/** What the panel broadcasts on /events. */
+/**
+ * What After Effects answers the server's next chunk with, in the shape the
+ * panel used to broadcast: progress -> a chunk that is not done; complete ->
+ * the finishing chunk; error with `unsureThrough` -> the chunk call itself
+ * fails; error with `progress` -> a chunk that stopped on a failed op there.
+ */
 function emit(evt) {
-  for (const ws of wss.clients) ws.send(JSON.stringify(evt));
+  let step;
+  if (evt.type === "progress") step = { result: { done: false, jobId: evt.jobId, progress: evt.progress, total: evt.total } };
+  else if (evt.type === "complete") step = { result: { done: true, jobId: evt.jobId, ...evt.result } };
+  else if (evt.type === "error" && evt.unsureThrough !== undefined) step = { error: evt.error };
+  else if (evt.type === "error") {
+    const ran = evt.progress - 1;
+    step = { result: { done: true, failed: true, jobId: evt.jobId, error: evt.error, results: Array.from({ length: ran }, () => ({})), errors: [{ index: ran }] } };
+  }
+  const w = waiting.get(evt.jobId);
+  if (w && w.length) w.shift()(step);
+  else {
+    if (!steps.has(evt.jobId)) steps.set(evt.jobId, []);
+    steps.get(evt.jobId).push(step);
+  }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -185,6 +227,7 @@ const batchEnvelope = (jobId) => ({
   undoStepsEstimate: 24,
   undoGroupName: "AE MCP Batch",
   note: "about 24 undo steps, NOT one",
+  driver: "server",
 });
 const batchArgs = { ops: [{ op: "create_null_layer", args: { compId: 1 } }] };
 
@@ -217,7 +260,7 @@ await check("run_batch sends no progress on its own token after its response", a
   const id = lastRequestId("run_batch");
   const responseAt = responseIndex(id);
 
-  // The panel drives the job and reports progress — after the envelope, as it
+  // The batch runs and reports progress — after the envelope, as it
   // always will, because the envelope is returned before the first chunk runs.
   for (let i = 1; i <= 4; i++) emit({ type: "progress", jobId: "j_p1", progress: 25 * i, total: 600, message: "running" });
   await sleep(80);
@@ -255,6 +298,9 @@ await check("await_job with a progressToken receives every progress event, all b
     expected.push({ progress: 25 * i, total: 600, message: "running" });
   }
   emit({ type: "complete", jobId: "j_p2", result: { results: [], errors: [], total: 600, undoSteps: 24 } });
+  // The server's driver adds one at the count the batch ended on, since the
+  // finishing chunk reports `done` and no progress (batchDriver.ts).
+  expected.push({ progress: 600, total: 600, message: "completed" });
 
   const res = await done;
   assert.equal(res.isError, undefined, res.content[0]?.text);
@@ -265,11 +311,11 @@ await check("await_job with a progressToken receives every progress event, all b
   // Correlated by the client: all five, in order, with their values intact.
   assert.deepEqual(received, expected);
 
-  // And on the wire: five notifications on await_job's token, every one of
+  // And on the wire: six notifications (five chunks and the final count) on await_job's token, every one of
   // them ahead of await_job's response, and none on run_batch's.
   const responseAt = responseIndex(awaitId);
   const notified = progressIndices(awaitId);
-  assert.equal(notified.length, 5);
+  assert.equal(notified.length, 6);
   for (const i of notified) assert.ok(i < responseAt, `a progress notification (wire #${i}) followed the response (wire #${responseAt})`);
   assert.deepEqual(progressIndices(batchId), [], "progress leaked onto run_batch's token");
 });
@@ -348,12 +394,12 @@ await check("two waiters on one job each get the events on their own token, each
   emit({ type: "complete", jobId: "j_p5", result: { results: [], undoSteps: 24 } });
   await Promise.all([a.done, b.done]);
 
-  assert.equal(a.received.length, 3);
-  assert.equal(b.received.length, 3);
+  assert.equal(a.received.length, 4);
+  assert.equal(b.received.length, 4);
   for (const id of ids) {
     const responseAt = responseIndex(id);
     const notified = progressIndices(id);
-    assert.equal(notified.length, 3, `request ${id} should have three notifications on its token`);
+    assert.equal(notified.length, 4, `request ${id} should have four notifications (three chunks and the final count) on its token`);
     for (const i of notified) assert.ok(i < responseAt, `request ${id}: notification #${i} followed response #${responseAt}`);
   }
 });
@@ -404,17 +450,19 @@ await check("a failed batch reports how far it got, from the panel's error event
   assert.doesNotMatch(st.message, /running/);
 });
 
-await check("a failed batch with no stop point says its progress is only the last one reported (#222)", async () => {
-  behaviour.set("run_batch", batchEnvelope("j_t3"));
-  await client.callTool({ name: "run_batch", arguments: batchArgs });
-  emit({ type: "progress", jobId: "j_t3", progress: 50, total: 600, message: "running" });
-  emit({ type: "error", jobId: "j_t3", error: "panel went away" });
-  await sleep(30);
-  const st = payload(await client.callTool({ name: "get_job", arguments: { jobId: "j_t3" } }));
-  assert.equal(st.status, "failed");
-  assert.equal(st.progress, 50);
-  assert.match(st.message, /last point reported/);
-});
+// A failure with no stop point came only from a panel-driven job's error event,
+// gone with #243 — the server's driver always knows how far it got. The
+// manager's wording for it is still pinned, on the manager alone.
+{
+  const jobs = new JobManager();
+  jobs.register("j_t3", 600);
+  jobs.reportProgress("j_t3", 50, 600, "running");
+  jobs.fail("j_t3", "panel went away");
+  assert.equal(jobs.get("j_t3").status, "failed");
+  assert.equal(jobs.get("j_t3").progress, 50);
+  assert.match(jobs.get("j_t3").message, /last point reported/);
+  passed++;
+}
 
 await check("a chunk that failed outright reports a lower bound, never a stop point (#222)", async () => {
   behaviour.set("run_batch", batchEnvelope("j_t4"));

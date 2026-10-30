@@ -1,19 +1,20 @@
-// The panel reports what it supports, and the house style moves to the server
-// on a panel that says it can name the .aep cheaply (issue #220, stage 3).
+// The panel reports what it supports (issue #220), and the house style's
+// file I/O is the server's (stage 3). Since issue #243 there is no older path:
+// every current panel does all of it, and one that does not is told to update.
 //
 // Pinned here, with no After Effects:
-//   - `capabilities` on /health is read as a list; absent or malformed is
-//     "legacy", never a guess. The gate keeps it with its verdict and drops it
-//     whenever it drops the verdict.
+//   - `capabilities` on /health is read as a list; absent or malformed lists
+//     nothing, never a guess, and `missingCapabilities` names what a panel
+//     lacks of what the server relies on.
 //   - `_project_path` (style.jsx) answers the path and the saved state, and is
 //     classified, as is every internal op the server sends; an internal
 //     write is sent only under the write lease.
 //   - The server's house-style I/O agrees with style.jsx on one real folder:
 //     the same results, the same sentences, the same bytes on disk.
-//   - Through tools/call: a legacy panel gets `get_house_style` exactly as
-//     before; a capable one gets `_project_path` and nothing else; a capable
-//     panel that turns out not to know the op, or a folder this process cannot
-//     read, falls back to the panel's own op.
+//   - Through tools/call: the panel gets `_project_path` and nothing else; a
+//     folder this process cannot read, or an answer in an odd shape, goes to
+//     the bundle's own op; a panel that does not know `_project_path` (or a
+//     raw screenshot op) is told to update, and nothing is re-sent.
 //
 // What a live After Effects must confirm: `app.project.file.fsName` and
 // `app.project.dirty` as `_project_path` reports them, and that the server
@@ -35,11 +36,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 const sharedDist = (...p) => pathToFileURL(path.join(root, "packages", "shared", "dist", ...p)).href;
 
-const { panelCapabilities, CAP_PROJECT_PATH } = await import(dist("setup", "panelCapabilities.js"));
-const { createPanelGate } = await import(dist("bridge", "panelGate.js"));
-const { BridgeUnreachableError } = await import(dist("util", "errors.js"));
+const { panelCapabilities, missingCapabilities, REQUIRED_PANEL_CAPABILITIES } = await import(dist("setup", "panelCapabilities.js"));
 const { readHouseStyle, writeHouseStyle } = await import(dist("style", "houseStyleFile.js"));
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 const { InternalOpMutation } = await import(sharedDist("schemas.js"));
 const { internalSender, UnleasedInternalWriteError } = await import(dist("tools", "internalOps.js"));
 const { WriteQueue } = await import(dist("bridge", "writeQueue.js"));
@@ -58,66 +57,37 @@ async function check(name, fn) {
 
 // ---------- reading the field ----------
 
-await check("a missing or malformed field is legacy", () => {
+await check("a missing or malformed field lists nothing", () => {
   for (const h of [undefined, null, {}, { ok: true }, { capabilities: "project-path" }, { capabilities: { 0: "x" } }]) {
-    const c = panelCapabilities(h);
-    assert.equal(c.legacy, true, JSON.stringify(h));
-    assert.equal(c.has(CAP_PROJECT_PATH), false);
+    assert.deepEqual([...panelCapabilities(h)], [], JSON.stringify(h));
+    assert.deepEqual(missingCapabilities(h), [...REQUIRED_PANEL_CAPABILITIES], JSON.stringify(h));
   }
 });
 
 await check("a list is read as one, and only strings count", () => {
-  const c = panelCapabilities({ capabilities: ["project-path", 7, null] });
-  assert.equal(c.legacy, false);
-  assert.equal(c.has("project-path"), true);
-  assert.deepEqual([...c.list], ["project-path"]);
-  const none = panelCapabilities({ capabilities: [] });
-  assert.equal(none.legacy, false);
-  assert.equal(none.has("project-path"), false);
+  assert.deepEqual([...panelCapabilities({ capabilities: ["project-path", 7, null] })], ["project-path"]);
+  assert.deepEqual([...panelCapabilities({ capabilities: [] })], []);
 });
 
-// ---------- the gate keeps it with the verdict ----------
+await check("missingCapabilities names what the server relies on and the panel lacks, in a stable order", () => {
+  assert.deepEqual(
+    [...REQUIRED_PANEL_CAPABILITIES].sort(),
+    ["project-path", "server-drives-jobs", "server-images", "server-run-jsx"]
+  );
+  assert.deepEqual(missingCapabilities({ capabilities: [...REQUIRED_PANEL_CAPABILITIES, "extra"] }), []);
+  assert.deepEqual(
+    missingCapabilities({ capabilities: ["server-images", "project-path"] }),
+    REQUIRED_PANEL_CAPABILITIES.filter((c) => c !== "server-images" && c !== "project-path")
+  );
+});
 
-await check("the gate reports what the last /health said, and forgets it with the verdict", async () => {
-  const b = {
-    caps: ["project-path"],
-    mode: "ok",
-    listeners: [],
-    async health() {
-      if (b.mode === "unreachable") throw new BridgeUnreachableError(7777, new Error("ECONNREFUSED"));
-      return { ok: true, port: 7777, bundleHash: "h", ...(b.caps ? { capabilities: b.caps } : {}) };
-    },
-    onPortChange(l) { b.listeners.push(l); },
-  };
-  let t = 0;
-  const gate = createPanelGate(b, { assess: () => ({ state: "current", message: "" }), now: () => t });
-  assert.equal(gate.capabilities().legacy, true, "nothing asked yet: legacy");
-  await gate.check();
-  assert.equal(gate.capabilities().has("project-path"), true);
-
-  gate.withdraw("project-path");
-  assert.equal(gate.capabilities().has("project-path"), false, "withdrawn after an Unknown op");
-  t += 120_000;
-  await gate.check();
-  assert.equal(gate.capabilities().has("project-path"), false, "a routine re-probe does not restore it");
-
-  gate.invalidate();
-  assert.equal(gate.capabilities().legacy, true, "invalidate forgets it");
-  await gate.check();
-  assert.equal(gate.capabilities().has("project-path"), true);
-
-  b.listeners.forEach((l) => l());
-  assert.equal(gate.capabilities().legacy, true, "a port change forgets it: another panel may answer");
-
-  b.caps = null;
-  await gate.check();
-  assert.equal(gate.capabilities().legacy, true, "a panel without the field is legacy");
-
-  b.caps = ["project-path"];
-  t += 120_000;
-  b.mode = "unreachable";
-  await gate.check();
-  assert.equal(gate.capabilities().legacy, true, "unreachable forgets it");
+// The panel's own list, read out of main.js: it must name everything the
+// server relies on, or a server with no shipped panel to hash refuses it.
+await check("main.js reports every capability the server relies on", () => {
+  const main = fs.readFileSync(path.join(root, "packages", "ae-panel", "client", "main.js"), "utf8");
+  const m = /var PANEL_CAPABILITIES = (\[[^\]]*\]);/.exec(main);
+  assert.ok(m, "PANEL_CAPABILITIES moved; update this test");
+  assert.deepEqual(missingCapabilities({ capabilities: JSON.parse(m[1]) }), []);
 });
 
 // ---------- internal ops are classified, and defined ----------
@@ -290,7 +260,7 @@ async function session(health) {
   const bridge = http.createServer((req, res) => {
     res.setHeader("content-type", "application/json");
     if (req.url === "/health") {
-      res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), ...health }));
+      res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash(), ...health }));
       return;
     }
     let body = "";
@@ -323,25 +293,9 @@ async function session(health) {
 const panelStyle = { ok: true, result: { found: true, projectSaved: true, path: "/elsewhere/house-style.md", content: "# From the panel\n", bytes: 17 } };
 const where = (p) => ({ ok: true, result: p === null ? { projectSaved: false, path: null, unsavedChanges: null } : { projectSaved: true, path: p, unsavedChanges: false } });
 
-const legacy = await session({});
-const capable = await session({ capabilities: ["project-path"] });
+const capable = await session({});
 
-await check("legacy panel: get_house_style goes to the panel, as before", async () => {
-  legacy.answers.get_house_style = panelStyle;
-  const r = await legacy.call("get_house_style", { detail: "full" });
-  assert.equal(r.isError, false, r.text);
-  assert.deepEqual(legacy.seen, ["get_house_style"], "no _project_path to a panel that did not offer it");
-  assert.equal(JSON.parse(r.text).content, "# From the panel\n");
-});
-
-await check("legacy panel: set_house_style goes to the panel, as before", async () => {
-  legacy.answers.set_house_style = { ok: true, result: { ok: true, path: "/x/house-style.md", bytes: 3, created: true, replaced: false } };
-  const r = await legacy.call("set_house_style", { content: "# x" });
-  assert.equal(r.isError, false, r.text);
-  assert.deepEqual(legacy.seen, ["set_house_style"]);
-});
-
-await check("capable panel: the server reads the guide itself", async () => {
+await check("the server reads the guide itself", async () => {
   resetDir(dir);
   fs.writeFileSync(aep, "");
   fs.writeFileSync(guide, "# Style\r\n\r\n## Palette\r\n- Ink #101820\r\n");
@@ -359,7 +313,7 @@ await check("capable panel: the server reads the guide itself", async () => {
   assert.ok(!("content" in sum));
 });
 
-await check("capable panel: no guide, and a project never saved", async () => {
+await check("no guide, and a project never saved", async () => {
   resetDir(dir);
   fs.writeFileSync(aep, "");
   capable.answers._project_path = where(aep);
@@ -378,7 +332,7 @@ await check("capable panel: no guide, and a project never saved", async () => {
   assert.deepEqual(capable.seen, ["_project_path"]);
 });
 
-await check("capable panel: the server writes, refuses to clobber, and replaces with overwrite", async () => {
+await check("the server writes, refuses to clobber, and replaces with overwrite", async () => {
   resetDir(dir);
   fs.writeFileSync(aep, "");
   capable.answers._project_path = where(aep);
@@ -399,19 +353,20 @@ await check("capable panel: the server writes, refuses to clobber, and replaces 
   assert.equal(fs.readFileSync(guide, "utf8"), "# Other\n");
 });
 
-await check("capable panel that does not know _project_path: falls back to the panel's op", async () => {
-  // Its own session: the withdrawal lasts for the rest of the session.
-  const forgetful = await session({ capabilities: ["project-path"] });
-  forgetful.answers.get_house_style = panelStyle;
-  const r = await forgetful.call("get_house_style", { detail: "full" });
-  assert.equal(r.isError, false, r.text);
-  assert.deepEqual(forgetful.seen, ["_project_path", "get_house_style"]);
-  assert.equal(JSON.parse(r.text).content, "# From the panel\n");
-  await forgetful.call("get_house_style", { detail: "full" });
-  assert.deepEqual(forgetful.seen, ["get_house_style"], "the capability is withdrawn: no second _project_path");
+await check("a panel that does not know _project_path is told to update; get_house_style is never sent (#243)", async () => {
+  const old = await session({});
+  old.answers.get_house_style = panelStyle;
+  old.answers.set_house_style = { ok: true, result: { ok: true, path: "/x/house-style.md", bytes: 3, created: true, replaced: false } };
+  for (const [tool, args] of [["get_house_style", { detail: "full" }], ["set_house_style", { content: "# x" }]]) {
+    const r = await old.call(tool, args);
+    assert.equal(r.isError, true, r.text);
+    assert.match(r.text, /older than these tools/);
+    assert.match(r.text, /setup_panel/);
+    assert.deepEqual(old.seen, ["_project_path"], `${tool} was re-sent under the public name`);
+  }
 });
 
-await check("capable panel, odd answer: falls back to the panel's op", async () => {
+await check("an odd _project_path answer goes to the bundle's own op", async () => {
   capable.answers._project_path = { ok: true, result: { path: 7 } };
   capable.answers.get_house_style = panelStyle;
   const r = await capable.call("get_house_style", { detail: "full" });
@@ -445,9 +400,8 @@ if (canChmod) {
   });
 }
 
-// ---------- server-images (issue #220, stage 4) ----------
-// Which side finishes a screenshot or a .mogrt thumbnail. The bytes are held
-// equal by tests/unit/image-parity.mjs; this is only who is asked for what.
+// ---------- screenshots and .mogrt thumbnails (issue #220, stage 4) ----------
+// The server finishes both; this is only who is asked for what.
 const { encodePng8 } = await import(dist("frames", "pngCodec.js"));
 const shotDir = fs.mkdtempSync(path.join(os.tmpdir(), "ae-caps-shot-"));
 let shotSeq = 0;
@@ -458,18 +412,8 @@ function rawFrame(args) {
   fs.writeFileSync(file, encodePng8(4, 3, 6, px));
   return { ok: true, result: { path: file, width: 16, height: 12, downsample: 4, time: args.time ?? 0, compId: 3 } };
 }
-const panelShot = { ok: true, result: { width: 4, height: 3, downsample: 4, time: 0, compId: 3, mimeType: "image/png", base64: "aGk=", bytes: 2 } };
-
-await check("legacy panel: a screenshot goes to the panel's own op, as before", async () => {
-  legacy.answers.screenshot_frame = panelShot;
-  const r = await legacy.call("screenshot_frame", { compId: 3, time: 0 });
-  assert.equal(r.isError, false, r.text);
-  assert.deepEqual(legacy.seen, ["screenshot_frame"], "no raw op to a panel that did not offer it");
-  assert.equal(JSON.parse(r.text).bytes, 2);
-});
-
-await check("server-images panel: the raw op is sent and the server reads the file", async () => {
-  const shots = await session({ capabilities: ["project-path", "server-images"] });
+await check("a screenshot: the raw op is sent and the server reads the file", async () => {
+  const shots = await session({});
   shots.answers._screenshot_frame = (a) => rawFrame(a);
   const r = await shots.call("screenshot_frame", { compId: 3, time: 1 });
   assert.equal(r.isError, false, r.text);
@@ -491,18 +435,18 @@ await check("server-images panel: the raw op is sent and the server reads the fi
   assert.deepEqual(shots.seen, ["_screenshot_frame", "_screenshot_frame"]);
 });
 
-await check("server-images panel that does not know the raw op: falls back once, then stays on the panel's op", async () => {
-  const forgetful = await session({ capabilities: ["server-images"] });
-  forgetful.answers.screenshot_frame = panelShot;
-  const r = await forgetful.call("screenshot_frame", { compId: 3, time: 0 });
-  assert.equal(r.isError, false, r.text);
-  assert.deepEqual(forgetful.seen, ["_screenshot_frame", "screenshot_frame"]);
-  await forgetful.call("screenshot_frame", { compId: 3, time: 0 });
-  assert.deepEqual(forgetful.seen, ["screenshot_frame"], "the capability is withdrawn");
+await check("a panel that does not know the raw screenshot op is told to update, and nothing is re-sent (#243)", async () => {
+  const old = await session({});
+  old.answers.screenshot_frame = { ok: true, result: { width: 4, height: 3, downsample: 4, time: 0, compId: 3, mimeType: "image/png", base64: "aGk=", bytes: 2 } };
+  const r = await old.call("screenshot_frame", { compId: 3, time: 0 });
+  assert.equal(r.isError, true, r.text);
+  assert.match(r.text, /older than these tools/);
+  assert.match(r.text, /setup_panel/);
+  assert.deepEqual(old.seen, ["_screenshot_frame"], "re-sent under the public name");
 });
 
-await check("server-images panel: export_mogrt is sent raw and never carries posterPngPath back", async () => {
-  const shots = await session({ capabilities: ["server-images"] });
+await check("export_mogrt is sent raw and never carries posterPngPath back", async () => {
+  const shots = await session({});
   shots.answers._export_mogrt = { ok: true, result: { ok: true, path: path.join(shotDir, "none.mogrt"), bytes: 5, compId: 3 } };
   const r = await shots.call("export_mogrt", { compId: 3 });
   assert.equal(r.isError, false, r.text);

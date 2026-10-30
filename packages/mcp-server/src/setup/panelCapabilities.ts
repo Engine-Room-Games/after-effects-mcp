@@ -1,17 +1,20 @@
 /**
  * What the running panel says it supports (issue #220, stage 3).
  *
- * `bundleHash` on `/health` names the ExtendScript the panel is running. It
- * says nothing about the panel's own JavaScript (`client/main.js`), and a
- * bundle can be current while that is not. From stage 3 on the panel lists
- * `capabilities` on `/health`, and that list is the only word on which panel
- * code is answering.
+ * Until issue #243 a capability switched the server between two paths: the
+ * server's own (screenshots, house-style I/O, `run_jsx` assembly, batch
+ * driving) for a panel that listed it, and the panel's older in-panel code for
+ * one that did not. Those older paths are gone from both sides. Every panel
+ * this server will talk to must do all four, and the version gate
+ * (`setup/panelVersion.ts`) refuses one that does not, with the "update your
+ * panel" message, before any call is forwarded.
  *
- * **A panel that lists nothing is "legacy", never "broken".** Every panel
- * before stage 3 omits the field, and it must keep working exactly as before:
- * the server uses a capability only when it is listed, and takes the path
- * every panel has otherwise. A malformed field counts as absent, for the same
- * reason — guessing that a panel can do something is how a call fails.
+ * The hashes are what normally decide that — a panel whose `bundleHash` and
+ * `clientHash` match the shipped panel has these capabilities by construction.
+ * The list is what the gate falls back on when the server has no shipped panel
+ * to hash (`sourcePanelHashes()` is null): it cannot say the panel is the
+ * current one, but it can say whether the panel can do what this server will
+ * ask of it. A missing or malformed field means "none".
  */
 
 /** `_project_path` answers the .aep's path cheaply; the server does house-style I/O itself. */
@@ -31,36 +34,30 @@ export const CAP_SERVER_IMAGES = "server-images";
  */
 export const CAP_SERVER_RUN_JSX = "server-run-jsx";
 
-export interface PanelCapabilities {
-  /** True when the panel sent no usable `capabilities` field. */
-  legacy: boolean;
-  has(name: string): boolean;
-  /** For logs and diagnostics. Empty when legacy. */
-  list: readonly string[];
-}
-
-export const LEGACY_CAPABILITIES: PanelCapabilities = Object.freeze({
-  legacy: true,
-  has: () => false,
-  list: Object.freeze([]) as readonly string[],
-});
-
-/** Read `capabilities` off a `/health` body. Anything but an array of strings is legacy. */
-export function panelCapabilities(health: unknown): PanelCapabilities {
-  const raw = health && typeof health === "object" ? (health as { capabilities?: unknown }).capabilities : undefined;
-  if (!Array.isArray(raw)) return LEGACY_CAPABILITIES;
-  const list = Object.freeze(raw.filter((c): c is string => typeof c === "string"));
-  const set = new Set(list);
-  return Object.freeze({ legacy: false, has: (name: string) => set.has(name), list });
-}
-
 /**
- * The server drives a chunked `run_batch` itself (issue #220, stage 5): the
- * panel answers the envelope and sends no `_continue_job` of its own, and the
- * server sends one per chunk. Asked for per call (`__driver: "server"` on the
- * forwarded args) and confirmed per call (`driver: "server"` on the envelope),
- * so a panel that did not do it — a stale capability, an older panel behind
- * the same port — drives its own job as before and is followed over its
- * event socket. Two drivers on one job is the failure this exists to rule out.
+ * A chunked `run_batch` answers the envelope with `driver: "server"` and sends
+ * no `_continue_job` of its own; the server sends one per chunk (issue #220,
+ * stage 5; jobs/batchDriver.ts).
  */
 export const CAP_SERVER_DRIVES_JOBS = "server-drives-jobs";
+
+/** Everything this server relies on. A panel missing any of them is out of date. */
+export const REQUIRED_PANEL_CAPABILITIES: readonly string[] = Object.freeze([
+  CAP_PROJECT_PATH,
+  CAP_SERVER_IMAGES,
+  CAP_SERVER_RUN_JSX,
+  CAP_SERVER_DRIVES_JOBS,
+]);
+
+/** Read `capabilities` off a `/health` body. Anything but an array of strings lists nothing. */
+export function panelCapabilities(health: unknown): readonly string[] {
+  const raw = health && typeof health === "object" ? (health as { capabilities?: unknown }).capabilities : undefined;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((c): c is string => typeof c === "string");
+}
+
+/** The required capabilities a `/health` body does not list, in a stable order. */
+export function missingCapabilities(health: unknown): string[] {
+  const have = new Set(panelCapabilities(health));
+  return REQUIRED_PANEL_CAPABILITIES.filter((c) => !have.has(c));
+}

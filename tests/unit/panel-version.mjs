@@ -4,6 +4,12 @@
 // a user, and three of the four are only reachable during an upgrade — which is
 // exactly when nobody is running the manual verification recipes.
 //
+// Since issue #243 a panel is two hashes, `bundleHash` (the ExtendScript) and
+// `clientHash` (every other file), and both must match. A current bundle beside
+// old client code is out of date; a panel too old to report either is out of
+// date, and enforced; and with no shipped panel to compare against the
+// capabilities decide, never "pass everything".
+//
 //   node tests/unit/panel-version.mjs
 
 import assert from "node:assert/strict";
@@ -13,13 +19,25 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 // pathToFileURL, not the bare path: on Windows an absolute path starts with a
 // drive letter, which the ESM loader reads as an unsupported URL scheme.
-const { assessPanel, sourceBundleHash, unknownOpMessage } = await import(
-  pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "setup", "panelVersion.js")).href
+const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
+const { assessPanel, sourcePanelHashes, sourceBundleHash, sourceClientHash, unknownOpMessage } = await import(
+  dist("setup", "panelVersion.js")
+);
+const { REQUIRED_PANEL_CAPABILITIES, missingCapabilities, panelCapabilities } = await import(
+  dist("setup", "panelCapabilities.js")
 );
 
-const SHIPPED = sourceBundleHash();
-assert.ok(SHIPPED, "no source bundle hash — run `npm run build` first");
+const SHIPPED = sourcePanelHashes();
+assert.ok(SHIPPED && SHIPPED.bundle && SHIPPED.client, "no source panel hashes — run `npm run build` first");
+assert.equal(sourceBundleHash(), SHIPPED.bundle);
+assert.equal(sourceClientHash(), SHIPPED.client);
 const OLD = "0".repeat(64);
+
+/** A /health body. */
+const run = (bundle, client, extra = {}) => ({ ok: true, bundleHash: bundle, clientHash: client, ...extra });
+const disk = (bundle, client) => ({ bundle, client });
+const CURRENT_DISK = disk(SHIPPED.bundle, SHIPPED.client);
+const OLD_DISK = disk(OLD, OLD);
 
 let passed = 0;
 function check(name, actual, expected) {
@@ -27,37 +45,63 @@ function check(name, actual, expected) {
   passed++;
 }
 
-// Running the shipped bundle: forward, say nothing.
-check("running current", assessPanel(SHIPPED, SHIPPED).state, "current");
-check("running current, disk somehow older", assessPanel(SHIPPED, OLD).state, "current");
+// Running the shipped panel: forward, say nothing.
+check("running current", assessPanel(run(SHIPPED.bundle, SHIPPED.client), CURRENT_DISK).state, "current");
+check("running current, disk somehow older", assessPanel(run(SHIPPED.bundle, SHIPPED.client), OLD_DISK).state, "current");
+
+// ------------------------------------------------- the client half (issue #243)
+// The gap this issue closes: the bundle is current, the client code beside it
+// is not. Comparing the bundle alone called this current.
+const staleClient = assessPanel(run(SHIPPED.bundle, OLD), OLD_DISK);
+check("current bundle, stale client code", staleClient.state, "update-needed");
+assert.match(staleClient.message, /setup_panel/);
+check(
+  "current bundle, stale client code, disk updated",
+  assessPanel(run(SHIPPED.bundle, OLD), CURRENT_DISK).state,
+  "restart-needed"
+);
+// And the other way round: a disk whose client files are current but whose
+// bundle is not is not a current install.
+check(
+  "stale bundle on disk, current client on disk",
+  assessPanel(run(OLD, OLD), disk(OLD, SHIPPED.client)).state,
+  "update-needed"
+);
 
 // Updated on disk, AE not restarted. The distinction that matters: telling
 // someone to run setup_panel again here would waste their time.
-const restart = assessPanel(OLD, SHIPPED);
+const restart = assessPanel(run(OLD, OLD), CURRENT_DISK);
 check("updated but not restarted", restart.state, "restart-needed");
 assert.match(restart.message, /quit and reopen/i);
 assert.match(restart.message, /will not help/i, "must say re-running setup_panel is pointless");
 
 // Never updated.
-const update = assessPanel(OLD, OLD);
+const update = assessPanel(run(OLD, OLD), OLD_DISK);
 check("panel predates the server", update.state, "update-needed");
 assert.match(update.message, /setup_panel/);
 assert.match(update.message, /quit and reopen/i);
 
-// A panel too old to report a hash. Not enforced — the message is advisory and
-// the Unknown-op backstop is what actually catches it — but it must not be
-// mistaken for a healthy panel.
+// A panel too old to report one hash or both. Every panel since #243 reports
+// both, so this is certain, and since #243 it is enforced: "unknown" would let
+// it through to a path it does not have.
 for (const missing of [undefined, null, ""]) {
-  check(`no hash (${JSON.stringify(missing)}), old disk`, assessPanel(missing, OLD).state, "unknown");
+  const tag = JSON.stringify(missing);
+  const noClient = assessPanel(run(SHIPPED.bundle, missing), OLD_DISK);
+  check(`current bundle, no clientHash (${tag}), old disk`, noClient.state, "update-needed");
+  assert.match(noClient.message, /too old to report/);
+  check(`no hashes (${tag}), old disk`, assessPanel(run(missing, missing), OLD_DISK).state, "update-needed");
   // Disk already refreshed: a restart is the only remaining step, and we can say so.
-  check(`no hash (${JSON.stringify(missing)}), fresh disk`, assessPanel(missing, SHIPPED).state, "restart-needed");
+  check(`no hashes (${tag}), fresh disk`, assessPanel(run(missing, missing), CURRENT_DISK).state, "restart-needed");
 }
+// A pre-0.3 /health: no hash fields at all.
+check("pre-0.3 health", assessPanel({ ok: true, bundleLoaded: true }, OLD_DISK).state, "update-needed");
+check("no health at all", assessPanel(null, OLD_DISK).state, "update-needed");
 
-// A half-updated install. bundle.jsx on disk is current, so every branch above
-// reasons its way to "restart-needed" — and a restart cannot fix files that were
-// never written. This is the state that cost three restarts in issue #20, so it
-// outranks the restart verdict rather than being a special case after it.
-const partial = assessPanel(OLD, SHIPPED, { installComplete: false });
+// A half-updated install. Every branch above that could recommend a restart
+// would, and a restart cannot fix files that were never written. This is the
+// state that cost three restarts in issue #20, so it outranks the restart
+// verdict rather than being a special case after it.
+const partial = assessPanel(run(OLD, OLD), CURRENT_DISK, { installComplete: false });
 check("bundle current but install incomplete", partial.state, "partial-install");
 assert.match(partial.message, /will not fix|not fix this/i, "must say a restart is not the remedy");
 assert.match(partial.message, /quit after effects/i, "must say to close AE before reinstalling");
@@ -65,15 +109,54 @@ assert.match(partial.message, /setup_panel/, "must name the tool that reinstalls
 passed += 3;
 
 // The same incomplete install, from a panel too old to report a hash.
-check("no hash, install incomplete", assessPanel(undefined, SHIPPED, { installComplete: false }).state, "partial-install");
-check("stale disk, install incomplete", assessPanel(OLD, OLD, { installComplete: false }).state, "partial-install");
+check("no hash, install incomplete", assessPanel(run(undefined, undefined), CURRENT_DISK, { installComplete: false }).state, "partial-install");
+check("stale disk, install incomplete", assessPanel(run(OLD, OLD), OLD_DISK, { installComplete: false }).state, "partial-install");
 
 // A complete install must be unaffected, whether stated explicitly or left out.
-check("explicitly complete", assessPanel(OLD, SHIPPED, { installComplete: true }).state, "restart-needed");
-check("unstated defaults to complete", assessPanel(OLD, SHIPPED, {}).state, "restart-needed");
+check("explicitly complete", assessPanel(run(OLD, OLD), CURRENT_DISK, { installComplete: true }).state, "restart-needed");
+check("unstated defaults to complete", assessPanel(run(OLD, OLD), CURRENT_DISK, {}).state, "restart-needed");
 // A running panel that already matches is current regardless — there is nothing
 // to reinstall when the code answering calls is the code we ship.
-check("running current beats an incomplete disk", assessPanel(SHIPPED, SHIPPED, { installComplete: false }).state, "current");
+check(
+  "running current beats an incomplete disk",
+  assessPanel(run(SHIPPED.bundle, SHIPPED.client), CURRENT_DISK, { installComplete: false }).state,
+  "current"
+);
+
+// ------------------------------------ no shipped panel to compare (issue #243)
+// This used to pass every panel. Now the capabilities decide: the server has
+// one path per tool, and each needs them.
+const ALL = [...REQUIRED_PANEL_CAPABILITIES];
+assert.deepEqual(
+  ALL.slice().sort(),
+  ["project-path", "server-drives-jobs", "server-images", "server-run-jsx"],
+  "the required list names every path the server has"
+);
+passed++;
+const capable = assessPanel(run(OLD, OLD, { capabilities: ALL }), null, { shipped: null });
+check("no source, every capability", capable.state, "unknown");
+assert.ok(capable.message.length > 0, "the let-through is explained, so the gate can log it");
+for (const caps of [undefined, "server-images", [], ALL.slice(1), [1, 2, 3]]) {
+  const verdict = assessPanel(run(OLD, OLD, caps === undefined ? {} : { capabilities: caps }), null, { shipped: null });
+  check(`no source, capabilities ${JSON.stringify(caps)}`, verdict.state, "update-needed");
+  assert.match(verdict.message, /setup_panel/);
+  assert.match(verdict.message, /reinstall/, "says what to do when setup_panel has nothing to install");
+}
+check("no source, no health", assessPanel(null, null, { shipped: null }).state, "update-needed");
+// The message names what is missing.
+assert.match(
+  assessPanel(run(OLD, OLD, { capabilities: ["project-path"] }), null, { shipped: null }).message,
+  /server-images, server-run-jsx, server-drives-jobs/
+);
+passed++;
+
+// panelCapabilities / missingCapabilities: a malformed field lists nothing.
+assert.deepEqual(panelCapabilities({ capabilities: "server-images" }), []);
+assert.deepEqual(panelCapabilities({ capabilities: ["a", 1, "b"] }), ["a", "b"]);
+assert.deepEqual(panelCapabilities(null), []);
+assert.deepEqual(missingCapabilities({ capabilities: ALL }), []);
+assert.deepEqual(missingCapabilities({}), ALL);
+passed += 5;
 
 // Unknown-op is always a version mismatch: server.ts rejects unknown tool names
 // before forwarding, so anything the panel rejects is an op this server defines.

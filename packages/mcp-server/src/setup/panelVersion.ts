@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { panelSourceDir } from "./paths.js";
+import { panelClientHash } from "./panelHash.js";
+import { missingCapabilities } from "./panelCapabilities.js";
 
 /**
  * Is the panel currently running inside After Effects the one this server ships?
@@ -11,15 +13,21 @@ import { panelSourceDir } from "./paths.js";
  * back `Unknown op: get_house_style`. Nothing in that says "your panel is older
  * than your tools". An agent retries, or concludes the tool is broken.
  *
- * Two hashes matter and they are not the same:
+ * Two copies matter and they are not the same:
  *
- *   - the bundle on disk in the CEP extension folder — what AE would load *next*
+ *   - the panel on disk in the CEP extension folder — what AE would load *next*
  *     time it starts
- *   - the bundle the panel actually evaluated — what it is running *now*
+ *   - the panel AE actually loaded — what it is running *now*
  *
  * They diverge for the whole window between `setup_panel` and restarting AE,
  * which is precisely the window where things break. Only the running one is
  * worth gating on, so it is read from the panel's own /health.
+ *
+ * And each copy has two halves (issue #243): `bundleHash` names the
+ * ExtendScript, `clientHash` names every other file of the panel. Both have
+ * to match. Comparing the bundle alone let a panel with a current bundle and
+ * old client code through, and since #243 the server has no older path left
+ * for such a panel to fall back on.
  */
 
 export type PanelState =
@@ -31,7 +39,11 @@ export type PanelState =
   | "update-needed"
   /** Files on disk are a mix of versions; no restart can resolve it. */
   | "partial-install"
-  /** A panel too old to report its hash, or no source to compare against. */
+  /**
+   * No shipped panel to compare against, and the running one lists every
+   * capability this server relies on. The only state besides "current" that
+   * the gate lets through.
+   */
   | "unknown";
 
 export interface PanelAssessment {
@@ -40,19 +52,50 @@ export interface PanelAssessment {
   message: string;
 }
 
-let cachedSourceHash: string | null | undefined;
-
-/** Hash of the bundle this server would install. Cached: it cannot change at runtime. */
-export function sourceBundleHash(): string | null {
-  if (cachedSourceHash !== undefined) return cachedSourceHash;
-  const source = panelSourceDir();
-  cachedSourceHash = source ? hashFile(path.join(source, "jsx", "bundle.jsx")) : null;
-  return cachedSourceHash;
+/**
+ * The two halves of "which panel is this". `bundle` names the ExtendScript
+ * (`jsx/bundle.jsx`); `client` names every other shipped file — main.js and
+ * its modules, index.html, the manifest (`setup/panelHash.ts`).
+ */
+export interface PanelHashes {
+  bundle: string | null;
+  client: string | null;
 }
 
-/** Hash of the bundle sitting in the CEP extension folder, i.e. what AE loads next launch. */
-export function installedBundleHash(installedPanel: string): string | null {
-  return hashFile(path.join(installedPanel, "jsx", "bundle.jsx"));
+/** The fields of a panel's `/health` the assessment reads. Any of them may be missing. */
+export interface RunningPanel {
+  bundleHash?: unknown;
+  clientHash?: unknown;
+  capabilities?: unknown;
+}
+
+let cachedSource: PanelHashes | null | undefined;
+
+/**
+ * Hashes of the panel this server would install, or null when it has none to
+ * compare against. Cached: it cannot change at runtime.
+ */
+export function sourcePanelHashes(): PanelHashes | null {
+  if (cachedSource !== undefined) return cachedSource;
+  const source = panelSourceDir();
+  const hashes = source ? installedPanelHashes(source) : null;
+  cachedSource = hashes && hashes.bundle && hashes.client ? hashes : null;
+  return cachedSource;
+}
+
+/** Hash of the bundle this server would install. */
+export function sourceBundleHash(): string | null {
+  return sourcePanelHashes()?.bundle ?? null;
+}
+
+/** Hash of every other file of the panel this server would install. */
+export function sourceClientHash(): string | null {
+  return sourcePanelHashes()?.client ?? null;
+}
+
+/** Hashes of a panel folder on disk. For the CEP extension folder, that is what AE loads next launch. */
+export function installedPanelHashes(dir: string): PanelHashes {
+  return { bundle: hashFile(path.join(dir, "jsx", "bundle.jsx")), client: panelClientHash(dir) };
 }
 
 function hashFile(file: string): string | null {
@@ -61,6 +104,10 @@ function hashFile(file: string): string | null {
   } catch {
     return null;
   }
+}
+
+function sameHashes(a: PanelHashes, b: PanelHashes | null | undefined): boolean {
+  return !!b && !!a.bundle && !!a.client && a.bundle === b.bundle && a.client === b.client;
 }
 
 const STALE_PANEL_ADVICE =
@@ -74,36 +121,73 @@ const PARTIAL_INSTALL_ADVICE =
   "user to quit After Effects completely, then run setup_panel, then reopen it.";
 
 /**
- * @param runningHash  `bundleHash` from the panel's /health, or null/undefined
- *                     from a panel too old to report one.
- * @param installedHash Hash of the extension folder's bundle, when known.
+ * @param running   The panel's `/health` body, or null when there is none.
+ *                  `bundleHash` and `clientHash` name the code it is running;
+ *                  a panel from before #243 sends no `clientHash`.
+ * @param installed Hashes of the extension folder's files, when known.
  * @param opts.installComplete `false` when the files on disk are known to be a
  *   mix of versions. Defaults to `true` — callers that have not checked keep the
  *   old behaviour rather than silently claiming an install is sound.
+ * @param opts.shipped The panel to compare against. Defaults to the one this
+ *   server ships; tests pass their own, null included.
  */
 export function assessPanel(
-  runningHash: string | null | undefined,
-  installedHash: string | null,
-  opts: { installComplete?: boolean } = {}
+  running: RunningPanel | null | undefined,
+  installed: PanelHashes | null,
+  opts: { installComplete?: boolean; shipped?: PanelHashes | null } = {}
 ): PanelAssessment {
-  const shipped = sourceBundleHash();
-  if (!shipped) return { state: "unknown", message: "" };
+  const shipped = opts.shipped !== undefined ? opts.shipped : sourcePanelHashes();
 
-  if (runningHash === shipped) return { state: "current", message: "" };
+  // No shipped panel to hash — a packaging fault, since every distribution
+  // carries one. This used to pass everything, which is how a panel older than
+  // the server could reach a path it does not have. Without hashes "is this the
+  // current panel" has no answer, but "can it do what this server will ask of
+  // it" still does: every path the server takes needs the capabilities in
+  // REQUIRED_PANEL_CAPABILITIES, and since #243 there is no older path to fall
+  // back on. So the list is the gate here, and a panel missing any of it is
+  // told to update rather than forwarded to fail obscurely.
+  if (!shipped) {
+    const missing = missingCapabilities(running);
+    if (missing.length === 0) {
+      return {
+        state: "unknown",
+        message:
+          "This copy of the AE MCP tools cannot find the panel it ships, so it cannot check the running panel's " +
+          "version. The panel reports everything these tools rely on, so calls go ahead.",
+      };
+    }
+    return {
+      state: "update-needed",
+      message:
+        `The After Effects panel is out of date: it does not support ${missing.join(", ")}, which these tools need. ` +
+        STALE_PANEL_ADVICE +
+        " If setup_panel says it has no panel to install, these tools are installed incompletely — reinstall them first.",
+    };
+  }
 
-  // Checked before anything else that could recommend a restart. Every branch
-  // below reasons from bundle.jsx alone, and bundle.jsx being current says
-  // nothing about the client files beside it — so a half-updated install would
-  // otherwise be told to restart, which cannot possibly resolve it. That loop is
-  // not theoretical: it is what v0.2.0 did, three restarts running.
+  const r = running ?? {};
+  const runningHashes: PanelHashes = {
+    bundle: typeof r.bundleHash === "string" && r.bundleHash ? r.bundleHash : null,
+    client: typeof r.clientHash === "string" && r.clientHash ? r.clientHash : null,
+  };
+  if (sameHashes(runningHashes, shipped)) return { state: "current", message: "" };
+
+  // Checked before anything else that could recommend a restart. A half-updated
+  // install can hash however it likes, and telling the user to restart for it
+  // cannot possibly resolve it. That loop is not theoretical: it is what v0.2.0
+  // did, three restarts running.
   if (opts.installComplete === false) {
     return { state: "partial-install", message: PARTIAL_INSTALL_ADVICE };
   }
 
-  if (typeof runningHash !== "string" || runningHash.length === 0) {
-    // Panels from before /health reported a hash. That alone means it predates
-    // this server, but say so cautiously — the disk copy is the only evidence.
-    if (installedHash === shipped) {
+  const installedCurrent = !!installed && sameHashes(shipped, installed);
+
+  if (!runningHashes.bundle || !runningHashes.client) {
+    // A panel that does not report both halves predates the one it is missing,
+    // and therefore this server: every panel since #243 reports both. That is a
+    // certainty, not a guess, so it is enforced like any other stale verdict
+    // rather than left to an `Unknown op:` later.
+    if (installedCurrent) {
       return {
         state: "restart-needed",
         message:
@@ -112,14 +196,14 @@ export function assessPanel(
       };
     }
     return {
-      state: "unknown",
+      state: "update-needed",
       message:
-        "The After Effects panel is too old to report its version, which means it predates these tools. " +
+        "The After Effects panel is too old to report its full version, which means it predates these tools. " +
         STALE_PANEL_ADVICE,
     };
   }
 
-  if (installedHash === shipped) {
+  if (installedCurrent) {
     return {
       state: "restart-needed",
       message:

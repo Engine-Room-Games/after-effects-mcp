@@ -1,10 +1,8 @@
 // mogrtThumbnail.ts — replace the still thumbnail inside an exported .mogrt.
 //
-// This is the MCP server's copy of `packages/ae-panel/client/mogrt.js` (issue
-// #220 stage 4: the server now patches the thumbnail itself). The panel keeps
-// its copy for legacy MCP servers that still ask it to, and the two must
-// produce identical bytes — tests/unit/image-parity.mjs holds them together.
-// Change both or neither.
+// Ported from the panel's `client/mogrt.js` when the server took over
+// patching the thumbnail (issue #220 stage 4). The panel's copy was deleted in
+// issue #243; this is the only one.
 //
 // A .mogrt is a zip holding project.aegraphic, definition.json, thumb.mp4 and
 // thumb.png. After Effects has no scriptable poster time, and the export

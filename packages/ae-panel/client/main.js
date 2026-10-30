@@ -76,10 +76,9 @@
     }
   }
 
-  // The screenshot checks live in their own files so a Node test can require
-  // them without a DOM: there is no After Effects on a CI runner, and neither
-  // real image code nor stale-buffer bookkeeping should be written blind.
-  // Same failure discipline as ws above — say what is missing, name the fix.
+  // The panel's own modules live in their own files so a Node test can require
+  // them without a DOM. Same failure discipline as ws above — say what is
+  // missing, name the fix.
   //
   // The list is ordered by how much it is trusted, not by convenience.
   // clientDir comes from CSInterface and is what the shipped layout actually
@@ -100,20 +99,27 @@
     }
     throw new Error("could not load " + name + " from any of: " + failures.join("; "));
   }
-  var pngCodec, frameCacheModule, mogrtModule, contactSheetModule, frameReaderModule;
+  var panelHashModule;
   try {
-    pngCodec = requireSibling("pngcodec.js");
-    frameCacheModule = requireSibling("framecache.js");
-    mogrtModule = requireSibling("mogrt.js");
-    contactSheetModule = requireSibling("contactsheet.js");
-    frameReaderModule = requireSibling("framereader.js");
+    panelHashModule = requireSibling("panelhash.js");
   } catch (e) {
-    setStatus("cannot start — one of the panel's file-processing modules is missing", "err");
-    log("error", "loading the panel's file-processing modules from " + __dirname + " failed: " + e.message);
+    setStatus("cannot start — one of the panel's modules is missing", "err");
+    log("error", "loading the panel's modules from " + __dirname + " failed: " + e.message);
     log("error", "Quit After Effects, run the setup_panel tool, then reopen it.");
     return;
   }
-  var frameCache = frameCacheModule.createFrameCache();
+
+  // ---------- Which panel code is this? (issue #243) ----------
+  // Every file of this panel except bundle.jsx, hashed once, now: the files
+  // CEP loaded at launch are the ones this process runs until After Effects
+  // restarts, whatever setup_panel writes over them later. Reported on /health
+  // beside bundleHash, and the server's version gate needs both to match the
+  // panel it ships — bundleHash alone let a current bundle beside old client
+  // code through. The algorithm is panelhash.js, ported to the server as
+  // setup/panelHash.ts; the signature files a self-signed install adds are
+  // left out of both, so a signed install is a current install.
+  var loadedClientHash = panelHashModule.panelClientHash(extDir);
+  if (!loadedClientHash) log("warn", "could not hash the panel's own files in " + extDir + "; the MCP server will report this panel as out of date");
 
   var bundlePath = path.join(extDir, "jsx", "bundle.jsx");
 
@@ -224,20 +230,23 @@
   }
 
   // ---------- What this panel supports ----------
-  // Reported on /health as `capabilities` (issue #220, stage 3). Each name is
-  // something a server may use only when it is listed:
+  // Reported on /health as `capabilities` (issue #220). Since issue #243 the
+  // server has no other path for any of these, and its version gate refuses a
+  // panel that is not the one it ships; the list is what that gate falls back
+  // on when it has no shipped panel to hash, so it must name everything the
+  // server relies on:
   //   project-path — `_project_path` answers the .aep's path with no project
   //                  walk, so the server reads and writes house-style.md itself.
   //   server-images — `_screenshot_frame`, `_screenshot_layer` and
-  //                  `_export_mogrt` reach the bundle untouched (handleOp only
-  //                  intercepts the public names), so the server reads the PNGs
-  //                  and patches the .mogrt itself (stage 4).
+  //                  `_export_mogrt` reach the bundle untouched and answer with
+  //                  file paths; the server reads the PNGs and patches the
+  //                  .mogrt itself.
   //   server-run-jsx — `_run_jsx` runs a script the server assembled, and a
   //                  failure carries `wrapperLine`/`libraryIndex` (forwarded
-  //                  above) for the server to map onto the caller's file (stage 6).
-  // The panel and its bundle.jsx install together, so a name here may stand for
-  // an op in the bundle. The server still falls back on `Unknown op:`.
-  var PANEL_CAPABILITIES = ["project-path", "server-images", "server-run-jsx"];
+  //                  above) for the server to map onto the caller's file.
+  //   server-drives-jobs — a chunked run_batch is handed back with
+  //                  `driver: "server"`, and the server sends each chunk.
+  var PANEL_CAPABILITIES = ["project-path", "server-images", "server-run-jsx", "server-drives-jobs"];
 
   // ---------- Load bundle.jsx ----------
   // Hash of the bundle *actually evaluated into ExtendScript*, reported on
@@ -433,223 +442,32 @@
     return cfg;
   }
 
-  // ---------- WS broadcast ----------
+  // ---------- Event socket ----------
+  // /events is still served (see startServers): the MCP server reads its
+  // reopening as a sign that After Effects restarted. No job events are sent
+  // on it since issue #243 — the server drives every batch itself.
   var wsClients = new Set();
-  function broadcast(eventObj) {
-    var str = JSON.stringify(eventObj);
-    wsClients.forEach(function (c) {
-      try { if (c.readyState === 1) c.send(str); } catch (e) {}
-    });
-  }
 
-  // ---------- Vision: read PNG and base64-encode (for screenshot_* ops) ----------
-  // Deciding when After Effects has finished writing a frame is issue #45, and
-  // it lives in framereader.js so a unit test can drive it with a file it grows
-  // by hand. What matters here: `waitForCompletePng` resolves only with bytes
-  // that parse end-to-end as a PNG, deletes the temp file on every path, and
-  // rejects with FRAME_INCOMPLETE or RENDER_TIMEOUT — never with one message
-  // covering both.
-  var waitForCompletePng = frameReaderModule.waitForCompletePng;
-  var dressFrameError = frameReaderModule.dressFrameError;
-  var frameError = frameReaderModule.frameError;
-  var unlinkQuietly = frameReaderModule.unlinkQuietly;
-
-  function sha256(bytes) {
-    return crypto.createHash("sha256").update(bytes).digest("hex");
-  }
-
-  // Downsampling happens in ExtendScript via the comp's resolutionFactor, so
-  // the file on disk is already the right size by the time we get here.
-  //
-  // What is *not* already right is the bit depth: a 16-bit project renders
-  // 16-bit-per-channel PNGs, which many decoders refuse outright. pngcodec
-  // converts those to 8-bit, tells us when the frame is entirely transparent,
-  // and hands back the decoded samples so a frame can be recognised if After
-  // Effects serves the same buffer again for a different request.
-  function readPngFrame(file, opts) {
-    // waitForCompletePng owns the temp file and removes it on every path,
-    // success or failure. A file left behind is one a later read could find,
-    // which is how a corrupt frame would start coming back for free.
-    return waitForCompletePng(file, opts).then(function (buf) {
-      var norm;
-      try {
-        norm = pngCodec.normalizePng(buf);
-      } catch (e) {
-        // The completeness gate above guarantees this file ends in a well-formed
-        // IEND, so a truncation error here would mean the gate is broken. Refuse
-        // rather than ship: "never report success for work that didn't happen"
-        // outranks the fallback below.
-        if (/truncated PNG/.test(e.message)) {
-          throw frameError("FRAME_INCOMPLETE", "the file passed the completeness check and then failed to parse (" + e.message + ")");
-        }
-        // A complete PNG this parser cannot read is still a PNG the client
-        // might. Ship it unchanged rather than throwing away a render that did
-        // happen — but say so, and fall back to hashing the file so the stale
-        // check survives.
-        log("warn", "could not normalise the frame (" + e.message + "); sending it unconverted");
-        var dims = pngDimensions(buf);
-        return {
-          buffer: buf,
-          width: dims ? dims.width : null,
-          height: dims ? dims.height : null,
-          empty: false,
-          hash: sha256(buf),
-          warning: "This frame could not be normalised to 8-bit (" + e.message +
-            ") and was sent exactly as After Effects wrote it. If it fails to decode, " +
-            "that is why.",
-        };
-      }
-      if (norm.empty) {
-        return { empty: true, width: norm.width, height: norm.height };
-      }
-      if (norm.converted) {
-        log("info", "converted a " + norm.bitDepth + "-bit frame to 8-bit (" +
-          buf.length + " -> " + norm.buffer.length + " bytes)");
-      }
-      return {
-        buffer: norm.buffer,
-        width: norm.width,
-        height: norm.height,
-        empty: false,
-        converted: norm.converted,
-        sourceBitDepth: norm.bitDepth,
-        // Decoded samples, kept only so the contact sheet can composite them
-        // without decoding the same PNG a second time. Already straight alpha —
-        // exactly what `buffer` decodes to — so the sheet must not convert them
-        // again (#130). Null on the passthrough path, where the pixels were
-        // never interpreted. The hash below is of the samples as After Effects
-        // wrote them, before un-premultiplying; see pngcodec.js.
-        pixels: norm.pixels,
-        channels: norm.channels,
-        hash: sha256(norm.hashInput),
-        // The pixels could not be read, so "empty" was never evaluated and the
-        // hash is of the compressed stream. Both are still better than nothing;
-        // saying which is what stops a later reader trusting the wrong one.
-        warning: norm.passthrough
-          ? "This frame's pixels were not inspected (" + norm.passthrough +
-            "), so it was sent exactly as After Effects wrote it."
-          : undefined,
-      };
-    });
-  }
-
-  // Read the true pixel dimensions out of the PNG's IHDR chunk rather than
-  // computing them, so what we report is always what the client received.
-  function pngDimensions(buf) {
-    if (buf.length < 24) return null;
-    if (buf.readUInt32BE(12) !== 0x49484452) return null; // "IHDR"
-    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
-  }
-
-  // ---------- Rendering one frame, with one bounded retry ----------
-  function renderFrameOnce(op, args) {
-    return runOp(op, args).then(function (info) {
-      return readPngFrame(info.path).then(function (img) {
-        return { info: info, img: img };
-      });
-    });
-  }
-
-  /**
-   * Render a frame, and re-render exactly once if what came back was corrupt.
-   *
-   * Safe to repeat, which is the only reason this is here. Both screenshot ops
-   * are read-only: `screenshot_frame` renders to a temp file, `screenshot_layer`
-   * additionally solos a layer and restores every solo state in a `finally`.
-   * Neither leaves anything in the project, so a second run is
-   * indistinguishable from one run — this is not `run_jsx`, where re-running a
-   * script that already had its side effects duplicates them (issue #43).
-   *
-   * Only on FRAME_INCOMPLETE, never on RENDER_TIMEOUT. A timeout has already
-   * spent the 120s budget; a second one would take the op past the server's
-   * 300s ceiling and turn a precise "the render did not finish" into a bridge
-   * timeout, whose remedy ("do not restart anything, wait") is a different
-   * remedy for a different problem. A corrupt read, by contrast, fails within
-   * FRAME_STALL_MS, and the evidence in #45 is that a retry sometimes succeeds
-   * — a light comp returned one truncated frame and then rendered.
-   *
-   * The temp file of a failed attempt is deleted before the retry (in
-   * `waitForCompletePng`), and ExtendScript names a fresh one per call, so a
-   * retry can never be handed the previous attempt's bytes.
-   */
-  function renderFrameWithRetry(op, args) {
-    return renderFrameOnce(op, args).catch(function (first) {
-      if (first.code !== "FRAME_INCOMPLETE") throw dressFrameError(first, 1);
-      log("warn", op + ": " + first.detail + " — re-rendering once");
-      return renderFrameOnce(op, args).catch(function (second) {
-        throw dressFrameError(second, 2);
-      });
-    });
-  }
-
-  // ---------- Stale render detection ----------
-  // The request identity a render is expected to be unique to. Built from what
-  // ExtendScript resolved, not from the arguments, so a defaulted time or
-  // downsample is compared as the value actually rendered.
-  function frameKey(op, info) {
-    var layer = (info.layerId === undefined || info.layerId === null) ? "-" : info.layerId;
-    return [op, info.compId, layer, Number(info.time).toFixed(6), info.downsample].join("|");
-  }
-  function frameLabel(op, info) {
-    return "comp " + info.compId +
-      ((info.layerId === undefined || info.layerId === null) ? "" : " layer " + info.layerId) +
-      " @ " + Number(info.time).toFixed(3) + "s downsample " + info.downsample;
-  }
-  // An error rather than a warning attached to the image, because an agent that
-  // can see the picture will believe the picture. It carries the whole
-  // workaround: there is nothing this panel can do to make the render happen.
-  function staleFrameError(label, match, bytes) {
-    var ago = Math.max(1, Math.round(match.ageMs / 1000));
-    var err = new Error(
-      "Stale frame: After Effects returned pixels identical to an earlier, different " +
-      "request (" + match.label + ", " + match.bytes + " bytes, " + ago + "s ago), so this " +
-      "image is not a picture of " + label + " (" + bytes + " bytes) and has not been sent.\n" +
-      "\n" +
-      "What to do next:\n" +
-      "1. Wait a few seconds — back-to-back screenshots trigger this far more often.\n" +
-      "2. Retry with a higher `downsample` (6 has worked where 3-4 stayed stale).\n" +
-      "3. If it repeats, verify the animation by reading keyframes (get_keyframes / " +
-      "get_layer_full) instead. That is exact; a picture is not.\n" +
-      "\n" +
-      "Do NOT start disabling layers to make the render succeed: this is a limit of the " +
-      "panel's render path, not a problem with the project. If those two frames really " +
-      "are identical — a static comp — a different `downsample` will render a different " +
-      "number of pixels and confirm it."
-    );
-    err.code = "STALE_FRAME";
-    return err;
-  }
-
-  // ---------- Long job continuation loop ----------
-  // Each turn of this loop is one evalScript, and each one now opens and closes
-  // its own undo group inside itself — a group cannot span two calls, because
-  // After Effects discards one that does (issue #69). So the chunk size is not
-  // only a pacing knob any more: it decides how many undo steps a long batch
-  // costs the user. It comes off the job envelope so the JSX side owns the
-  // number and the two cannot drift.
-  // Every batch this panel is driving, by id, with how far it has got. The
-  // job table lives in the bundle's closure, so /reload-jsx would drop each of
-  // these mid-run; it reads this to refuse instead (issue #163).
+  // ---------- Batches in flight ----------
+  // A chunked run_batch is handed back to the server (`driver: "server"`),
+  // which sends each `_continue_job` itself, so progress, cancel and the
+  // job's state are the server's. Each chunk opens and closes its own undo
+  // group inside one evalScript (issue #69). Only what /reload-jsx needs is
+  // kept here: the job table lives in the bundle's closure, so a reload would
+  // drop each of these mid-run, and /reload-jsx reads this to refuse instead
+  // (issue #163). Jobs are tracked as their chunks pass through, and one no
+  // chunk has reached for SERVER_JOB_IDLE_MS is taken for a batch whose server
+  // stopped (it died), so it no longer blocks a reload.
   var jobsInFlight = {};
-
-  // ---------- Batches the server drives (issue #220, stage 5) ----------
-  // A server that asks (`__driver: "server"` on run_batch's args) gets the
-  // envelope back with `driver: "server"` and sends each `_continue_job`
-  // itself, so progress, cancel and the job's state are the server's. A server
-  // that does not ask — an older one — gets the loop below, as before. Only
-  // what /reload-jsx needs is kept here: those jobs are tracked as their chunks
-  // pass through, and one no chunk has reached for SERVER_JOB_IDLE_MS is taken
-  // for a batch whose server stopped (it died), so it no longer blocks a reload.
-  PANEL_CAPABILITIES.push("server-drives-jobs");
   var SERVER_JOB_IDLE_MS = 10 * 60 * 1000;
 
   function trackServerJob(jobId, total) {
-    jobsInFlight[jobId] = { attempted: 0, total: (typeof total === "number") ? total : null, server: true, seenAt: Date.now() };
+    jobsInFlight[jobId] = { attempted: 0, total: (typeof total === "number") ? total : null, seenAt: Date.now() };
   }
 
   function noteServerChunk(jobId, res) {
     var j = jobsInFlight[jobId];
-    if (!j || !j.server) return;
+    if (!j) return;
     if (!res || res.done) { delete jobsInFlight[jobId]; return; }
     if (typeof res.progress === "number") j.attempted = res.progress;
     if (typeof res.total === "number") j.total = res.total;
@@ -662,492 +480,32 @@
     for (var id in jobsInFlight) {
       if (!jobsInFlight.hasOwnProperty(id)) continue;
       var j = jobsInFlight[id];
-      if (j.server && now - j.seenAt > SERVER_JOB_IDLE_MS) continue;
+      if (now - j.seenAt > SERVER_JOB_IDLE_MS) continue;
       parts.push(id + " (" + j.attempted + " of " + (j.total === null ? "?" : j.total) + " ops attempted" +
-        (j.server ? ", driven by the MCP server" : "") + ")");
+        ", driven by the MCP server)");
     }
     return parts.join(", ");
   }
 
-  function driveJob(jobId, progressToken, chunkSize, total) {
-    var tracked = { attempted: 0, total: (typeof total === "number") ? total : null };
-    jobsInFlight[jobId] = tracked;
-    function untrack(v) { delete jobsInFlight[jobId]; return v; }
-    function untrackThrow(e) { delete jobsInFlight[jobId]; throw e; }
-    return driveJobSteps(jobId, progressToken, chunkSize, total, tracked).then(untrack, untrackThrow);
-  }
-
-  function driveJobSteps(jobId, progressToken, chunkSize, total, tracked) {
-    var totalGuess = (typeof total === "number") ? total : null;
-    var size = chunkSize || 25;
-    // The cursor: ops attempted, not ops that succeeded — a continue-on-error
-    // batch moves past a failed op too.
-    var attempted = 0;
-    var stepsTaken = 0;
-    // What After Effects reported through app.onError in ANY chunk (core.jsx,
-    // dialog guard, issue #225). Each chunk is its own dispatch, so a warning
-    // raised in chunk 3 of 40 would otherwise be on a result nobody reads.
-    var aeWarnings = [];
-    function step() {
-      return runOp("_continue_job", { jobId: jobId, chunkSize: size }).then(function (res) {
-        if (res && res.aeWarnings && res.aeWarnings.length) aeWarnings = aeWarnings.concat(res.aeWarnings);
-        if (res.total) totalGuess = res.total;
-        tracked.total = totalGuess;
-        if (!res.done) {
-          if (typeof res.progress === "number") attempted = res.progress;
-          tracked.attempted = attempted;
-          if (typeof res.undoSteps === "number") stepsTaken = res.undoSteps;
-          broadcast({ type: "progress", jobId: jobId, progress: res.progress, total: res.total, message: "running" });
-          // Yield to UI so AE stays responsive.
-          return new Promise(function (r) { setTimeout(r, 0); }).then(step);
-        }
-        if (res.failed) {
-          // A failed job reaches the server as an error string and nothing else,
-          // so what the batch cost has to travel inside it or it is lost: the
-          // ops before the failure are applied and stay applied.
-          var failedMsg = (res.error || "batch failed") + (res.note ? " || " + res.note : "") +
-            (aeWarnings.length ? " || After Effects also reported, through app.onError while dialogs were suppressed: " +
-              aeWarnings.join(" | ") : "");
-          // Where it stopped travels with the error (issue #222): the last
-          // progress event is the boundary before the failing chunk.
-          var failedAt = (res.results ? res.results.length : 0) + (res.errors ? res.errors.length : 0);
-          broadcast({ type: "error", jobId: jobId, error: failedMsg, progress: failedAt });
-          var failedOut = { done: true, failed: true, jobId: jobId, error: res.error, results: res.results, errors: res.errors, atIndex: res.atIndex, undoSteps: res.undoSteps, note: res.note };
-          if (aeWarnings.length) failedOut.aeWarnings = aeWarnings;
-          return failedOut;
-        }
-        // `undoSteps` is the measured number of undo groups the batch opened,
-        // and `diff` is the batch's own before/after — both are only ever seen
-        // by the agent if they are carried on this event.
-        var completed = {
-          results: res.results,
-          errors: res.errors,
-          total: res.total || totalGuess,
-          cancelled: !!res.cancelled,
-          undoSteps: res.undoSteps,
-          undoGroupName: res.undoGroupName,
-          note: res.note,
-          diff: res.diff,
-        };
-        if (aeWarnings.length) completed.aeWarnings = aeWarnings;
-        broadcast({ type: "complete", jobId: jobId, result: completed });
-        var doneOut = { done: true, jobId: jobId };
-        for (var k in completed) { if (completed.hasOwnProperty(k)) doneOut[k] = completed[k]; }
-        return doneOut;
-      }, function (e) {
-        // Any failure of a continuation leaves the chunks before it in the
-        // project, and a bare error — "No job: j_…" after a bundle reload, or
-        // the heal's own "Nothing ran", which is true of that one call and
-        // false of the batch — would invite a re-run that applies them twice.
-        // So every failure path of an in-flight job says what had landed.
-        //
-        // The job table lives in the bundle's closure, so a bundle reload —
-        // the automatic heal after another script removed __AEMCP (issue #185),
-        // or /reload-jsx — loses every job in flight; that is the "No job" case.
-        var msg = String(e && e.message ? e.message : e);
-        var cause = msg.indexOf("No job: ") === 0
-          ? "the AE MCP bundle was reloaded in After Effects (another script removed it from the shared " +
-            "script engine, or /reload-jsx ran), which discards running jobs."
-          : msg.split("Nothing ran.").join("The next chunk did not run.");
-        var landed = (attempted === 0 && stepsTaken === 0)
-          ? "No op of the batch had run yet."
-          : attempted + " of " + (totalGuess === null ? "?" : totalGuess) + " ops had already been attempted, " +
-            "in " + stepsTaken + " undo step(s); whatever they changed stays applied (an op that failed under " +
-            "continue-on-error may not have changed anything, and its error is lost with the job). " +
-            "Do NOT re-run the batch as it was: read the comp back and send only the ops that are missing.";
-        // Warnings from chunks that did run are still true of the project.
-        var warned = aeWarnings.length
-          ? " || After Effects also reported, through app.onError while dialogs were suppressed: " +
-            aeWarnings.join(" | ")
-          : "";
-        var stopped = new Error("Batch " + jobId + " stopped mid-run: " + cause + " " + landed + warned);
-        stopped.code = e && e.code;
-        // A lower bound, not a stop point: the failing chunk may have partly
-        // or fully run ("Bad JSON" means it did) (issue #222).
-        stopped.progress = attempted;
-        stopped.unsureThrough = totalGuess === null ? attempted + size : Math.min(attempted + size, totalGuess);
-        if (aeWarnings.length) stopped.aeWarnings = aeWarnings;
-        log("error", stopped.message);
-        throw stopped;
-      });
-    }
-    return step();
-  }
-
-  // ---------- Motion Graphics template thumbnail ----------
-  // ExtendScript can render the poster frame but cannot rewrite a zip, so the
-  // JSX side hands back a PNG path and the archive surgery happens here.
-  //
-  // A failed patch is reported on an otherwise successful result, never thrown:
-  // the .mogrt is already written and valid at this point, and throwing away a
-  // successful export because its thumbnail could not be improved would be the
-  // worse trade. The result says plainly that the thumbnail is still AE's.
-  function patchMogrtThumbnail(info) {
-    // The same completeness gate the screenshot path uses. The poster frame is
-    // written by the same asynchronous `saveFrameToPng`, so a half-written one
-    // is just as possible here — and it would be resampled into the template's
-    // thumbnail rather than merely displayed.
-    // It takes the poster file with it, on success and on failure alike.
-    return waitForCompletePng(info.posterPngPath).then(function (poster) {
-      var patched = mogrtModule.patchThumbnail(fs.readFileSync(info.path), poster);
-      // Write via a sibling temp file and rename, so an interrupted write
-      // cannot leave a half-rewritten template where a valid one used to be.
-      var tmp = info.path + ".tmp-thumb";
-      fs.writeFileSync(tmp, patched.buffer);
-      fs.renameSync(tmp, info.path);
-      return {
-        patched: true,
-        posterTime: info.posterTime,
-        width: patched.width,
-        height: patched.height,
-        sourceWidth: patched.sourceWidth,
-        sourceHeight: patched.sourceHeight,
-        letterboxed: patched.letterboxed || undefined,
-      };
-    }).catch(function (e) {
-      unlinkQuietly(info.posterPngPath);
-      log("warn", "could not patch the .mogrt thumbnail: " + e.message);
-      return {
-        patched: false,
-        posterTime: info.posterTime,
-        reason: "The template exported correctly, but its thumbnail could not be replaced (" +
-          e.message + "). It still shows the one After Effects wrote.",
-      };
-    });
-  }
-
-  // ---------- Contact sheet ----------
-  //
-  // ExtendScript renders every requested time and hands back one temp path per
-  // tile; everything from here on is pixels, which `packages/jsx` has no way to
-  // touch. One tile that fails is drawn as a marked block rather than dropped —
-  // the sheet has to keep mapping onto the times that were asked for, or an
-  // agent counting frames left to right reads the wrong one as the right one.
-
-  /** One line, for a note inside a tile rather than a whole error message. */
-  function shortReason(err) {
-    var s = err && err.detail ? err.detail : (err && err.message ? err.message : String(err));
-    return String(s).split("\n")[0];
-  }
-
-  function sheetOutOfTime(tile) {
-    return {
-      time: tile.time,
-      status: "failed",
-      note: "not read: the contact sheet's overall time limit (" +
-        Math.round(contactSheetModule.CONTACT_SHEET_BUDGET_MS / 1000) + "s) ran out before this tile",
-    };
-  }
-
-  function readSheetTile(info, tile, deadline) {
-    if (tile.error) {
-      return Promise.resolve({ time: tile.time, status: "failed", note: tile.error });
-    }
-    var budget = contactSheetModule.tileBudgetMs(deadline, Date.now(), frameReaderModule.FRAME_RENDER_BUDGET_MS);
-    if (!budget) {
-      // Never read, so nothing else will remove it.
-      unlinkQuietly(tile.path);
-      return Promise.resolve(sheetOutOfTime(tile));
-    }
-    return readPngFrame(tile.path, { budgetMs: budget }).then(function (img) {
-      return { time: tile.time, status: "ok", img: img };
-    }, function (err) {
-      if (err.code !== "FRAME_INCOMPLETE") {
-        return { time: tile.time, status: "failed", note: shortReason(err) };
-      }
-      // A re-render is a whole render plus a read. Started with less than
-      // RETRY_MIN_MS left, it could only finish past the sheet's deadline.
-      if (deadline - Date.now() < contactSheetModule.RETRY_MIN_MS) {
-        return { time: tile.time, status: "failed", note: shortReason(err) + "; too little of the sheet's time limit left to re-render it" };
-      }
-      // The same bounded retry the single-frame path gets, and safe for the same
-      // reason — but re-rendering only this one time. The already-derived
-      // downsample is passed explicitly so the per-tile factor cannot drift from
-      // the rest of the sheet.
-      log("warn", "contact sheet tile at " + tile.time + "s: " + shortReason(err) + " — re-rendering once");
-      // The render itself cannot be interrupted once it is in ExtendScript, but
-      // the sheet does not wait for it past the deadline: the race settles the
-      // tile then, and a render that answers later has its file removed.
-      var outOfTime = false;
-      var rerender = runOp("screenshot_frame", {
-        compId: info.compId,
-        time: tile.time,
-        downsample: info.downsample,
-      });
-      rerender.then(function (late) { if (outOfTime && late && late.path) unlinkQuietly(late.path); }, function () {});
-      var timer;
-      var expire = new Promise(function (resolve) {
-        timer = setTimeout(function () { outOfTime = true; resolve(null); }, Math.max(0, deadline - Date.now()));
-      });
-      return Promise.race([rerender, expire]).then(function (retry) {
-        clearTimeout(timer);
-        if (!retry) return sheetOutOfTime(tile);
-        var left = contactSheetModule.tileBudgetMs(deadline, Date.now(), frameReaderModule.FRAME_RENDER_BUDGET_MS);
-        if (!left) {
-          unlinkQuietly(retry.path);
-          return sheetOutOfTime(tile);
-        }
-        return readPngFrame(retry.path, { budgetMs: left }).then(function (img) {
-          return { time: tile.time, status: "ok", img: img };
-        });
-      }).catch(function (again) {
-        return { time: tile.time, status: "failed", note: shortReason(again) };
-      });
-    });
-  }
-
-  function finishContactSheet(info, read) {
-    var i;
-    var ds = info.downsample;
-    // Pass one: classify. Every `match` is computed before any `remember`, so a
-    // sheet's own tiles cannot collide with each other through the cache.
-    var seen = {};
-    for (i = 0; i < read.length; i++) {
-      var t = read[i];
-      if (t.status !== "ok") continue;
-      if (t.img.empty) { t.status = "empty"; t.img = null; continue; }
-      var ident = { compId: info.compId, layerId: null, time: t.time, downsample: ds };
-      t.key = frameKey("screenshot_frame", ident);
-      var match = frameCache.match(t.key, t.img.hash);
-      if (match) {
-        // Pixels identical to an *earlier, different* request are the #29 stale
-        // buffer, and a tile of them is not a picture of this time. Mark the
-        // block rather than showing it: an agent that can see a frame believes
-        // the frame.
-        t.status = "stale";
-        t.note = "identical to " + match.label + ", rendered " +
-          Math.max(1, Math.round(match.ageMs / 1000)) + "s earlier";
-        t.img = null;
-        continue;
-      }
-      // Two tiles of one sheet matching each other is what a static comp looks
-      // like — the caller asked for several times on purpose, and refusing the
-      // second would be a false alarm on a correct answer. Flagged, not refused.
-      if (seen[t.img.hash] !== undefined) {
-        t.note = "pixel-identical to the " + contactSheetModule.formatTime(seen[t.img.hash]) +
-          " tile — nothing changed between them";
-      } else {
-        seen[t.img.hash] = t.time;
-      }
-    }
-
-    var specs = [];
-    var ok = 0;
-    for (i = 0; i < read.length; i++) {
-      var r = read[i];
-      var spec = { time: r.time, status: r.status, note: r.note };
-      if (r.status === "ok") {
-        var px = r.img.pixels;
-        var channels = r.img.channels;
-        if (!px) {
-          // The passthrough path never interpreted the pixels. A sheet needs
-          // them, so decode strictly here; a frame that cannot be decoded
-          // becomes a marked block rather than a wrong one.
-          try {
-            var dec = pngCodec.decodePng8(r.img.buffer);
-            // decodePng8 returns the file's samples as After Effects wrote
-            // them, premultiplied; every other tile arrives straight, so this
-            // one is converted here, once.
-            px = pngCodec.unpremultiply8(dec.pixels, dec.channels,
-              pngCodec.alphaIndexFor(dec.colorType), dec.width * dec.height);
-            channels = dec.channels;
-          } catch (e) {
-            // Both records move together: `spec` is what gets drawn, `r` is what
-            // the cache loop below reads, and a frame that is not delivered must
-            // not be remembered as if it were.
-            spec.status = "failed";
-            r.status = "failed";
-            spec.note = "the frame could not be decoded for tiling (" + e.message + ")";
-          }
-        }
-        if (spec.status === "ok") {
-          spec.pixels = px;
-          spec.channels = channels;
-          spec.width = r.img.width;
-          spec.height = r.img.height;
-          ok++;
-        }
-      }
-      specs.push(spec);
-    }
-
-    if (!ok) {
-      var why = [];
-      for (i = 0; i < specs.length; i++) {
-        why.push(contactSheetModule.formatTime(specs[i].time) + ": " + specs[i].status +
-          (specs[i].note ? " (" + specs[i].note + ")" : ""));
-      }
-      var dead = new Error(
-        "No tile of the contact sheet rendered, so there is no sheet to send. Per time:\n" +
-        why.join("\n") + "\n\n" +
-        "A sheet of coloured blocks is not a screenshot. Retry at a higher `downsample`, " +
-        "or screenshot the shot precomps one at a time; if it repeats, read keyframes " +
-        "(get_keyframes / get_layer_full) instead."
-      );
-      dead.code = "CONTACT_SHEET_FAILED";
-      throw dead;
-    }
-
-    // The expected cell size, used only for the cells with no picture. A tile
-    // that rendered is the authority on its own dimensions.
-    var sheet = contactSheetModule.composeContactSheet(specs, {
-      cellWidth: Math.round(info.width / ds),
-      cellHeight: Math.round(info.height / ds),
-    });
-
-    // Only what is actually being delivered goes into the cache.
-    for (i = 0; i < read.length; i++) {
-      if (read[i].status === "ok" && read[i].key) {
-        frameCache.remember(read[i].key, read[i].img.hash, {
-          label: frameLabel("screenshot_frame", { compId: info.compId, time: read[i].time, downsample: ds }),
-          bytes: read[i].img.buffer.length,
-        });
-      }
-    }
-
-    var bad = [];
-    for (i = 0; i < sheet.tiles.length; i++) {
-      if (sheet.tiles[i].status !== "ok") {
-        bad.push(sheet.tiles[i].label + (sheet.tiles[i].note ? " — " + sheet.tiles[i].note : ""));
-      }
-    }
-
-    return {
-      contactSheet: true,
-      width: sheet.width,
-      height: sheet.height,
-      cols: sheet.cols,
-      rows: sheet.rows,
-      cellWidth: sheet.cellWidth,
-      cellHeight: sheet.cellHeight,
-      fullWidth: info.width,
-      fullHeight: info.height,
-      downsample: ds,
-      compId: info.compId,
-      tiles: sheet.tiles,
-      mimeType: "image/png",
-      base64: sheet.buffer.toString("base64"),
-      bytes: sheet.buffer.length,
-      // Named and counted, because a sheet that looks complete and is not is the
-      // same class of lie as a swallowed error.
-      warning: bad.length
-        ? bad.length + " of " + sheet.tiles.length + " tiles are marked blocks, not frames: " + bad.join("; ")
-        : undefined,
-    };
-  }
-
-  function renderContactSheet(args) {
-    // Started before the render, because the server's clock starts then too.
-    var deadline = Date.now() + contactSheetModule.CONTACT_SHEET_BUDGET_MS;
-    return runOp("screenshot_frame", args).then(function (info) {
-      var jsxTiles = info.tiles || [];
-      // Sequentially: `evalScript` is a mutex anyway, a per-tile retry re-enters
-      // ExtendScript, and reading them in order keeps the panel log legible.
-      var read = [];
-      var chain = Promise.resolve();
-      for (var i = 0; i < jsxTiles.length; i++) {
-        chain = chain.then(function (tile) {
-          return function () {
-            return readSheetTile(info, tile, deadline).then(function (res) { read.push(res); });
-          };
-        }(jsxTiles[i]));
-      }
-      return chain.then(function () { return finishContactSheet(info, read); });
-    });
-  }
-
-  // ---------- Op handler with vision/job specialization ----------
-  function handleOp(op, args, progressToken) {
-    // Export writes the .mogrt; the thumbnail it wants is a second file that
-    // has to be folded into it afterwards.
-    if (op === "export_mogrt") {
-      return runOp(op, args).then(function (info) {
-        if (!info || !info.posterPngPath) return info;
-        return patchMogrtThumbnail(info).then(function (thumbnail) {
-          var out = {};
-          for (var k in info) { if (info.hasOwnProperty(k) && k !== "posterPngPath") out[k] = info[k]; }
-          out.thumbnail = thumbnail;
-          // The file changed size when the thumbnail was replaced, and the
-          // reported number has to be the one on disk.
-          try { out.bytes = fs.statSync(info.path).size; } catch (e) {}
-          return out;
-        });
-      });
-    }
-    // Vision ops: run JSX, then read PNG and base64-encode on Node side.
-    if (op === "screenshot_frame" || op === "screenshot_layer") {
-      if (op === "screenshot_frame" && args && args.times && args.times.length) {
-        return renderContactSheet(args);
-      }
-      return renderFrameWithRetry(op, args).then(function (r) {
-        var info = r.info;
-        var img = r.img;
-        // A frame with nothing in it is a fact about the composition, not a
-        // failure — and the ~5KB PNG that encodes it is the one decoders
-        // reject. Report it, cheaply, instead of shipping an image nobody can
-        // read and calling that a successful screenshot.
-        if (img.empty) {
-          return {
-            empty: true,
-            width: img.width,
-            height: img.height,
-            fullWidth: info.width,
-            fullHeight: info.height,
-            downsample: info.downsample,
-            time: info.time,
-            compId: info.compId,
-            layerId: info.layerId,
-            reason: "Every pixel of this frame is fully transparent — the frame is empty. " +
-              "No image was sent because there is nothing in it to see. Usually this means " +
-              "the time is outside the layers' in/out points, the layers are disabled or " +
-              "have zero opacity, or the wrong comp was addressed.",
-          };
-        }
-        // Only a frame that read cleanly ever reaches the cache. A corrupt read
-        // is rejected above and never remembered — before the completeness gate
-        // existed, a truncated file was hashed and recorded here, so the next
-        // truncation at the same byte count was reported as a stale buffer and
-        // the real fault was hidden behind the wrong diagnosis.
-        var key = frameKey(op, info);
-        var match = frameCache.match(key, img.hash);
-        if (match) throw staleFrameError(frameLabel(op, info), match, img.buffer.length);
-        frameCache.remember(key, img.hash, { label: frameLabel(op, info), bytes: img.buffer.length });
-        return {
-          // Dimensions come from the PNG itself, not from arithmetic on the
-          // comp size, so they cannot disagree with the image sent.
-          width: img.width,
-          height: img.height,
-          fullWidth: info.width,
-          fullHeight: info.height,
-          downsample: info.downsample,
-          time: info.time,
-          compId: info.compId,
-          layerId: info.layerId,
-          mimeType: "image/png",
-          base64: img.buffer.toString("base64"),
-          bytes: img.buffer.length,
-          // Only present when the frame was not 8-bit as rendered, so the
-          // metadata stays quiet on the ordinary path.
-          converted: img.converted ? true : undefined,
-          sourceBitDepth: img.converted ? img.sourceBitDepth : undefined,
-          warning: img.warning,
-        };
-      });
-    }
-    // Long batches: returns {jobId, async, total}. We kick off background drive
-    // and return the jobId immediately.
+  // ---------- Op handler ----------
+  // Everything goes to the bundle as sent. Screenshots, the .mogrt thumbnail,
+  // the house style's file I/O and run_jsx's assembly are the server's (issue
+  // #220), and the copies of that work that used to live here are gone (issue
+  // #243). What is left is bookkeeping for /reload-jsx.
+  function handleOp(op, args) {
     if (op === "run_batch") {
       // The driver flag is the server's word to this panel, never an op
       // argument: ExtendScript does not see it.
-      var serverDrives = !!(args && args.__driver === "server");
       if (args && args.__driver !== undefined) {
         var stripped = {};
         for (var ak in args) { if (args.hasOwnProperty(ak) && ak !== "__driver") stripped[ak] = args[ak]; }
         args = stripped;
       }
       return runOp(op, args).then(function (res) {
-        if (res && res.async && res.jobId && serverDrives) {
+        if (res && res.async && res.jobId) {
           trackServerJob(res.jobId, res.total);
+          // The undo fields ride out with the envelope so the agent is told the
+          // batch will be several steps *before* it goes and says otherwise.
           return {
             jobId: res.jobId,
             async: true,
@@ -1160,32 +518,12 @@
             driver: "server",
           };
         }
-        if (res && res.async && res.jobId) {
-          driveJob(res.jobId, progressToken, res.chunkSize, res.total).catch(function (e) {
-            var stoppedEvt = { type: "error", jobId: res.jobId, error: e.message };
-            if (typeof e.progress === "number") stoppedEvt.progress = e.progress;
-            if (typeof e.unsureThrough === "number") stoppedEvt.unsureThrough = e.unsureThrough;
-            broadcast(stoppedEvt);
-          });
-          // The undo fields ride out with the envelope so the agent is told the
-          // batch will be several steps *before* it goes and says otherwise —
-          // the final count arrives much later, on the completion event.
-          return {
-            jobId: res.jobId,
-            async: true,
-            total: res.total,
-            chunkSize: res.chunkSize,
-            undoStepsEstimate: res.undoStepsEstimate,
-            undoGroupName: res.undoGroupName,
-            note: res.note,
-          };
-        }
         return res; // small batch: inline result already
       });
     }
-    // One chunk of a batch the server drives: passed through untouched,
-    // watched only for /reload-jsx.
-    if (op === "_continue_job" && args && jobsInFlight[args.jobId] && jobsInFlight[args.jobId].server) {
+    // One chunk of a batch: passed through untouched, watched only for
+    // /reload-jsx.
+    if (op === "_continue_job" && args && jobsInFlight[args.jobId]) {
       var cj = args.jobId;
       return runOp(op, args).then(function (res) {
         noteServerChunk(cj, res);
@@ -1228,15 +566,15 @@
             port: addr && addr.port ? addr.port : port,
             bundleLoaded: true,
             bundleHash: loadedBundleHash,
+            // Every other file of this panel, hashed at launch (issue #243). The
+            // server's gate needs both hashes to match the panel it ships.
+            clientHash: loadedClientHash,
             // The gate exists, never anything about the token. Absent on a
             // pre-#106 panel, which is how the server tells "needs a token"
             // from "too old to want one".
             auth: true,
-            // What this panel can do that a panel without this field cannot
-            // (issue #220, stage 3). bundleHash names the ExtendScript; this is
-            // the only thing that says which panel code answers. The server
-            // reads a missing field as "legacy" and keeps to what every panel
-            // has, so a name is only ever added here, never relied on alone.
+            // What this panel can do (issue #220). The server's gate reads it
+            // only when it has no shipped panel to compare the hashes with.
             capabilities: PANEL_CAPABILITIES,
             ts: Date.now()
           }));
@@ -1271,7 +609,7 @@
 
           if (url === "/op") {
             bumpReq();
-            handleOp(body.op, body.args, body.progressToken)
+            handleOp(body.op, body.args)
               .then(function (result) {
                 res.statusCode = 200; res.setHeader("content-type", "application/json");
                 res.end(JSON.stringify({ ok: true, result: result }));

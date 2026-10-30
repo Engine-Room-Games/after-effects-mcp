@@ -1,10 +1,8 @@
 // frameReader.ts — wait for After Effects to finish writing a frame.
 //
-// This is the MCP server's copy of `packages/ae-panel/client/framereader.js`
-// (issue #220 stage 4: the server now reads rendered frames itself). The panel
-// keeps its copy for legacy MCP servers that still ask it to, and the two must
-// behave identically — tests/unit/image-parity.mjs holds them together. Change
-// both or neither.
+// Ported from the panel's `client/framereader.js` when the server took over
+// reading rendered frames (issue #220 stage 4). The panel's copy was deleted in
+// issue #243; this is the only one.
 //
 // `saveFrameToPng` is asynchronous: it returns before the bytes are on disk, so
 // whoever reads the frame has to decide for itself when the file is finished.

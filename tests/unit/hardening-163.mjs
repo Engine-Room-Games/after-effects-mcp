@@ -206,9 +206,10 @@ await check("with another write holding the queue, it answers within its own sho
 // The contact sheet's deadline
 // ---------------------------------------------------------------------------
 
+// The server's copies since issue #243 deleted the panel's.
+const cs = await import(dist("frames", "contactSheet.js"));
+const fr = await import(dist("frames", "frameReader.js"));
 await check("a contact-sheet tile never waits past the sheet's deadline", () => {
-  const cs = nodeRequire(path.join(root, "packages", "ae-panel", "client", "contactsheet.js"));
-  const fr = nodeRequire(path.join(root, "packages", "ae-panel", "client", "framereader.js"));
   assert.ok(cs.CONTACT_SHEET_BUDGET_MS < 300_000, "the sheet's limit must sit under the server's 300s for screenshot_frame");
   const per = fr.FRAME_RENDER_BUDGET_MS;
   const now = 1_000_000;
@@ -262,9 +263,6 @@ function makeDom() {
  * parse), and holds any op named `slow` for `holdMs`.
  */
 let batchCursor = 0;
-// "ok" runs to the end; "failed" fails transactionally in chunk 2 (7 ran, the
-// 8th failed); "throw" has chunk 3 fail outright, as "Bad JSON" would (#222).
-let batchMode = "ok";
 function makeHost(extDir, events) {
   return {
     getSystemPath: () => extDir,
@@ -296,11 +294,6 @@ function makeHost(extDir, events) {
                 return JSON.stringify({ ok: true, result: { async: true, jobId: "j_live", chunkSize: 5, total: 20 } });
               }
               if (op === "_continue_job") {
-                if (batchMode === "failed" && batchCursor === 5) {
-                  return JSON.stringify({ ok: true, result: { done: true, failed: true, jobId: "j_live", error: "op 7 failed",
-                    atIndex: 7, results: [1, 2, 3, 4, 5, 6, 7], errors: [{ index: 7 }], undoSteps: 2 } });
-                }
-                if (batchMode === "throw" && batchCursor === 10) throw new Error("Bad JSON from the host");
                 batchCursor += 5;
                 const done = batchCursor >= 20;
                 return JSON.stringify({ ok: true, result: done
@@ -414,12 +407,16 @@ try {
     );
   });
 
+  // The server drives every batch (issue #243), so this test sends the chunks
+  // itself, the way jobs/batchDriver.ts does.
+  const chunk = () => post("/op", { op: "_continue_job", args: { jobId: "j_live", chunkSize: 5 } }).then((r) => r.json());
   await check("/reload-jsx refuses while a batch is in flight, naming it; ?force=1 overrides", async () => {
-    const env = await (await post("/op", { op: "run_batch", args: { ops: [] } })).json();
+    const env = await (await post("/op", { op: "run_batch", args: { ops: [], __driver: "server" } })).json();
     assert.equal(env.ok, true);
     assert.equal(env.result.jobId, "j_live");
-    // Let the first chunk land so there is progress to name.
-    for (let i = 0; i < 100 && batchCursor < 5; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(env.result.driver, "server");
+    // Land the first chunk so there is progress to name.
+    assert.equal((await chunk()).result.progress, 5);
 
     events.length = 0;
     const refused = await post("/reload-jsx");
@@ -427,7 +424,7 @@ try {
     const body = await refused.json();
     assert.equal(body.ok, false);
     assert.equal(body.code, "batch_in_flight");
-    assert.match(body.error, /j_live \(\d+ of 20 ops attempted\)/);
+    assert.match(body.error, /j_live \(5 of 20 ops attempted, driven by the MCP server\)/);
     assert.match(body.error, /\?force=1/);
     assert.ok(!events.includes("reload:start"), "a refused reload must not reach After Effects");
 
@@ -437,49 +434,11 @@ try {
     assert.ok(events.includes("reload:start"), "force=1 reloads");
 
     // Once the batch is over, a plain reload goes through again.
-    for (let i = 0; i < 300 && batchCursor < 20; i++) await new Promise((r) => setTimeout(r, 10));
-    await new Promise((r) => setTimeout(r, 400));
+    while (!(await chunk()).result.done);
     const after = await post("/reload-jsx");
     assert.equal(after.status, 200, `still refused after the batch ended: ${await after.text()}`);
   });
 
-  // The panel's error event says where a batch stopped (#222): exactly, for a
-  // batch that failed on an op; as a lower bound with the unsure span, for a
-  // chunk that failed outright and may have partly run.
-  const { default: WebSocket } = await import("ws");
-  const wsEvents = [];
-  const sock = new WebSocket(`ws://127.0.0.1:${PORT}/events`, { headers: { "x-ae-mcp-token": token } });
-  await new Promise((r, j) => { sock.on("open", r); sock.on("error", j); });
-  sock.on("message", (d) => wsEvents.push(JSON.parse(d.toString())));
-  const errorEvent = async () => {
-    for (let i = 0; i < 400; i++) {
-      const e = wsEvents.find((x) => x.type === "error" || x.type === "complete");
-      if (e) return e;
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    throw new Error(`no terminal event: ${JSON.stringify(wsEvents)}`);
-  };
-  try {
-    await check("a batch that fails on an op reports the exact number attempted on its error event", async () => {
-      batchMode = "failed"; wsEvents.length = 0;
-      assert.equal((await (await post("/op", { op: "run_batch", args: { ops: [] } })).json()).ok, true);
-      const e = await errorEvent();
-      assert.equal(e.type, "error");
-      assert.equal(e.progress, 8, "7 succeeded and the 8th failed");
-      assert.equal(e.unsureThrough, undefined, "an op-level failure knows exactly where it stopped");
-    });
-    await check("a chunk that fails outright reports a lower bound and the span that may have run", async () => {
-      batchMode = "throw"; wsEvents.length = 0;
-      assert.equal((await (await post("/op", { op: "run_batch", args: { ops: [] } })).json()).ok, true);
-      const e = await errorEvent();
-      assert.equal(e.type, "error");
-      assert.equal(e.progress, 10, "the last confirmed chunk boundary");
-      assert.equal(e.unsureThrough, 15, "the failing chunk is ops 11-15");
-    });
-  } finally {
-    batchMode = "ok";
-    sock.terminate();
-  }
 } finally {
   panel.close();
   fs.rmSync(dir, { recursive: true, force: true });

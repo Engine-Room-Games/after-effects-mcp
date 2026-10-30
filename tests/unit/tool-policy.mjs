@@ -26,7 +26,7 @@ const {
 } = policyMod;
 const { OpSchemas, OpMutation } = await import(sharedDist("schemas.js"));
 const { findUnsafeArgKeys } = await import(dist("util", "argsSafety.js"));
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 const { SERVER_INSTRUCTIONS } = await import(dist("generated", "content.js"));
 
 let passed = 0;
@@ -201,7 +201,7 @@ const seen = [];
 const bridge = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash() }));
+    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash() }));
     return;
   }
   let body = "";

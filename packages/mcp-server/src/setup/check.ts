@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -20,7 +19,7 @@ import {
   panelSourceDir,
   signedInstallPresent,
 } from "./paths.js";
-import { assessPanel } from "./panelVersion.js";
+import { assessPanel, installedPanelHashes } from "./panelVersion.js";
 import {
   CSXS_VERSIONS,
   cepLogDir,
@@ -69,14 +68,6 @@ export interface CheckSetupOptions {
   opPort?: number;
   /** Ports to ask, in order. Defaults to the same list the bridge client uses. */
   candidates?: number[];
-}
-
-function sha256(file: string): string | null {
-  try {
-    return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-  } catch {
-    return null;
-  }
 }
 
 export interface BridgeProbe {
@@ -365,7 +356,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
   // restarts. This is the check that notices that window, and it is the one that
   // predicts whether calls will actually work.
   if (bridge.answering && source) {
-    const assessment = assessPanel(bridge.answering.health?.bundleHash, sha256(path.join(installed, "jsx", "bundle.jsx")), {
+    const assessment = assessPanel(bridge.answering.health, installedPanelHashes(installed), {
       installComplete,
     });
     const ok = assessment.state === "current";
@@ -379,7 +370,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
           : assessment.state === "restart-needed"
             ? "After Effects is still running the previous panel — the update needs a restart to take effect"
             : assessment.state === "unknown"
-              ? "the running panel is too old to report its version"
+              ? "these tools cannot find the panel they ship, so the running panel's version cannot be checked"
               : "After Effects is running a panel older than these tools",
       fix: ok ? undefined : assessment.message,
     });

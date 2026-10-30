@@ -112,6 +112,10 @@ export interface PanelHealth {
   port: number;
   bundleLoaded?: boolean;
   bundleHash?: string | null;
+  /** Every panel file but bundle.jsx (setup/panelHash.ts). Absent before issue #243. */
+  clientHash?: string | null;
+  /** What the panel supports (issue #220). Absent before stage 3. */
+  capabilities?: unknown;
   /** Requires a bridge token. Absent before issue #106: `undefined` is "too old to want one". */
   auth?: boolean;
   ts?: number;

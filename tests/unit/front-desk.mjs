@@ -30,7 +30,7 @@ const serverEntry = path.join(root, "packages", "mcp-server", "dist", "index.js"
 const { DeskLock } = await import(dist("frontdesk", "lock.js"));
 const { toWire, fromWire, ordinal, describeLockWait, describeAhead } = await import(dist("frontdesk", "protocol.js"));
 const errors = await import(dist("util", "errors.js"));
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
 
@@ -753,11 +753,12 @@ await check("a write the desk may have forwarded is never re-sent: no answer is 
 const seen = [];
 let chain = Promise.resolve();
 const batches = new Map(); // jobId -> completedAt
+const running = new Map(); // jobId -> { endsAt, chunks }
 let batchMs = 700;
 const panel = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, port: panelPort, bundleLoaded: true, bundleHash: sourceBundleHash() }));
+    res.end(JSON.stringify({ ok: true, port: panelPort, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash() }));
     return;
   }
   let body = "";
@@ -766,8 +767,14 @@ const panel = http.createServer((req, res) => {
     const { op, args } = JSON.parse(body || "{}");
     // One at a time, like the real panel's evalScript chain.
     chain = chain.then(async () => {
-      const tag = op === "run_jsx" ? /tag:(\w+)/.exec(args.code)?.[1] : op;
-      const ms = op === "run_jsx" ? Number(/ms:(\d+)/.exec(args.code)?.[1] ?? 5) : 5;
+      // run_jsx arrives as `_run_jsx`, with the server-built wrapper (#220, #243).
+      const jsxSource = op === "run_jsx" || op === "_run_jsx" ? String(args.code ?? args.built?.wrapper ?? "") : null;
+      const tag = jsxSource !== null ? /tag:(\w+)/.exec(jsxSource)?.[1] : op;
+      let ms = jsxSource !== null ? Number(/ms:(\d+)/.exec(jsxSource)?.[1] ?? 5) : 5;
+      // The server drives every batch (#243): each chunk runs up to 50ms, and
+      // the job is done once it has run for batchMs.
+      const job = op === "_continue_job" ? running.get(args.jobId) : null;
+      if (job) ms = Math.max(0, Math.min(50, job.endsAt - Date.now()));
       const entry = { op, tag, enteredAt: Date.now() };
       seen.push(entry);
       await sleep(ms);
@@ -775,13 +782,18 @@ const panel = http.createServer((req, res) => {
       let result = { tag };
       if (op === "run_batch") {
         const jobId = `job-${seen.length}`;
-        result = { jobId, async: true, total: 600 };
-        const runFor = batchMs;
-        setTimeout(() => {
-          batches.set(jobId, Date.now());
-          const msg = JSON.stringify({ type: "complete", jobId, result: { results: [], total: 600 } });
-          for (const c of wss.clients) c.send(msg);
-        }, runFor);
+        result = { jobId, async: true, total: 600, chunkSize: 25, driver: "server" };
+        running.set(jobId, { endsAt: Date.now() + batchMs, chunks: 0 });
+      }
+      if (job) {
+        job.chunks++;
+        if (Date.now() >= job.endsAt) {
+          running.delete(args.jobId);
+          batches.set(args.jobId, Date.now());
+          result = { done: true, jobId: args.jobId, results: [], errors: [], total: 600, undoSteps: job.chunks };
+        } else {
+          result = { done: false, jobId: args.jobId, progress: Math.min(575, job.chunks * 25), total: 600, undoSteps: job.chunks };
+        }
       }
       if (op === "list_comps") result = [];
       // A non-object result After Effects warned about, as core.jsx wraps it (#225).
@@ -931,7 +943,7 @@ try {
     // It still waits inside After Effects — the panel runs one thing at a time —
     // and is told what it is behind rather than left in silence.
     assert.ok(
-      rb.progress.some((m) => /`list_comps` has reached After Effects, which is still running another session's `run_jsx` \(desk-test-A, pid \d+\)/.test(m)),
+      rb.progress.some((m) => /`list_comps` has reached After Effects, which is still running another session's `_?run_jsx` \(desk-test-A, pid \d+\)/.test(m)),
       rb.progress.join("\n") || "no progress at all"
     );
   });
@@ -943,7 +955,7 @@ try {
     const rb = await call(B, "list_comps", {});
     assert.equal(rb.res.isError, undefined, rb.text);
     assert.ok(
-      rb.progress.some((m) => /still running another session's `run_batch` \(desk-test-A, pid \d+\)/.test(m)),
+      rb.progress.some((m) => /still running another session's `(run_batch|_continue_job)` \(desk-test-A, pid \d+\)/.test(m)),
       rb.progress.join("\n") || "no progress at all"
     );
     await until("the batch to finish", () => batches.has(rbatch.json().jobId), 5000);
@@ -980,7 +992,7 @@ try {
     const [rc, rb] = await Promise.all([pc, hb.done]);
 
     assert.equal(rc.res.isError, true, "C's write had been handed to After Effects: it must not report success");
-    assert.match(rc.text, /went away in the middle of `run_jsx`/);
+    assert.match(rc.text, /went away in the middle of `_?run_jsx`/);
     assert.match(rc.text, /may or may not have/);
     assert.equal(rb.res.isError, undefined, `B's queued write should have moved to the new desk: ${rb.text}`);
     // The whole wait, across the handover, and who it was behind — not just the new desk's share.
@@ -1092,7 +1104,7 @@ try {
         const t0 = Date.now();
         const rl = await pl;
         assert.equal(rl.res.isError, true, rl.text);
-        assert.match(rl.text, /stopped answering in the middle of `run_jsx`/);
+        assert.match(rl.text, /stopped answering in the middle of `_?run_jsx`/);
         assert.match(rl.text.replace(/\n/g, " "), /may or may not have taken effect/);
         assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0}ms to notice`);
 

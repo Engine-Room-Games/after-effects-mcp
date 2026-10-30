@@ -1,7 +1,7 @@
 import type { AeSourceInfo } from "../util/errors.js";
 import { AeError, BridgeAuthError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, isResetError, isTimeoutError, isUnsentError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
-import { authHeaders, DEFAULT_PORT, discoverPort, locatePanel, panelToken, pinnedPort, portCandidates, type LocateResult } from "./discovery.js";
+import { authHeaders, DEFAULT_PORT, discoverPort, locatePanel, panelToken, pinnedPort, portCandidates, type LocateResult, type PanelHealth } from "./discovery.js";
 
 interface OpResultOk { ok: true; result: unknown; }
 interface OpResultErr { ok: false; error: string; code?: string; stack?: string; line?: number; source?: AeSourceInfo; }
@@ -163,13 +163,14 @@ export class HttpClient {
     return locatePanel(this.candidates());
   }
 
-  // `bundleHash` is absent on panels installed before it was added; callers must
-  // treat undefined as "too old to say" rather than as a mismatch.
-  async health(): Promise<{ ok: boolean; port: number; bundleLoaded?: boolean; bundleHash?: string | null }> {
+  // `bundleHash` is absent on panels older than 0.3 and `clientHash` on panels
+  // older than issue #243; the version gate reads either absence as a panel
+  // that predates this server.
+  async health(): Promise<PanelHealth> {
     try {
       const r = await fetch(`${this.base}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
       if (!r.ok) throw new Error(`health HTTP ${r.status}`);
-      return (await r.json()) as { ok: boolean; port: number; bundleLoaded?: boolean; bundleHash?: string | null };
+      return (await r.json()) as PanelHealth;
     } catch (e) {
       // A busy AE blows this 2s probe long before it blows the op timeout, and
       // check_setup is exactly what a confused user runs next — so this failure

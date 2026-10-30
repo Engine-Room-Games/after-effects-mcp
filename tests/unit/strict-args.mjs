@@ -24,7 +24,7 @@ const S = await import(sharedDist("schemas.js"));
 const { OpSchemas, StrictOpSchemas, STRICT_UNHANDLED, OpMutation, crossFieldRulesIn } = S;
 const { prepareBatchSteps, batchStepRefusal, BATCH_STEP_REFUSALS } = await import(dist("tools", "batchSteps.js"));
 const { MAX_BATCH_DEPTH } = await import(dist("tools", "policy.js"));
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 
 let passed = 0;
 async function check(name, fn) {
@@ -215,7 +215,7 @@ const seen = [];
 const bridge = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash() }));
+    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash() }));
     return;
   }
   let body = "";

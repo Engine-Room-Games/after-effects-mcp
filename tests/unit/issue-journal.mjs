@@ -787,7 +787,7 @@ process.env.AE_MCP_HOME = home;
 const stubBridge = http.createServer((req, res) => {
   res.setHeader("content-type", "application/json");
   if (req.url === "/health") {
-    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: bundleHash }));
+    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: bundleHash, clientHash: sourceClientHash() }));
     return;
   }
   let body = "";
@@ -801,7 +801,7 @@ const stubBridge = http.createServer((req, res) => {
     }
   });
 });
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 // Report the hash this server ships so the panel-version gate is a no-op
 // rather than a variable of whatever is installed on the test machine.
 const bundleHash = sourceBundleHash();
