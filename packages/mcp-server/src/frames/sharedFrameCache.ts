@@ -21,6 +21,11 @@
  *   small writes and a compaction lands by rename, so a reader sees whole
  *   lines. A lock older than LOCK_STALE_MS is a writer that died holding it,
  *   and is broken. Nothing is ever written to the file without the lock.
+ *   On Windows a lock its holder has just deleted can still be on disk, and
+ *   taking it then fails EPERM rather than EEXIST: that is contention, waited
+ *   out like a held lock, never a reason to skip the record (TRANSIENT). A
+ *   compaction that cannot read the file skips itself rather than rewrite it
+ *   from nothing.
  * - **Semantics.** A check replays the file through `createFrameCache` — the
  *   panel's own window logic — line by line at each line's own time, so the
  *   answers are the in-memory cache's exactly. Torn or foreign lines are
@@ -30,9 +35,12 @@
  *   does nothing to an existing file), and its directory is tightened to 0700
  *   (see privateDir). Not on Windows, where POSIX modes do not apply and the
  *   profile directory's ACL is what protects it.
- * - **Never a hang.** A lock that cannot be taken in LOCK_WAIT_MS — held, or
- *   stale and unremovable — skips the shared record (this process keeps it)
- *   and warns once on stderr.
+ * - **Never a hang.** A record has one deadline, LOCK_WAIT_MS, covering the
+ *   lock and every retry made under it. A record that misses it — the lock
+ *   held, stale and unremovable, or the file unwritable — is kept by this
+ *   process alone, and so is every record for the next COOL_OFF_MS, without
+ *   waiting: a persistent failure costs one wait a minute, not one per
+ *   screenshot. Warned once on stderr.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -48,6 +56,8 @@ const DEFAULT_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_COMPACT_AT = 200;
 const LOCK_WAIT_MS = 500;
 const LOCK_STALE_MS = 5000;
+/** After a record could not be written, how long later ones skip the file without waiting. */
+const COOL_OFF_MS = 60_000;
 
 export function sharedFrameCacheFile(port: number): string {
   return path.join(os.homedir(), ".engineroom-ae-mcp", `frames-${port}.jsonl`);
@@ -78,6 +88,14 @@ export interface SharedFrameCacheOptions {
   limit?: number;
   ttlMs?: number;
   compactAt?: number;
+  /**
+   * How long a record waits for the lock before this process keeps it alone.
+   * Defaults to LOCK_WAIT_MS. Tests that hammer the file raise it, so that a
+   * loaded CI machine's ordinary lock wait is not mistaken for a lost line.
+   */
+  lockWaitMs?: number;
+  /** How long records skip the shared file after one could not be written. Defaults to COOL_OFF_MS. */
+  coolOffMs?: number;
   /** Where the one "could not write the shared window" warning goes. Defaults to stderr. */
   warn?: (message: string) => void;
 }
@@ -89,6 +107,10 @@ function readLines(file: string, instance: string): Line[] {
   } catch {
     return [];
   }
+  return parseLines(text, instance);
+}
+
+function parseLines(text: string, instance: string): Line[] {
   const out: Line[] = [];
   for (const raw of text.split("\n")) {
     if (!raw) continue;
@@ -127,28 +149,67 @@ function sleepSync(ms: number): void {
 }
 
 /**
- * Run `fn` holding `<file>.lock`. Returns false, without running it, when the
- * lock cannot be had within LOCK_WAIT_MS. Every failed attempt — a held lock, a
- * stale one that will not unlink (EACCES, a Windows sharing violation, a lock
- * path that is a directory), a stat that fails — goes through the same
- * deadline and sleep, so no path can spin: a stuck lock costs half a second,
- * never a hung server.
+ * The codes Windows gives for a file another process is in the middle of
+ * using. A lock file its holder has just unlinked can stay on disk, "delete
+ * pending", until every handle on it closes — another server's `stat` of it
+ * is one — and creating it again in that window fails EPERM, not EEXIST. A
+ * rename or an open that meets a handle opened without delete sharing (a virus
+ * scanner, the indexer) fails EPERM, EBUSY or EACCES. All of them clear in
+ * milliseconds.
  */
-function withLock(file: string, fn: () => void): boolean {
+const TRANSIENT = new Set(["EPERM", "EBUSY", "EACCES"]);
+
+function errCode(e: unknown): string {
+  return (e as NodeJS.ErrnoException | null)?.code ?? "";
+}
+
+/**
+ * Run `fn`, retrying a transient sharing failure (TRANSIENT) until `deadline`
+ * — the one deadline of the whole record, so retries inside the lock can
+ * never stretch a record past it. Always makes at least one attempt.
+ */
+function retrying<T>(deadline: number, fn: () => T): T {
+  for (;;) {
+    try {
+      return fn();
+    } catch (e) {
+      const left = deadline - Date.now();
+      if (left <= 0 || !TRANSIENT.has(errCode(e))) throw e;
+      sleepSync(Math.min(5, left));
+    }
+  }
+}
+
+/**
+ * Run `fn` holding `<file>.lock`. Returns null once `fn` has run, or — without
+ * running it — why the lock could not be had by `deadline`. `fn` is handed the
+ * same deadline for its own retries, and the release honours it too, so a
+ * record costs at most `deadline` in all. Every failed
+ * attempt — a held lock, one its holder is still deleting (Windows: EPERM, see
+ * TRANSIENT), a stale one that will not unlink (EACCES, a Windows sharing
+ * violation, a lock path that is a directory), a stat that fails — goes
+ * through the same deadline and sleep, so no path can spin: a stuck lock costs
+ * half a second, never a hung server. An error that cannot be contention
+ * (ENOENT, ENOTDIR, …) gives up at once. EPERM and EACCES are waited out on
+ * every platform, so a directory this user cannot write costs that half
+ * second once — the caller then skips the shared file for COOL_OFF_MS rather
+ * than pay it on every screenshot.
+ */
+function withLock(file: string, deadline: number, fn: () => void): string | null {
   const lock = `${file}.lock`;
-  const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     let fd: number | null = null;
     try {
       fd = fs.openSync(lock, "wx", 0o600);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") return false;
+      const code = errCode(e) || (e as Error).message;
+      if (code !== "EEXIST" && !TRANSIENT.has(code)) return code;
       try {
         if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) fs.unlinkSync(lock);
       } catch {
         /* released meanwhile, or not removable: the deadline below decides */
       }
-      if (Date.now() > deadline) return false;
+      if (Date.now() > deadline) return code === "EEXIST" ? "held" : code;
       sleepSync(5);
       continue;
     }
@@ -160,13 +221,16 @@ function withLock(file: string, fn: () => void): boolean {
       } catch {
         /* closed */
       }
+      // A lock left behind costs every server LOCK_STALE_MS of skipped
+      // records, so a release that meets a transient sharing failure retries
+      // while the deadline allows.
       try {
-        fs.unlinkSync(lock);
+        retrying(deadline, () => fs.unlinkSync(lock));
       } catch {
         /* already gone */
       }
     }
-    return true;
+    return null;
   }
 }
 
@@ -175,8 +239,12 @@ export function createSharedFrameCache(where: () => SharedWindow | null, opts: S
   const limit = opts.limit ?? DEFAULT_LIMIT;
   const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
   const compactAt = opts.compactAt ?? DEFAULT_COMPACT_AT;
+  const lockWaitMs = opts.lockWaitMs ?? LOCK_WAIT_MS;
+  const coolOffMs = opts.coolOffMs ?? COOL_OFF_MS;
   const warn = opts.warn ?? ((m: string) => logger.warn(m));
   let warned = false;
+  /** Wall-clock time before which a record skips the shared file. */
+  let coolUntil = 0;
   // What could not be written to the file (or every frame, when no window is known).
   const local = createFrameCache({ now, limit, ttlMs });
 
@@ -207,12 +275,21 @@ export function createSharedFrameCache(where: () => SharedWindow | null, opts: S
   }
 
   /** Under the lock: rewrite the file to its live window. Other instances' lines go. */
-  function compact(w: SharedWindow): void {
-    const kept = live(readLines(w.file, w.instance));
+  function compact(w: SharedWindow, deadline: number): void {
+    // A file that cannot be read right now is not an empty one: compacting it
+    // from nothing would replace every line with none. Leave it for the next.
+    let text: string;
+    try {
+      text = retrying(deadline, () => fs.readFileSync(w.file, "utf8"));
+    } catch {
+      return;
+    }
+    const kept = live(parseLines(text, w.instance));
     const tmp = `${w.file}.${process.pid}.${Date.now()}.tmp`;
     try {
       fs.writeFileSync(tmp, kept.map((l) => JSON.stringify(l) + "\n").join(""), { mode: 0o600 });
-      fs.renameSync(tmp, w.file);
+      // A reader holding the file for a moment makes the rename EPERM on Windows.
+      retrying(deadline, () => fs.renameSync(tmp, w.file));
     } catch {
       try {
         fs.unlinkSync(tmp);
@@ -242,13 +319,17 @@ export function createSharedFrameCache(where: () => SharedWindow | null, opts: S
     remember(key: string, hash: string, meta?: FrameCacheMeta | null): void {
       const w = where();
       if (!w) return local.remember(key, hash, meta);
+      // Cooling off after a failed record: this process keeps it, and the
+      // screenshot does not block on a lock that just cost a full wait.
+      if (Date.now() < coolUntil) return local.remember(key, hash, meta);
       const line: Line = { key, hash, at: now(), label: meta?.label || key, bytes: meta?.bytes || 0, inst: w.instance };
       const text = JSON.stringify(line) + "\n";
+      const deadline = Date.now() + lockWaitMs;
       let appended = false;
       const append = () => {
         // `mode` applies only when the append creates the file; a file left
         // 0644 by an earlier writer is tightened on every append.
-        const fd = fs.openSync(w.file, "a", 0o600);
+        const fd = retrying(deadline, () => fs.openSync(w.file, "a", 0o600));
         try {
           if (process.platform !== "win32") fs.fchmodSync(fd, 0o600);
           fs.writeSync(fd, text);
@@ -257,31 +338,33 @@ export function createSharedFrameCache(where: () => SharedWindow | null, opts: S
         }
         appended = true;
       };
-      let locked = false;
+      let refused: string | null = null;
       let failure: string | null = null;
       try {
         privateDir(path.dirname(w.file));
-        locked = withLock(w.file, () => {
+        refused = withLock(w.file, deadline, () => {
           append();
-          if (lineCount(w.file) > compactAt) compact(w);
+          if (lineCount(w.file) > compactAt) compact(w, deadline);
         });
       } catch (e) {
         failure = (e as Error).message;
       }
-      // Not written to the shared file: this process still keeps it, and says
-      // why once rather than on every screenshot.
+      // Not written to the shared file: this process still keeps it, skips
+      // the file for coolOffMs, and says why once rather than on every
+      // screenshot.
       if (!appended) {
         local.remember(key, hash, meta);
+        coolUntil = Date.now() + coolOffMs;
         if (!warned) {
           warned = true;
           warn(
             `the shared stale-frame window ${w.file} could not be written` +
               (failure !== null
                 ? ` (${failure})`
-                : locked
+                : refused === null
                   ? ""
-                  : ` (its lock ${w.file}.lock could not be taken within ${LOCK_WAIT_MS}ms)`) +
-              "; this server keeps its own window until it can. Screenshots are unaffected."
+                  : ` (its lock ${w.file}.lock could not be taken within ${lockWaitMs}ms: ${refused})`) +
+              `; this server keeps its own window and tries again in ${Math.round(coolOffMs / 1000)}s. Screenshots are unaffected.`
           );
         }
       }
