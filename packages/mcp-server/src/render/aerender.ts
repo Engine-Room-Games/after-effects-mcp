@@ -478,8 +478,12 @@ interface Running {
   startedAt: number;
   /** The private copy of the saved .aep every item renders from. */
   snapshot: string;
+  /** Where the copy sits, and the folder everything the job writes is inside (#215). */
+  layout: SnapshotLayout;
   /** When the snapshot folder's mtime was last refreshed (see touchSnapshot). */
   touchedAt: number;
+  /** Outputs that could not be moved out of the job folder (#215), for a cancel's report. */
+  relocateProblems: string[];
 }
 
 export interface RenderRunnerOptions {
@@ -543,97 +547,143 @@ export interface RenderRunnerOptions {
  * the second layer. The copy keeps the project's file name, so aerender's
  * messages read the same.
  *
- * Why the copy sits at the END OF A MIRROR of the project's own folder
- * (`<tmp>/ae-mcp-render/<jobId>/Users/me/show/show.aep` for
- * `/Users/me/show/show.aep`) — issue #215, MEASURED on 26.5 (macOS): an output
- * module's folder is saved as an alias (`fullpath` plus ascend counts) and a
- * file name, and aerender uses the RELATIVE form whenever the folder it names
- * exists next to the project it was given. With the copy one level down in
- * `<jobId>/`, an output beside the project was written into the job folder
- * and deleted with it, and an output one folder up landed in the shared
- * `ae-mcp-render/` root and was never cleaned. In the mirror, every folder
- * the relative form can climb to is a folder of this job's own, named as the
- * real one is: an output in a folder that is not an ancestor of the project
- * resolves to a mirror folder that does not exist, so aerender falls back to
- * the absolute path; an output in the project's folder or an ancestor of it
- * resolves to that folder's mirror, at a known place, and
- * `relocateShadowOutputs` moves it to where the user asked. Nothing can land
- * outside the job folder, so nothing is left behind.
+ * Why the copy sits at the bottom of a CHAIN OF ONE-LETTER FOLDERS as deep as
+ * the project's own folder (`<tmp>/ae-mcp-render/<jobId>/a/a/a/a/a/show.aep`
+ * for `/Users/me/work/show/show.aep`, two spare levels included) — issue #215,
+ * MEASURED on 26.5 (macOS): an output module's folder is saved as an alias
+ * (`fullpath` plus ascend counts) and a file name, and aerender uses the
+ * RELATIVE form whenever the folder it names exists next to the project it
+ * was given. With the copy directly in `<jobId>/`, an output beside the
+ * project was written into the job folder and deleted with it, and an output
+ * one folder up landed in the shared `ae-mcp-render/` root and was never
+ * cleaned. In the chain, every folder the ascend counts can climb to is one
+ * of this job's own. The relative form of an output that is not in the
+ * project's folder or an ancestor of it continues below the climb with a
+ * real folder name — never the chain's letter, which is chosen to match no
+ * name in the project's or any output's path — so it names nothing, and
+ * aerender uses the absolute path. An output in the project's folder or an
+ * ancestor lands in a chain folder; `relocateShadowOutputs` moves it to
+ * where the user asked. The chain is as deep as the deeper of the project's
+ * given and real (symlinks resolved) spellings, plus spare levels, because
+ * which spelling After Effects counts against is not measured. Letters keep
+ * the path short on Windows, where a mirror of real names doubled it.
  */
-export function snapshotProject(projectPath: string, jobId: string, tmpRoot: string = os.tmpdir()): string {
-  const snap = snapshotLocation(projectPath, jobId, tmpRoot);
-  try {
-    fs.mkdirSync(path.dirname(snap), { recursive: true });
-    fs.copyFileSync(projectPath, snap);
-  } catch (e) {
-    removeSnapshot(snap);
-    throw new Error(
-      `Could not copy the project to ${snap} for the render (${(e as Error).message}), so nothing was rendered.`
-    );
-  }
-  return snap;
-}
-
-/**
- * The components of a folder's path below its root, the root itself given as
- * plain names: `/Users/me` -> [Users, me], `C:\Users\me` -> [C, Users, me],
- * `\\server\share\x` -> [server, share, x]. Used to mirror a folder inside a
- * job folder (#215). `p` is a test's way to ask for the other platform's rules.
- */
-export function mirrorSegments(dir: string, p: path.PlatformPath = path): string[] {
-  const root = p.parse(dir).root;
-  const rootParts = root.split(/[\\/:]+/).filter(Boolean);
-  const rest = dir.slice(root.length).split(/[\\/]+/).filter(Boolean);
-  return [...rootParts, ...rest];
-}
-
-/**
- * Where `snapshotProject` puts a job's copy:
- * `<tmpRoot>/ae-mcp-render/<jobId>/<mirror of the project's real folder>/<name>`.
- * The real folder (symlinks resolved — `/var` is `/private/var` on macOS) is
- * mirrored, so the mirror's depth matches the spelling After Effects measures
- * its ascend counts against.
- */
-export function snapshotLocation(
+export function snapshotProject(
   projectPath: string,
   jobId: string,
   tmpRoot: string = os.tmpdir(),
-  p: path.PlatformPath = path,
-  real: (dir: string) => string = realOrSelf
-): string {
-  const projDir = real(p.dirname(projectPath));
-  return p.join(tmpRoot, "ae-mcp-render", jobId, ...mirrorSegments(projDir, p), p.basename(projectPath));
+  outputPaths: string[] = []
+): SnapshotLayout {
+  const layout = snapshotLayout(projectPath, jobId, tmpRoot, outputPaths);
+  try {
+    fs.mkdirSync(path.dirname(layout.snap), { recursive: true });
+    fs.copyFileSync(projectPath, layout.snap);
+  } catch (e) {
+    removeSnapshot(layout.jobDir);
+    throw new Error(
+      `Could not copy the project to ${layout.snap} for the render (${(e as Error).message}), so nothing was rendered.`
+    );
+  }
+  return layout;
 }
 
-/** The `ae-mcp-render/<jobId>` folder a snapshot lives in, or null when `snap` is not inside one. */
-export function jobDirOf(snap: string, p: path.PlatformPath = path): string | null {
-  let dir = p.dirname(snap);
-  for (;;) {
-    const parent = p.dirname(dir);
-    if (parent === dir) return null;
-    if (p.basename(parent) === "ae-mcp-render") return dir;
-    dir = parent;
-  }
+/** Where a job's copy lives, and the chain of folders above it (#215). */
+export interface SnapshotLayout {
+  /** `<tmpRoot>/ae-mcp-render/<jobId>` — everything the job writes is inside it. */
+  jobDir: string;
+  /** The copy aerender renders. */
+  snap: string;
+  /** How many chain folders lie between `jobDir` and the copy. */
+  depth: number;
+  /** The one name every chain folder has. */
+  name: string;
+}
+
+/** Levels the ascend counts may climb past the deepest spelling of the project's folder we know. */
+export const SPARE_LEVELS = 2;
+const CHAIN_NAMES = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+/** A job's own folder. Derived, never searched for. */
+export function jobFolder(tmpRoot: string, jobId: string, p: path.PlatformPath = path): string {
+  return p.join(tmpRoot, "ae-mcp-render", jobId);
+}
+
+/** The folder names of a path below its root. */
+function segments(dir: string, p: path.PlatformPath): string[] {
+  return dir.slice(p.parse(dir).root.length).split(/[\\/]+/).filter(Boolean);
 }
 
 /**
- * Where aerender writes `outputPath` when it resolves the output folder
- * relative to the copy instead of absolutely (#215): the same name in that
- * folder's mirror inside the job folder. Only folders that are the project's
- * own or an ancestor of it exist in the mirror, so for any other output this
- * names a path that cannot exist — which is the point. Null when `snap` is not
- * a job snapshot.
+ * Lay out a job's copy. `real` resolves symlinks (a test's stand-in); the
+ * chain's letter is the first that is no folder or file name, in any case, of
+ * the project's or any output's path in either spelling.
  */
-export function shadowOutputPath(
-  outputPath: string,
-  snap: string,
+export function snapshotLayout(
+  projectPath: string,
+  jobId: string,
+  tmpRoot: string = os.tmpdir(),
+  outputPaths: string[] = [],
   p: path.PlatformPath = path,
   real: (dir: string) => string = realOrSelf
-): string | null {
-  const jobDir = jobDirOf(snap, p);
-  if (!jobDir) return null;
-  const outDir = real(p.dirname(outputPath));
-  return p.join(jobDir, ...mirrorSegments(outDir, p), p.basename(outputPath));
+): SnapshotLayout {
+  const given = p.dirname(projectPath);
+  const depth = Math.max(segments(given, p).length, segments(real(given), p).length) + SPARE_LEVELS;
+  const used = new Set<string>();
+  for (const f of [projectPath, ...outputPaths]) {
+    const d = p.dirname(f);
+    for (const s of [...segments(f, p), ...segments(real(d), p)]) used.add(s.toLowerCase());
+  }
+  let name = "";
+  for (const c of CHAIN_NAMES) {
+    if (!used.has(c)) {
+      name = c;
+      break;
+    }
+  }
+  if (!name) {
+    let n = 0;
+    while (used.has(`m${n}`)) n++;
+    name = `m${n}`;
+  }
+  const jobDir = jobFolder(tmpRoot, jobId, p);
+  const snap = p.join(jobDir, ...new Array<string>(depth).fill(name), p.basename(projectPath));
+  return { jobDir, snap, depth, name };
+}
+
+/** Levels from `dir` up to `anc`, or null when `anc` is not `dir` or above it. */
+function levelsUp(anc: string, dir: string, p: path.PlatformPath): number | null {
+  const rel = p.relative(anc, dir);
+  if (rel === "") return 0;
+  if (rel.startsWith("..") || p.isAbsolute(rel)) return null;
+  return rel.split(/[\\/]+/).filter(Boolean).length;
+}
+
+/**
+ * The chain folders aerender writes `outputPath` into if it resolves the
+ * output's folder relative to the copy (#215): one per spelling (given, real)
+ * of the project's and the output's folders in which the output's folder is
+ * the project's or an ancestor of it. Empty for any other output — aerender
+ * writes those by their absolute path.
+ */
+export function shadowDirs(
+  outputPath: string,
+  projectPath: string,
+  layout: SnapshotLayout,
+  p: path.PlatformPath = path,
+  real: (dir: string) => string = realOrSelf
+): string[] {
+  const projDirs = [p.dirname(projectPath), real(p.dirname(projectPath))];
+  const outDirs = [p.dirname(outputPath), real(p.dirname(outputPath))];
+  const out: string[] = [];
+  for (const pd of projDirs) {
+    for (const od of outDirs) {
+      const k = levelsUp(od, pd, p);
+      if (k === null || k > layout.depth) continue;
+      const dir = p.join(layout.jobDir, ...new Array<string>(layout.depth - k).fill(layout.name));
+      if (!out.includes(dir)) out.push(dir);
+    }
+  }
+  return out;
 }
 
 /** The frame files of an `[####]` image-sequence name, or null when `base` is not one. */
@@ -656,64 +706,11 @@ function moveFile(from: string, to: string): void {
   }
 }
 
-/**
- * Move anything aerender wrote into the copy's mirror back to the path the
- * render queue item names (#215). Called after every aerender exit, success
- * or not, so a file is where the user asked whenever there is a file at all —
- * a failure that says "the file was left in place" must be true. A frame of an
- * image sequence is moved one file at a time. Never throws: a move that fails
- * is a problem the job reports, because the file is about to be deleted with
- * the copy.
- */
-export function relocateShadowOutputs(
-  outputs: RenderOutputPlan[],
-  snap: string
-): { moved: string[]; problems: string[] } {
-  const moved: string[] = [];
-  const problems: string[] = [];
-  for (const o of outputs) {
-    if (!o.path) continue;
-    const shadow = shadowOutputPath(o.path, snap);
-    if (!shadow || shadow === snap) continue;
-    const re = sequenceMatcher(path.basename(o.path));
-    const pairs: [string, string][] = [];
-    if (re) {
-      let names: string[] = [];
-      try {
-        names = fs.readdirSync(path.dirname(shadow));
-      } catch {
-        continue; // no such mirror folder: the output was not shadowed
-      }
-      for (const n of names) {
-        if (re.test(n)) pairs.push([path.join(path.dirname(shadow), n), path.join(path.dirname(o.path), n)]);
-      }
-    } else {
-      try {
-        if (fs.statSync(shadow).isFile()) pairs.push([shadow, o.path]);
-      } catch {}
-    }
-    for (const [from, to] of pairs) {
-      try {
-        moveFile(from, to);
-        moved.push(to);
-      } catch (e) {
-        problems.push(
-          `After Effects wrote ${to} into the render's private copy folder (${from}) and moving it out failed: ` +
-            `${(e as Error).message}`
-        );
-      }
-    }
-  }
-  return { moved, problems };
-}
-
-/** Files in a job folder other than the snapshot itself — output aerender put somewhere unforeseen. */
-export function strayFiles(snap: string): string[] {
-  const jobDir = jobDirOf(snap);
+/** Every file in a job folder other than the copy itself — output aerender wrote there. */
+export function strayFiles(layout: SnapshotLayout): string[] {
   const out: string[] = [];
-  if (!jobDir) return out;
   const walk = (dir: string, depth: number) => {
-    if (depth > 64) return;
+    if (depth > 256) return;
     let ents: fs.Dirent[];
     try {
       ents = fs.readdirSync(dir, { withFileTypes: true });
@@ -723,11 +720,59 @@ export function strayFiles(snap: string): string[] {
     for (const e of ents) {
       const f = path.join(dir, e.name);
       if (e.isDirectory()) walk(f, depth + 1);
-      else if (f !== snap) out.push(f);
+      else if (f !== layout.snap) out.push(f);
     }
   };
-  walk(jobDir, 0);
+  walk(layout.jobDir, 0);
   return out;
+}
+
+/**
+ * Move every file aerender wrote inside the job folder to the output it
+ * belongs to (#215). The WHOLE job folder is scanned, not only the folders
+ * `shadowDirs` predicts, so a resolution counted against a spelling of the
+ * project's path this did not foresee is still caught. A file belongs to the
+ * output whose file name it has (or whose `[####]` pattern it matches); when
+ * two outputs share a name, the one whose predicted folder it is in. A file
+ * no output claims is left, and reported by the caller through `strayFiles`.
+ *
+ * Called after every aerender exit — success, failure or cancel — so a file
+ * is where the user asked whenever there is a file at all: a failure that
+ * says "left in place", or a cancel that names the partial file, must be
+ * true. Never throws: a move that fails is a problem the job reports, because
+ * the file is about to be deleted with the copy.
+ */
+export function relocateShadowOutputs(
+  outputs: RenderOutputPlan[],
+  projectPath: string,
+  layout: SnapshotLayout
+): { moved: string[]; problems: string[] } {
+  const moved: string[] = [];
+  const problems: string[] = [];
+  const claims = outputs
+    .filter((o): o is RenderOutputPlan & { path: string } => !!o.path)
+    .map((o) => {
+      const base = path.basename(o.path);
+      const re = sequenceMatcher(base);
+      return { o, matches: (n: string) => (re ? re.test(n) : n === base), dirs: shadowDirs(o.path, projectPath, layout) };
+    });
+  for (const f of strayFiles(layout)) {
+    const name = path.basename(f);
+    let owners = claims.filter((c) => c.matches(name));
+    if (owners.length > 1) owners = owners.filter((c) => c.dirs.includes(path.dirname(f)));
+    if (owners.length !== 1) continue;
+    const to = path.join(path.dirname(owners[0].o.path), name);
+    try {
+      moveFile(f, to);
+      moved.push(to);
+    } catch (e) {
+      problems.push(
+        `After Effects wrote ${to} into the render's private copy folder (${f}) and moving it out failed: ` +
+          `${(e as Error).message}`
+      );
+    }
+  }
+  return { moved, problems };
 }
 
 /** How old another job's snapshot folder must be before a new render clears it away. */
@@ -750,10 +795,8 @@ export const STALE_SNAPSHOT_MS = 24 * 60 * 60 * 1000;
  * age limit is not mistaken for a leftover by another session's sweep. Called
  * as the job runs; never throws.
  */
-export function touchSnapshot(snap: string, now: Date = new Date()): void {
-  const dir = jobDirOf(snap);
-  if (!dir) return;
-  try { fs.utimesSync(dir, now, now); } catch {}
+export function touchSnapshot(jobDir: string, now: Date = new Date()): void {
+  try { fs.utimesSync(jobDir, now, now); } catch {}
 }
 
 /** How often a running job refreshes its snapshot folder's age. */
@@ -790,11 +833,13 @@ export function sweepStaleSnapshots(
   return removed;
 }
 
-/** Remove a snapshot and the per-job folder it was made in — and nothing else. */
-export function removeSnapshot(snap: string): void {
-  const dir = jobDirOf(snap);
-  if (!dir) return;
-  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+/**
+ * Remove a job's folder (`jobFolder`), copy and chain included — and nothing
+ * else: a path that is not an `ae-mcp-render/<jobId>` folder is left alone.
+ */
+export function removeSnapshot(jobDir: string): void {
+  if (path.basename(path.dirname(jobDir)) !== "ae-mcp-render") return;
+  try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch {}
 }
 
 /**
@@ -1354,7 +1399,9 @@ export class RenderRunner {
     if (this.current) throw new Error(`A render is already running (job ${this.current.jobId}).`);
     const jobId = `r_${Date.now()}_${++seq}`;
     sweepStaleSnapshots(jobId, this.tmpRoot);
-    const snapshot = snapshotProject(plan.projectPath, jobId, this.tmpRoot);
+    const outputPaths = plan.items.flatMap((i) => i.outputs.map((o) => o.path).filter((x): x is string => !!x));
+    const layout = snapshotProject(plan.projectPath, jobId, this.tmpRoot, outputPaths);
+    const snapshot = layout.snap;
     const totalFrames = Math.max(1, plan.items.reduce((n, i) => n + Math.max(0, i.frames || 0), 0));
     const r: Running = {
       jobId,
@@ -1373,7 +1420,9 @@ export class RenderRunner {
       rendered: [],
       startedAt: Date.now(),
       snapshot,
+      layout,
       touchedAt: Date.now(),
+      relocateProblems: [],
     };
     this.current = r;
     this.arm();
@@ -1400,15 +1449,13 @@ export class RenderRunner {
         );
         const itemStart = Date.now();
         r.touchedAt = itemStart;
-        touchSnapshot(r.snapshot);
+        touchSnapshot(r.layout.jobDir);
         const outcome = await this.renderItem(r, item, label);
+        // Before any verdict, and before a cancel's: an output aerender
+        // resolved relative to the copy is in the job folder, and goes where
+        // it was asked (#215) — a partial one too, so a cancel can name it.
+        const relocated = this.relocate(r, item);
         if (r.cancelled) break;
-        // Before any verdict: an output aerender resolved relative to the
-        // copy is in the copy's mirror, and goes where it was asked (#215).
-        const relocated = relocateShadowOutputs(item.outputs, r.snapshot);
-        if (relocated.moved.length) {
-          logger.info(`render ${r.jobId}: moved ${relocated.moved.length} output file(s) out of the copy's folder (#215)`);
-        }
         if (relocated.problems.length) {
           status = "failed";
           r.settled = true;
@@ -1455,7 +1502,7 @@ export class RenderRunner {
           status = "failed";
           r.settled = true;
           await this.unqueue(r);
-          const stray = strayFiles(r.snapshot);
+          const stray = strayFiles(r.layout);
           this.jobs.fail(
             r.jobId,
             `aerender reported success on ${label} but the output cannot be verified: ${problems.join("; ")}. ` +
@@ -1507,6 +1554,8 @@ export class RenderRunner {
         // await_job waits for ever on a render that is over.
         if (!r.settled && r.cancelGaveUp) {
           r.settled = true;
+          const cut = r.plan.items[r.itemPos];
+          if (cut) this.relocate(r, cut);
           await this.unqueue(r);
           this.jobs.cancel(r.jobId, {
             jobId: r.jobId,
@@ -1546,7 +1595,7 @@ export class RenderRunner {
     } finally {
       this.finished.set(r.jobId, status);
       if (this.current === r) this.current = null;
-      removeSnapshot(r.snapshot);
+      removeSnapshot(r.layout.jobDir);
       this.disarm?.();
       // Last, because it is the one async step: the job is settled and its
       // copy gone by now, and an engine that outlived aerender (see cancel)
@@ -1577,6 +1626,16 @@ export class RenderRunner {
       const a = answers.find((x) => x.index === done.index);
       done.unqueued = a ? { marked: a.marked, ...(a.reason ? { reason: a.reason } : {}) } : { marked: false, reason: "no answer" };
     }
+  }
+
+  /** `relocateShadowOutputs` for one item, remembering what could not be moved. */
+  private relocate(r: Running, item: RenderItemPlan): { moved: string[]; problems: string[] } {
+    const res = relocateShadowOutputs(item.outputs, r.plan.projectPath, r.layout);
+    if (res.moved.length) {
+      logger.info(`render ${r.jobId}: moved ${res.moved.length} output file(s) out of the copy's folder (#215)`);
+    }
+    for (const x of res.problems) if (!r.relocateProblems.includes(x)) r.relocateProblems.push(x);
+    return res;
   }
 
   /** The sentence a failure message carries about the unticking, when any happened. */
@@ -1673,7 +1732,7 @@ export class RenderRunner {
           r.itemFrames++;
           if (Date.now() - r.touchedAt >= TOUCH_EVERY_MS) {
             r.touchedAt = Date.now();
-            touchSnapshot(r.snapshot);
+            touchSnapshot(r.layout.jobDir);
           }
           const done = Math.min(r.framesBefore + r.itemFrames, r.totalFrames);
           this.jobs.reportProgress(
@@ -1782,6 +1841,9 @@ export class RenderRunner {
       r.cancelGaveUp = true;
       if (this.current !== r && survivors.length === 0) stopped = true;
     }
+    // run() relocates as aerender exits; this catches what an engine that
+    // outlived aerender wrote after that (#215).
+    if (item) this.relocate(r, item);
     const partialFiles = item ? existingOutputs(item.outputs) : [];
     const report: CancelReport = {
       jobId,
@@ -1796,6 +1858,9 @@ export class RenderRunner {
         ? "aerender and its render engine were stopped and have exited; no later item was started. " +
           (partialFiles.length
             ? `The interrupted item's output is INCOMPLETE and was left on disk: ${partialFiles.join(", ")} — tell the user, or delete it, rather than presenting it as a render. `
+            : "") +
+          (r.relocateProblems.length
+            ? `Part of the output could not be moved out of the render's private copy folder, which is deleted: ${r.relocateProblems.join("; ")}. `
             : "") +
           (r.rendered.length ? "Items listed in `rendered` finished and were verified before the cancel." : "No item had finished.")
         : (aerenderGone ? "" : `aerender (pid ${child?.pid}) did not exit after being told to stop and then killed. `) +
@@ -1858,7 +1923,10 @@ export class RenderRunner {
       }
     }
     if (r) {
-      removeSnapshot(r.snapshot);
+      // A partial output in the job folder goes where it was asked, not with the copy (#215).
+      const cut = r.plan.items[r.itemPos];
+      if (cut) relocateShadowOutputs(cut.outputs, r.plan.projectPath, r.layout);
+      removeSnapshot(r.layout.jobDir);
     }
   }
 }

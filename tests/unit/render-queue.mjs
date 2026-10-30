@@ -28,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo, mirrorSegments, snapshotLocation, jobDirOf, shadowOutputPath, relocateShadowOutputs } =
+const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo, snapshotLayout, jobFolder, shadowDirs, strayFiles, relocateShadowOutputs } =
   await import(dist("render", "aerender.js"));
 const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin, stopProcessTreeSync, snapshotMarker } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
@@ -199,16 +199,17 @@ await check("the snapshot goes to a per-job temp folder, never beside the projec
   const proj = path.join(tmp, "snap-src.aep");
   fs.writeFileSync(proj, "aep");
   const tmpRoot = path.join(tmp, "osTmp");
-  const snap = snapshotProject(proj, "r_1_1", tmpRoot);
+  const layout = snapshotProject(proj, "r_1_1", tmpRoot);
+  const snap = layout.snap;
   const jobDir = path.join(tmpRoot, "ae-mcp-render", "r_1_1");
-  assert.equal(snap, path.join(jobDir, ...mirrorSegments(fs.realpathSync(tmp)), "snap-src.aep"));
-  assert.equal(jobDirOf(snap), jobDir);
+  assert.equal(layout.jobDir, jobDir);
+  assert.equal(snap, path.join(jobDir, ...new Array(layout.depth).fill(layout.name), "snap-src.aep"));
   assert.equal(fs.readFileSync(snap, "utf8"), "aep");
   assert.deepEqual(fs.readdirSync(tmp).filter((n) => n.includes("ae-mcp-render")), [], "nothing new beside the project");
-  removeSnapshot(snap);
+  removeSnapshot(layout.jobDir);
   assert.ok(!fs.existsSync(jobDir), "the per-job folder goes with it");
   // removeSnapshot only ever removes an ae-mcp-render/<job> folder.
-  removeSnapshot(proj);
+  removeSnapshot(path.dirname(proj));
   assert.ok(fs.existsSync(proj));
   assert.throws(() => snapshotProject(path.join(tmp, "nope", "x.aep"), "r_1_2", tmpRoot), /nothing was rendered/);
 });
@@ -244,14 +245,13 @@ await check("a running job keeps its snapshot folder young, so a long render sur
   const root = path.join(tmp, "touchTmp");
   const src = path.join(tmp, "long.aep");
   fs.writeFileSync(src, "aep");
-  const snap = snapshotProject(src, "r_long_9", root);
-  const dir = jobDirOf(snap);
+  const { snap, jobDir: dir } = snapshotProject(src, "r_long_9", root);
   const old = new Date(Date.now() - 3 * 24 * 3600_000);
   fs.utimesSync(dir, old, old);
-  touchSnapshot(snap);
+  touchSnapshot(dir);
   assert.deepEqual(sweepStaleSnapshots("r_other", root), [], "a touched folder is not stale");
   assert.ok(fs.existsSync(snap));
-  removeSnapshot(snap);
+  removeSnapshot(dir);
 });
 await check("missing-footage lines are recognised, ordinary ones are not", () => {
   assert.ok(isMissingFootageLine("aerender WARNING: Footage file missing: /x/clip.mov"));
@@ -294,10 +294,10 @@ await check("Windows: name AND command line, so the PowerShell search never matc
   assert.equal(isRenderProcessWin("cmd.exe", "cmd /c echo r_1_2", snap), false);
   assert.equal(isRenderProcessWin("aerender.exe", "aerender.exe -project C:\\other\\ae-mcp-render\\r_9_9\\rq.aep", snap), false);
 });
-await check("a mirrored snapshot path still identifies its job, and only its job (#215)", () => {
-  const a = "/var/folders/xx/T/ae-mcp-render/r_1_2/private/var/folders/xx/T/proj/show.aep";
-  const b = "/var/folders/xx/T/ae-mcp-render/r_9_9/private/var/folders/xx/T/proj/show.aep";
-  assert.equal(snapshotMarker(a), "ae-mcp-render/r_1_2/private/var/folders/xx/T/proj/show.aep");
+await check("a chained snapshot path still identifies its job, and only its job (#215)", () => {
+  const a = "/var/folders/xx/T/ae-mcp-render/r_1_2/a/a/a/a/a/a/a/show.aep";
+  const b = "/var/folders/xx/T/ae-mcp-render/r_9_9/a/a/a/a/a/a/a/show.aep";
+  assert.equal(snapshotMarker(a), "ae-mcp-render/r_1_2/a/a/a/a/a/a/a/show.aep");
   const ps = [
     `  201 /Applications/Adobe After Effects 2026/aerender -project ${a} -rqindex 1`,
     `  202 /Applications/Adobe After Effects 2026/aerender -project ${b} -rqindex 1`,
@@ -305,61 +305,72 @@ await check("a mirrored snapshot path still identifies its job, and only its job
   assert.deepEqual(renderPidsFromPs(ps, a), [201], "another job on the same project is not this one");
   assert.equal(snapshotMarker("/var/folders/xx/T/ae-mcp-render/r_1_2/rq.aep"), "ae-mcp-render/r_1_2/rq.aep");
 });
-await check("the snapshot mirrors the project's folder, on both hosts (#215)", () => {
+await check("the copy sits under a chain of one-letter folders as deep as the project's, on both hosts (#215)", () => {
   const id = (d) => d;
-  assert.deepEqual(mirrorSegments("/Users/me/show", path.posix), ["Users", "me", "show"]);
-  assert.deepEqual(mirrorSegments("/", path.posix), []);
-  assert.deepEqual(mirrorSegments("C:\\Users\\me\\show", path.win32), ["C", "Users", "me", "show"]);
-  assert.deepEqual(mirrorSegments("\\\\srv\\share\\show", path.win32), ["srv", "share", "show"]);
-  assert.equal(
-    snapshotLocation("/Users/me/show/show.aep", "r_1_1", "/tmp/T", path.posix, id),
-    "/tmp/T/ae-mcp-render/r_1_1/Users/me/show/show.aep"
-  );
-  const wsnap = snapshotLocation("C:\\Users\\me\\show\\show.aep", "r_1_1", "C:\\Temp", path.win32, id);
-  assert.equal(wsnap, "C:\\Temp\\ae-mcp-render\\r_1_1\\C\\Users\\me\\show\\show.aep");
-  assert.equal(jobDirOf(wsnap, path.win32), "C:\\Temp\\ae-mcp-render\\r_1_1");
-  assert.equal(jobDirOf("/Users/me/show/show.aep", path.posix), null, "never a folder outside ae-mcp-render");
-  // Where aerender's relative resolution puts each output: the same folder's
-  // mirror. Beside the project and one folder up exist in the mirror; a
-  // subfolder or a sibling branch do not, so aerender writes those absolutely.
-  const snap = "/tmp/T/ae-mcp-render/r_1_1/Users/me/show/show.aep";
-  assert.equal(shadowOutputPath("/Users/me/show/out.mp4", snap, path.posix, id), "/tmp/T/ae-mcp-render/r_1_1/Users/me/show/out.mp4");
-  assert.equal(shadowOutputPath("/Users/me/out4.mp4", snap, path.posix, id), "/tmp/T/ae-mcp-render/r_1_1/Users/me/out4.mp4");
-  assert.equal(shadowOutputPath("/Users/me/show/renders/o.mov", snap, path.posix, id), "/tmp/T/ae-mcp-render/r_1_1/Users/me/show/renders/o.mov");
-  assert.equal(shadowOutputPath("/x.mov", "/Users/me/show/show.aep", path.posix, id), null);
-  assert.equal(
-    shadowOutputPath("C:\\Users\\me\\show\\out.mov", wsnap, path.win32, id),
-    "C:\\Temp\\ae-mcp-render\\r_1_1\\C\\Users\\me\\show\\out.mov"
-  );
+  const L = snapshotLayout("/Users/me/show/show.aep", "r_1_1", "/tmp/T", [], path.posix, id);
+  assert.deepEqual(L, {
+    jobDir: "/tmp/T/ae-mcp-render/r_1_1",
+    snap: "/tmp/T/ae-mcp-render/r_1_1/a/a/a/a/a/show.aep",
+    depth: 5,
+    name: "a",
+  });
+  assert.equal(jobFolder("/tmp/T", "r_1_1", path.posix), L.jobDir);
+  // The letter never matches a folder name in the project's or an output's path.
+  assert.equal(snapshotLayout("/A/b/show.aep", "r", "/t", ["/x/c/o.mov"], path.posix, id).name, "d");
+  // A symlinked spelling: the chain is as deep as the deeper of the two.
+  const sym = (d) => (d === "/Users/me/Dropbox/show" ? "/Users/me/Library/CloudStorage/Dropbox/show" : d);
+  assert.equal(snapshotLayout("/Users/me/Dropbox/show/show.aep", "r", "/t", [], path.posix, sym).depth, 6 + 2);
+  // Windows: short, whatever the project's depth — two characters a level.
+  const deep = "C:\\Users\\someone\\Documents\\Client Work 2026\\Big Campaign\\Shots\\shot_010\\ae\\v12";
+  const W = snapshotLayout(deep + "\\shot_010_comp_v12.aep", "r_1793320237670_7", "C:\\Users\\someone\\AppData\\Local\\Temp", [], path.win32, id);
+  assert.equal(W.depth, 9 + 2);
+  assert.ok(W.snap.length < 140, `${W.snap.length}: ${W.snap}`);
+  assert.equal(W.snap, "C:\\Users\\someone\\AppData\\Local\\Temp\\ae-mcp-render\\r_1793320237670_7\\" + "a\\".repeat(11) + "shot_010_comp_v12.aep");
+  // Where aerender's relative resolution puts each output: the chain folder
+  // as many levels up as the output's folder is above the project's. A
+  // subfolder or a sibling branch is not in the chain, so it is written absolutely.
+  const at = (n) => "/tmp/T/ae-mcp-render/r_1_1" + "/a".repeat(n);
+  assert.deepEqual(shadowDirs("/Users/me/show/out.mp4", "/Users/me/show/show.aep", L, path.posix, id), [at(5)]);
+  assert.deepEqual(shadowDirs("/Users/me/out4.mp4", "/Users/me/show/show.aep", L, path.posix, id), [at(4)]);
+  assert.deepEqual(shadowDirs("/Users/me/show/renders/o.mov", "/Users/me/show/show.aep", L, path.posix, id), []);
+  assert.deepEqual(shadowDirs("/Users/other/o.mov", "/Users/me/show/show.aep", L, path.posix, id), []);
+  assert.deepEqual(shadowDirs("c:\\users\\SOMEONE\\o.mov", deep + "\\p.aep", W, path.win32, id), [W.jobDir + "\\a".repeat(11 - 7)]);
 });
-await check("whatever aerender wrote into the mirror is moved to where it was asked (#215)", () => {
+await check("whatever aerender wrote anywhere in the job folder is moved to where it was asked (#215)", () => {
   const proj = path.join(tmp, "reloc", "show");
   fs.mkdirSync(proj, { recursive: true });
   const projFile = path.join(proj, "show.aep");
   fs.writeFileSync(projFile, "aep");
-  const snap = snapshotProject(projFile, "r_reloc_1", path.join(tmp, "relocTmp"));
-  const mirror = path.dirname(snap);
-  // Beside the project, a frame sequence beside it, and one folder up.
-  fs.writeFileSync(path.join(mirror, "beside.mov"), "movie");
-  fs.writeFileSync(path.join(mirror, "f_0001.png"), "png");
-  fs.writeFileSync(path.join(mirror, "f_0002.png"), "png");
-  fs.writeFileSync(path.join(path.dirname(mirror), "up.mov"), "movie");
-  fs.writeFileSync(path.join(proj, "beside.mov"), "the previous render"); // overwrite:true
   const outs = [
     { index: 1, path: path.join(proj, "beside.mov") },
     { index: 2, path: path.join(proj, "f_[####].png") },
     { index: 3, path: path.join(path.dirname(proj), "up.mov") },
     { index: 4, path: path.join(proj, "untouched.mov") },
   ];
-  const r = relocateShadowOutputs(outs, snap);
+  const layout = snapshotProject(projFile, "r_reloc_1", path.join(tmp, "relocTmp"), outs.map((o) => o.path));
+  const here = path.dirname(layout.snap);
+  // Beside the project, a frame sequence beside it, one folder up — and one
+  // a level nobody predicted (a spelling of the path AE counted against that
+  // this did not foresee), which the whole-folder scan still finds.
+  fs.writeFileSync(path.join(here, "beside.mov"), "movie");
+  fs.writeFileSync(path.join(here, "f_0001.png"), "png");
+  fs.writeFileSync(path.join(here, "f_0002.png"), "png");
+  fs.writeFileSync(path.join(layout.jobDir, "up.mov"), "movie");
+  fs.writeFileSync(path.join(here, "nobody-asked.txt"), "?");
+  fs.writeFileSync(path.join(proj, "beside.mov"), "the previous render"); // overwrite:true
+  const r = relocateShadowOutputs(outs, projFile, layout);
   assert.deepEqual(r.problems, []);
   assert.equal(r.moved.length, 4);
   assert.equal(fs.readFileSync(path.join(proj, "beside.mov"), "utf8"), "movie");
   assert.ok(fs.existsSync(path.join(proj, "f_0001.png")) && fs.existsSync(path.join(proj, "f_0002.png")));
   assert.equal(fs.readFileSync(path.join(path.dirname(proj), "up.mov"), "utf8"), "movie");
   assert.ok(!fs.existsSync(path.join(proj, "untouched.mov")));
-  assert.ok(fs.existsSync(snap), "the copy itself is never moved");
-  removeSnapshot(snap);
+  assert.ok(fs.existsSync(layout.snap), "the copy itself is never moved");
+  assert.deepEqual(strayFiles(layout), [path.join(here, "nobody-asked.txt")], "a file no output claims is reported, not moved");
+  removeSnapshot(layout.jobDir);
+  assert.ok(!fs.existsSync(layout.jobDir));
+  removeSnapshot(proj);
+  assert.ok(fs.existsSync(projFile), "removeSnapshot only ever removes an ae-mcp-render/<job> folder");
 });
 await check("names and paths that merely contain the words do not fail a good render", () => {
   // The two examples from review: an output path and a comp name.
@@ -460,8 +471,9 @@ if (mode === "relative") {
   // project it was GIVEN, whenever the folder it names exists.
   const path = require("path");
   const project = args[args.indexOf("-project") + 1];
-  const a = fs.realpathSync(process.env.FAKE_REAL_PROJ_DIR).split(path.sep);
-  const b = fs.realpathSync(path.dirname(out)).split(path.sep);
+  const spell = (d) => (process.env.FAKE_SPELLING === "given" ? path.resolve(d) : fs.realpathSync(d));
+  const a = spell(process.env.FAKE_REAL_PROJ_DIR).split(path.sep);
+  const b = spell(path.dirname(out)).split(path.sep);
   let k = 0;
   while (k < a.length && k < b.length && a[k] === b[k]) k++;
   let base = path.dirname(project);
@@ -671,7 +683,7 @@ function alive(pid) {
     const args = JSON.parse(fs.readFileSync(process.env.FAKE_ARGS, "utf8"));
     assert.equal(args[0], "-project");
     assert.equal(path.basename(args[1]), "show.aep");
-    assert.equal(path.basename(path.dirname(jobDirOf(args[1]))), "ae-mcp-render");
+    assert.ok(path.relative(path.join(runTmp, "ae-mcp-render"), args[1]).split(path.sep).length > 2, args[1]);
     assert.notEqual(path.dirname(args[1]), tmp);
     assert.deepEqual(args.slice(2), aerenderArgs("x", 2).slice(2));
     assert.ok(!fs.existsSync(args[1]), "the snapshot must be removed when the job ends");
@@ -764,6 +776,55 @@ function alive(pid) {
     const leaked = fs.existsSync(root215) ? fs.readdirSync(root215).filter((n) => !fs.statSync(path.join(root215, n)).isDirectory()) : [];
     assert.deepEqual(leaked, [], "nothing written into the shared ae-mcp-render folder");
     delete process.env.FAKE_REAL_PROJ_DIR;
+  });
+
+  await check("a project reached through a symlink of another depth: outputs still land where asked, either way AE counts (#215)", async () => {
+    if (win) return; // symlinked folders need privileges on Windows
+    const top = path.join(tmp, "sl215");
+    const real = path.join(top, "x", "y", "z", "show");
+    fs.mkdirSync(real, { recursive: true });
+    const link = path.join(top, "ln");
+    fs.symlinkSync(real, link);
+    const proj = path.join(link, "show.aep");
+    fs.writeFileSync(proj, "aep bytes");
+    process.env.FAKE_REAL_PROJ_DIR = link;
+    for (const spelling of ["given", "real"]) {
+      process.env.FAKE_SPELLING = spelling;
+      for (const out of [path.join(link, `beside-${spelling}.mov`), path.join(top, `up-${spelling}.mov`)]) {
+        const jobs = new JobManager();
+        const runner = runnerFor(jobs, { tmpRoot: runTmp });
+        env("relative", out);
+        const { jobId } = runner.start({ ...plan(out), projectPath: proj }, fake);
+        const st = await jobs.waitFor(jobId, 10_000);
+        assert.equal(st.status, "completed");
+        assert.ok(fs.statSync(out).size > 0, `${spelling}: ${out}`);
+      }
+    }
+    delete process.env.FAKE_SPELLING;
+    delete process.env.FAKE_REAL_PROJ_DIR;
+  });
+
+  await check("a cancelled render's partial output beside the project is moved out and named, not deleted (#215)", async () => {
+    const projDir = path.join(tmp, "cancel215");
+    fs.mkdirSync(projDir, { recursive: true });
+    const proj = path.join(projDir, "show.aep");
+    fs.writeFileSync(proj, "aep bytes");
+    const out = path.join(projDir, "partial.mov");
+    const jobs = new JobManager();
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, graceMs: 500 });
+    // The hanging fake's own file goes elsewhere; the partial output is
+    // written into the job folder, where aerender resolving the output
+    // relative to the copy puts it.
+    env("hang", path.join(tmp, "cancel215-elsewhere.mov"));
+    const { jobId } = runner.start({ ...plan(out, 100), projectPath: proj }, fake);
+    const shadow = path.join(path.dirname(snapshotLayout(proj, jobId, runTmp, [out]).snap), "partial.mov");
+    for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_SELF); i++) await sleep(20);
+    fs.writeFileSync(shadow, "partial");
+    const report = await runner.cancel(jobId);
+    assert.equal(report.stopped, true, report.note);
+    assert.deepEqual(report.partialFiles, [out]);
+    assert.equal(fs.readFileSync(out, "utf8"), "partial");
+    try { process.kill(Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8")), "SIGKILL"); } catch {}
   });
 
   await check("a stuck engine cannot hold the job open: killed at the cap, then decided", async () => {
@@ -871,7 +932,7 @@ function alive(pid) {
     env("hang", out);
     const { jobId } = runner.start(plan(out, 100), fake);
     for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
-    const snapPath = snapshotLocation(projectFile, jobId, runTmp);
+    const snapPath = snapshotLayout(projectFile, jobId, runTmp, [out]).snap;
     // A non-aerender process whose arguments hold this job's snapshot path and id.
     const decoy = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)", "--", jobId, snapPath], { detached: true, stdio: "ignore" });
     decoy.unref();
