@@ -240,6 +240,14 @@ for (const [name, code, route] of [
   ["eval", 'var x = eval("1 + 1");', "eval"],
   ["Function", 'var f = Function("return 1"); f();', "Function"],
   ["$.evalFile", 'if (false) $.evalFile("/tmp/rig.jsx");', "$.evalFile"],
+  // Whitespace JavaScript allows, newlines included (#226 final review).
+  ["eval with a space", "var x = eval ('1 + 1');", "eval"],
+  ["new Function with a space", "var f = new Function ('return 1'); f();", "Function"],
+  ["Function split across lines", "var f = Function\n  ('return 1'); f();", "Function"],
+  ["$ . evalFile spaced", "if (false) $ . evalFile('/tmp/rig.jsx');", "$.evalFile"],
+  ["$.evalFile across lines", "if (false) $\n  .\n  evalFile('/tmp/rig.jsx');", "$.evalFile"],
+  ["a \\u escape in an identifier", "var n = 'x'; if (false) app.end\\u0055ndoGroup();",
+    "a \\u escape spelling beginUndoGroup/endUndoGroup"],
 ]) {
   check(`CAUTION for code the guard cannot see into: ${name}`, () => {
     const { call } = load();
@@ -251,6 +259,21 @@ for (const [name, code, route] of [
     assert.match(r.result.undoGuard.note, /NOT seen by the guard/);
   });
 }
+
+check("eval of a string naming the methods leads with CAUTION, not \"0 found\"", () => {
+  const { call } = load();
+  const r = call("run_jsx", { code: "if (false) eval ('app.endUndoGroup()'); return 1;" });
+  assert.match(r.result.undoGuard.note, /^CAUTION: this script uses eval\./);
+  assert.match(r.result.undoGuard.note, /\(0 found\)/);
+});
+
+check("words that only look like the routes are not cautioned", () => {
+  const { call } = load();
+  const r = call("run_jsx", {
+    code: "var o = { evaluate: 1, Functions: 2 }; var evalFile = 3; var u = '\\u0041'; return o.evaluate + o.Functions + evalFile + u.length;",
+  });
+  assert.equal(r.result, 7, "no caution, no envelope");
+});
 
 check("a $.evalFile in a library is cautioned too", () => {
   const { call } = load();

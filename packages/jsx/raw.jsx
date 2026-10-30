@@ -610,25 +610,89 @@ function __rjRewriteUndoText(src) {
   return { text: out.join(""), rewrites: rewrites };
 }
 
-// The routes the rewrite cannot see into. Matched as words — `eval(` with no
-// identifier character before it, so `myeval(` and `retrieval(` do not count —
-// and reported, never refused: the code inside may well not touch undo at all.
-var __RJ_OPAQUE_NEEDLES = [
-  { needle: "eval(", name: "eval", word: true },
-  { needle: "Function(", name: "Function", word: true },
-  { needle: "$.evalFile", name: "$.evalFile", word: false }
-];
+// The routes the rewrite cannot see into.
+// Matched as words, with any whitespace (newlines included) where JavaScript
+// allows it: `eval (`, `new Function\n(`, `$ . evalFile`. A word must not sit
+// inside a longer identifier — `myeval(`, `retrieval(`, `myFunction(` do not
+// count. Reported, never refused: the code inside may well not touch undo.
+function __rjSkipSpaceForward(s, i) {
+  while (i < s.length && __rjIsSpaceChar(s.charAt(i))) i++;
+  return i;
+}
+
+function __rjSkipSpaceBack(s, i) {
+  while (i >= 0 && __rjIsSpaceChar(s.charAt(i))) i--;
+  return i;
+}
+
+// True when `word` occurs in s as a whole identifier that `test(s, start, end)`
+// accepts, where end is the index just past the word.
+function __rjFindWord(s, word, test) {
+  var at = s.indexOf(word);
+  while (at >= 0) {
+    var end = at + word.length;
+    var before = at === 0 ? "" : s.charAt(at - 1);
+    var after = end < s.length ? s.charAt(end) : "";
+    if ((before === "" || !__rjIsIdentChar(before)) && (after === "" || !__rjIsIdentChar(after)) &&
+        test(s, at, end)) return true;
+    at = s.indexOf(word, at + 1);
+  }
+  return false;
+}
+
+function __rjCalledHere(s, at, end) {
+  var j = __rjSkipSpaceForward(s, end);
+  return j < s.length && s.charAt(j) === "(";
+}
+
+function __rjOnDollar(s, at, end) {
+  var dot = __rjSkipSpaceBack(s, at - 1);
+  if (dot < 0 || s.charAt(dot) !== ".") return false;
+  var d = __rjSkipSpaceBack(s, dot - 1);
+  return d >= 0 && s.charAt(d) === "$" && (d === 0 || !__rjIsIdentChar(s.charAt(d - 1)));
+}
+
+// `app.endUndoGroup()` is the same call as `app.endUndoGroup()` to the
+// parser, and invisible to both the fast path and the rewrite. Cheap to spot:
+// decode \uXXXX only when the source has one, and see whether a method name
+// appears that was not there before.
+function __rjDecodeUnicodeEscapes(s) {
+  var out = "";
+  var i = 0;
+  while (i < s.length) {
+    var c = s.charAt(i);
+    if (c === "\\" && s.charAt(i + 1) === "u" && i + 6 <= s.length) {
+      var code = parseInt(s.substring(i + 2, i + 6), 16);
+      if (!isNaN(code) && s.substring(i + 2, i + 6).length === 4) {
+        out += String.fromCharCode(code);
+        i += 6;
+        continue;
+      }
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+function __rjCountUndoNames(t) {
+  var n = 0;
+  var words = ["beginUndoGroup", "endUndoGroup"];
+  for (var w = 0; w < words.length; w++) {
+    var at = t.indexOf(words[w]);
+    while (at >= 0) { n++; at = t.indexOf(words[w], at + 1); }
+  }
+  return n;
+}
 
 function __rjOpaqueRoutes(src) {
   var s = String(src);
   var found = [];
-  for (var k = 0; k < __RJ_OPAQUE_NEEDLES.length; k++) {
-    var n = __RJ_OPAQUE_NEEDLES[k];
-    var at = s.indexOf(n.needle);
-    while (at >= 0) {
-      if (!n.word || at === 0 || !__rjIsIdentChar(s.charAt(at - 1))) { found.push(n.name); break; }
-      at = s.indexOf(n.needle, at + 1);
-    }
+  if (__rjFindWord(s, "eval", __rjCalledHere)) found.push("eval");
+  if (__rjFindWord(s, "Function", __rjCalledHere)) found.push("Function");
+  if (__rjFindWord(s, "evalFile", __rjOnDollar)) found.push("$.evalFile");
+  if (s.indexOf("\\u") >= 0 && __rjCountUndoNames(__rjDecodeUnicodeEscapes(s)) > __rjCountUndoNames(s)) {
+    found.push("a \\u escape spelling beginUndoGroup/endUndoGroup");
   }
   return found;
 }
@@ -730,7 +794,8 @@ function __rjUndoGuardReport(g) {
   }
   if (g.opaque.length > 0) {
     report.uncountedRoutes = g.opaque;
-    parts.push("CAUTION: this script uses " + g.opaque.join(", ") + ". Undo-group calls made that way are NOT seen " +
+    // First: a note that goes on to say "(0 found)" must not read as clean.
+    parts.unshift("CAUTION: this script uses " + g.opaque.join(", ") + ". Undo-group calls made that way are NOT seen " +
       "by the guard and reach After Effects uncounted — measured on AE 26.5, one stray end through eval cost two " +
       "undo steps. If that code calls app.beginUndoGroup/app.endUndoGroup, check Edit > Undo in After Effects " +
       "before going on.");
