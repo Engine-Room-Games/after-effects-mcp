@@ -56,6 +56,11 @@ import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./gen
 import { archiveIssue, listIssues, logIssue, markReported } from "./issues/journal.js";
 import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
+import {
+  checkFootageExists,
+  checkRenderOutput,
+  checkMogrtDestination,
+} from "./files/destinations.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
 import { fileURLToPath } from "node:url";
@@ -690,6 +695,17 @@ export function createServer(opts: CreateServerOptions = {}) {
       // cross the bridge. The lease is released when this returns, on purpose
       // — see runRender.
       if (name === "render_queue") return textResult(await runRender(args as RenderQueueArgs, runner, renders), wait);
+
+      // Filesystem checks the server makes itself (issue #220, stage 2), so a
+      // refusal costs After Effects nothing. The jsx copies stay in the bundle
+      // and run again after these: older servers and `run_batch` steps rely on
+      // them. See "Filesystem checks on the server" in docs/subsystems.md.
+      // None of them has a side effect: a refusal leaves nothing behind.
+      if (name === "add_to_render_queue") checkRenderOutput(args as { outputPath: string; overwrite?: boolean });
+      if (name === "import_footage") checkFootageExists(args as { path: string });
+      if (name === "export_mogrt") {
+        checkMogrtDestination(args as { compId: number; destDir?: string; name?: string; overwrite?: boolean });
+      }
 
       // The request's progressToken is deliberately not forwarded. The panel
       // does nothing with it — its WS `progress` events carry a jobId and no
