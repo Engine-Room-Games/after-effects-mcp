@@ -12,11 +12,12 @@
 // null until then, and there is no folder to write into. That is reported, never
 // guessed around.
 //
-// Since issue #220 (stage 3) a server talking to a panel that reports the
-// `project-path` capability asks `_project_path` and does the file I/O itself
-// (style/houseStyleFile.ts, same sentences). get_house_style and
-// set_house_style stay for older servers, for panels the server cannot read
-// beside, and for set_house_style as a run_batch step. Change both together.
+// Since issue #220 (stage 3) the server asks `_project_path` and does the file
+// I/O itself (style/houseStyleFile.ts, same sentences). get_house_style and
+// set_house_style are not legacy: the server still falls back on them for a
+// folder macOS privacy lets After Effects see and the server not, or a
+// `_project_path` answer it cannot read; and set_house_style runs here as a
+// run_batch step (get_house_style is refused as one). Change both together.
 
 var HOUSE_STYLE_FILENAME = "house-style.md";
 

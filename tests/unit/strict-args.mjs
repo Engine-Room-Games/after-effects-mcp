@@ -174,7 +174,8 @@ await check("internal, server-resident and half-outside-AE ops are refused by na
     assert.equal(problems[0].problem, BATCH_STEP_REFUSALS[op]);
   }
   // And the ordinary ExtendScript-only tools are not refused.
-  for (const op of ["set_layer", "run_jsx", "run_batch", "add_to_render_queue", "checkpoint_comp"]) {
+  // set_house_style included: as a step it runs style.jsx, which stays (#243).
+  for (const op of ["set_layer", "run_jsx", "run_batch", "add_to_render_queue", "checkpoint_comp", "set_house_style"]) {
     assert.equal(batchStepRefusal(op), undefined, op);
   }
 });
