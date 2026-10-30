@@ -54,7 +54,8 @@ OPS.list_layers = noUndo(function (args) {
 
 OPS.create_text_layer = function (args) {
   var c = getCompById(args.compId);
-  var l = c.layers.addText(args.text || "");
+  // A box size makes paragraph text (issue #181): it wraps inside the box.
+  var l = args.boxSize ? c.layers.addBoxText([args.boxSize[0], args.boxSize[1]], args.text || "") : c.layers.addText(args.text || "");
   if (args.name) l.name = args.name;
   // `anchorAlign` is paragraph justification, not geometry. Offsetting the
   // anchor to the measured bbox edge (what this did before) looks right at
@@ -112,6 +113,16 @@ OPS.create_text_layer = function (args) {
   if (verified) {
     out.justification = __justificationName(verified.justification);
     out.justificationReasserted = verified.reasserted;
+  }
+  if (args.boxSize) {
+    var boxSrc = l.property("Source Text");
+    try {
+      out.boxSize = __verifyBoxSize(boxSrc, args.boxSize, "create_text_layer", "");
+    } catch (eBox) {
+      try { l.remove(); } catch (eRm) {}
+      eBox.message = String(eBox.message) + "The new layer was removed, so nothing was created.";
+      throw eBox;
+    }
   }
   return out;
 };
@@ -361,13 +372,39 @@ OPS.set_layer = function (args) {
     }
   }
 
+  // The switch enumerations (issue #181), resolved by name like blendingMode.
+  var switchEnums = {};
+  for (var ei = 0; ei < __LAYER_SWITCH_ENUMS.length; ei++) {
+    var ef = __LAYER_SWITCH_ENUMS[ei][0];
+    if (args[ef] === undefined) continue;
+    var en = __LAYER_SWITCH_ENUMS[ei][1];
+    var table = __layerSwitchEnum(en);
+    var ev = table ? table[args[ef]] : undefined;
+    if (ev === undefined) {
+      throw new Error("set_layer: " + ef + " '" + args[ef] + "' is not one of After Effects' " + en + " names. Nothing was changed.");
+    }
+    switchEnums[ef] = ev;
+  }
+
   // What can be known to fail without writing anything is refused here too.
   var camOrLight = __isCamOrLight(l);
-  var pixelOnly = ["blendingMode", "threeDLayer", "preserveTransparency"];
+  var pixelOnly = ["blendingMode", "threeDLayer", "preserveTransparency", "motionBlur", "collapseTransformation",
+    "adjustmentLayer", "guideLayer", "effectsActive", "audioEnabled", "quality", "samplingQuality", "frameBlendingType"];
   for (var pi = 0; pi < pixelOnly.length; pi++) {
     if (camOrLight && args[pixelOnly[pi]] !== undefined) {
       throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") is a " + __layerKind(l) + ", which has no " + pixelOnly[pi] + ". Nothing was changed.");
     }
+  }
+  if (args.collapseTransformation !== undefined && l.canSetCollapseTransformation === false) {
+    throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") has no collapse-transformations / continuous-rasterize switch " +
+      "(After Effects offers it on precomp, shape, text and vector-footage layers). Nothing was changed.");
+  }
+  if (args.audioEnabled !== undefined && l.hasAudio === false) {
+    throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") has no audio, so it has no audio switch. Nothing was changed.");
+  }
+  if (args.autoOrient === "CHARACTERS_TOWARD_CAMERA" && !(l instanceof TextLayer)) {
+    throw new Error("set_layer: autoOrient CHARACTERS_TOWARD_CAMERA applies only to a 3D text layer with per-character 3D; layer " + l.id +
+      " (\"" + l.name + "\") is a " + __layerKind(l) + ". Nothing was changed.");
   }
   if (args.stretch !== undefined && args.stretch === 0) {
     throw new Error("set_layer: stretch 0 is not a speed After Effects accepts. Nothing was changed.");
@@ -392,7 +429,12 @@ OPS.set_layer = function (args) {
     ["name", args.name], ["enabled", args.enabled], ["shy", args.shy],
     ["solo", args.solo], ["threeDLayer", args.threeDLayer], ["blendingMode", blend], ["label", args.label],
     ["inPoint", args.inPoint], ["outPoint", args.outPoint], ["startTime", args.startTime],
-    ["stretch", args.stretch], ["preserveTransparency", args.preserveTransparency]
+    ["stretch", args.stretch], ["preserveTransparency", args.preserveTransparency],
+    ["motionBlur", args.motionBlur], ["collapseTransformation", args.collapseTransformation],
+    ["adjustmentLayer", args.adjustmentLayer], ["guideLayer", args.guideLayer],
+    ["effectsActive", args.effectsActive], ["audioEnabled", args.audioEnabled],
+    ["quality", switchEnums.quality], ["samplingQuality", switchEnums.samplingQuality],
+    ["frameBlendingType", switchEnums.frameBlendingType], ["autoOrient", switchEnums.autoOrient]
   );
   if (args.locked === true) steps.push(["locked", true]);
 
@@ -403,6 +445,12 @@ OPS.set_layer = function (args) {
     try {
       if (field === "trackMatte") out = __setTrackMatte(l, tm, tmType, tmLayer);
       else l[field] = steps[si][1];
+      // The switches are read back (issue #181): After Effects can take an
+      // assignment it does not apply (frame blending on a still) and say nothing.
+      if (__LAYER_READBACK[field] && l[field] !== steps[si][1]) {
+        throw new Error("set_layer: After Effects took " + field + " but reads " + String(l[field]) + " afterwards, not " +
+          String(steps[si][1]) + "; this layer does not hold that setting.");
+      }
     } catch (eW) {
       var notReached = [];
       for (var sj = si + 1; sj < steps.length; sj++) if (steps[sj][1] !== undefined) notReached.push(steps[sj][0]);
@@ -418,8 +466,36 @@ OPS.set_layer = function (args) {
   }
   var summary = __layerSummary(l);
   if (out) summary.trackMatte = out;
+  // The switches this call set, as After Effects now holds them.
+  var switches = null;
+  for (var ri = 0; ri < __LAYER_SWITCHES.length; ri++) {
+    var rf = __LAYER_SWITCHES[ri];
+    if (args[rf] === undefined) continue;
+    if (!switches) switches = {};
+    switches[rf] = switchEnums[rf] !== undefined ? args[rf] : l[rf];
+  }
+  if (switches) summary.switches = switches;
   return summary;
 };
+
+// set_layer's timeline switches (issue #181). Booleans and enum-valued ones;
+// the enum names are keys into the After Effects enumeration named beside them.
+var __LAYER_SWITCHES = ["motionBlur", "collapseTransformation", "adjustmentLayer", "guideLayer", "effectsActive",
+  "audioEnabled", "quality", "samplingQuality", "frameBlendingType", "autoOrient"];
+var __LAYER_SWITCH_ENUMS = [
+  ["quality", "LayerQuality"], ["samplingQuality", "LayerSamplingQuality"],
+  ["frameBlendingType", "FrameBlendingType"], ["autoOrient", "AutoOrientType"]
+];
+// Named one by one: an enumeration a build lacks reads undefined, not a throw.
+function __layerSwitchEnum(name) {
+  if (name === "LayerQuality") return typeof LayerQuality !== "undefined" ? LayerQuality : undefined;
+  if (name === "LayerSamplingQuality") return typeof LayerSamplingQuality !== "undefined" ? LayerSamplingQuality : undefined;
+  if (name === "FrameBlendingType") return typeof FrameBlendingType !== "undefined" ? FrameBlendingType : undefined;
+  if (name === "AutoOrientType") return typeof AutoOrientType !== "undefined" ? AutoOrientType : undefined;
+  return undefined;
+}
+var __LAYER_READBACK = {};
+(function () { for (var i = 0; i < __LAYER_SWITCHES.length; i++) __LAYER_READBACK[__LAYER_SWITCHES[i]] = true; })();
 
 /**
  * Apply a resolved track matte and read it back (issue #149). The 2023+ API is

@@ -201,7 +201,7 @@ check("set_interpolation on a key that does not exist is an error", () => {
   const ae = keyed();
   refused(
     ae.call("set_interpolation", { compId: 100, layerId: 2, propertyPath: OPACITY, keyIndex: 3, in: "hold" }),
-    /out of range/,
+    /no key 3 .*it has 2 keyframes.*Nothing was changed/,
     "set_interpolation"
   );
 });

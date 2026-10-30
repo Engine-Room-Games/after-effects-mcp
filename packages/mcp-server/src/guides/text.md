@@ -21,6 +21,21 @@ call then renders differently on two machines.
 
 `set_text` controls the text and its styling — font, size, fill and stroke,
 tracking, leading, justification, faux bold and italic, caps, baseline shift.
+
+**Paragraph text that wraps is box text, and it is chosen at creation.**
+`create_text_layer({…, boxSize: [width, height]})` makes it; `set_text({…,
+boxSize})` resizes the box later, and both read the size back. Point text
+cannot become box text from a script, so `set_text` refuses `boxSize` on it —
+delete it and create a box layer instead. Justification aligns the lines
+inside the box. A line longer than the box wraps, and one taller than it is
+hidden, not reported: check `sourceRect` from `get_layer_full({…, include:
+["bounds"]})` when the copy can change.
+
+**`font` is the PostScript name**, as in `Montserrat-Bold`, not the family
+name the menu shows. After Effects does not reject a name it lacks, so read
+the layer back with `get_layer_full({…, include: ["text"]})` after setting
+one; from `run_jsx` on AE 24 and later, `app.fonts.getFontsByFamilyNameAndStyleName(family,
+style)` turns a family and style into the PostScript name.
 `add_text_animator` adds an animator group (position, scale, rotation, opacity,
 tracking, skew, fill and stroke colour) with an optional range selector, which
 is how per-character animation is built. It is all-or-nothing: if After

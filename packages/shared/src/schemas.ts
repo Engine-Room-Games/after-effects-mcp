@@ -50,6 +50,12 @@ export const BLENDING_MODES = [
   "ALPHA_ADD", "LUMINESCENT_PREMUL",
 ] as const;
 export const TRACK_MATTE_TYPES = ["NO_TRACK_MATTE", "ALPHA", "ALPHA_INVERTED", "LUMA", "LUMA_INVERTED"] as const;
+// set_layer's switch enumerations (issue #181): keys into LayerQuality,
+// LayerSamplingQuality, FrameBlendingType and AutoOrientType.
+export const LAYER_QUALITIES = ["BEST", "DRAFT", "WIREFRAME"] as const;
+export const SAMPLING_QUALITIES = ["BICUBIC", "BILINEAR"] as const;
+export const FRAME_BLENDING_TYPES = ["NO_FRAME_BLEND", "FRAME_MIX", "PIXEL_MOTION"] as const;
+export const AUTO_ORIENT_TYPES = ["NO_AUTO_ORIENT", "ALONG_PATH", "CAMERA_OR_POINT_OF_INTEREST", "CHARACTERS_TOWARD_CAMERA"] as const;
 export const MASK_MODES = ["ADD", "NONE", "SUBTRACT", "INTERSECT", "LIGHTEN", "DARKEN", "DIFFERENCE"] as const;
 
 export const PropertyPath = z
@@ -379,6 +385,12 @@ export const SetComp = z.object({
   workAreaStart: z.number().optional().describe("Seconds."),
   workAreaDuration: z.number().positive().optional().describe("Seconds."),
   bgColor: Color.optional(),
+  // The comp-level switches a layer's motionBlur / frameBlendingType need
+  // before they render (issue #181). Read back after the write.
+  motionBlur: z.boolean().optional()
+    .describe("Comp motion-blur switch; layers also need their own (set_layer)."),
+  frameBlending: z.boolean().optional()
+    .describe("Comp frame-blending switch; layers also need frameBlendingType (set_layer)."),
 });
 export const DeleteComp = z
   .object({
@@ -541,6 +553,8 @@ export const GetLayerFull = z.object({
     ),
 });
 
+// [width, height] of a paragraph (box) text layer (issue #181).
+const BoxSize = z.tuple([z.number().positive(), z.number().positive()]);
 export const CreateTextLayer = z.object({
   compId: z.number(),
   text: z.string().default(""),
@@ -550,6 +564,8 @@ export const CreateTextLayer = z.object({
   position: VecAny.optional(),
   tracking: z.number().optional()
     .describe("Letter-spacing. Omitted: 0, rather than whatever the user's Character panel was left on (not reset when anchorAlign is 'none')."),
+  boxSize: BoxSize.optional()
+    .describe("[width, height]: paragraph (box) text that wraps inside the box, instead of point text."),
   anchorAlign: z.enum(["left", "center", "right", "none"]).optional().meta({ default: "left" })
     .describe("How the text aligns to `position`, as live paragraph justification (anchor stays [0,0]), so it survives later text changes. 'left' (default): `position` is the start of the first baseline; 'center'/'right': its centre/end. 'none': AE's raw defaults — no justification, anchor move or tracking reset."),
   name: z.string().optional(),
@@ -612,6 +628,19 @@ export const SetLayer = z.object({
     layerId: z.number().optional()
       .describe("Matte layer id, same comp, anywhere in the stack. Omit to change only the type of the current matte; required when there is none yet."),
   }).optional(),
+  // The timeline switches (issue #181). Each is read back after the write; a
+  // switch After Effects does not take on this layer is an error, not an {ok}.
+  motionBlur: z.boolean().optional().describe("Needs the comp's switch too (set_comp)."),
+  collapseTransformation: z.boolean().optional()
+    .describe("Collapse (precomp) / continuously rasterize (shape, text, vector)."),
+  adjustmentLayer: z.boolean().optional(),
+  guideLayer: z.boolean().optional(),
+  effectsActive: z.boolean().optional().describe("The fx switch."),
+  audioEnabled: z.boolean().optional(),
+  quality: namedEnum(LAYER_QUALITIES).optional(),
+  samplingQuality: namedEnum(SAMPLING_QUALITIES).optional(),
+  frameBlendingType: namedEnum(FRAME_BLENDING_TYPES).optional().describe("Needs the comp's switch too (set_comp)."),
+  autoOrient: namedEnum(AUTO_ORIENT_TYPES).optional(),
 });
 export const ParentLayer = z.object({
   compId: z.number(),
@@ -657,13 +686,18 @@ const keyframeNeedsTime: CrossFieldRule = {
   then: "`time` is the keyframe's time in comp seconds.",
 };
 
-export const SetTransform = crossField(z.object({
+export const SetTransform = crossField(crossField(z.object({
   compId: z.number(),
   layerId: z.number(),
   time: z.number().optional().describe("Comp seconds."),
   keyframe: z.boolean().optional().meta({ default: false }),
+  separateDimensions: z.boolean().optional()
+    .describe("Position's Separate Dimensions switch, set before the values. While on, write xPosition/yPosition/zPosition, not position."),
   properties: z.object({
     position: VecAny.optional(),
+    xPosition: z.number().optional().describe("Separated dimensions only."),
+    yPosition: z.number().optional().describe("Separated dimensions only."),
+    zPosition: z.number().optional().describe("Separated dimensions, 3D layer only."),
     scale: VecAny.optional(),
     rotation: z.number().optional(),
     anchorPoint: VecAny.optional(),
@@ -672,8 +706,13 @@ export const SetTransform = crossField(z.object({
     xRotation: z.number().optional(),
     yRotation: z.number().optional(),
     zRotation: z.number().optional(),
-  }),
-}), keyframeNeedsTime);
+  }).optional(),
+}), keyframeNeedsTime), {
+  // A switch-only call needs no empty `properties`; a call with neither does nothing.
+  kind: "atLeastOne",
+  fields: ["properties", "separateDimensions"],
+  then: "`separateDimensions` alone just flips the switch.",
+});
 
 // ---------- keyframes ----------
 export const AddKeyframe = z.object({
@@ -695,24 +734,41 @@ export const GetKeyframes = z.object({
   layerId: z.number(),
   propertyPath: PropertyPath,
 });
-export const SetInterpolation = z.object({
-  compId: z.number(),
-  layerId: z.number(),
-  propertyPath: PropertyPath,
-  keyIndex: z.number().int().positive(),
-  in: z.enum(["linear", "bezier", "hold"]).optional(),
-  out: z.enum(["linear", "bezier", "hold"]).optional(),
-});
+export const SetInterpolation = crossField(
+  z.object({
+    compId: z.number(),
+    layerId: z.number(),
+    propertyPath: PropertyPath,
+    keyIndex: z.number().int().positive(),
+    in: z.enum(["linear", "bezier", "hold"]).optional(),
+    out: z.enum(["linear", "bezier", "hold"]).optional(),
+    // Keyframe flags (issue #181). Each is read back after the write.
+    temporalContinuous: z.boolean().optional(),
+    temporalAutoBezier: z.boolean().optional(),
+    spatialContinuous: z.boolean().optional().describe("Spatial properties only."),
+    spatialAutoBezier: z.boolean().optional().describe("Spatial properties only."),
+    roving: z.boolean().optional().describe("Spatial only; not the first or last key."),
+  }),
+  // A call with none of these used to answer {ok:true} having done nothing.
+  {
+    kind: "atLeastOne",
+    fields: ["in", "out", "temporalContinuous", "temporalAutoBezier", "spatialContinuous", "spatialAutoBezier", "roving"],
+    then: "`in`/`out` set the type; the rest are the key's flags.",
+  }
+);
+const EasePair = z.object({ influence: z.number(), speed: z.number() });
+// One pair for every dimension, or one pair per dimension (issue #181).
+const EaseSpec = z.union([EasePair, z.array(EasePair).min(1).max(4)]);
 export const SetTemporalEase = crossField(
   z.object({
     compId: z.number(),
     layerId: z.number(),
     propertyPath: PropertyPath,
     keyIndex: z.number().int().positive(),
-    easeIn: z.object({ influence: z.number(), speed: z.number() }).optional()
-      .describe(`One pair for every dimension: ${EASE_RANGES}`),
-    easeOut: z.object({ influence: z.number(), speed: z.number() }).optional()
-      .describe(`One pair for every dimension: ${EASE_RANGES}`),
+    easeIn: EaseSpec.optional()
+      .describe(`One pair for every dimension, or a list of pairs, one per ease dimension: ${EASE_RANGES}`),
+    easeOut: EaseSpec.optional()
+      .describe(`Same forms as easeIn: ${EASE_RANGES}`),
   }),
   // `keyframes.jsx` has always refused this, and still does — but it refused
   // from inside After Effects, which meant a round trip and a write lease spent
@@ -720,7 +776,7 @@ export const SetTemporalEase = crossField(
   {
     kind: "atLeastOne",
     fields: ["easeIn", "easeOut"],
-    then: "Each is one {influence, speed} pair; this tool sizes the ease array for the property itself.",
+    then: "Each is one {influence, speed} pair, or a list of them, one per dimension.",
   }
 );
 export const SetSpatialTangents = z.object({
@@ -856,6 +912,8 @@ export const SetText = z.object({
   compId: z.number(),
   layerId: z.number(),
   text: z.string().optional(),
+  boxSize: BoxSize.optional()
+    .describe("[width, height] of a box text layer's box. Refused on point text (not convertible)."),
   font: z.string().optional(),
   size: z.number().positive().optional(),
   fillColor: Color.optional(),
@@ -964,6 +1022,16 @@ export const ShapeContent = z.discriminatedUnion("type", [
     name: z.string().optional(),
     copies: z.number().optional(),
     offset: z.number().optional(),
+    // The Repeater's own Transform group (issue #181): what each copy adds to
+    // the one before it.
+    transform: z.object({
+      anchorPoint: Vec2.optional(),
+      position: Vec2.optional().describe("Offset per copy; AE default [100, 0]."),
+      scale: Vec2.optional(),
+      rotation: z.number().optional(),
+      startOpacity: z.number().optional(),
+      endOpacity: z.number().optional(),
+    }).strict().optional(),
   }).strict(),
   z.object({
     type: z.literal("merge"),

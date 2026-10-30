@@ -50,6 +50,22 @@ function __verifyJustification(src, expected) {
   );
 }
 
+/**
+ * Read a box text layer's box back and compare with what was asked (issue
+ * #181). Returns the size AE holds; throws naming both when they differ.
+ */
+function __verifyBoxSize(src, want, op, tail) {
+  var got = null;
+  try { got = src.value.boxTextSize; } catch (e) { got = null; }
+  // Within a pixel: After Effects may round a fractional box size, and a write
+  // that landed must not be reported as one that did not.
+  if (!got || Math.abs(got[0] - want[0]) > 1 || Math.abs(got[1] - want[1]) > 1) {
+    throw new Error(op + ": asked for a text box of [" + want[0] + ", " + want[1] + "] but After Effects reads " +
+      (got ? "[" + got[0] + ", " + got[1] + "]" : "no box") + " afterwards. " + tail);
+  }
+  return [got[0], got[1]];
+}
+
 OPS.set_text = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
@@ -67,7 +83,14 @@ OPS.set_text = function (args) {
     }
     justificationWanted = __JUSTIFICATION[args.justification];
   }
+  // Box text (issue #181). Point text has no box, and scripting cannot turn
+  // it into box text, so a size for it is refused before anything is written.
+  if (args.boxSize !== undefined && !td.boxText) {
+    throw new Error("set_text: layer '" + l.name + "' is point text, which has no box; After Effects' scripting cannot convert it to " +
+      "box text. Nothing was changed. Create a box text layer with create_text_layer boxSize:[w, h] instead.");
+  }
   if (args.text !== undefined) td.text = args.text;
+  if (args.boxSize !== undefined) td.boxTextSize = [args.boxSize[0], args.boxSize[1]];
   if (args.font !== undefined) td.font = args.font;
   if (args.size !== undefined) td.fontSize = args.size;
   if (args.fillColor) { td.applyFill = true; td.fillColor = [args.fillColor[0], args.fillColor[1], args.fillColor[2]]; }
@@ -85,11 +108,13 @@ OPS.set_text = function (args) {
   if (args.baselineShift !== undefined) td.baselineShift = args.baselineShift;
   src.setValue(td);
   var verified = __verifyJustification(src, justificationWanted);
-  return {
+  var res = {
     ok: true,
     justification: __justificationName(verified.justification),
     justificationReasserted: verified.reasserted,
   };
+  if (args.boxSize !== undefined) res.boxSize = __verifyBoxSize(src, args.boxSize, "set_text", "The other fields were written.");
+  return res;
 };
 
 // Issue #154: the animator property used to be added inside `catch (e) {}`,

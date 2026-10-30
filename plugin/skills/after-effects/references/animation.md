@@ -10,11 +10,14 @@ description: Keyframes, easing, rigging and expressions through the AE MCP tools
 
 `add_keyframe` sets a value at a time. Interpolation is separate:
 
-- `set_interpolation` — linear / bezier / hold, per keyframe, in and out.
+- `set_interpolation` — linear / bezier / hold, per keyframe, in and out, and
+  the key's flags: `temporalContinuous`, `temporalAutoBezier`, and on a
+  spatial property `spatialContinuous`, `spatialAutoBezier` and `roving`.
 - `set_temporal_ease` — influence and speed, the "easy ease" controls.
 - `set_spatial_tangents` — the shape of a motion path through a position keyframe.
-- `get_keyframes` reads them all back, with the ease on each key — the exact
-  answer to "does it move right", where a screenshot is an impression.
+- `get_keyframes` reads them all back, with the ease and flags on each key —
+  the exact answer to "does it move right", where a screenshot is an
+  impression.
 
 `set_transform`, `set_effect_param` and `set_shape_property` also key a value
 with `keyframe: true` — and that **requires `time`**; without it the call is
@@ -31,6 +34,22 @@ per property, and the measured table is in the `extendscript-gotchas` topic for
 the day you script an ease by hand. Through the tools you never need it; from a
 script, use the `ease()` helper, which is the same sizing code and not a second
 copy of it.
+
+**To ease dimensions apart, pass a list.** `set_temporal_ease` also takes an
+array of pairs, one per ease dimension — how many a property has is in the
+`extendscript-gotchas` topic — and refuses a length the property does not
+take. Position eases along its path with one pair, and differing pairs on it
+are refused; to ease X and Y apart, separate it first:
+`set_transform({…, separateDimensions: true, properties: {xPosition,
+yPosition}})`, then key `["Transform", "X Position"]` and `["Transform",
+"Y Position"]` on their own. While dimensions are separated `position` is
+refused, and `xPosition`/`yPosition` are refused while they are joined.
+
+**Roving keys smooth a multi-point move.** `set_interpolation({keyIndex,
+roving: true})` on every key between the first and the last lets After
+Effects re-time them so speed is even along the path; the first and last key
+cannot rove, and the tool refuses them before anything changes. Read the keys
+back afterwards — their times are After Effects' now, not yours.
 
 **A held pose is a hold keyframe, not two equal keys.** Between two
 equal-valued bezier keys the value still moves — the tangents are shaped by the

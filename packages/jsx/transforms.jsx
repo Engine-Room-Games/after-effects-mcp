@@ -6,6 +6,9 @@
 // "Z Rotation", and both are ADBE Rotate Z.
 var __TRANSFORM_FIELDS = [
   ["position", "ADBE Position"],
+  ["xPosition", "ADBE Position_0"],
+  ["yPosition", "ADBE Position_1"],
+  ["zPosition", "ADBE Position_2"],
   ["scale", "ADBE Scale"],
   ["rotation", "ADBE Rotate Z"],
   ["anchorPoint", "ADBE Anchor Point"],
@@ -39,8 +42,38 @@ OPS.set_transform = function (args) {
   // flag (the same exclusion __ptChain makes in layers.jsx).
   var isCamOrLight = (typeof CameraLayer !== "undefined" && l instanceof CameraLayer) ||
     (typeof LightLayer !== "undefined" && l instanceof LightLayer);
+  // Separate Dimensions (issue #181). Position and X/Y/Z Position are each
+  // hidden while the other is in use, so which family this call may write is
+  // decided by the switch as it will be once this call has set it — and said
+  // in those words, rather than as a bare "hidden" from the generic check.
+  var posProp = null;
+  try { posProp = tr.property("ADBE Position"); } catch (ePos) { posProp = null; }
+  var sepNow = false;
+  try { sepNow = !!(posProp && posProp.dimensionsSeparated); } catch (eSep) { sepNow = false; }
+  var sepToggle = args.separateDimensions !== undefined && !!args.separateDimensions !== sepNow;
+  var sepAfter = args.separateDimensions !== undefined ? !!args.separateDimensions : sepNow;
+  if (args.separateDimensions !== undefined && !posProp) {
+    throw new Error("set_transform: layer '" + l.name + "' has no Position property, so it has no Separate Dimensions switch. Nothing was changed.");
+  }
+  if (sepAfter && p.position !== undefined) {
+    throw new Error(
+      "set_transform: layer '" + l.name + "' has Position's dimensions separated" + (sepToggle ? " (by this call)" : "") +
+      ", so Position itself is hidden. Nothing was changed. Pass xPosition/yPosition" +
+      (l.threeDLayer ? "/zPosition" : "") + " instead, or separateDimensions:false to write position."
+    );
+  }
+  var sepFields = [];
+  if (p.xPosition !== undefined) sepFields.push("xPosition");
+  if (p.yPosition !== undefined) sepFields.push("yPosition");
+  if (p.zPosition !== undefined) sepFields.push("zPosition");
+  if (!sepAfter && sepFields.length) {
+    throw new Error(
+      "set_transform: " + sepFields.join(", ") + " exist only while Position's dimensions are separated, and on layer '" +
+      l.name + "' they are not. Nothing was changed. Pass separateDimensions:true in the same call, or write position."
+    );
+  }
   if (!l.threeDLayer && !isCamOrLight) {
-    var only3D = ["orientation", "xRotation", "yRotation"];
+    var only3D = ["orientation", "xRotation", "yRotation", "zPosition"];
     var refused = [];
     for (i = 0; i < only3D.length; i++) {
       if (p[only3D[i]] !== undefined) refused.push(only3D[i]);
@@ -70,12 +103,16 @@ OPS.set_transform = function (args) {
     var prop = null;
     try { prop = tr.property(__TRANSFORM_FIELDS[i][1]); } catch (e) { prop = null; }
     var settable = true;
-    if (prop) {
+    // Position and X/Y/Z Position swap visibility when this call flips the
+    // switch, so their hidden state now says nothing about after; the checks
+    // above have already decided them.
+    var swaps = sepToggle && (field === "position" || field === "xPosition" || field === "yPosition" || field === "zPosition");
+    if (prop && !swaps) {
       try { settable = prop.canSetExpression !== false; } catch (e2) { settable = false; }
     }
     if (!prop) missing.push(field);
     else if (!settable) unsettable.push(field);
-    else plan.push([prop, p[field], field]);
+    else plan.push([prop, p[field], field, __TRANSFORM_FIELDS[i][1]]);
   }
   if (missing.length || unsettable.length) {
     var what = [];
@@ -91,9 +128,24 @@ OPS.set_transform = function (args) {
   // Fallback for a hidden property the check above did not see: name what
   // already landed, so the failure is never read as "nothing changed".
   var written = [];
+  if (sepToggle) {
+    try {
+      posProp.dimensionsSeparated = sepAfter;
+    } catch (eSet) {
+      throw new Error("set_transform: could not " + (sepAfter ? "separate" : "join") + " Position's dimensions on layer '" + l.name +
+        "': " + ((eSet && eSet.message) ? eSet.message : String(eSet)) + " Nothing was changed.");
+    }
+    if (!!posProp.dimensionsSeparated !== sepAfter) {
+      throw new Error("set_transform: asked to " + (sepAfter ? "separate" : "join") + " Position's dimensions on layer '" + l.name +
+        "', but After Effects reads dimensionsSeparated " + posProp.dimensionsSeparated + " afterwards. Nothing else was written.");
+    }
+    written.push("separateDimensions");
+  }
   for (i = 0; i < plan.length; i++) {
     try {
-      __setOrKeyAtTime(plan[i][0], plan[i][1], t, kf, "set_transform");
+      // Re-fetched after the switch flipped, so no reference outlives it.
+      var target = sepToggle ? tr.property(plan[i][3]) : plan[i][0];
+      __setOrKeyAtTime(target, plan[i][1], t, kf, "set_transform");
     } catch (e3) {
       var msg = (e3 && e3.message) ? e3.message : String(e3);
       throw new Error(
@@ -104,5 +156,7 @@ OPS.set_transform = function (args) {
     }
     written.push(plan[i][2]);
   }
-  return { ok: true };
+  var res = { ok: true };
+  if (posProp && (args.separateDimensions !== undefined || sepFields.length)) res.dimensionsSeparated = !!posProp.dimensionsSeparated;
+  return res;
 };
