@@ -581,7 +581,7 @@ await check("the tarball's digest travels in the tag, and CI refuses an asset th
     "the digest check must come before the publish");
   // The draft is made, assets and all, before anything is pushed.
   assert.ok(sh.indexOf("--draft") < sh.indexOf('git push --quiet origin "$TAG"'), "the release must be drafted before the tag is pushed");
-  assert.ok(sh.indexOf('git push --quiet origin "$TAG"') < sh.indexOf("--draft=false"));
+  assert.ok(sh.indexOf('git push --quiet origin "$TAG"') < sh.lastIndexOf("--draft=false"));
   // CI signs and builds nothing.
   const steps = yml.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
   assert.doesNotMatch(steps, /AE_MCP_PANEL_CERT|ZXPSignCmd|npm ci|npm pack|install-rosetta|panel-signing/);

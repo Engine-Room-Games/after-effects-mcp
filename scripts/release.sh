@@ -212,6 +212,10 @@ step "Release assets"
 for a in "${ASSETS[@]}"; do printf '    %s\n' "$a"; done
 
 REPO=$(git remote get-url origin | sed -E 's#.*github\.com[:/]([^/]+/[^/.]+)(\.git)?#\1#')
+# Every gh call below names the repo explicitly, so the slug has to be right
+# before anything is committed or tagged.
+[[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+  || die "could not work out the GitHub owner/repo from origin ($(git remote get-url origin)) — nothing has been tagged or pushed"
 
 # The tarball's digest goes into the annotated tag. release.yml reads it back
 # from the tag and refuses to publish a downloaded asset that does not match
@@ -250,6 +254,9 @@ Keep each downloaded folder together: the After Effects panel ships alongside th
 Full changelog: https://github.com/$REPO/compare/v$CURRENT...$TAG
 EOF
 )
+# `--repo` is required here, not a nicety: the tag exists only locally, and
+# without --repo gh resolves the repository through it and refuses an unpushed
+# tag. Every later gh call names it too, for the same reason.
 if ! gh release create "$TAG" "${ASSETS[@]}" \
   --repo "$REPO" \
   --title "$TAG" \
@@ -257,13 +264,35 @@ if ! gh release create "$TAG" "${ASSETS[@]}" \
   --draft; then
   gh release delete "$TAG" --repo "$REPO" --yes >/dev/null 2>&1 || true
   git tag -d "$TAG" >/dev/null
-  git reset --quiet --soft HEAD~1
-  die "creating the draft release failed — nothing has been pushed; the release commit and tag were undone locally"
+  # --mixed, not --soft: the bump goes back to being unstaged changes, so the
+  # `git checkout -- .` this script promises really does restore the tree.
+  git reset --quiet --mixed HEAD~1
+  die "creating the draft release failed — nothing has been pushed; the release commit and tag were undone locally (git checkout -- . discards the version bump)"
 fi
 
+push_failed() {
+  cat >&2 <<EOF
+
+Pushing failed. The draft release $TAG exists on GitHub (unpublished, so npm
+has not been touched), and the release commit and tag exist locally.
+
+Either retry the push, then publish the draft:
+
+  git push origin main && git push origin $TAG
+  gh release edit $TAG --repo $REPO --draft=false
+
+or undo everything (check first that neither push reached origin):
+
+  gh release delete $TAG --repo $REPO --yes
+  git tag -d $TAG
+  git reset --mixed HEAD~1 && git checkout -- .
+EOF
+  exit 1
+}
+
 step "Pushing"
-git push --quiet origin main
-git push --quiet origin "$TAG"
+git push --quiet origin main || push_failed
+git push --quiet origin "$TAG" || push_failed
 
 step "Publishing the release"
 if ! gh release edit "$TAG" --repo "$REPO" --draft=false; then
