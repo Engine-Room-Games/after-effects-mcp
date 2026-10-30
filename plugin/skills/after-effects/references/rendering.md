@@ -98,10 +98,13 @@ the render worked.
 ## Cancelling
 
 `cancel_job({jobId})` ends the aerender process. `stopped: true` comes back
-only once the process has actually exited. The interrupted item's file is
-**incomplete** and is left on disk in `partialFiles` — tell the user, or delete
-it, but never present it as a render. Items in `rendered` finished before the
-cancel and are good. A file that was at the output path before the render (an
+only once the process has actually exited. The interrupted item's file **may
+be incomplete** — the render was stopped before After Effects confirmed it
+finished — and is left on disk in `partialFiles`. A cancel near the end can
+leave a complete file, so check its duration or frame count before using or
+deleting it, and never present it as a finished render unchecked. Items in
+`rendered` finished before the cancel and are good. If the note says After
+Effects' unfinished file was discarded, there is no partial file to find. A file that was at the output path before the render (an
 earlier render, with `overwrite:true`) is never listed in `partialFiles` and is
 not replaced by the cancel; the partial is then named at its temp-folder path.
 Each partial file is named exactly — delete by those names, never by a

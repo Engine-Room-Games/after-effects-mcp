@@ -879,8 +879,21 @@ function alive(pid) {
     assert.equal(report.stopped, true, report.note);
     assert.deepEqual(report.partialFiles, [out]);
     assert.equal(fs.readFileSync(out, "utf8"), "partial");
-    assert.match(report.note, /INCOMPLETE/);
+    assert.match(report.note, /may be INCOMPLETE: the render was stopped before After Effects confirmed it finished/);
+    assert.match(report.note, /check its duration or frame count/);
+    assert.doesNotMatch(report.note, /or delete those files by name/, "never a bare instruction to delete");
     assert.equal(jobs.get(jobId).status, "cancelled");
+  });
+
+  await check("cancel: an unfinished file After Effects wrote under another name is said to be discarded, not 'nothing found' (#217 live)", async () => {
+    const { wrote, report } = await cancelWithLateEngineWrite("tmpname", {
+      late: (sd) => fs.writeFileSync(path.join(sd, "beside_inprogress.m4v"), Buffer.alloc(4096)),
+    });
+    assert.ok(wrote);
+    assert.equal(report.stopped, true, report.note);
+    assert.deepEqual(report.partialFiles, []);
+    assert.doesNotMatch(report.note, /No partial output was found on disk/);
+    assert.match(report.note, /unfinished file\(s\)[^]*discarded[^]*beside_inprogress\.m4v/);
   });
 
   await check("cancel: a complete file from an earlier render is never reported as partial, nor replaced (#215 review)", async () => {
@@ -1282,7 +1295,7 @@ function alive(pid) {
     assert.equal(st.status, "cancelled");
     assert.equal(st.result.stopped, true);
     assert.match(st.result.note, /after cancel_job had reported it still running/);
-    assert.match(st.result.note, /INCOMPLETE: exactly the \d+ file\(s\) in `partialFiles`|No partial output was found/, "the follow-up names where the partial is, like a normal cancel");
+    assert.match(st.result.note, /may be INCOMPLETE|No partial output was found/, "the follow-up names where the partial is, like a normal cancel");
     try { process.kill(grandchild, "SIGKILL"); } catch {}
   });
 

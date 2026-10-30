@@ -1893,10 +1893,31 @@ export class RenderRunner {
     const moved = partialFiles.filter((f) => !r.kept.has(f));
     const kept = partialFiles.filter((f) => r.kept.has(f));
     const list = (xs: string[]) => xs.slice(0, 10).join(", ") + (xs.length > 10 ? ` and ${xs.length - 10} more` : "");
+    // What After Effects wrote under a name no output claims (live, 26.5: an
+    // in-progress .m4v for an .mp4 output) stays in the job folder and goes
+    // with it. Say so — "nothing found" would hide a file thrown away.
+    const discarded = strayFiles(r.layout).filter((f) => !r.kept.has(f));
+    const mb = discarded.reduce((n, f) => {
+      try {
+        return n + fs.statSync(f).size;
+      } catch {
+        return n;
+      }
+    }, 0) / (1 << 20);
     return (
       (partialFiles.length
-        ? `The interrupted item's output is INCOMPLETE: exactly the ${partialFiles.length} file(s) in \`partialFiles\` — tell the user, or delete those files by name (never by a folder or a [####] pattern), rather than presenting them as a render. `
-        : "No partial output was found on disk. ") +
+        ? `The interrupted item's output may be INCOMPLETE: the render was stopped before After Effects confirmed it ` +
+          `finished. Before using or deleting any of the ${partialFiles.length} file(s) in \`partialFiles\`, check ` +
+          "its duration or frame count — a cancel near the end can leave a complete file. Never present one as a " +
+          "finished render without that check, and delete only by those exact names (never by a folder or a [####] " +
+          "pattern). "
+        : discarded.length
+          ? "No partial output reached the asked location. "
+          : "No partial output was found on disk. ") +
+      (discarded.length
+        ? `After Effects' unfinished file(s) in the render's private copy folder were discarded with it, under names ` +
+          `no output asked for: ${list(discarded.map((f) => path.basename(f)))} (${mb.toFixed(1)} MB). `
+        : "") +
       (moved.length ? `At the asked location: ${list(moved)}. ` : "") +
       (kept.length
         ? `In the temp folder, because a file from before this render was at the asked path and was NOT replaced: ${list(kept)}. ` +
