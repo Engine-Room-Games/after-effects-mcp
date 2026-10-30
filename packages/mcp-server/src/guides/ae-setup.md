@@ -24,7 +24,11 @@ read alike and their remedies contradict each other:
   reply. After Effects is single-threaded, so a long script or a modal dialog
   waiting for a click blocks it completely. Nothing is broken and nothing needs
   installing. The call **did** reach After Effects and may still be running, so
-  do not re-send it.
+  do not re-send it. If another AI client is connected to the same After
+  Effects, the call may be waiting its turn behind that client's work; it
+  can still land once that finishes, after the timeout has been reported.
+  The exception is `render_queue`: its timeout comes before any render
+  starts and says so, and it is called again once the panel answers.
 - **Cannot reach** — nothing is listening on the port the server tried. That
   is the case the repair path below is for — *unless* the next case applies,
   so read the message to the end: it now says which other ports it looked at

@@ -15,7 +15,15 @@
  * needs a snapshot from yesterday — but it must never be discovered as a
  * cryptic failure, so `missingMessage` says it in full and names the way
  * forward.
+ *
+ * Ids carry a random per-process prefix (issue #163). A bare `snap_1` from a
+ * previous server process would otherwise match the new process's first
+ * snapshot — of a different comp, or of the same comp at a different moment —
+ * and `diff_comp` would answer with a plausible, wrong diff instead of the
+ * "gone" message.
  */
+
+import { randomBytes } from "node:crypto";
 
 export interface CompFingerprint {
   compId: number;
@@ -40,13 +48,15 @@ const DEFAULT_MAX = 32;
 export class SnapshotStore {
   private snapshots = new Map<string, StoredSnapshot>();
   private seq = 0;
+  /** Distinct per store, so per process: an old session's id cannot resolve here. */
+  private readonly prefix = randomBytes(3).toString("hex");
 
   constructor(private readonly max: number = DEFAULT_MAX) {}
 
   store(fingerprint: CompFingerprint): StoredSnapshot {
     this.seq += 1;
     const snapshot: StoredSnapshot = {
-      id: `snap_${this.seq}`,
+      id: `snap_${this.prefix}_${this.seq}`,
       compId: fingerprint.compId,
       compName: fingerprint.name,
       layerCount: Array.isArray(fingerprint.layers) ? fingerprint.layers.length : 0,

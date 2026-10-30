@@ -74,7 +74,21 @@ OPS.set_comp = function (args) {
   if (args.workAreaStart !== undefined) c.workAreaStart = args.workAreaStart;
   if (args.workAreaDuration !== undefined) c.workAreaDuration = args.workAreaDuration;
   if (args.bgColor) c.bgColor = [args.bgColor[0], args.bgColor[1], args.bgColor[2]];
-  return __compSummary(c);
+  // The comp switches layer motion blur and frame blending need (issue #181),
+  // read back: a switch that did not land is an error, not a summary.
+  var sw = [["motionBlur", args.motionBlur], ["frameBlending", args.frameBlending]];
+  for (var i = 0; i < sw.length; i++) {
+    if (sw[i][1] === undefined) continue;
+    c[sw[i][0]] = sw[i][1];
+    if (c[sw[i][0]] !== sw[i][1]) {
+      throw new Error("set_comp: asked for " + sw[i][0] + " " + sw[i][1] + " but After Effects reads " + c[sw[i][0]] +
+        " afterwards. The fields before it in this call were written.");
+    }
+  }
+  var out = __compSummary(c);
+  if (args.motionBlur !== undefined) out.motionBlur = c.motionBlur;
+  if (args.frameBlending !== undefined) out.frameBlending = c.frameBlending;
+  return out;
 };
 
 // A solid layer's source is a FootageItem in the project's Solids folder, and
@@ -84,17 +98,50 @@ OPS.set_comp = function (args) {
 // comp uses — and after it, `usedIn` decides: an item some other comp still
 // places is kept and reported with the comps using it. The helpers live in
 // footage.jsx beside purge_unused_footage, the project-wide sweep.
+//
+// Removing a comp also removes every precomp layer that nests it, in every
+// other comp, and After Effects says nothing (issue #160). So the nesting is
+// read first, from AE's own `usedIn`: by default a comp something nests is
+// refused with those comps named, and `force:true` deletes it anyway and
+// reports, per comp, the layers that went with it.
 OPS.delete_comp = function (args) {
   var c = getCompById(args.compId);
   var compId = c.id;
   var compName = c.name;
   var purge = (args.purgeUnusedSolids === true);
+  var force = (args.force === true);
+
+  var nestedIn = __delCompNestingLayers(c);
+  if (nestedIn.unreadable && !force) {
+    throw new Error("delete_comp refused: could not read which comps nest comp \"" + compName + "\" (id " + compId +
+      "): " + nestedIn.unreadable + ". Nothing was deleted. Deleting a comp removes every precomp layer that uses it, " +
+      "so it is not deleted blind; pass force:true to delete it anyway.");
+  }
+  if (nestedIn.length > 0 && !force) {
+    var cps = 0;
+    for (var k = 0; k < nestedIn.length; k++) if (nestedIn[k].checkpoint) cps++;
+    var advice = "Re-point or delete those layers first, or pass force:true to delete the comp and those layers together.";
+    if (cps > 0) {
+      advice = cps + " of them " + (cps === 1 ? "is a checkpoint copy" : "are checkpoint copies") +
+        " (marked [checkpoint]): revert_comp or delete_checkpoints to discard the checkpoint, rather than editing it. " +
+        (cps < nestedIn.length ? "For the others, re-point or delete those layers first. " : "") +
+        "Or pass force:true to delete the comp and those layers together.";
+    }
+    throw new Error("delete_comp refused: comp \"" + compName + "\" (id " + compId + ") is nested in " +
+      nestedIn.length + " other comp(s): " + __delCompNestingText(nestedIn) +
+      ". Deleting it would remove those precomp layers too. Nothing was deleted. " + advice);
+  }
+  var rqCount = __delCompRenderQueueCount(compId);
 
   var solids = __solidItemsOf(c);
 
   c.remove();
 
   var out = { ok: true, compId: compId, name: compName };
+  if (nestedIn.length > 0) out.removedFromComps = nestedIn;
+  if (nestedIn.unreadable) out.nestingUnknown = "Which comps nested it could not be read (" + nestedIn.unreadable +
+    "); any precomp layers using it were removed unreported.";
+  if (rqCount > 0) out.renderQueueItemsRemoved = rqCount;
   var kept = [];
   var toRemove = [];
   var gone = [];
@@ -105,7 +152,7 @@ OPS.delete_comp = function (args) {
     var item = __findItem(solids[i].id);
     if (!item) { gone.push(solids[i]); continue; }
     var uses = __usedInList(item);
-    if (uses.length > 0) {
+    if (uses.length > 0 || uses.unreadable) {
       kept.push({ id: item.id, name: item.name, usedIn: uses });
       continue;
     }
@@ -140,6 +187,59 @@ OPS.delete_comp = function (args) {
   }
   return out;
 };
+
+/**
+ * The comps that nest `c`, each with the precomp layers pointing at it, as
+ * {id, name, layers:[{id, name}]}. Read before the removal: afterwards those
+ * layers no longer exist to be named.
+ */
+function __delCompNestingLayers(c) {
+  var users = __usedInList(c);
+  var out = [];
+  if (users.unreadable) out.unreadable = users.unreadable;
+  for (var i = 0; i < users.length; i++) {
+    var host = __findItem(users[i].id);
+    var layers = [];
+    if (host) {
+      for (var j = 1; j <= host.numLayers; j++) {
+        var l = host.layer(j);
+        var src = null;
+        try { src = l.source; } catch (e) { src = null; }
+        if (src && src.id === c.id) layers.push({ id: l.id, name: l.name });
+      }
+    }
+    var entry = { id: users[i].id, name: users[i].name, layers: layers };
+    try { if (host && typeof __cpIsCheckpoint === "function" && __cpIsCheckpoint(host)) entry.checkpoint = true; } catch (eCp) {}
+    out.push(entry);
+  }
+  return out;
+}
+
+function __delCompNestingText(nestedIn) {
+  var parts = [];
+  for (var i = 0; i < nestedIn.length && i < 20; i++) {
+    var n = nestedIn[i];
+    parts.push("\"" + n.name + "\" (id " + n.id + ", " + n.layers.length + " layer(s)" + (n.checkpoint ? ", checkpoint" : "") + ")");
+  }
+  if (nestedIn.length > 20) parts.push("and " + (nestedIn.length - 20) + " more");
+  return parts.join(", ");
+}
+
+/** Render-queue items that render this comp; AE removes them with it. 0 when the queue cannot be read. */
+function __delCompRenderQueueCount(compId) {
+  var n = 0;
+  try {
+    var rq = app.project.renderQueue;
+    if (!rq) return 0;
+    for (var i = 1; i <= rq.numItems; i++) {
+      var it = rq.item(i);
+      var comp = null;
+      try { comp = it.comp; } catch (e) { comp = null; }
+      if (comp && comp.id === compId) n++;
+    }
+  } catch (e2) { return n; }
+  return n;
+}
 
 // ---------------------------------------------------------------------------
 // duplicate_comp

@@ -92,36 +92,48 @@ export async function installPanel(opts: { enableDebugMode?: boolean; force?: bo
     };
   }
 
+  // Nothing to replace (issue #163): the folder on disk already holds exactly
+  // what this server would write. Re-copying it changes nothing, and saying
+  // "restart After Effects" for it sends the user to restart for no reason. A
+  // signed install never matches (its META-INF is extra), so the #91 warning
+  // path below is unaffected; `force` always replaces.
+  const unchanged = !!existing && !existing.isSymbolicLink() && !opts.force && installMatches(source, ws, target);
+
   // Decided before anything is removed: the evidence is the folder itself.
-  const wasSigned = existing ? signedInstallPresent(target) : false;
-  if (existing) {
-    fs.rmSync(target, { recursive: true, force: true });
-    actions.push(wasSigned ? "Removed the previously installed (self-signed) panel." : "Removed the previously installed panel.");
-  }
+  const wasSigned = existing && !unchanged ? signedInstallPresent(target) : false;
+  if (unchanged) {
+    actions.push(`The panel at ${target} is already identical to the one this server ships; left it in place.`);
+  } else {
+    if (existing) {
+      fs.rmSync(target, { recursive: true, force: true });
+      actions.push(wasSigned ? "Removed the previously installed (self-signed) panel." : "Removed the previously installed panel.");
+    }
 
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  copyRecursive(source, target);
-  actions.push(`Installed the panel to ${target}.`);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    copyRecursive(source, target);
+    actions.push(`Installed the panel to ${target}.`);
 
-  // The panel's CEF process resolves modules relative to itself, so `ws` has to
-  // sit inside the installed extension rather than in this package.
-  const dest = path.join(target, "node_modules", "ws");
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.rmSync(dest, { recursive: true, force: true });
-  copyRecursive(ws, dest);
-  // Confirmed rather than assumed. A panel whose `require('ws')` fails hangs at
-  // "starting…" and never binds its port, which surfaces only as "no response
-  // on port 7777" — so reporting this step as done without checking it turns a
-  // precise fault into an unrecognisable one.
-  if (!isWsModuleDir(dest)) {
-    throw new Error(
-      `Copying \`ws\` from ${ws} to ${dest} did not produce a usable copy. The panel cannot start without it. ` +
-        "The panel files are installed but the extension is not yet working — please report this."
-    );
+    // The panel's CEF process resolves modules relative to itself, so `ws` has to
+    // sit inside the installed extension rather than in this package.
+    const dest = path.join(target, "node_modules", "ws");
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+    copyRecursive(ws, dest);
+    // Confirmed rather than assumed. A panel whose `require('ws')` fails hangs at
+    // "starting…" and never binds its port, which surfaces only as "no response
+    // on port 7777" — so reporting this step as done without checking it turns a
+    // precise fault into an unrecognisable one.
+    if (!isWsModuleDir(dest)) {
+      throw new Error(
+        `Copying \`ws\` from ${ws} to ${dest} did not produce a usable copy. The panel cannot start without it. ` +
+          "The panel files are installed but the extension is not yet working — please report this."
+      );
+    }
+    actions.push("Copied the `ws` module the panel needs at runtime.");
   }
-  actions.push("Copied the `ws` module the panel needs at runtime.");
 
   let rebootRecommended = false;
+  let debugModeEnabledNow = false;
   if (opts.enableDebugMode !== false) {
     const existing = await isDebugModeOn();
     if (existing.on) {
@@ -132,6 +144,7 @@ export async function installPanel(opts: { enableDebugMode?: boolean; force?: bo
         notes.push(`Failed to set ${debugModeLocation()}. Without it After Effects will refuse to load this panel.`);
       } else {
         actions.push(`Enabled PlayerDebugMode for CSXS ${versions.join(", ")} so AE will load the unsigned panel.`);
+        debugModeEnabledNow = true;
         // Only macOS has the "preference cached until reboot" behaviour; on
         // Windows AE re-reads the registry on launch.
         rebootRecommended = process.platform === "darwin";
@@ -153,6 +166,18 @@ export async function installPanel(opts: { enableDebugMode?: boolean; force?: bo
   }
 
   if (wasSigned) notes.push(SIGNED_INSTALL_OVERWRITTEN_NOTE);
+  // A restart loads what changed on disk or in Adobe's preferences. When
+  // neither did, this call gives no reason for one — but the disk is not what
+  // After Effects is running, so an EARLIER install may still be waiting for
+  // its restart; check_setup compares against the running panel and says so.
+  const restartAfterEffects = !unchanged || debugModeEnabledNow;
+  if (!restartAfterEffects) {
+    notes.push(
+      "Nothing this call does needs After Effects restarted: the installed panel was already this version. " +
+        "If check_setup still reports the running panel as out of date, an earlier install has not been loaded " +
+        "yet, and quitting and reopening After Effects is what loads it."
+    );
+  }
   if (rebootRecommended) {
     notes.push("PlayerDebugMode was just turned on. Quit and reopen After Effects; if the panel still does not connect, restart the Mac once — on some macOS builds the preference only applies after a reboot.");
   }
@@ -161,9 +186,56 @@ export async function installPanel(opts: { enableDebugMode?: boolean; force?: bo
     ok: true,
     panelPath: target,
     actions,
-    restartAfterEffects: true,
+    restartAfterEffects,
     rebootRecommended,
     notes,
     signedInstallOverwritten: wasSigned || undefined,
   };
+}
+
+/**
+ * Whether `target` holds exactly what an install would write there: every file
+ * of `source`, with `node_modules/ws` taken from `ws`, byte for byte, and
+ * nothing else. Any difference — an extra file, a missing one, a symlink where
+ * a file should be — means "replace", which is always the safe answer.
+ */
+export function installMatches(source: string, ws: string, target: string): boolean {
+  const WS = path.join("node_modules", "ws");
+  const expected = new Map<string, string>();
+  for (const rel of listFiles(source)) {
+    if (rel === WS || rel.startsWith(WS + path.sep)) continue;
+    expected.set(rel, path.join(source, rel));
+  }
+  for (const rel of listFiles(ws)) expected.set(path.join(WS, rel), path.join(ws, rel));
+  let actual: string[];
+  try {
+    actual = listFiles(target);
+  } catch {
+    return false;
+  }
+  if (actual.length !== expected.size) return false;
+  for (const rel of actual) {
+    const from = expected.get(rel);
+    if (!from) return false;
+    try {
+      const a = fs.lstatSync(path.join(target, rel));
+      const b = fs.lstatSync(from);
+      if (!a.isFile() || !b.isFile() || a.size !== b.size) return false;
+      if (!fs.readFileSync(path.join(target, rel)).equals(fs.readFileSync(from))) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Relative paths of every non-directory entry under `root`, symlinks included (and never followed). */
+function listFiles(root: string, rel = ""): string[] {
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(path.join(root, rel), { withFileTypes: true })) {
+    const r = path.join(rel, entry.name);
+    if (entry.isDirectory()) out.push(...listFiles(root, r));
+    else out.push(r);
+  }
+  return out;
 }

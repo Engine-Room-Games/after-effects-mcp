@@ -16,13 +16,6 @@ function getCompById(id) {
   return item;
 }
 
-function getItemById(id) {
-  if (id === null || id === undefined) throw new Error("itemId required");
-  var item = __findItem(id);
-  if (!item) throw new Error("No item with id " + id);
-  return item;
-}
-
 function getLayerById(comp, layerId) {
   if (!(comp instanceof CompItem)) throw new Error("Expected CompItem");
   if (layerId === null || layerId === undefined) throw new Error("layerId required");
@@ -45,9 +38,4 @@ function walkProperty(root, path) {
     if (!cur) throw new Error("Property path segment returned null at [" + i + "]=" + String(seg));
   }
   return cur;
-}
-
-function colorOrDefault(c, fallback) {
-  if (!c) return fallback;
-  return [Number(c[0]), Number(c[1]), Number(c[2])];
 }

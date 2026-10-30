@@ -367,6 +367,102 @@ await check("await_job on a job that has already finished answers at once with n
   assert.equal(allProgress().length, before);
 });
 
+// ---------------------------------------------------------------------------
+// Issue #222: the terminal state says where the job ended. The panel's last
+// progress event is the chunk boundary BEFORE the final chunk (575 of 600);
+// the chunk that finishes reports `done` and no progress, so a finished batch
+// used to read back as 575/600, "running".
+// ---------------------------------------------------------------------------
+await check("a completed batch reads back at full progress with a completed message (#222)", async () => {
+  behaviour.set("run_batch", batchEnvelope("j_t1"));
+  await client.callTool({ name: "run_batch", arguments: batchArgs });
+  for (let p = 25; p <= 575; p += 25) emit({ type: "progress", jobId: "j_t1", progress: p, total: 600, message: "running" });
+  const results = Array.from({ length: 598 }, () => ({}));
+  const errors = [{ index: 3 }, { index: 9 }];
+  emit({ type: "complete", jobId: "j_t1", result: { results, errors, total: 600, cancelled: false, undoSteps: 24 } });
+  const res = await client.callTool({ name: "await_job", arguments: { jobId: "j_t1", timeoutMs: 5000 } });
+  const st = payload(res);
+  assert.equal(st.status, "completed");
+  assert.equal(st.progress, 600, "a completed job must report full progress, not the last chunk boundary");
+  assert.equal(st.total, 600);
+  assert.equal(st.message, "completed");
+  const polled = payload(await client.callTool({ name: "get_job", arguments: { jobId: "j_t1" } }));
+  assert.equal(polled.progress, 600);
+  assert.equal(polled.message, "completed");
+});
+
+await check("a failed batch reports how far it got, from the panel's error event (#222)", async () => {
+  behaviour.set("run_batch", batchEnvelope("j_t2"));
+  await client.callTool({ name: "run_batch", arguments: batchArgs });
+  for (let p = 25; p <= 300; p += 25) emit({ type: "progress", jobId: "j_t2", progress: p, total: 600, message: "running" });
+  emit({ type: "error", jobId: "j_t2", error: "op 312 failed", progress: 313 });
+  await sleep(30);
+  const st = payload(await client.callTool({ name: "get_job", arguments: { jobId: "j_t2" } }));
+  assert.equal(st.status, "failed");
+  assert.equal(st.progress, 313, "a failed job must report where it stopped");
+  assert.equal(st.message, "failed after 313 of 600 ops attempted");
+  assert.doesNotMatch(st.message, /running/);
+});
+
+await check("a failed batch with no stop point says its progress is only the last one reported (#222)", async () => {
+  behaviour.set("run_batch", batchEnvelope("j_t3"));
+  await client.callTool({ name: "run_batch", arguments: batchArgs });
+  emit({ type: "progress", jobId: "j_t3", progress: 50, total: 600, message: "running" });
+  emit({ type: "error", jobId: "j_t3", error: "panel went away" });
+  await sleep(30);
+  const st = payload(await client.callTool({ name: "get_job", arguments: { jobId: "j_t3" } }));
+  assert.equal(st.status, "failed");
+  assert.equal(st.progress, 50);
+  assert.match(st.message, /last point reported/);
+});
+
+await check("a chunk that failed outright reports a lower bound, never a stop point (#222)", async () => {
+  behaviour.set("run_batch", batchEnvelope("j_t4"));
+  await client.callTool({ name: "run_batch", arguments: batchArgs });
+  emit({ type: "progress", jobId: "j_t4", progress: 575, total: 600, message: "running" });
+  emit({ type: "error", jobId: "j_t4", error: "Bad JSON", progress: 575, unsureThrough: 600 });
+  await sleep(30);
+  const st = payload(await client.callTool({ name: "get_job", arguments: { jobId: "j_t4" } }));
+  assert.equal(st.status, "failed");
+  assert.equal(st.progress, 575);
+  assert.equal(
+    st.message,
+    "failed: at least 575 of 600 ops ran; the failing chunk (ops 576–600) may have partly run, so read back before re-running"
+  );
+});
+
+{
+  // The manager alone: a cancelled batch reports the ops it ran, a late
+  // cancel keeps its "too late" message, and a server-side cancel (a render)
+  // stops reading "running".
+  const jobs = new JobManager();
+  jobs.register("j_c", 600);
+  jobs.reportProgress("j_c", 100, 600, "running");
+  jobs.markCancelling("j_c");
+  jobs.complete("j_c", { results: Array.from({ length: 124 }, () => ({})), errors: [{}], cancelled: true });
+  assert.equal(jobs.get("j_c").status, "cancelled");
+  assert.equal(jobs.get("j_c").progress, 125, "a cancelled batch must report where it stopped");
+
+  jobs.register("j_late", 600);
+  jobs.reportProgress("j_late", 575, 600, "running");
+  jobs.markCancelling("j_late");
+  jobs.complete("j_late", { results: Array.from({ length: 600 }, () => ({})), errors: [], total: 600 });
+  assert.equal(jobs.get("j_late").progress, 600);
+  assert.match(jobs.get("j_late").message, /too late/);
+
+  jobs.register("j_r", 90);
+  jobs.reportProgress("j_r", 40, 90, "rendering");
+  jobs.cancel("j_r");
+  assert.equal(jobs.get("j_r").progress, 40);
+  assert.equal(jobs.get("j_r").message, "cancelled");
+
+  jobs.register("j_nototal");
+  jobs.complete("j_nototal", { results: [{}, {}, {}], errors: [] });
+  assert.equal(jobs.get("j_nototal").progress, 3);
+  assert.equal(jobs.get("j_nototal").total, 3);
+  passed++;
+}
+
 assert.deepEqual(clientErrors, [], "the client reported a notification it was not tracking");
 console.log(`job-progress: ${passed} checks passed`);
 // Settle before exiting: `process.exit()` straight after a `fetch` crashes

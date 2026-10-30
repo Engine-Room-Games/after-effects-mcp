@@ -1,0 +1,55 @@
+{
+  "recipe": 57,
+  "title": "add_to_render_queue queues a comp with the template asked for",
+  "needsSavedProject": true,
+  "manual": "Record whether outputs[0].path kept .mov, and that the item reads Queued in the Render Queue panel.",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 2
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "saveProject": "rq.aep"
+    },
+    {
+      "writeFile": "rq/.keep",
+      "content": ""
+    },
+    {
+      "call": "add_to_render_queue",
+      "args": {
+        "compId": "${comp.id}",
+        "outputPath": "${scratch}/rq/lt.mov",
+        "outputModuleTemplate": "High Quality with Alpha"
+      },
+      "expect": [
+        {
+          "path": "outputs[0].path",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "call": "list_render_queue",
+      "expect": [
+        {
+          "path": "$text",
+          "matches": "lt"
+        }
+      ]
+    }
+  ]
+}

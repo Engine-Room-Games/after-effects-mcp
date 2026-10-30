@@ -69,6 +69,8 @@ jobs:
               const missing=Object.keys(OpSchemas).filter(op=>!served.has(op));
               if(missing.length){console.error(`defined in OpSchemas but not served: ${missing.join(", ")}`);process.exit(1);}
               if(n!==defined){console.error(`tools/list served ${n} but OpSchemas defines ${defined}`);process.exit(1);}
+              const unannotated=t.result.tools.filter(x=>typeof x.annotations?.readOnlyHint!=="boolean"||typeof x.annotations?.destructiveHint!=="boolean").map(x=>x.name);
+              if(unannotated.length){console.error(`served without readOnlyHint/destructiveHint annotations: ${unannotated.join(", ")}`);process.exit(1);}
               if(n<76){console.error(`expected >=76 tools, got ${n} — a tool was removed from OpSchemas`);process.exit(1);}
               console.log(`${n} tools on ${process.platform}`);
               c.kill();process.exit(0);
@@ -189,6 +191,50 @@ jobs:
       - name: Release checks catch a rejected notarization and a dead artifact
         run: node tests/unit/release-checks.mjs
 
+      # Issues #147 and #157: an unknown key is refused at every depth rather
+      # than stripped behind an {ok:true}, and a run_batch step is validated —
+      # defaults applied — exactly as the tool it names, or the batch is refused.
+      - name: Tool arguments are closed, in a batch as well as direct
+        run: node tests/unit/strict-args.mjs
+
+      # Issue #172: the live After Effects driver (tests/live/) minus After
+      # Effects — its stdio framing, its safety guards, and every recipe
+      # fixture checked against the real op schemas, so a fixture that would
+      # only fail on the next live pass fails here instead.
+      - name: Live driver guards and recipe fixtures hold without After Effects
+        run: node tests/unit/live-driver.mjs
+
+      # Issues #149 and #150: set_layer's trackMatte.layerId sets the matte, and
+      # an unknown blend, matte or mask mode name is refused, not ignored.
+      - name: Track mattes land and AE enumeration names are closed
+        run: node tests/unit/layer-enum-names.mjs
+
+      # keyframe:true without time used to write a static value, and a 2D layer
+      # dropped orientation/X/Y rotation, both behind {ok:true} (#151, #152).
+      - name: A keyframe needs a time, and 3D-only transforms are refused on 2D
+        run: node tests/unit/keyframe-transform.mjs
+
+      # set_transform, set_effect_param and set_shape_property share one
+      # set-or-keyframe helper (#184); it keeps every rule the three copies had.
+      - name: One set-or-keyframe path for transforms, effect params and shape properties
+        run: node tests/unit/set-or-key.mjs
+
+      # Issue #207: set_mask applies closed and the tangents without new
+      # vertices; #163: set_shape_path finds its Path by match name.
+      - name: Mask and shape paths apply every field and resolve by match name
+        run: node tests/unit/mask-path.mjs
+
+      # Issue #163: the server exits with its stdin, a dropped connection is not
+      # re-sent as a refusal, a finished render does not wait on the write
+      # queue, and the panel escapes U+2028/U+2029 and queues /reload-jsx.
+      - name: Hardening batch (#163) holds
+        run: node tests/unit/hardening-163.mjs
+
+      # #181: layer/comp switches, separate dimensions, keyframe flags and
+      # per-dimension ease, box text and the Repeater's Transform group.
+      - name: Capability gaps reach After Effects and are read back
+        run: node tests/unit/capability-gaps.mjs
+
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
       # makes a screenshot worth taking.
@@ -247,11 +293,25 @@ jobs:
         run: |
           node tests/unit/jsx-ternary.mjs
           node tests/unit/jsx-undo-group.mjs
+          node tests/unit/run-jsx-undo-guard.mjs
           node tests/unit/run-jsx-result.mjs
           node tests/unit/shape-read.mjs
           node tests/unit/parent-transform.mjs
           node tests/unit/svg-import.mjs
           node tests/unit/bundle-determinism.mjs
+
+      # Issue #185: After Effects runs every extension and script in one shared
+      # ExtendScript engine. The built bundle must publish one global, leave
+      # other scripts' globals alone, and keep working when they replace ours.
+      - name: The bundle survives a hostile neighbour in the shared engine
+        run: node tests/unit/bundle-namespace.mjs
+
+      # Issue #164: Node runs the .jsx happily on syntax ExtendScript rejects,
+      # and AE then refuses the whole bundle. build:jsx refuses to write such a
+      # bundle; this holds the checker itself (ES5 parse, ES3 reserved words,
+      # missing ES5 built-ins).
+      - name: bundle.jsx contains nothing ExtendScript cannot run
+        run: node tests/unit/extendscript-syntax.mjs
 
       # Issue #129: a setValue that throws for a write that landed must not
       # make an op report failure, or roll back, for work that happened.
@@ -277,6 +337,7 @@ jobs:
       - name: The ops added in 0.4.0 behave
         run: |
           node tests/unit/comp-snapshot.mjs
+          node tests/unit/comp-diff-server.mjs
           node tests/unit/duplicate-comp.mjs
           node tests/unit/comp-checkpoint.mjs
           node tests/unit/audio-cues.mjs
@@ -286,12 +347,38 @@ jobs:
           node tests/unit/batch-undo.mjs
           node tests/unit/mogrt-preconditions.mjs
 
+      # #220 stage 2: the export/render/import file checks run on the server.
+      # Each port is held to the jsx it came from on real folders (the jsx
+      # copies still run after it), and the server is driven against a stub
+      # bridge to pin the round trips and the comp-first refusal order.
+      - name: File checks on the server match the panel's
+        run: |
+          node tests/unit/destination-checks.mjs
+          node tests/unit/file-ops-server.mjs
+
+      # Issue #220, stage 3: the panel's capabilities on /health, and the house
+      # style's file I/O on the server for a panel reporting project-path —
+      # legacy panels keep the old path, and style.jsx parity on real folders.
+      - name: Panel capabilities and the house style on the server
+        run: node tests/unit/panel-capabilities.mjs
+
+      # add_essential_property (#177): the panel is read back, never the add's
+      # boolean, and a property AE cannot take is refused before anything moves.
+      - name: Essential Graphics properties are added honestly
+        run: node tests/unit/essential-property.mjs
+
       # 0.5.0: delete_comp's purgeUnusedSolids and purge_unused_footage (#83).
       # A solid's footage item outlives its layer, so both ops decide by
       # `usedIn`, on footage only, and a dry run must not be an undo step.
       - name: The ops added in 0.5.0 behave
         run: |
           node tests/unit/purge-footage.mjs
+
+      # retime_keyframes and copy_animation (#180): every key attribute
+      # survives the remove-and-rewrite, and a collision is refused, not merged.
+      - name: Retiming and copying animation keeps the eases
+        run: |
+          node tests/unit/retime-animation.mjs
 
       # The guidance carriers, from the other side: that the guide sources
       # cross-reference files that exist, and that a house style is digested to
@@ -308,8 +395,10 @@ jobs:
       - name: Reads are bounded and writes are verified
         run: |
           node tests/unit/find-layers.mjs
+          node tests/unit/get-selection.mjs
           node tests/unit/effect-params.mjs
           node tests/unit/text-justification.mjs
+          node tests/unit/text-animator.mjs
           node tests/unit/expression-error.mjs
 
       # Issue #121: a display-name lookup that misses on a localised After
@@ -346,11 +435,23 @@ jobs:
           node tests/unit/write-queue.mjs
           node tests/unit/write-queue-server.mjs
 
+      # The front desk (#223): real server processes sharing one fake panel —
+      # cross-session order, truthful waits, a batch's lock across sessions,
+      # a leader killed mid-request and mid-batch, a stale leader file.
+      - name: Sessions on one After Effects share one front desk
+        run: node tests/unit/front-desk.mjs
+
       # Read-only mode and the run_jsx switch (#135): no write is listed or
       # callable in read-only mode, every server op has a deliberate decision,
       # and a run_jsx step cannot ride in through run_batch.
       - name: The tool switches offer and refuse what they say
         run: node tests/unit/tool-policy.mjs
+
+      # Tool annotations (#165) follow OpMutation and the read-only table, so a
+      # client never auto-approves a write as a read; and every JSON result is
+      # compact (#166), because the model re-reads it on every later turn.
+      - name: Tool annotations match OpMutation and results are compact
+        run: node tests/unit/tool-annotations.mjs
 
       # Where a long batch's progress goes. A notification sent after its
       # request's response is on the wire and seen by no client — that is how
@@ -374,6 +475,23 @@ jobs:
       # these" rule can be enforced by the server and invisible to the model.
       - name: Tool schemas are valid 2020-12 and hide no constraints
         run: node tests/unit/schema-constraints.mjs
+
+      # Issue #170: the tool list is resident in every session and nothing
+      # errors when it grows. A per-tool prose budget and a ceiling on the
+      # whole list; also that ae_guide's topic description names every topic.
+      - name: Tool list stays inside its token budget
+        run: node tests/unit/tool-budget.mjs
+
+      # A field a schema advertises and no handler reads is a call that answers
+      # {ok:true} having done nothing (issue #155) — how create_shape_layer's
+      # fill/stroke and set_layer's trackMatte.layerId shipped. The second file
+      # runs set_layer, set_interpolation, get_keyframes, the mask and marker
+      # ops and a get_layer_full golden through the real dispatch() against a
+      # minimal fake After Effects (issue #167); until it, nothing executed them.
+      - name: Every advertised field is read, and the core layer ops behave
+        run: |
+          node tests/unit/schema-handler-contract.mjs
+          node tests/unit/fake-ae-ops.mjs
 
       - name: check_setup resolves platform paths without throwing
         shell: bash

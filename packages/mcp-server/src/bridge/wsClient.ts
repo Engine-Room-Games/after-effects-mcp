@@ -1,9 +1,15 @@
 import WebSocket from "ws";
-import type { WsEvent } from "@engineroom/shared";
 import { logger } from "../util/logger.js";
 import { authHeaders } from "./discovery.js";
 import type { JobManager } from "../jobs/manager.js";
 import type { HttpClient } from "./httpClient.js";
+
+/** What the panel broadcasts on /events (`broadcast` in packages/ae-panel/client/main.js). */
+type WsEvent =
+  | { type: "progress"; jobId: string; progress: number; total?: number; message?: string }
+  | { type: "complete"; jobId: string; result: unknown }
+  | { type: "error"; jobId: string; error: string; stack?: string; progress?: number; unsureThrough?: number }
+  | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string };
 
 /**
  * The /events socket a long `run_batch` reports progress and completion on.
@@ -41,7 +47,9 @@ export class WsClient {
   stop(): void {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    try { this.ws?.close(); } catch {}
+    // terminate, not close: a graceful close waits up to 30s on a busy panel,
+    // and shutdown (#163) must not sit on it until the fallback exit fires.
+    try { this.ws?.terminate(); } catch {}
   }
 
   /** Drop the current socket and connect to wherever the bridge is now. Resolves on open, or on failure. */
@@ -108,7 +116,7 @@ export class WsClient {
         this.jobs.complete(evt.jobId, evt.result);
         break;
       case "error":
-        this.jobs.fail(evt.jobId, evt.error);
+        this.jobs.fail(evt.jobId, evt.error, evt.progress, evt.unsureThrough);
         break;
       case "log":
         logger.debug("[ae]", evt.level, evt.message);

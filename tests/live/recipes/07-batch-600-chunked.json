@@ -1,0 +1,148 @@
+{
+  "recipe": 7,
+  "title": "run_batch of 600 is a chunked job whose progress arrives before await_job answers; singleUndo and its limit",
+  "manual": "Edit menu reads 'Undo AE MCP Batch (24)' and one Cmd-Z removes 25 layers; after the singleUndo batch one Cmd-Z removes all 600.",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 10
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "run_batch",
+      "args": {
+        "ops": {
+          "$repeat": 600,
+          "item": {
+            "op": "create_solid_layer",
+            "args": {
+              "compId": "${comp.id}",
+              "name": "s${n}",
+              "color": [
+                1,
+                0,
+                0
+              ]
+            }
+          }
+        }
+      },
+      "save": "job",
+      "expect": [
+        {
+          "path": "jobId",
+          "type": "string"
+        },
+        {
+          "path": "chunkSize",
+          "equals": 25
+        },
+        {
+          "path": "undoStepsEstimate",
+          "equals": 24
+        },
+        {
+          "path": "note",
+          "matches": "await_job"
+        }
+      ]
+    },
+    {
+      "call": "await_job",
+      "args": {
+        "jobId": "${job.jobId}",
+        "timeoutMs": 600000
+      },
+      "timeoutMs": 620000,
+      "progress": true,
+      "expect": [
+        {
+          "path": "$text",
+          "matches": "\"undoSteps\": 24"
+        },
+        {
+          "path": "$progress",
+          "gte": 1
+        }
+      ]
+    },
+    {
+      "call": "run_batch",
+      "args": {
+        "ops": {
+          "$repeat": 600,
+          "item": {
+            "op": "create_solid_layer",
+            "args": {
+              "compId": "${comp.id}",
+              "name": "s${n}",
+              "color": [
+                1,
+                0,
+                0
+              ]
+            }
+          }
+        },
+        "singleUndo": true
+      },
+      "timeoutMs": 600000,
+      "expect": [
+        {
+          "path": "jobId",
+          "exists": false
+        },
+        {
+          "path": "undoSteps",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "call": "run_batch",
+      "args": {
+        "ops": {
+          "$repeat": 2001,
+          "item": {
+            "op": "create_solid_layer",
+            "args": {
+              "compId": "${comp.id}",
+              "name": "s${n}",
+              "color": [
+                1,
+                0,
+                0
+              ]
+            }
+          }
+        },
+        "singleUndo": true
+      },
+      "expectError": "2000"
+    },
+    {
+      "call": "list_layers",
+      "args": {
+        "compId": "${comp.id}",
+        "include": []
+      },
+      "expect": [
+        {
+          "length": 1200
+        }
+      ]
+    }
+  ]
+}

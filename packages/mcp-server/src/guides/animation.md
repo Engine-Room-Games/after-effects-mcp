@@ -10,20 +10,46 @@ description: Keyframes, easing, rigging and expressions through the AE MCP tools
 
 `add_keyframe` sets a value at a time. Interpolation is separate:
 
-- `set_interpolation` — linear / bezier / hold, per keyframe, in and out.
+- `set_interpolation` — linear / bezier / hold, per keyframe, in and out, and
+  the key's flags: `temporalContinuous`, `temporalAutoBezier`, and on a
+  spatial property `spatialContinuous`, `spatialAutoBezier` and `roving`.
 - `set_temporal_ease` — influence and speed, the "easy ease" controls.
 - `set_spatial_tangents` — the shape of a motion path through a position keyframe.
-- `get_keyframes` reads them all back, with the ease on each key — the exact
-  answer to "does it move right", where a screenshot is an impression.
+- `get_keyframes` reads them all back, with the ease and flags on each key —
+  the exact answer to "does it move right", where a screenshot is an
+  impression.
+
+`set_transform`, `set_effect_param` and `set_shape_property` also key a value
+with `keyframe: true` — and that **requires `time`**; without it the call is
+refused rather than quietly setting a static value. Orientation and X/Y
+Rotation exist only on a 3D layer: `set_transform` refuses them on a 2D one,
+so `set_layer({threeDLayer: true})` first.
 
 **Pass one `{influence, speed}` pair per side and nothing else.**
 `set_temporal_ease` and `add_keyframe` size the ease array for the property
-themselves and report the count that worked as `easeDimensions`. That number is
+themselves and report the count that worked as `easeDimensions`; pass only one
+side and the other keeps the ease the key already has. That count is
 not derivable from the value's dimension — After Effects wants a different count
 per property, and the measured table is in the `extendscript-gotchas` topic for
 the day you script an ease by hand. Through the tools you never need it; from a
 script, use the `ease()` helper, which is the same sizing code and not a second
 copy of it.
+
+**To ease dimensions apart, pass a list.** `set_temporal_ease` also takes an
+array of pairs, one per ease dimension — how many a property has is in the
+`extendscript-gotchas` topic — and refuses a length the property does not
+take. Position eases along its path with one pair, and differing pairs on it
+are refused; to ease X and Y apart, separate it first:
+`set_transform({…, separateDimensions: true, properties: {xPosition,
+yPosition}})`, then key `["Transform", "X Position"]` and `["Transform",
+"Y Position"]` on their own. While dimensions are separated `position` is
+refused, and `xPosition`/`yPosition` are refused while they are joined.
+
+**Roving keys smooth a multi-point move.** `set_interpolation({keyIndex,
+roving: true})` on every key between the first and the last lets After
+Effects re-time them so speed is even along the path; the first and last key
+cannot rove, and the tool refuses them before anything changes. Read the keys
+back afterwards — their times are After Effects' now, not yours.
 
 **A held pose is a hold keyframe, not two equal keys.** Between two
 equal-valued bezier keys the value still moves — the tangents are shaped by the
@@ -37,6 +63,15 @@ speed to zero at each one, and the move visibly halts there. One move is one
 ease — `set_temporal_ease` on the first and last key — with the keys between
 them left linear (`set_interpolation({in: "linear", out: "linear"})`), so
 speed passes through them instead of stopping.
+
+**Move, stretch, reverse or stagger keys with `retime_keyframes`; reuse them
+on another layer with `copy_animation`.** Both carry every key whole — value,
+interpolation, eases, spatial tangents, continuous / auto-bezier / roving — so
+the move keeps its feel. Removing keys and re-adding them by hand, or a `run_jsx`
+loop over `setValueAtTime`, keeps only the values and drops every ease. Keys
+that would land on the same frame are refused, never merged, and a target that
+is already animated is refused unless you pass `replaceExisting`. Neither moves
+an expression's idea of `time` — see "Expressions run on comp time" below.
 
 Expressions are usually a better answer than dense keyframes for anything
 procedural — wiggle, loops, counters, follow-through, time remapping. They stay

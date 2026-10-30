@@ -32,8 +32,12 @@ const behaviour = new Map();
 /** Every op the stub saw, with the moment it entered and left. */
 const seen = [];
 
-const bridge = http.createServer((req, res) => {
+/** How long the stub's /health takes to answer — a busy After Effects blocks it too. */
+let healthDelayMs = 0;
+
+const bridge = http.createServer(async (req, res) => {
   if (req.url === "/health") {
+    if (healthDelayMs) await new Promise((r) => setTimeout(r, healthDelayMs));
     res.setHeader("content-type", "application/json");
     // Report the hash this server ships so the panel-version gate is a no-op
     // rather than a variable of whatever is installed on the test machine.
@@ -153,6 +157,61 @@ await check("an uncontended write is byte-identical to what it always was", asyn
   const res = await call("create_comp", { name: "t", width: 1920, height: 1080, frameRate: 30, duration: 5 });
   assert.equal(res.content.length, 1);
   assert.deepEqual(payload(res), { id: 42, name: "t" });
+});
+
+await check("a timeout says what the whole call cost, not only the op's limit", async () => {
+  // Issue #175, measured on 26.5: AE_MCP_OP_TIMEOUT_MS=3000 and the agent was
+  // told "did not answer within 3s" after 5.0 s. A fresh server's first call
+  // asks /health for the panel-version gate first — a 2 s probe that a busy
+  // After Effects blocks too — and only then starts the op's own clock.
+  const fresh = createServer();
+  const c2 = new Client({ name: "timeout-test", version: "0" }, { capabilities: {} });
+  const [cs2, ss2] = InMemoryTransport.createLinkedPair();
+  await Promise.all([fresh.connect(ss2), c2.connect(cs2)]);
+  healthDelayMs = 2300;
+  process.env.AE_MCP_OP_TIMEOUT_MS = "400";
+  behaviour.set("set_layer", { ms: 1500, result: { ok: true } });
+  try {
+    const t0 = Date.now();
+    const res = await c2.callTool({ name: "set_layer", arguments: { compId: 1, layerId: 1, name: "n" } });
+    const took = Date.now() - t0;
+    assert.equal(res.isError, true);
+    const text = res.content[0].text;
+    const m = /gave up (\d+\.\d)s after it was made/.exec(text);
+    assert.ok(m, text.split("\n")[0]);
+    const reported = Number(m[1]) * 1000;
+    assert.ok(Math.abs(reported - took) <= 200, `reported ${reported} ms, took ${took} ms`);
+    assert.match(text, /limit is 0\.4s/);
+    assert.match(text, /earlier steps of this call\. Of that, \d\.\ds checking the panel's version/);
+    assert.doesNotMatch(text, /did not answer within/, "the bare limit is not what the call cost");
+    assert.match(text, /may still run and land after this message/);
+  } finally {
+    healthDelayMs = 0;
+    delete process.env.AE_MCP_OP_TIMEOUT_MS;
+    behaviour.delete("set_layer");
+    await c2.close();
+  }
+});
+
+await check("a render_queue step that times out is reported as render_queue, with no render started", async () => {
+  // The prepare and the save cross the bridge before any render starts; a
+  // timeout in either must not say "may still land, do not re-send" under an
+  // internal op name.
+  process.env.AE_MCP_OP_TIMEOUT_MS = "300";
+  behaviour.set("_render_prepare", { ms: 900, result: { items: [] } });
+  try {
+    const res = await client.callTool({ name: "render_queue", arguments: { all: true } });
+    assert.equal(res.isError, true);
+    const text = res.content[0].text;
+    assert.match(text, /`render_queue`/);
+    assert.doesNotMatch(text, /_render_prepare|may still run and land|Do not re-send/);
+    assert.match(text, /Nothing was saved and no render was started/);
+    assert.match(text, /call render_queue again/);
+  } finally {
+    delete process.env.AE_MCP_OP_TIMEOUT_MS;
+    behaviour.delete("_render_prepare");
+    await new Promise((r) => setTimeout(r, 700)); // let the stub answer the abandoned request
+  }
 });
 
 await check("a long batch holds the queue until the job finishes", async () => {

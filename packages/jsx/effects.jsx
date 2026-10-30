@@ -184,9 +184,8 @@ OPS.set_effect_param = function (args) {
     try { lang = app.isoLanguage; } catch (e) { lang = null; }
     throw new Error(__effectParamMissMessage(eff, args, lang));
   }
-  if (args.keyframe && args.time !== undefined) p.setValueAtTime(args.time, args.value);
-  else if (args.time !== undefined && p.numKeys > 0) p.setValueAtTime(args.time, args.value);
-  else __setValue(p, args.value);
+  __requireKeyTime(!!args.keyframe, args.time, "set_effect_param");
+  __setOrKeyAtTime(p, args.value, args.time, !!args.keyframe, "set_effect_param");
   return { ok: true };
 };
 

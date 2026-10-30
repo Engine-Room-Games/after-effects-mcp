@@ -1,0 +1,87 @@
+{
+  "recipe": 36,
+  "title": "purge_unused_footage: dryRun lists without removing, then removes the same",
+  "manual": "The dry run must add no step to Edit > History.",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "orphan",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ],
+      "save": "layer"
+    },
+    {
+      "call": "delete_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}"
+      }
+    },
+    {
+      "call": "purge_unused_footage",
+      "args": {
+        "dryRun": true
+      },
+      "expect": [
+        {
+          "path": "wouldRemove",
+          "length": 1
+        },
+        {
+          "path": "wouldRemove[0].kind",
+          "equals": "solid"
+        }
+      ]
+    },
+    {
+      "call": "purge_unused_footage",
+      "expect": [
+        {
+          "path": "removed",
+          "length": 1
+        }
+      ]
+    },
+    {
+      "call": "purge_unused_footage",
+      "args": {
+        "dryRun": true
+      },
+      "expect": [
+        {
+          "path": "wouldRemove",
+          "length": 0
+        }
+      ]
+    }
+  ]
+}

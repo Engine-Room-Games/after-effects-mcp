@@ -1,7 +1,7 @@
 ---
 name: extendscript-gotchas
 reference: after-effects
-description: The run_jsx reference — when to script instead of calling a tool, how much one call can do before the timeout, scriptPath and libraries as the normal way to build, the helpers already in scope, and the ExtendScript facts that abort a script while naming something else (property lookups that return null, a `.value` read at the playhead rather than at a time, effects addressed by a name that is not unique, a track matte that switches its matte's video off, ease arrays sized per property, a TextDocument that stores the wrong justification, output-module settings that are read-only, the reserved words that stop a script before its first line). Read it before writing raw ExtendScript, not after it fails.
+description: The run_jsx reference — when to script instead of calling a tool, how much one call can do before the timeout, scriptPath and libraries as the normal way to build, the helpers already in scope, and the ExtendScript facts that abort a script while naming something else (property lookups that return null, a `.value` read at the playhead rather than at a time, effects addressed by a name that is not unique, a track matte that switches its matte's video off, ease arrays sized per property, a TextDocument that stores the wrong justification, output-module settings that are read-only, the reserved words that stop a script before its first line). Also the recipes for precomposing, applying a preset, setting a font by name and replacing footage. Read it before writing raw ExtendScript, not after it fails.
 ---
 
 # Scripting After Effects with run_jsx
@@ -329,8 +329,68 @@ output modules anyway.
   success, and the only place the truth is visible is AE's Edit menu. Anything
   spanning calls opens and closes its own group per call. *The tool already
   does:* `run_batch` reports the measured `undoSteps`.
+- **Never call `app.beginUndoGroup` or `app.endUndoGroup` in a `run_jsx`
+  script** — with `undoGroup: false` either. The tool owns the grouping: the
+  script runs inside one group, `AE MCP: run_jsx`, and `withoutUndoGroup(fn)`
+  is the supported way to step outside it for one statement. Measured on 26.5,
+  none of these raised an error. A nested `begin`/`end` pair is absorbed: the
+  call is one undo step named `AE MCP: run_jsx` and the inner name never
+  appears. A `begin` with no `end` broke undo for the project: the next tool
+  call got no undo step of its own, Undo then removed nothing and emptied the
+  undo history, and the history stayed empty after the project was closed and
+  reopened. An extra `endUndoGroup()` after that raised a blocking "Undo group
+  mismatch, will attempt to fix." dialog, and After Effects crashed on the next
+  Undo. If a script seems to need different grouping, tell the user rather than
+  grouping it by hand.
+
+  *The tool already does:* calls written out as `app.beginUndoGroup(...)` /
+  `app.endUndoGroup()` are rerouted through a counter. Inside the open group
+  they do nothing, and under `undoGroup:false` the first one opens a single
+  real group. A stray end is ignored, and a group left open is closed before
+  the call returns. The result then carries `undoGuard`; read its `note`.
+  **Only written-out calls are covered.** A call made through `eval`,
+  `Function`, `$.evalFile`, an alias of `app` or a computed name reaches After
+  Effects uncounted; measured, one stray end that way cost two undo steps. A
+  script that uses `eval`, `Function` or `$.evalFile` gets a note beginning
+  CAUTION. When you see one, check Edit > Undo in After Effects.
+- **A result with `aeWarnings` is not a clean success.** After Effects reported
+  something while its dialogs were held back. Read the state back before going
+  on.
+- **`alert`, `confirm` and `prompt` do not show.** A dialog inside a script
+  would block After Effects and the bridge until someone clicked it. They come
+  back on the result as `suppressedDialogs`. `confirm` answers No and `prompt`
+  answers Cancel.
 - **`copyToComp` needs the group closed**, which is the opposite problem — see
   "Layers and comps".
+
+## Recipes for what no tool does
+
+Four everyday operations have no tool on purpose or not yet; each is a few
+lines of script with one trap.
+
+- **Precompose.** `comp.layers.precompose(indices, name, true)` takes 1-based
+  layer *indices* — resolve them from ids immediately before the call, never
+  from an earlier read — and returns the new comp. `false` (leave attributes
+  in the original comp) is legal only for a single layer. The precomp layer
+  replaces the topmost moved layer in the original comp; find it by
+  `layer.source.id === newComp.id` rather than by index, and read the moved
+  layers' ids afresh with `list_layers` on the new comp.
+- **Applying an animation preset.** `layer.applyPreset(new File(path))` with
+  an absolute path to an `.ffx`; a missing file throws. Make the layer the
+  only one selected first (`layer.selected = true` and the others false) in
+  case the preset follows the selection — not measured here — then read what
+  it added back with `list_effects` or `get_layer_full`.
+- **Fonts.** `TextDocument.font` is the PostScript name, and a name After
+  Effects does not have is accepted without a word. Look the name up on AE 24
+  and later with `app.fonts.getFontsByFamilyNameAndStyleName(family, style)`
+  (each result has `postScriptName`), set it through `OPS.set_text({compId,
+  layerId, font})`, and read `font` back.
+- **Replacing footage.** `footageItem.replace(new File(path))` swaps the file
+  under *every* layer that uses the item; `layer.replaceSource(item, false)`
+  swaps one layer's source and keeps its old timing (see Layers and comps
+  above). Neither is a tool: replacing and relinking footage are outside what
+  the tools cover, so do it only when the user asks for it, and say which
+  layers it reached (`item.usedIn`).
 
 ## The language itself
 

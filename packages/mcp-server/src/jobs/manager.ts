@@ -26,6 +26,24 @@ function abortedWaitMessage(jobId: string): string {
   );
 }
 
+function numberField(v: unknown, key: string): number | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const n = (v as Record<string, unknown>)[key];
+  return typeof n === "number" && Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Ops a batch result says were attempted: what succeeded plus what failed
+ * under continue-on-error (a transactional failure records its op in `errors`
+ * too). Undefined for a result that is not a batch's.
+ */
+function opsAttempted(result: unknown): number | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const r = result as { results?: unknown; errors?: unknown };
+  if (!Array.isArray(r.results) && !Array.isArray(r.errors)) return undefined;
+  return (Array.isArray(r.results) ? r.results.length : 0) + (Array.isArray(r.errors) ? r.errors.length : 0);
+}
+
 type ProgressEmitter =(jobId: string, progress: number, total?: number, message?: string) => void;
 
 interface PendingResolver {
@@ -121,17 +139,52 @@ export class JobManager {
       }
       s.status = "completed";
     }
+    // The panel's last `progress` event is the chunk boundary *before* the
+    // final chunk — the chunk that finishes the job reports `done` and no
+    // progress — so a finished 600-op batch used to read back as 575/600,
+    // "running" (issue #222). The terminal state says where the job ended.
+    const attempted = opsAttempted(result);
+    if (s.status === "completed") {
+      const total = s.total ?? numberField(result, "total") ?? attempted;
+      if (total !== undefined) {
+        s.total = total;
+        s.progress = total;
+      }
+      if (s.message === undefined || !/too late/.test(s.message)) s.message = "completed";
+    } else if (attempted !== undefined) {
+      s.progress = attempted;
+    }
     s.result = result;
     s.finishedAt = Date.now();
     this.flush(jobId);
     return true;
   }
 
-  fail(jobId: string, error: string): boolean {
+  /**
+   * `progress`, when the panel knows it, is how many ops had been attempted
+   * when the job stopped. With `unsureThrough` it is only a lower bound: a
+   * chunk failed outright, and ops `progress + 1` to `unsureThrough` may have
+   * partly or fully run. Without either, the job keeps the last chunk boundary
+   * it was told of, and the message says that is all it is.
+   */
+  fail(jobId: string, error: string, progress?: number, unsureThrough?: number): boolean {
     const s = this.jobs.get(jobId);
     if (!s || isTerminal(s.status)) return false;
     s.status = "failed";
     s.error = error;
+    const of = s.total !== undefined ? ` of ${s.total}` : "";
+    const known = typeof progress === "number" && Number.isFinite(progress);
+    if (known && typeof unsureThrough === "number" && Number.isFinite(unsureThrough) && unsureThrough > progress) {
+      s.progress = progress;
+      s.message =
+        `failed: at least ${progress}${of} ops ran; the failing chunk (ops ${progress + 1}–${unsureThrough}) ` +
+        "may have partly run, so read back before re-running";
+    } else if (known) {
+      s.progress = progress;
+      s.message = `failed after ${progress}${of} ops attempted`;
+    } else {
+      s.message = `failed; progress ${s.progress}${of} is the last point reported before it stopped, not necessarily where it stopped`;
+    }
     s.finishedAt = Date.now();
     this.flush(jobId);
     return true;
@@ -150,6 +203,7 @@ export class JobManager {
     const s = this.jobs.get(jobId);
     if (!s || isTerminal(s.status)) return false;
     s.status = "cancelled";
+    s.message = "cancelled";
     if (result !== undefined) s.result = result;
     s.finishedAt = Date.now();
     this.flush(jobId);
@@ -163,6 +217,12 @@ export class JobManager {
     s.status = "cancelling";
     s.message = "cancel accepted by the panel; the job stops at its next chunk boundary";
     return true;
+  }
+
+  /** Attach a warning the job's state must carry (issue #223). The first one stands. */
+  warn(jobId: string, warning: string): void {
+    const s = this.jobs.get(jobId);
+    if (s && !s.warning) s.warning = warning;
   }
 
   get(jobId: string): JobState | undefined { return this.jobs.get(jobId); }

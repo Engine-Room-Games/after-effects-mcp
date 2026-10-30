@@ -1,0 +1,84 @@
+{
+  "recipe": 4,
+  "title": "add Gaussian Blur and set its Blurriness",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "bg",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ],
+      "save": "layer"
+    },
+    {
+      "call": "add_effect",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "matchName": "ADBE Gaussian Blur 2"
+      },
+      "save": "fx",
+      "expect": [
+        {
+          "path": "matchName",
+          "equals": "ADBE Gaussian Blur 2"
+        },
+        {
+          "path": "index",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "call": "set_effect_param",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "effectIndex": "${fx.index}",
+        "paramName": "Blurriness",
+        "value": 25
+      }
+    },
+    {
+      "call": "list_effects",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}"
+      },
+      "expect": [
+        {
+          "path": "$text",
+          "matches": "25"
+        }
+      ]
+    }
+  ]
+}

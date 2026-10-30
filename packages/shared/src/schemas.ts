@@ -13,16 +13,62 @@ export const Vec2 = z.tuple([z.number(), z.number()]);
 export const Vec3 = z.tuple([z.number(), z.number(), z.number()]);
 export const VecAny = z.union([z.number(), Vec2, Vec3, z.array(z.number())]);
 
+/**
+ * A closed set of names, matched without regard to case and forwarded in the
+ * canonical spelling (issue #150). The emitted schema is a plain `enum`, so the
+ * model sees every accepted value, and `Multiply` reaches the handler as
+ * `MULTIPLY` instead of missing After Effects' enumeration and changing nothing.
+ */
+export function namedEnum<const T extends readonly [string, ...string[]]>(
+  values: T,
+  aliases: Record<string, T[number]> = {}
+) {
+  return z.preprocess((v) => {
+    if (typeof v !== "string") return v;
+    const key = v.trim().toLowerCase();
+    const hit = values.find((x) => x.toLowerCase() === key);
+    if (hit) return hit;
+    const alias = Object.keys(aliases).find((a) => a.toLowerCase() === key);
+    return alias ? aliases[alias] : v;
+  }, z.enum(values));
+}
+
+/** Adobe spells it SILHOUETE_ALPHA (one T); the English spelling is accepted and forwarded as AE's. */
+export const BLENDING_MODE_ALIASES = { SILHOUETTE_ALPHA: "SILHOUETE_ALPHA" } as const;
+
+// Keys into After Effects' own enumerations. The .jsx looks each one up by name
+// and refuses a miss rather than leaving the layer as it was, so a name here
+// that some AE build does not define is an error, never a silent no-op.
+export const BLENDING_MODES = [
+  "NORMAL", "DISSOLVE", "DANCING_DISSOLVE",
+  "DARKEN", "MULTIPLY", "COLOR_BURN", "CLASSIC_COLOR_BURN", "LINEAR_BURN", "DARKER_COLOR",
+  "ADD", "LIGHTEN", "SCREEN", "COLOR_DODGE", "CLASSIC_COLOR_DODGE", "LINEAR_DODGE", "LIGHTER_COLOR",
+  "OVERLAY", "SOFT_LIGHT", "HARD_LIGHT", "LINEAR_LIGHT", "VIVID_LIGHT", "PIN_LIGHT", "HARD_MIX",
+  "DIFFERENCE", "CLASSIC_DIFFERENCE", "EXCLUSION", "SUBTRACT", "DIVIDE",
+  "HUE", "SATURATION", "COLOR", "LUMINOSITY",
+  "STENCIL_ALPHA", "STENCIL_LUMA", "SILHOUETE_ALPHA", "SILHOUETTE_LUMA",
+  "ALPHA_ADD", "LUMINESCENT_PREMUL",
+] as const;
+export const TRACK_MATTE_TYPES = ["NO_TRACK_MATTE", "ALPHA", "ALPHA_INVERTED", "LUMA", "LUMA_INVERTED"] as const;
+// set_layer's switch enumerations (issue #181): keys into LayerQuality,
+// LayerSamplingQuality, FrameBlendingType and AutoOrientType.
+export const LAYER_QUALITIES = ["BEST", "DRAFT", "WIREFRAME"] as const;
+export const SAMPLING_QUALITIES = ["BICUBIC", "BILINEAR"] as const;
+export const FRAME_BLENDING_TYPES = ["NO_FRAME_BLEND", "FRAME_MIX", "PIXEL_MOTION"] as const;
+export const AUTO_ORIENT_TYPES = ["NO_AUTO_ORIENT", "ALONG_PATH", "CAMERA_OR_POINT_OF_INTEREST", "CHARACTERS_TOWARD_CAMERA"] as const;
+export const MASK_MODES = ["ADD", "NONE", "SUBTRACT", "INTERSECT", "LIGHTEN", "DARKEN", "DIFFERENCE"] as const;
+
 export const PropertyPath = z
   .array(z.union([z.string(), z.number()]))
   .min(1)
-  .describe("Dotted property path into a layer, e.g. ['Transform','Position'] or ['Effects','Gaussian Blur','Blurriness'].");
+  .describe("Array of property names (or matchNames, or 1-based indices) from the layer down, e.g. ['Transform','Position'] or ['Effects','Gaussian Blur','Blurriness'].");
 
+const EASE_RANGES = "influence 0.1-100 (%); speed in the property's units per second (0 = flat).";
 export const Interpolation = z.object({
   in: z.enum(["linear", "bezier", "hold"]).optional(),
   out: z.enum(["linear", "bezier", "hold"]).optional(),
-  easeIn: z.object({ influence: z.number(), speed: z.number() }).optional(),
-  easeOut: z.object({ influence: z.number(), speed: z.number() }).optional(),
+  easeIn: z.object({ influence: z.number(), speed: z.number() }).optional().describe(EASE_RANGES),
+  easeOut: z.object({ influence: z.number(), speed: z.number() }).optional().describe(EASE_RANGES),
 });
 
 /**
@@ -76,7 +122,13 @@ export type CrossFieldKind =
   /** Zero or one. Both together are two readings of the same question. */
   | "atMostOne"
   /** One or more. Zero means the call would do nothing. */
-  | "atLeastOne";
+  | "atLeastOne"
+  /**
+   * When the first field is `true`, every other field is required too.
+   * `keyframe: true` with no `time` has no keyframe to write (issue #151);
+   * `keyframe: false` or absent asks for nothing, so needs nothing.
+   */
+  | "whenTrue";
 
 export interface CrossFieldRule {
   kind: CrossFieldKind;
@@ -109,6 +161,17 @@ const joinWith = (parts: readonly string[], conjunction: string) => {
  * those apart re-sends the same mistake.
  */
 export function crossFieldMessage(rule: CrossFieldRule, present: readonly string[]): string {
+  if (rule.kind === "whenTrue") {
+    const [trigger, ...needed] = rule.fields;
+    const missing = needed.filter((f) => !present.includes(f));
+    const listed = missing.length ? missing : needed;
+    return (
+      `\`${trigger}: true\` requires ${joinWith(backticked(needed), "and")}` +
+      ` — ${joinWith(backticked(listed), "and")} ${listed.length === 1 ? "was" : "were"} not passed.` +
+      ` Pass ${joinWith(backticked(listed), "and")}, or drop \`${trigger}\` to set a static value.` +
+      (rule.then ? " " + rule.then : "")
+    );
+  }
   const want = joinWith(backticked(rule.fields), "or");
   const got = joinWith(backticked(present), "and");
   const head =
@@ -134,6 +197,11 @@ export function crossFieldPresent(rule: CrossFieldRule, value: unknown): string[
 }
 
 export function crossFieldSatisfied(rule: CrossFieldRule, value: unknown): boolean {
+  if (rule.kind === "whenTrue") {
+    const obj = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+    if (obj[rule.fields[0]] !== true) return true;
+    return rule.fields.slice(1).every((f) => obj[f] !== undefined);
+  }
   const n = crossFieldPresent(rule, value).length;
   if (rule.kind === "exactlyOne") return n === 1;
   if (rule.kind === "atLeastOne") return n >= 1;
@@ -158,6 +226,18 @@ export function crossFieldJsonSchema(rule: CrossFieldRule): Record<string, unkno
   const each = rule.fields.map((f) => ({ required: [f] }));
   if (rule.kind === "exactlyOne") return { oneOf: each };
   if (rule.kind === "atLeastOne") return { anyOf: each };
+  if (rule.kind === "whenTrue") {
+    // "Either the trigger is not `true`, or the rest are all there." Written
+    // as `anyOf` over a negation rather than `if`/`then`, for the same
+    // portability reason as the other three shapes.
+    const [trigger, ...needed] = rule.fields;
+    return {
+      anyOf: [
+        { not: { required: [trigger], properties: { [trigger]: { const: true } } } },
+        { required: needed },
+      ],
+    };
+  }
   // "at most one" is the absence of every pair. Written as a negated `anyOf`
   // rather than as `oneOf` + an all-absent branch, because the negation is what
   // the rule actually says and reads that way to anything parsing it.
@@ -291,7 +371,7 @@ export const CreateComp = z.object({
   width: z.number().int().positive().default(1920),
   height: z.number().int().positive().default(1080),
   frameRate: z.number().positive().default(30),
-  duration: z.number().positive().default(5),
+  duration: z.number().positive().default(5).describe("Seconds."),
   pixelAspect: z.number().positive().optional().meta({ default: 1 }),
   bgColor: Color.optional(),
 });
@@ -301,17 +381,27 @@ export const SetComp = z.object({
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
   frameRate: z.number().positive().optional(),
-  duration: z.number().positive().optional(),
-  workAreaStart: z.number().optional(),
-  workAreaDuration: z.number().positive().optional(),
+  duration: z.number().positive().optional().describe("Seconds."),
+  workAreaStart: z.number().optional().describe("Seconds."),
+  workAreaDuration: z.number().positive().optional().describe("Seconds."),
   bgColor: Color.optional(),
+  // The comp-level switches a layer's motionBlur / frameBlendingType need
+  // before they render (issue #181). Read back after the write.
+  motionBlur: z.boolean().optional()
+    .describe("Comp motion-blur switch; layers also need their own (set_layer)."),
+  frameBlending: z.boolean().optional()
+    .describe("Comp frame-blending switch; layers also need frameBlendingType (set_layer)."),
 });
 export const DeleteComp = z
   .object({
     compId: z.number(),
     purgeUnusedSolids: z.boolean().optional().meta({ default: false })
       .describe(
-        "Also remove the solid footage items this comp's own layers used, once nothing else uses them. Off by default because a solid can be shared: one another comp still uses is kept and reported with the comps using it."
+        "Also remove, in the same undo step, the solids this comp's own layers used that nothing else uses. A solid another comp still uses is kept and reported."
+      ),
+    force: z.boolean().optional().meta({ default: false })
+      .describe(
+        "Delete the comp even though other comps nest it; every precomp layer using it is deleted too (listed in removedFromComps)."
       ),
   })
   .strict();
@@ -321,10 +411,10 @@ export const DuplicateComp = z
     compId: z.number(),
     name: z.string().optional().describe("Name for the copy. Omit to take AE's own ('<name> 2')."),
     folderId: z.number().optional()
-      .describe("Project folder to put the copy in. Must be a folder item id from get_project_summary."),
+      .describe("Folder item id (from get_project_summary) to put the copy in."),
     deep: z.boolean().optional().meta({ default: false })
       .describe(
-        "Also duplicate the nested precomps and re-point the copy's layers at them. Off by default, which matches AE's own Duplicate: a shallow copy shares its nested comps with the original, so editing one edits both."
+        "Also duplicate the nested precomps and re-point the copy's layers at them. Off by default: a shallow copy shares its nested comps with the original."
       ),
     nameSuffix: z.string().optional()
       .describe("With deep:true, name each duplicated nested comp '<original><nameSuffix>'. Omit to let AE name them."),
@@ -352,7 +442,7 @@ export const RevertComp = z
   .object({
     checkpointId: z.number().describe("The checkpointId from checkpoint_comp or list_checkpoints - not the comp's own id."),
     compId: z.number().optional()
-      .describe("The comp being reverted. Optional - the checkpoint knows which comp it belongs to. Pass it to confirm a comp that was renamed since the checkpoint, or to name the same comp under a new id after its project was imported (it must then carry the recorded name, and the checkpoint is re-bound to it)."),
+      .describe("The comp being reverted; optional, the checkpoint knows it. Pass it to confirm a comp renamed since the checkpoint, or to name the same comp under a new id after its project was imported — accepted only for a comp with the recorded name while the recorded comp is gone or renamed; a clean revert then re-binds the checkpoint (checkpointRebound)."),
     saveCurrent: z.boolean().optional().meta({ default: false })
       .describe("Checkpoint the comp's current state first, so the revert itself can be reverted. Its id comes back in savedCheckpoint."),
     keepCheckpoint: z.boolean().optional().meta({ default: true })
@@ -375,7 +465,7 @@ export const SnapshotComp = z
     compId: z.number(),
     includeFingerprint: z.boolean().optional().meta({ default: false })
       .describe(
-        "Return the fingerprint itself as well as its id. Off by default — returning it reintroduces exactly the context cost a snapshot exists to avoid."
+        "Also return the fingerprint itself. Off by default — it is the context cost a snapshot exists to avoid."
       ),
   })
   .strict();
@@ -412,14 +502,14 @@ const effectParamFields = {
     .positive()
     .optional()
     .describe(
-      `Cap the parameters serialized per effect. Default ${EFFECT_PARAMS_DEFAULT}, applied even when omitted, because a third-party effect can carry thousands (Trapcode Particular: 7,401). Every effect reports paramCount; a capped one also reports paramsOmitted and paramsTruncated, so a capped read is never mistaken for a complete one.`
+      `Cap on parameters serialized per effect. Default ${EFFECT_PARAMS_DEFAULT}, applied even when omitted. Every effect reports paramCount; a capped one also reports paramsOmitted and paramsTruncated.`
     ),
   paramFilter: z
     .string()
     .min(1)
     .optional()
     .describe(
-      "Case-insensitive regex over each parameter's display name and matchName; only matches are returned (still under maxParams) and paramsMatched counts them. The way to read a few parameters of a heavy effect, e.g. 'velocity|emitter'."
+      "Case-insensitive regex over parameter name and matchName, e.g. 'velocity|emitter'; only matches are returned (still under maxParams), counted in paramsMatched."
     ),
 };
 export const GetLayerFull = z.object({
@@ -436,7 +526,7 @@ export const GetLayerFull = z.object({
     .positive()
     .optional()
     .describe(
-      "Cap the keyframes serialized per property. Over the cap you get the first and last few plus a count of what was omitted — never a silent truncation. Omit for all of them."
+      "Cap on keyframes serialized per property: over it, the first and last few plus a count of what was omitted. Omit for all."
     ),
   ...effectParamFields,
   shapeDepth: z
@@ -453,16 +543,18 @@ export const GetLayerFull = z.object({
     .optional()
     .meta({ default: false })
     .describe(
-      "Include each shape group's Material Options — the 48-property 3D extrusion block. Off by default: it applies only to an extruded shape under the Cinema 4D renderer, and on an ordinary 2D shape layer it is most of the bytes of the read. What was skipped is counted in the response."
+      "Include each shape group's Material Options (48 3D-extrusion properties, inert on a 2D shape layer). Off by default; skipped ones are counted in materialsOmitted."
     ),
   shapeDetail: z
     .enum(["full", "compact"])
     .optional()
     .describe(
-      "How to serialize a shape layer's Contents. 'full' (default) is one JSON node per property. 'compact' is one indented line per group with that group's own properties folded onto it as name=value — several times smaller, and enough to see what a layer is made of and address its nodes by name."
+      "'full' (default): one JSON node per property. 'compact': one indented line per group — `name  matchName  prop=value …`, `[3 keys]`/`[expr]` marking animated properties, `(at defaults)` an untouched group Transform — several times smaller and still naming every node."
     ),
 });
 
+// [width, height] of a paragraph (box) text layer (issue #181).
+const BoxSize = z.tuple([z.number().positive(), z.number().positive()]);
 export const CreateTextLayer = z.object({
   compId: z.number(),
   text: z.string().default(""),
@@ -471,20 +563,22 @@ export const CreateTextLayer = z.object({
   color: Color.optional(),
   position: VecAny.optional(),
   tracking: z.number().optional()
-    .describe("Letter-spacing. Omit it and the layer is created with tracking 0, because AE's addText() otherwise inherits whatever the user's Character panel was last left on (-20 is common) and the same call then renders differently on two machines. Not normalised when anchorAlign is 'none'."),
+    .describe("Letter-spacing. Omitted: 0, rather than whatever the user's Character panel was left on (not reset when anchorAlign is 'none')."),
+  boxSize: BoxSize.optional()
+    .describe("[width, height]: paragraph (box) text that wraps inside the box, instead of point text."),
   anchorAlign: z.enum(["left", "center", "right", "none"]).optional().meta({ default: "left" })
-    .describe("How the text aligns to `position`, implemented as live paragraph justification with the anchor point left at [0,0]. Default 'left' makes `position` the start of the first baseline; 'center' and 'right' put it at the centre/end. Because it is justification rather than a measured anchor offset, the alignment stays correct when the Source Text changes later — retyped, driven by an expression, or edited through Essential Graphics. 'none' leaves AE's raw defaults alone: no justification, no anchor move, no tracking reset."),
+    .describe("How the text aligns to `position`, as live paragraph justification (anchor stays [0,0]), so it survives later text changes. 'left' (default): `position` is the start of the first baseline; 'center'/'right': its centre/end. 'none': AE's raw defaults — no justification, anchor move or tracking reset."),
   name: z.string().optional(),
 });
 export const CreateShapeLayer = z.object({
   compId: z.number(),
   name: z.string().optional(),
-  shapes: z.array(z.record(z.string(), z.unknown())).default([]),
-  fill: Color.optional(),
-  stroke: Color.optional(),
-  strokeWidth: z.number().nonnegative().optional(),
+  // No shapes/fill/stroke/strokeWidth (issue #148): they were declared and never
+  // applied, so a filled shape came back as an empty layer behind {ok:true}.
+  // Contents go through add_shape_content, which builds them all-or-nothing;
+  // the strict parse now refuses those keys by name instead.
   position: z.union([Vec2, Vec3, z.literal("center")]).optional()
-    .describe("Where the layer's origin goes. Defaults to [0,0], which makes the layer's coordinate space the comp's — so vertices and shape positions you write afterwards are in comp pixels. 'center' is After Effects' own spawn point (the comp centre), which offsets every path you add by half a frame. The Anchor Point stays at [0,0] either way. A new shape layer is 2D, so use [x,y]; a three-component position needs set_layer threeDLayer:true first."),
+    .describe("Where the layer's origin goes. Default [0,0]: layer space = comp space. 'center': AE's own spawn point. Anchor Point stays [0,0] either way. The layer is 2D, so [x,y]; [x,y,z] needs set_layer threeDLayer:true first."),
 });
 export const CreateSolidLayer = z.object({
   compId: z.number(),
@@ -492,7 +586,7 @@ export const CreateSolidLayer = z.object({
   color: Color,
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
-  duration: z.number().positive().optional(),
+  duration: z.number().positive().optional().describe("Seconds."),
 });
 export const CreateNullLayer = z.object({ compId: z.number(), name: z.string().optional() });
 export const CreateAdjustmentLayer = z.object({ compId: z.number(), name: z.string().optional() });
@@ -517,31 +611,43 @@ export const SetLayer = z.object({
   shy: z.boolean().optional(),
   solo: z.boolean().optional(),
   threeDLayer: z.boolean().optional(),
-  // These two are keys into After Effects' own `BlendingMode` and
-  // `TrackMatteType` enumerations, looked up by name in `layers.jsx`. A name
-  // that is not in the enumeration is **ignored**, and the call still reports
-  // success — so the accepted spelling has to be visible here, and a value you
-  // are unsure of has to be read back off the layer rather than assumed.
-  blendingMode: z.string().optional()
-    .describe("After Effects' BlendingMode constant name, upper case with underscores: NORMAL, MULTIPLY, SCREEN, OVERLAY, ADD, SUBTRACT, DIFFERENCE, DARKEN, LIGHTEN, COLOR_DODGE, COLOR_BURN, LINEAR_DODGE, LINEAR_BURN, SOFT_LIGHT, HARD_LIGHT, VIVID_LIGHT, LINEAR_LIGHT, PIN_LIGHT, HUE, SATURATION, COLOR, LUMINOSITY, STENCIL_ALPHA, STENCIL_LUMA, ALPHA_ADD, DISSOLVE. A name After Effects does not recognise leaves the mode unchanged without erroring, so read it back with get_layer_full if you are guessing."),
+  // Keys into After Effects' own `BlendingMode` and `TrackMatteType`
+  // enumerations (issue #150). Closed here so the model sees the names, and
+  // refused again in `layers.jsx` if the running AE does not define one.
+  blendingMode: namedEnum(BLENDING_MODES, BLENDING_MODE_ALIASES).optional()
+    .describe("After Effects' BlendingMode name, case-insensitive. SILHOUETE_ALPHA is After Effects' own spelling; SILHOUETTE_ALPHA is accepted for it."),
   label: z.number().int().min(0).max(16).optional(),
-  inPoint: z.number().optional(),
-  outPoint: z.number().optional(),
-  startTime: z.number().optional(),
-  stretch: z.number().optional(),
+  inPoint: z.number().optional().describe("Comp seconds."),
+  outPoint: z.number().optional().describe("Comp seconds."),
+  startTime: z.number().optional().describe("Comp seconds."),
+  stretch: z.number().optional().describe("Percent; 100 is normal speed."),
   preserveTransparency: z.boolean().optional(),
   trackMatte: z.object({
-    type: z.string()
-      .describe("NO_TRACK_MATTE, ALPHA, ALPHA_INVERTED, LUMA or LUMA_INVERTED. Anything else leaves the matte unchanged without erroring."),
-    layerId: z.number().optional(),
+    type: namedEnum(TRACK_MATTE_TYPES)
+      .describe("How the matte is read, case-insensitive. NO_TRACK_MATTE removes the matte and takes no layerId."),
+    layerId: z.number().optional()
+      .describe("Matte layer id, same comp, anywhere in the stack. Omit to change only the type of the current matte; required when there is none yet."),
   }).optional(),
+  // The timeline switches (issue #181). Each is read back after the write; a
+  // switch After Effects does not take on this layer is an error, not an {ok}.
+  motionBlur: z.boolean().optional().describe("Needs the comp's switch too (set_comp)."),
+  collapseTransformation: z.boolean().optional()
+    .describe("Collapse (precomp) / continuously rasterize (shape, text, vector)."),
+  adjustmentLayer: z.boolean().optional(),
+  guideLayer: z.boolean().optional(),
+  effectsActive: z.boolean().optional().describe("The fx switch."),
+  audioEnabled: z.boolean().optional(),
+  quality: namedEnum(LAYER_QUALITIES).optional(),
+  samplingQuality: namedEnum(SAMPLING_QUALITIES).optional(),
+  frameBlendingType: namedEnum(FRAME_BLENDING_TYPES).optional().describe("Needs the comp's switch too (set_comp)."),
+  autoOrient: namedEnum(AUTO_ORIENT_TYPES).optional().describe("Toward-camera values need a 3D layer (threeDLayer:true)."),
 });
 export const ParentLayer = z.object({
   compId: z.number(),
   layerId: z.number(),
   parentLayerId: z.number().nullable(),
   preserveTransform: z.boolean().optional().meta({ default: true })
-    .describe("Keep the layer visually where it is (what AE's UI does). Leave on unless you want the layer to jump into the parent's coordinate space."),
+    .describe("Keep the layer visually where it is, as AE's UI does. false lets it jump into the parent's space."),
 });
 /**
  * Reorder is the one op whose whole job is invalidating layer indexes, so an
@@ -555,7 +661,7 @@ export const ReorderLayer = crossField(
     compId: z.number(),
     layerId: z.number(),
     toIndex: z.number().int().positive().optional()
-      .describe("Where the layer ENDS UP: its 1-based index after the move, counting from the front (1 renders in front of everything, numLayers is the back). Clamped to the stack. Prefer beforeLayerId/afterLayerId when you are placing this layer relative to another one — an index you read earlier may already be stale."),
+      .describe("The 1-based index the layer ENDS UP at (1 = front, numLayers = back), clamped — not the slot it displaces, which differs by one when moving down."),
     beforeLayerId: z.number().optional()
       .describe("Put this layer directly IN FRONT OF (above) the layer with this id."),
     afterLayerId: z.number().optional()
@@ -571,13 +677,27 @@ export const ReorderLayer = crossField(
 );
 
 // ---------- transforms ----------
-export const SetTransform = z.object({
+// A keyframe with no time used to fall through to a static write and report
+// ok (issue #151). Declared here so the model sees it in the schema and the
+// server refuses before anything reaches After Effects.
+const keyframeNeedsTime: CrossFieldRule = {
+  kind: "whenTrue",
+  fields: ["keyframe", "time"],
+  then: "`time` is the keyframe's time in comp seconds.",
+};
+
+export const SetTransform = crossField(crossField(z.object({
   compId: z.number(),
   layerId: z.number(),
-  time: z.number().optional(),
+  time: z.number().optional().describe("Comp seconds."),
   keyframe: z.boolean().optional().meta({ default: false }),
+  separateDimensions: z.boolean().optional()
+    .describe("Position's Separate Dimensions switch, set before the values. While on, write xPosition/yPosition/zPosition, not position."),
   properties: z.object({
     position: VecAny.optional(),
+    xPosition: z.number().optional().describe("Separated dimensions only."),
+    yPosition: z.number().optional().describe("Separated dimensions only."),
+    zPosition: z.number().optional().describe("Separated dimensions, 3D layer only."),
     scale: VecAny.optional(),
     rotation: z.number().optional(),
     anchorPoint: VecAny.optional(),
@@ -586,7 +706,12 @@ export const SetTransform = z.object({
     xRotation: z.number().optional(),
     yRotation: z.number().optional(),
     zRotation: z.number().optional(),
-  }),
+  }).optional(),
+}), keyframeNeedsTime), {
+  // A switch-only call needs no empty `properties`; a call with neither does nothing.
+  kind: "atLeastOne",
+  fields: ["properties", "separateDimensions"],
+  then: "`separateDimensions` alone just flips the switch.",
 });
 
 // ---------- keyframes ----------
@@ -594,7 +719,7 @@ export const AddKeyframe = z.object({
   compId: z.number(),
   layerId: z.number(),
   propertyPath: PropertyPath,
-  time: z.number(),
+  time: z.number().describe("Comp seconds."),
   value: VecAny,
   interpolation: Interpolation.optional(),
 });
@@ -602,31 +727,48 @@ export const RemoveKeyframe = z.object({
   compId: z.number(),
   layerId: z.number(),
   propertyPath: PropertyPath,
-  time: z.number(),
+  time: z.number().describe("Comp seconds."),
 });
 export const GetKeyframes = z.object({
   compId: z.number(),
   layerId: z.number(),
   propertyPath: PropertyPath,
 });
-export const SetInterpolation = z.object({
-  compId: z.number(),
-  layerId: z.number(),
-  propertyPath: PropertyPath,
-  keyIndex: z.number().int().positive(),
-  in: z.enum(["linear", "bezier", "hold"]).optional(),
-  out: z.enum(["linear", "bezier", "hold"]).optional(),
-});
+export const SetInterpolation = crossField(
+  z.object({
+    compId: z.number(),
+    layerId: z.number(),
+    propertyPath: PropertyPath,
+    keyIndex: z.number().int().positive(),
+    in: z.enum(["linear", "bezier", "hold"]).optional(),
+    out: z.enum(["linear", "bezier", "hold"]).optional(),
+    // Keyframe flags (issue #181). Each is read back after the write.
+    temporalContinuous: z.boolean().optional(),
+    temporalAutoBezier: z.boolean().optional(),
+    spatialContinuous: z.boolean().optional().describe("Spatial properties only."),
+    spatialAutoBezier: z.boolean().optional().describe("Spatial properties only."),
+    roving: z.boolean().optional().describe("Spatial only; not the first or last key."),
+  }),
+  // A call with none of these used to answer {ok:true} having done nothing.
+  {
+    kind: "atLeastOne",
+    fields: ["in", "out", "temporalContinuous", "temporalAutoBezier", "spatialContinuous", "spatialAutoBezier", "roving"],
+    then: "`in`/`out` set the type; the rest are the key's flags.",
+  }
+);
+const EasePair = z.object({ influence: z.number(), speed: z.number() });
+// One pair for every dimension, or one pair per dimension (issue #181).
+const EaseSpec = z.union([EasePair, z.array(EasePair).min(1).max(4)]);
 export const SetTemporalEase = crossField(
   z.object({
     compId: z.number(),
     layerId: z.number(),
     propertyPath: PropertyPath,
     keyIndex: z.number().int().positive(),
-    easeIn: z.object({ influence: z.number(), speed: z.number() }).optional()
-      .describe("One influence/speed pair, applied to every dimension of the property. At least one of easeIn/easeOut is required."),
-    easeOut: z.object({ influence: z.number(), speed: z.number() }).optional()
-      .describe("One influence/speed pair, applied to every dimension of the property."),
+    easeIn: EaseSpec.optional()
+      .describe(`One pair for every dimension, or a list of pairs, one per ease dimension: ${EASE_RANGES}`),
+    easeOut: EaseSpec.optional()
+      .describe(`Same forms as easeIn: ${EASE_RANGES}`),
   }),
   // `keyframes.jsx` has always refused this, and still does — but it refused
   // from inside After Effects, which meant a round trip and a write lease spent
@@ -634,7 +776,7 @@ export const SetTemporalEase = crossField(
   {
     kind: "atLeastOne",
     fields: ["easeIn", "easeOut"],
-    then: "Each is one {influence, speed} pair; this tool sizes the ease array for the property itself.",
+    then: "Each is one {influence, speed} pair, or a list of them, one per dimension.",
   }
 );
 export const SetSpatialTangents = z.object({
@@ -644,6 +786,81 @@ export const SetSpatialTangents = z.object({
   keyIndex: z.number().int().positive(),
   inTangent: z.array(z.number()).min(2).max(3),
   outTangent: z.array(z.number()).min(2).max(3),
+});
+
+// ---------- retiming and copying animation (issue #180) ----------
+const PropertyPaths = z
+  .array(PropertyPath)
+  .min(1)
+  .describe("Properties to act on, each a propertyPath like ['Transform','Position']. Omit for every keyframed property on the layer (markers excluded).");
+const RetimeLayer = z.object({
+  layerId: z.number(),
+  propertyPaths: PropertyPaths.optional(),
+});
+export const RetimeKeyframes = z.object({
+  compId: z.number(),
+  layers: z
+    .array(RetimeLayer)
+    .min(1)
+    .describe("Layers to retime, in stagger order: the first gets `offset`, the second `offset + stagger`, and so on. Each layer once."),
+  offset: z.number().optional().meta({ default: 0 }).describe("Seconds to shift the keys by; negative moves them earlier."),
+  scale: z
+    .number()
+    .positive()
+    .optional()
+    .meta({ default: 1 })
+    .describe("Stretch factor about `pivot`: 2 plays the keys at half speed, 0.5 at double. Eases keep their shape."),
+  pivot: z
+    .number()
+    .optional()
+    .describe("Comp time, in seconds, that `scale` stretches about. Omit for each layer's first retimed key, so the animation keeps its start."),
+  reverse: z
+    .boolean()
+    .optional()
+    .meta({ default: false })
+    .describe("Play the keys backwards within each layer's span of retimed keys (first to last), mirroring eases and tangents."),
+  stagger: z.number().optional().meta({ default: 0 }).describe("Seconds added per layer, in the order `layers` lists them."),
+  range: z
+    .object({ start: z.number(), end: z.number() })
+    .optional()
+    .describe("Only retime keys whose time is in [start, end] (comp seconds). Keys outside it stay put, and one moved onto one of them is refused. Omit for every key."),
+  snapToFrames: z
+    .boolean()
+    .optional()
+    .meta({ default: true })
+    .describe("Round each new key time to the comp's frame grid. Two keys that would round onto one frame are refused, never merged."),
+});
+const CopyTarget = z.object({
+  layerId: z.number(),
+  compId: z.number().optional().describe("The target layer's comp. Omit for the source comp."),
+});
+export const CopyAnimation = z.object({
+  compId: z.number(),
+  layerId: z.number().describe("The source layer."),
+  propertyPaths: PropertyPaths.optional().describe(
+    "Properties to copy, each a propertyPath like ['Transform','Scale']. Omit for every keyframed property on the source layer, plus every property with an expression when `expressions` is on (markers excluded)."
+  ),
+  targets: z
+    .array(CopyTarget)
+    .min(1)
+    .describe("Layers to paste onto, in stagger order. Each needs the same property — for an effect, mask or shape group, the same ones in the same order."),
+  offset: z.number().optional().meta({ default: 0 }).describe("Seconds added to every copied key time."),
+  stagger: z.number().optional().meta({ default: 0 }).describe("Seconds added per target, in the order `targets` lists them."),
+  align: z
+    .enum(["comp", "layerStart"])
+    .optional()
+    .meta({ default: "comp" })
+    .describe("'comp': keys land at the same comp times as the source (plus offsets). 'layerStart': shifted by the difference in layer start times, so the animation keeps its place relative to each layer."),
+  expressions: z
+    .boolean()
+    .optional()
+    .meta({ default: true })
+    .describe("Copy expressions too, text and enabled state as they are on the source."),
+  replaceExisting: z
+    .boolean()
+    .optional()
+    .meta({ default: false })
+    .describe("A target property that already has keys (or an expression, when one is being copied) is refused unless this is true; then its keys are removed and replaced."),
 });
 
 // ---------- expressions ----------
@@ -656,7 +873,7 @@ export const ClearExpression = z.object({ compId: z.number(), layerId: z.number(
 export const ListEffects = z.object({ compId: z.number(), layerId: z.number(), ...effectParamFields });
 export const AddEffect = z.object({ compId: z.number(), layerId: z.number(), matchName: z.string() });
 export const RemoveEffect = z.object({ compId: z.number(), layerId: z.number(), effectIndex: z.number().int().positive() });
-export const SetEffectParam = crossField(
+const SetEffectParamBase = crossField(
   z.object({
     compId: z.number(),
     layerId: z.number(),
@@ -666,7 +883,7 @@ export const SetEffectParam = crossField(
     paramMatchName: z.string().optional()
       .describe("Preferred. The parameter's matchName, e.g. 'ADBE Gaussian Blur 2-0001' — the same in every UI language. Tried before paramName when both are given."),
     value: VecAny,
-    time: z.number().optional(),
+    time: z.number().optional().describe("Comp seconds."),
     keyframe: z.boolean().optional().meta({ default: false }),
   }),
   // Neither one is not a call with a default — it is a call that resolves no
@@ -679,6 +896,7 @@ export const SetEffectParam = crossField(
     then: "list_effects on the layer reports both for every parameter of every effect.",
   }
 );
+export const SetEffectParam = crossField(SetEffectParamBase, keyframeNeedsTime);
 export const SetEffectEnabled = z.object({ compId: z.number(), layerId: z.number(), effectIndex: z.number().int().positive(), enabled: z.boolean() });
 // The result is cached for the AE session because enumerating app.effects is
 // slow enough to time the bridge out (issue #26). `filter` is a case-insensitive
@@ -694,6 +912,8 @@ export const SetText = z.object({
   compId: z.number(),
   layerId: z.number(),
   text: z.string().optional(),
+  boxSize: BoxSize.optional()
+    .describe("[width, height] of a box text layer's box. Refused on point text (not convertible)."),
   font: z.string().optional(),
   size: z.number().positive().optional(),
   fillColor: Color.optional(),
@@ -775,7 +995,8 @@ export const ShapeContent = z.discriminatedUnion("type", [
     name: z.string().optional(),
     color: ShapeColor.optional(),
     opacity: z.number().optional().describe("0..100"),
-    fillRule: z.number().optional(),
+    fillRule: z.union([namedEnum(["nonzero", "evenodd"]), z.literal(1), z.literal(2)]).optional()
+      .describe("nonzero (After Effects' 1, the default) or evenodd (2)."),
   }).strict(),
   z.object({
     type: z.literal("stroke"),
@@ -783,8 +1004,10 @@ export const ShapeContent = z.discriminatedUnion("type", [
     color: ShapeColor.optional(),
     opacity: z.number().optional().describe("0..100"),
     width: z.number().optional(),
-    lineCap: z.number().optional(),
-    lineJoin: z.number().optional(),
+    lineCap: z.union([namedEnum(["butt", "round", "projecting"]), z.literal(1), z.literal(2), z.literal(3)]).optional()
+      .describe("butt (After Effects' 1, the default), round (2) or projecting (3)."),
+    lineJoin: z.union([namedEnum(["miter", "round", "bevel"]), z.literal(1), z.literal(2), z.literal(3)]).optional()
+      .describe("miter (After Effects' 1, the default), round (2) or bevel (3)."),
     miterLimit: z.number().optional(),
   }).strict(),
   z.object({
@@ -799,6 +1022,16 @@ export const ShapeContent = z.discriminatedUnion("type", [
     name: z.string().optional(),
     copies: z.number().optional(),
     offset: z.number().optional(),
+    // The Repeater's own Transform group (issue #181): what each copy adds to
+    // the one before it.
+    transform: z.object({
+      anchorPoint: Vec2.optional(),
+      position: Vec2.optional().describe("Offset per copy; AE default [100, 0]."),
+      scale: Vec2.optional(),
+      rotation: z.number().optional(),
+      startOpacity: z.number().optional(),
+      endOpacity: z.number().optional(),
+    }).strict().optional(),
   }).strict(),
   z.object({
     type: z.literal("merge"),
@@ -817,17 +1050,17 @@ export const AddShapeContent = z.object({
   parentGroupPath: PropertyPath.optional(),
   content: ShapeContent,
   zOrder: z.enum(["front", "back"]).optional()
-    .describe("Where the new node sits in its group's render stack. Index 1 renders in FRONT, and AE appends new content to the end — so the default, 'back', puts each node behind everything already there. 'front' moves it to index 1. Prefer ordering your calls front-to-back (details first, background rects last) over reaching for 'front': it needs an internal moveTo, which has been seen to disturb nested renders of the comp in AE 26.3."),
+    .describe("'back' (default): behind everything already in the group. 'front': moved to index 1, which needs an internal moveTo that can disturb nested renders — prefer ordering your calls front-to-back."),
 });
-export const SetShapeProperty = z.object({
+export const SetShapeProperty = crossField(z.object({
   compId: z.number(),
   layerId: z.number(),
   contentPath: PropertyPath,
   property: z.string(),
   value: VecAny,
-  time: z.number().optional(),
+  time: z.number().optional().describe("Comp seconds."),
   keyframe: z.boolean().optional().meta({ default: false }),
-});
+}), keyframeNeedsTime);
 
 // ---------- masks ----------
 export const AddMask = z.object({
@@ -837,10 +1070,10 @@ export const AddMask = z.object({
   inTangents: z.array(Vec2).optional(),
   outTangents: z.array(Vec2).optional(),
   closed: z.boolean().optional().meta({ default: true }),
-  // A key into AE's `MaskMode`, looked up by name in `masks.jsx`; an
-  // unrecognised one leaves the mode alone rather than erroring.
-  mode: z.string().optional().meta({ default: "ADD" })
-    .describe("Mask blend mode: ADD (default), NONE, SUBTRACT, INTERSECT, LIGHTEN, DARKEN or DIFFERENCE. Anything else leaves the mode unchanged without erroring."),
+  // A key into AE's `MaskMode`, looked up by name in `masks.jsx`, which
+  // refuses a miss (issue #150).
+  mode: namedEnum(MASK_MODES).optional().meta({ default: "ADD" })
+    .describe("Mask blend mode, case-insensitive."),
 });
 export const SetMask = z.object({
   compId: z.number(),
@@ -850,8 +1083,8 @@ export const SetMask = z.object({
   inTangents: z.array(Vec2).optional(),
   outTangents: z.array(Vec2).optional(),
   closed: z.boolean().optional(),
-  mode: z.string().optional()
-    .describe("Mask blend mode: ADD, NONE, SUBTRACT, INTERSECT, LIGHTEN, DARKEN or DIFFERENCE. Anything else leaves the mode unchanged without erroring."),
+  mode: namedEnum(MASK_MODES).optional()
+    .describe("Mask blend mode, case-insensitive."),
   inverted: z.boolean().optional(),
   expansion: z.number().optional(),
   feather: Vec2.optional(),
@@ -863,8 +1096,8 @@ export const RemoveMask = z.object({ compId: z.number(), layerId: z.number(), ma
 export const AddMarker = z.object({
   compId: z.number(),
   layerId: z.number().optional(),
-  time: z.number(),
-  duration: z.number().nonnegative().optional().meta({ default: 0 }),
+  time: z.number().describe("Comp seconds."),
+  duration: z.number().nonnegative().optional().meta({ default: 0 }).describe("Seconds."),
   comment: z.string().optional(),
   label: z.number().int().min(0).max(16).optional(),
   chapter: z.string().optional(),
@@ -891,12 +1124,12 @@ const downsampleParam = z
   .max(8)
   .optional()
   .describe(
-    "Render at 1/N resolution. Omit and one is chosen from the comp size (long edge ~1280px: 2 at 1080p, 3 at 4K). Pass 1 for a full-resolution frame. The factor is always exactly what you asked for: the render sets the comp's resolution and puts it back, so a viewer left on Quarter or Third does not change the size of the frame you get."
+    "Render at 1/N resolution. Omit to have one chosen from the comp size (long edge ~1280px, per tile for a sheet); 1 is full resolution. Exact whatever the viewer's resolution is set to."
   );
 export const ScreenshotFrame = crossField(
   z.object({
     compId: z.number(),
-    time: z.number().optional(),
+    time: z.number().optional().describe("Comp seconds. Omit for the current time."),
     /**
      * Several times in one call, returned as one tiled sheet.
      *
@@ -912,7 +1145,7 @@ export const ScreenshotFrame = crossField(
       .max(6)
       .optional()
       .describe(
-        "2-6 times to render into one tiled contact sheet, in order, with the time burned into each tile. Cheaper than one call per frame and the whole point of it is judging motion. Mutually exclusive with `time`."
+        "2-6 comp times in seconds, rendered into one tiled contact sheet with the time burned into each tile — for judging motion. Mutually exclusive with `time`."
       ),
     downsample: downsampleParam,
   }),
@@ -929,7 +1162,7 @@ export const ScreenshotFrame = crossField(
 export const ScreenshotLayer = z.object({
   compId: z.number(),
   layerId: z.number(),
-  time: z.number().optional(),
+  time: z.number().optional().describe("Comp seconds. Omit for the current time."),
   downsample: downsampleParam,
 });
 
@@ -944,28 +1177,29 @@ const diffParam = z
   .optional()
   .meta({ default: false })
   .describe(
-    "Fingerprint the comp before and after this call and append only what changed (layers added/removed/renamed/retimed/re-parented, keyframe counts, expression and effect counts). A few dozen tokens instead of reading the comp back. If the call fails, the diff of what landed before it stopped is appended to the error."
+    "Append only what this call changed in the comp (layers added/removed/renamed/retimed/re-parented, keyframe, expression and effect counts) — a few dozen tokens. On failure it rides on the error, showing what landed."
   );
 const diffCompIdParam = z
   .number()
   .optional()
-  .describe("Which comp `diff` should fingerprint. Defaults to the comps this call names, else the comp open in the viewer.");
+  .describe("Comp for `diff`. Defaults to the comps the call names, else the one in the viewer.");
 
 // ---------- batch ----------
 export const RunBatch = z.object({
   ops: z.array(z.object({ op: z.string(), args: z.unknown().optional() })),
   transactional: z.boolean().optional().meta({ default: true })
-    .describe("Stop at the first failing op instead of running the rest. Nothing rolls back either way — the ops before the failure stay applied, and the error says where it stopped."),
+    .describe("Stop at the first failing op. Nothing rolls back either way; the error says where it stopped."),
   undoGroupName: z.string().optional().meta({ default: "AE MCP Batch" })
-    .describe("What the user sees in After Effects' Edit > Undo menu. A chunked batch numbers its steps from this, e.g. \"AE MCP Batch (3)\"."),
+    .describe("Label in AE's Edit > Undo menu; a chunked batch numbers its steps, e.g. \"AE MCP Batch (3)\"."),
   singleUndo: z.boolean().optional().meta({ default: false })
-    .describe("Force the whole batch into ONE undo step, whatever its size, by running it in a single blocking ExtendScript call. Up to 2000 ops. The cost is real: After Effects' interface is frozen for the entire batch and no progress is reported, so the user sees nothing until it finishes. Without it a batch over 500 ops is chunked and lands as one undo step per chunk of 25 — the result reports the exact count. Reach for this only when the user has to be able to undo the work with a single Cmd-Z."),
+    .describe("ONE undo step at any size up to 2000 ops, in one blocking call: AE's interface is frozen and no progress is reported until it finishes. Only when the user must be able to undo it with a single Cmd-Z."),
   diff: diffParam,
   diffCompId: diffCompIdParam,
 });
 
 // ---------- explore ----------
 export const GetProjectSummary = z.object({}).strict();
+export const GetSelection = z.object({}).strict();
 export const FindLayers = z.object({
   compId: z.number().optional(),
   namePattern: z.string().optional(),
@@ -989,16 +1223,16 @@ export const RunJsx = crossField(
     code: z.string().optional()
       .describe("The ExtendScript to run. Exactly one of `code` or `scriptPath`."),
     scriptPath: z.string().optional()
-      .describe("Absolute path to a .jsx file to run instead of `code`. The server reads it, so a long script never enters the conversation. Exactly one of `code` or `scriptPath`."),
+      .describe("Absolute path to a .jsx file the server reads and runs. Exactly one of `code` or `scriptPath`."),
     libraries: z.array(z.string()).optional()
-      .describe("Absolute paths to .jsx files inlined ahead of the script, sharing its scope, so their functions are callable from it. The server reads them, so their text never enters the conversation. They are re-evaluated on every call — keep them to declarations, not to work. Put shared helpers here rather than pasting them into every script."),
+      .describe("Absolute paths to .jsx files the server inlines ahead of the script, in its scope. Re-evaluated every call: declarations only. Put shared helpers here instead of pasting them."),
     undoGroup: z.boolean().optional().meta({ default: true })
-      .describe("Wrap the script in one undo step. Set false only for the operations AE refuses while an undo group is open — copyToComp on a layer with a parent or a linked expression. The script's changes then land as whatever undo steps AE records on its own."),
+      .describe("Wrap the script in one undo step. false only for what AE refuses inside one (copyToComp on a parented or expression-linked layer); changes then land as AE's own undo steps."),
     diff: diffParam,
     diffCompId: diffCompIdParam,
   }),
   // `resolveRunJsxSource` refuses both and neither too, and keeps doing so —
-  // it is reachable from `run_batch`, whose steps are never zod-validated. What
+  // it is reachable from a hand-rolled `POST /op`, which nothing validates. What
   // the rule buys here is the half that runs *before* the call: declared, it
   // reaches the emitted JSON Schema, so the model sees the choice rather than
   // discovering it.
@@ -1018,7 +1252,7 @@ export const ImportFootage = z
       .describe("Import a numbered still as an image sequence rather than a single frame."),
     force: z.boolean().optional().meta({ default: false })
       .describe(
-        "Keep an item that failed validation instead of deleting it and throwing. The problem is still reported in `validation`. Only pass this when you know the dimensions are wrong and want the item anyway."
+        "Keep an item that failed validation instead of deleting it and throwing; the problem is still reported in `validation`."
       ),
   })
   .strict();
@@ -1027,18 +1261,18 @@ export const CreateFootageLayer = z.object({
   itemId: z.number().describe("Project item id from import_footage or get_project_summary."),
   name: z.string().optional(),
   position: VecAny.optional(),
-  startTime: z.number().optional(),
+  startTime: z.number().optional().describe("Comp seconds."),
 });
 export const PurgeUnusedFootage = z
   .object({
     solidsOnly: z.boolean().optional().meta({ default: true })
       .describe(
-        "Only remove solids — the items behind solid and adjustment layers. Pass false to remove every footage item no comp uses, imported files and placeholders included, which is what AE's own Remove Unused Footage does. Comps and folders are never removed either way."
+        "Only solids (behind solid and adjustment layers). false: every footage item no comp uses, imported files and placeholders included."
       ),
     dryRun: z.boolean().optional().meta({ default: false })
       .describe("List what would be removed without removing anything — not even an undo step."),
     folderId: z.number().optional()
-      .describe("Restrict the sweep to one project folder and everything nested under it. A folder id from get_project_summary; omit for the whole project."),
+      .describe("Folder id (from get_project_summary) to restrict the sweep to, nested folders included. Omit for the whole project."),
   })
   .strict();
 
@@ -1048,23 +1282,23 @@ export const AudioCue = z
     footageId: z.number().optional()
       .describe("Project item id of an already-imported sound. Give this or `path`, not both."),
     path: z.string().min(1).optional()
-      .describe("Absolute path to a sound file. Imported once per call however many cues name it, and an item already in the project from that path is reused rather than imported again."),
+      .describe("Absolute path to a sound file. Imported once per call; an item already in the project from that path is reused."),
     time: z.number().describe("Comp time in seconds where the cue starts."),
     levelDb: z.number().optional()
-      .describe("Level in decibels, the same unit After Effects shows. 0 is the file untouched, -6 is roughly half as loud, negative is quieter. Defaults to 0, written explicitly so the result is the same on every machine."),
+      .describe("Decibels: 0 = as recorded (default), -6 ≈ half as loud."),
     name: z.string().optional().describe("Layer name. Defaults to namePrefix + the file's basename without its extension."),
-    inPoint: z.number().optional().describe("Trim the layer's in point to this COMP time. Must not be earlier than `time`. Omit to play from the start of the file."),
-    outPoint: z.number().optional().describe("Trim the layer's out point to this COMP time. Omit to play to the end of the file."),
+    inPoint: z.number().optional().describe("Trim in point, in COMP seconds, not before `time`. Omit to play from the file's start."),
+    outPoint: z.number().optional().describe("Trim out point, in COMP seconds. Omit to play to the file's end."),
     label: z.union([z.number().int().min(0).max(16), z.string()]).optional()
       .describe("AE label colour, as an index 0-16 or a name (red, yellow, aqua, pink, lavender, peach, seafoam, blue, green, purple, orange, brown, fuchsia, cyan, sandstone, darkgreen)."),
     loop: z.boolean().optional()
-      .describe("Loop the sound until `outPoint`, or until the end of the comp when no outPoint is given — for beds and ambiences. Enables time remapping with a wrap-around expression on Time Remap; the layer's in point still trims the front of the file the way it does on any layer. Default false: the file plays once."),
+      .describe("Repeat the sound to `outPoint`, or the comp's end — for beds and ambiences (time remap + a wrap-around expression). Default false."),
     fadeIn: z.number().min(0).optional()
-      .describe("Seconds to fade in from `fadeFloorDb` up to `levelDb`, as keyframes on Audio Levels starting at the layer's in point. Default 0 (no fade). fadeIn + fadeOut must fit inside the cue's placed length or the cue is refused by index."),
+      .describe("Seconds to fade up from `fadeFloorDb` to `levelDb` from the layer's in point. Default 0. fadeIn + fadeOut must fit the cue's placed length."),
     fadeOut: z.number().min(0).optional()
-      .describe("Seconds to fade out from `levelDb` down to `fadeFloorDb`, ending at the layer's out point. Default 0 (no fade). fadeIn + fadeOut must fit inside the cue's placed length or the cue is refused by index."),
+      .describe("Seconds to fade down to `fadeFloorDb`, ending at the layer's out point. Default 0."),
     stretch: z.number().positive().optional()
-      .describe("Time stretch as a percentage: 100 is unchanged, 200 plays at half speed (lower pitch, twice as long), 50 at double speed. Must be greater than 0. The layer's start time and any trim are re-asserted after it, since After Effects moves them when stretch changes. Default 100."),
+      .describe("Percent: 100 unchanged (default), 200 half speed and lower pitch, 50 double speed. Start time and trims are kept."),
   })
   .strict();
 export const PlaceAudioCues = z
@@ -1074,9 +1308,9 @@ export const PlaceAudioCues = z
     namePrefix: z.string().optional().meta({ default: "SFX_" })
       .describe("Prefix for cues that do not name themselves. Pass \"\" for no prefix."),
     fadeFloorDb: z.number().optional()
-      .describe("The level in decibels that every fadeIn starts from and every fadeOut ends at. Default -48, the bottom of After Effects' own Audio Levels slider and 1/256 of the recorded amplitude — near-silence. Must be below each faded cue's levelDb. One floor for the whole list."),
+      .describe("dB every fade starts from or ends at, for the whole list. Default -48 (near-silence). Must be below each faded cue's levelDb."),
     dryRun: z.boolean().optional().meta({ default: false })
-      .describe("Resolve and check the whole list without importing, creating or changing anything — not even an undo step. Returns counts, the files it would import, the items it would reuse and the failing cues by index — never the whole resolved list."),
+      .describe("Check the whole list without changing anything, not even undo. Returns counts, wouldImport, wouldReuse and the failing cues by index."),
   })
   .strict();
 
@@ -1088,18 +1322,29 @@ export const ExportMogrt = z
       .describe("Folder to write the .mogrt into. Defaults to the folder holding the .aep."),
     name: z.string().optional()
       .describe(
-        "Template name, which is also the output filename. Defaults to the comp name — AE's own default is the literal 'Untitled', so every scripted export would otherwise overwrite the same file."
+        "Template name and filename. Defaults to the comp name (AE's own would be 'Untitled' every time)."
       ),
     overwrite: z.boolean().optional().meta({ default: false })
       .describe("Required to replace an existing .mogrt at that path."),
     posterTime: z.number().optional()
       .describe(
-        "Comp time to render as the template's still thumbnail, replacing the black one AE writes. Omit to leave AE's thumbnail alone."
+        "Comp seconds of the frame to render as the thumbnail. Omit to keep AE's black one."
       ),
     suppressDialogs: z.boolean().optional().meta({ default: true })
       .describe(
-        "Suppress the modal font warning during export. Leave true: an unsuppressed dialog freezes the bridge until someone clicks it in AE. Set false only to see the dialog deliberately."
+        "Suppress AE's modal font warning. Leave true: an unsuppressed dialog freezes the bridge until someone clicks it in AE."
       ),
+  })
+  .strict();
+
+// Issue #177: the controller export_mogrt needs, added from the tools.
+export const AddEssentialProperty = z
+  .object({
+    compId: z.number().describe("The comp the layer is in — the template comp export_mogrt exports."),
+    layerId: z.number(),
+    propertyPath: PropertyPath.describe("Path to one leaf property on that layer, e.g. ['Source Text'] or ['Effects', 'Fill', 'Color']. A group is refused."),
+    name: z.string().min(1).optional()
+      .describe("Controller label in Essential Graphics and Premiere. Omit for the property's own name."),
   })
   .strict();
 
@@ -1110,10 +1355,10 @@ export const AddToRenderQueue = z
     outputPath: z.string()
       .describe("Absolute path of the file to write. Its folder must already exist. For an image sequence put the frame number in as [####], e.g. /renders/shot_[####].png."),
     outputModuleTemplate: z.string().optional()
-      .describe("Output module template by name, e.g. 'High Quality with Alpha' or one the user saved. Omit for After Effects' default. An unknown name is refused with the list of names that exist. Codec, bit depth and alpha can only be chosen this way — a script cannot set them directly."),
+      .describe("Output module template name, e.g. 'High Quality with Alpha' or one the user saved. Omit for AE's default."),
     renderSettingsTemplate: z.string().optional()
       .describe("Render settings template by name, e.g. 'Best Settings'. Omit for After Effects' default."),
-    startTime: z.number().optional().describe("Seconds, comp time. Omit to start where After Effects defaults the item (the work area)."),
+    startTime: z.number().optional().describe("Comp seconds. Omit for AE's default (the work area)."),
     duration: z.number().optional().describe("Seconds to render from startTime. Omit for After Effects' default span."),
     overwrite: z.boolean().optional().meta({ default: false })
       .describe("Required when a file already exists at outputPath; the render replaces it."),
@@ -1143,7 +1388,7 @@ export const RenderQueue = crossField(
       overwrite: z.boolean().optional().meta({ default: false })
         .describe("Required when an output file (or any frame of an output sequence) already exists; the render replaces it."),
       saveProject: z.boolean().optional().meta({ default: false })
-        .describe("Required when the project has unsaved changes: the render reads the saved file, so it saves first. Tell the user before passing it. Also required, and saves a project with no unsaved changes, when the saved file records footage at paths it has since moved from (the refusal says so). Otherwise ignored for a saved project."),
+        .describe("Save first — required with unsaved changes, since the render reads the saved file; tell the user. Also required (and saves) when the saved file records footage at paths it has since moved from; the refusal says so."),
     })
     .strict(),
   // Rendering items the agent never added is a choice the caller has to make
@@ -1160,7 +1405,7 @@ export const GetHouseStyle = z
   .object({
     detail: z.enum(["summary", "full"]).optional().meta({ default: "summary" })
       .describe(
-        "'summary' (default) is a few hundred tokens: palette as named hexes, type, motion defaults, layout rules, and what it could not summarise. 'full' returns the whole document — use it before editing the guide with set_house_style, or when the summary is not enough."
+        "'summary' (default): palette as named hexes, type, motion, layout, and what it could not summarise. 'full': the whole document — needed before set_house_style."
       ),
   })
   .strict();
@@ -1177,7 +1422,7 @@ export const SetHouseStyle = z
 export const CheckSetup = z.object({}).strict();
 export const SetupPanel = z.object({
   enableDebugMode: z.boolean().optional().meta({ default: true })
-    .describe("Also set Adobe's PlayerDebugMode preference, which AE requires to load this unsigned panel, and CEP's LogLevel where it was never set, so CEP's own log records why a panel failed to load (issue #91). Default true."),
+    .describe("Also set Adobe's PlayerDebugMode (AE needs it to load this unsigned panel) and CEP's LogLevel where unset, so CEP logs why a panel fails to load. Default true."),
   force: z.boolean().optional().meta({ default: false })
     .describe("Replace an existing symlinked (development) install with a copy. Default false."),
 }).strict();
@@ -1205,14 +1450,14 @@ export const GUIDE_TOPICS = [
 export const AeGuide = z
   .object({
     topic: z.enum(GUIDE_TOPICS).describe(
-      "after-effects: the core — orienting, bounded reads, verifying a write, screenshots, the bridge failures — start here; it points at one topic per subject. animation: keyframes, easing, rigging, expressions. shapes: shape layers and their Contents. text: text layers. assembly: shots placed into a master comp, markers, retiming. extendscript-gotchas: read before writing raw ExtendScript for run_jsx. sound: sound effects and levels. mogrt-and-footage: exporting a .mogrt, importing footage. issue-journal: when a tool fought back. whats-new: what changed, one section per release, when a call behaves differently from what you expected or a project is being brought up to date after an upgrade. style-guide: capturing the user's look. ae-setup: connecting to AE when a tool cannot reach it."
+      "after-effects: the core — orienting, bounded reads, verifying writes, screenshots, bridge failures; start here. animation: keyframes, easing, rigging, expressions. shapes: shape layers and their Contents. text: text layers. assembly: shots into a master comp, markers, retiming. extendscript-gotchas: before writing run_jsx. sound: sound effects and levels. mogrt-and-footage: .mogrt export, footage import. rendering: the render queue and render_queue. issue-journal: when a tool fought back. whats-new: what changed per release — when a call surprises you, or after an upgrade. style-guide: capturing the user's look. ae-setup: when a tool cannot reach AE."
     ),
     since: z
       .string()
       .regex(/^v?\d+\.\d+\.\d+$/, "must be a version like 0.4.0")
       .optional()
       .describe(
-        "whats-new only: return just the releases newer than this version — the version named is the one already absorbed and is excluded — behind the guide's preamble, or one line saying nothing is newer. Use the version a project's docs record as last absorbed, or 0.0.0 for the whole history; omitted, only the two newest releases are returned and the older ones are named. The answer opens with the server's own version. Rejected on any other topic, since there is nothing there to filter."
+        "whats-new only: the releases newer than this (already absorbed) version, or one line saying none is; 0.0.0 for the whole history. Omitted: the two newest. The answer opens with the server's own version. Rejected on other topics."
       ),
   })
   .strict();
@@ -1241,15 +1486,15 @@ export const LogIssue = z
     tools: z.array(z.string()).optional().describe("Tool names involved, e.g. ['set_temporal_ease']. With errorText, this is what a later failure is matched on."),
     errorText: z.string().optional()
       .describe(
-        "The exact error text the failing call returned, verbatim. The next time a call to one of `tools` fails with matching text, its error names this entry — and a later log_issue with the same tool and error text extends this entry instead of creating a second one under a different title."
+        "The failing call's error text, verbatim. A later failure of one of `tools` with matching text names this entry, and a re-log with it extends this entry."
       ),
     kind: z.enum(["tool-bug", "ae-quirk"]).optional().meta({ default: "tool-bug" })
       .describe(
-        "'tool-bug' (default): something these tools get wrong, which a later release may fix — so the entry is archived once it was last seen on an older server than the one running. 'ae-quirk': After Effects itself behaving unlike its documentation; no release changes that, so it is never archived by version."
+        "'tool-bug' (default): something a release may fix — archived once last seen on an older server. 'ae-quirk': After Effects' own behaviour, never archived by version."
       ),
     scope: z.enum(["project", "user"]).optional().meta({ default: "project" })
       .describe(
-        "'project' (default) for this project's footage, comps or files. 'user' for how these tools or After Effects behave — that journal travels with the person, so every future project starts knowing it. Reported back as 'home' when there is no project folder to write into."
+        "'project' (default) for this project's footage, comps or files. 'user' for how these tools or AE behave — carried to every project. Reported as 'home' when there is no project folder."
       ),
   })
   .strict();
@@ -1264,13 +1509,13 @@ export const ListKnownIssues = z
     id: z
       .string()
       .optional()
-      .describe("Read one entry in full — cause and workaround included — by the id from a previous listing. Ignores the filters. Ids are unique only within a journal, so prefix with the entry's scope ('user:my-entry') when the listing shows one in each."),
+      .describe("Read one entry in full (archived or not) by id; ignores the filters. Prefix the scope ('user:my-entry') when both journals hold it."),
     detail: z
       .enum(["index", "full"])
       .optional()
       .meta({ default: "index" })
       .describe(
-        "'index' (default) is one line per entry: id, title, tools, kind, when and on which version it was last seen, counts — read the one you need with `id`. 'full' returns every matching entry's whole body and costs thousands of tokens."
+        "'index' (default): one line per entry — read the one you need with `id`. 'full': every matching body, thousands of tokens."
       ),
     scope: z.enum(["all", "project", "user"]).optional().meta({ default: "all" })
       .describe(
@@ -1280,7 +1525,7 @@ export const ListKnownIssues = z
       .describe("Most entries to return. Anything held back is counted in `omitted`."),
     includeArchived: z.boolean().optional().meta({ default: false })
       .describe(
-        "Also list archived entries — not seen for 30 days, last seen on an older server than this one, or retired with archive_issue — each flagged with its reason. Default false: they are hidden and only counted in `archivedCount`. An `id` read always returns the entry, archived or not."
+        "Also list archived entries (30 days unseen, last seen on an older server, or archive_issue), each with its reason. Default: hidden, counted in `archivedCount`."
       ),
   })
   .strict();
@@ -1346,6 +1591,8 @@ export const OpSchemas = {
   set_interpolation: SetInterpolation,
   set_temporal_ease: SetTemporalEase,
   set_spatial_tangents: SetSpatialTangents,
+  retime_keyframes: RetimeKeyframes,
+  copy_animation: CopyAnimation,
   // expressions
   get_expression: GetExpression,
   set_expression: SetExpression,
@@ -1379,6 +1626,7 @@ export const OpSchemas = {
   run_batch: RunBatch,
   // explore
   get_project_summary: GetProjectSummary,
+  get_selection: GetSelection,
   find_layers: FindLayers,
   // footage
   import_footage: ImportFootage,
@@ -1388,6 +1636,7 @@ export const OpSchemas = {
   place_audio_cues: PlaceAudioCues,
   // motion graphics templates
   export_mogrt: ExportMogrt,
+  add_essential_property: AddEssentialProperty,
   // render queue
   add_to_render_queue: AddToRenderQueue,
   list_render_queue: ListRenderQueue,
@@ -1488,6 +1737,8 @@ export const OpMutation = {
   set_interpolation: "write",
   set_temporal_ease: "write",
   set_spatial_tangents: "write",
+  retime_keyframes: "write",
+  copy_animation: "write",
   // expressions
   get_expression: "read",
   set_expression: "write",
@@ -1527,6 +1778,8 @@ export const OpMutation = {
   run_batch: "write",
   // explore
   get_project_summary: "read",
+  // The user's selection and playhead in the active comp; reads only.
+  get_selection: "read",
   find_layers: "read",
   // footage
   import_footage: "write",
@@ -1539,6 +1792,8 @@ export const OpMutation = {
   place_audio_cues: "write",
   // motion graphics templates — saves the project before exporting.
   export_mogrt: "write",
+  // Adds a controller to the comp's Essential Graphics panel.
+  add_essential_property: "write",
   // render queue. Adding and removing items edits the project's queue.
   add_to_render_queue: "write",
   list_render_queue: "read",
@@ -1550,7 +1805,8 @@ export const OpMutation = {
   render_queue: "write",
   // raw — the script is the caller's and may do anything. Assume the worst.
   run_jsx: "write",
-  // house style — written over the bridge into a file beside the .aep.
+  // house style — a file beside the .aep. The server reads and writes it
+  // itself when the panel reports `project-path`, over the bridge otherwise.
   get_house_style: "read",
   set_house_style: "write",
   // jobs
@@ -1571,3 +1827,197 @@ export const OpMutation = {
 } as const satisfies Record<OpName, "write" | "read" | "server">;
 
 export type OpEffect = (typeof OpMutation)[OpName];
+
+/**
+ * The internal ops the server sends itself, as part of a tool — never tools,
+ * so never in `OpSchemas` (a key there is a tool in the list). Classified the
+ * same way and for the same reason: an op that changes the project must be
+ * known to. The server sends them only through `internalSender`
+ * (mcp-server `tools/internalOps.ts`): its op name is typed over this table,
+ * and it refuses a `"write"` unless the write lease is held at that moment.
+ * `tests/unit/panel-capabilities.mjs` pins that, and that every op here has a
+ * handler in the bundle.
+ */
+export const InternalOpMutation = {
+  // render_queue's halves. Prepare reads; save saves the project; mark-done
+  // unticks rendered items as one named undo step.
+  _render_prepare: "read",
+  _render_save: "write",
+  _render_mark_done: "write",
+  // snapshot_comp / diff_comp gather a fingerprint; the server keeps it.
+  _comp_fingerprint: "read",
+  // The .aep's path, for the house style the server reads and writes itself
+  // (issue #220, stage 3). Sent only to a panel reporting `project-path`.
+  _project_path: "read",
+} as const satisfies Record<`_${string}`, "write" | "read">;
+
+type ServerOpName = { [K in OpName]: (typeof OpMutation)[K] extends "server" ? K : never }[OpName];
+
+/**
+ * What each `"server"` op does, as a read or a write (issue #165).
+ *
+ * `OpMutation` says only that these never reach the bridge, and
+ * `READ_ONLY_SERVER_OPS` (tools/policy.ts) answers a different question —
+ * whether read-only mode offers them, which drops `get_job` and `await_job`
+ * for having nothing to read, not for writing. This is the plain answer, used
+ * for `readOnlyHint`. Typed over every server op, so a new one does not
+ * compile until it is decided: no default, like `OpMutation`.
+ */
+export const ServerOpEffect = {
+  await_job: "read",
+  get_job: "read",
+  // Stops a batch or kills an aerender process.
+  cancel_job: "write",
+  check_setup: "read",
+  setup_panel: "write",
+  init_project: "write",
+  ae_guide: "read",
+  log_issue: "write",
+  list_known_issues: "read",
+  mark_issue_reported: "write",
+  archive_issue: "write",
+} as const satisfies Record<ServerOpName, "read" | "write">;
+
+/**
+ * Ops that write files outside After Effects' undo stack (issue #165), and
+ * whether that can lose what was there.
+ *
+ *   "overwrites" — can replace an existing file's content: Edit > Undo does
+ *                  not bring it back, so the tool is `destructiveHint: true`.
+ *   "adds"       — only creates files, or merges into one without losing what
+ *                  it held. Not destructive.
+ *
+ * An op whose arguments carry an `overwrite` field is treated as "overwrites"
+ * whether or not it is listed here (tools/annotations.ts reads the schema), so
+ * this table is for the ops that write disk without one. An op absent from
+ * both writes nothing outside the project.
+ */
+export const OpDiskWrite = {
+  // Saves the .aep, then writes the .mogrt (overwrite field too).
+  export_mogrt: "overwrites",
+  // Can save the .aep (`saveProject`) and replace render outputs.
+  render_queue: "overwrites",
+  // Replaces house-style.md beside the .aep.
+  set_house_style: "overwrites",
+  // Replaces the installed panel and can change Adobe's debug preference.
+  setup_panel: "overwrites",
+  // Refuses to clobber any existing file.
+  init_project: "adds",
+  // The journal: a repeat merges into its entry, a report or an archive adds a
+  // field to it. The file and what it said are kept.
+  log_issue: "adds",
+  mark_issue_reported: "adds",
+  archive_issue: "adds",
+} as const satisfies Partial<Record<OpName, "overwrites" | "adds">>;
+
+// ---------- runtime strictness ----------
+/**
+ * Every object in an op schema, closed — at every depth (issue #147).
+ *
+ * zod's default for an object is to **strip** a key it does not declare, and
+ * the emitted JSON Schema says the opposite: `toolInputSchema()` closes every
+ * object (`additionalProperties: false`), so the model is told an unknown key
+ * is refused. Before this, a misspelt `positon` reached no handler, nothing
+ * failed, and the tool answered `{ok: true}` for a change that never happened
+ * — the swallowed error this repo refuses everywhere else. The agent never
+ * learnt it had to try again.
+ *
+ * Writing `.strict()` on every object by hand is a rule that holds until the
+ * next schema somebody adds, and the failure is invisible. So the closing is
+ * done here, once, over every op: a `ZodObject` with no catchall of its own is
+ * cloned with `catchall: never`, which is what `.strict()` does, and every
+ * wrapper around it is cloned onto the closed copy. A clone keeps its `checks`,
+ * so `crossField()` rules travel with it; it does not keep `.describe()`/
+ * `.meta()`, which is why the **emitted** schema is still built from the
+ * originals in `OpSchemas` and only the **parse** uses these.
+ *
+ * A `z.record()` or `z.unknown()` is free-form by declaration and stays so.
+ * A node type this does not know is left as it was and named in
+ * `STRICT_UNHANDLED`; `tests/unit/strict-args.mjs` fails the build on any, for
+ * the same reason the cross-field guard throws rather than skips. It does not
+ * throw here: this runs at module load, and a throw would take down every tool
+ * in the session rather than leave one of them lenient.
+ */
+type AnyZod = z.ZodType;
+interface CloneableDef {
+  type: string;
+  [k: string]: unknown;
+}
+const defOf = (s: unknown): CloneableDef => (s as { _zod: { def: CloneableDef } })._zod.def;
+const cloneWith = (s: AnyZod, patch: Record<string, unknown>): AnyZod =>
+  (s as unknown as { clone(def: unknown): AnyZod }).clone({ ...defOf(s), ...patch });
+
+/** Node types that hold no object, and are returned as they are. */
+const STRICT_LEAVES = new Set([
+  "string", "number", "int", "boolean", "bigint", "date", "enum", "literal", "unknown", "any",
+  "never", "null", "undefined", "void", "nan", "symbol", "file", "transform", "custom", "template_literal",
+]);
+
+/** Paths of nodes `strictDeep` did not know how to close. Empty in a healthy build. */
+export const STRICT_UNHANDLED: string[] = [];
+
+export function strictDeep<T extends AnyZod>(schema: T, where = "(root)"): T {
+  const cache = new Map<unknown, AnyZod>();
+  const walk = (node: AnyZod, path: string): AnyZod => {
+    const hit = cache.get(node);
+    if (hit) return hit;
+    const def = defOf(node);
+    let out: AnyZod;
+    switch (def.type) {
+      case "object": {
+        const shape = def.shape as Record<string, AnyZod>;
+        const closed: Record<string, AnyZod> = {};
+        for (const key of Object.keys(shape)) closed[key] = walk(shape[key], `${path}.${key}`);
+        // An object that declared its own catchall (`.loose()`, `.catchall(x)`)
+        // said so on purpose; only the default — strip — is closed.
+        const catchall = def.catchall === undefined ? z.never() : walk(def.catchall as AnyZod, `${path}.*`);
+        out = cloneWith(node, { shape: closed, catchall });
+        break;
+      }
+      case "optional":
+      case "default":
+      case "prefault":
+      case "nullable":
+      case "readonly":
+      case "nonoptional":
+      case "catch":
+        out = cloneWith(node, { innerType: walk(def.innerType as AnyZod, path) });
+        break;
+      case "array":
+        out = cloneWith(node, { element: walk(def.element as AnyZod, `${path}[]`) });
+        break;
+      case "tuple":
+        out = cloneWith(node, {
+          items: (def.items as AnyZod[]).map((s, i) => walk(s, `${path}[${i}]`)),
+          rest: def.rest ? walk(def.rest as AnyZod, `${path}[...]`) : def.rest,
+        });
+        break;
+      case "union":
+        // Covers `discriminatedUnion` too: same node type, with a
+        // `discriminator` in the def that the spread carries over.
+        out = cloneWith(node, { options: (def.options as AnyZod[]).map((s, i) => walk(s, `${path}|${i}`)) });
+        break;
+      case "record":
+        out = cloneWith(node, { valueType: walk(def.valueType as AnyZod, `${path}{}`) });
+        break;
+      case "pipe":
+        out = cloneWith(node, { in: walk(def.in as AnyZod, path), out: walk(def.out as AnyZod, path) });
+        break;
+      default:
+        if (!STRICT_LEAVES.has(def.type)) STRICT_UNHANDLED.push(`${where}${path === "(root)" ? "" : path}: ${def.type}`);
+        out = node;
+    }
+    cache.set(node, out);
+    return out;
+  };
+  return walk(schema, "") as T;
+}
+
+/**
+ * `OpSchemas`, closed at every depth. **Parse with these; emit from
+ * `OpSchemas`.** Used for every direct tool call and for every `run_batch`
+ * step (issue #157), so a step is held to exactly what the tool itself is.
+ */
+export const StrictOpSchemas: { readonly [K in OpName]: (typeof OpSchemas)[K] } = Object.fromEntries(
+  Object.entries(OpSchemas).map(([name, s]) => [name, strictDeep(s as AnyZod, name)])
+) as { readonly [K in OpName]: (typeof OpSchemas)[K] };

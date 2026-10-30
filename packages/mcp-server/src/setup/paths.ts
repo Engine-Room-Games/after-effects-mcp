@@ -219,14 +219,31 @@ export function panelInstallDiff(source: string, installed: string): string[] {
     .sort();
 }
 
-export function copyRecursive(src: string, dst: string): void {
+export interface CopyOptions {
+  /** Base names to leave out, at any depth (the root included). */
+  skip?: ReadonlySet<string>;
+  /**
+   * Copy a symlink's target file instead of recreating the link. Off by
+   * default: setup_panel keeps links as links, which `--symlink` dev installs
+   * depend on. The packaging scripts turn it on, as their own copies did.
+   */
+  dereference?: boolean;
+}
+
+/**
+ * The one directory copy: setup_panel, scripts/install-panel.mjs and the three
+ * packaging scripts (prepare-package, build-mcpb, build-binaries, through
+ * `loadPackagingCopy` in scripts/lib/setup.mjs) all go through it (issue #184).
+ */
+export function copyRecursive(src: string, dst: string, opts: CopyOptions = {}): void {
+  if (opts.skip?.has(path.basename(src))) return;
   const stat = fs.lstatSync(src);
   if (stat.isDirectory()) {
     fs.mkdirSync(dst, { recursive: true });
     for (const entry of fs.readdirSync(src)) {
-      copyRecursive(path.join(src, entry), path.join(dst, entry));
+      copyRecursive(path.join(src, entry), path.join(dst, entry), opts);
     }
-  } else if (stat.isSymbolicLink()) {
+  } else if (stat.isSymbolicLink() && !opts.dereference) {
     fs.symlinkSync(fs.readlinkSync(src), dst);
   } else {
     fs.copyFileSync(src, dst);

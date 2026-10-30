@@ -25,6 +25,7 @@ const {
   refusedBatchSteps, policyNotice, MAX_BATCH_DEPTH,
 } = policyMod;
 const { OpSchemas, OpMutation } = await import(sharedDist("schemas.js"));
+const { findUnsafeArgKeys } = await import(dist("util", "argsSafety.js"));
 const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
 const { SERVER_INSTRUCTIONS } = await import(dist("generated", "content.js"));
 
@@ -150,7 +151,7 @@ await check("a batch step naming a switched-off op is caught, with its path", ()
 // steps go to OPS[...] by name — so run_jsx two batches down is run_jsx.
 const nest = (depth, leaf) => {
   let step = leaf;
-  for (let i = 0; i < depth; i++) step = { op: "run_batch", args: { ops: [{ op: "set_layer", args: {} }, step] } };
+  for (let i = 0; i < depth; i++) step = { op: "run_batch", args: { ops: [{ op: "set_layer", args: { compId: 1, layerId: 1, name: "x" } }, step] } };
   return step;
 };
 const JSX_LEAF = { op: "run_jsx", args: { code: "return 1" } };
@@ -237,9 +238,9 @@ const clients = {
 };
 const listed = async (client) => (await client.listTools()).tools.map((t) => t.name);
 
-await check("tools/list: default lists all 84 ops", async () => {
+await check("tools/list: default lists all 88 ops", async () => {
   assert.deepEqual(await listed(clients.default), ALL);
-  assert.equal(ALL.length, 84, "the op count moved — update this and the README's tool count together");
+  assert.equal(ALL.length, 88, "the op count moved — update this and the README's tool count together");
 });
 
 await check("tools/list: read-only lists exactly enabledOps, and no write", async () => {
@@ -298,7 +299,7 @@ await check("run_batch refuses a run_jsx step whole, naming it, and sends nothin
   seen.length = 0;
   const res = await clients.noJsx.callTool({
     name: "run_batch",
-    arguments: { ops: [{ op: "set_layer", args: {} }, { op: "run_jsx", args: { code: "return 1" } }] },
+    arguments: { ops: [{ op: "set_layer", args: { compId: 1, layerId: 1, name: "x" } }, { op: "run_jsx", args: { code: "return 1" } }] },
   });
   assert.equal(res.isError, true);
   assert.match(res.content[0].text, /ops\[1\] \(run_jsx\)/);
@@ -342,22 +343,25 @@ await check("__proto__, constructor and prototype are refused in every op's args
   for (const key of ["__proto__", "constructor", "prototype"]) {
     const res = await clients.default.callTool({ name: "run_batch", arguments: protoPayload(key) });
     assert.equal(res.isError, true, `${key} was forwarded`);
-    // Not only run_batch: a declared free-form field on any op is the same
-    // door. `shapes` is a z.record, so zod passes the key straight through.
+    // Not only run_batch: the check runs on the raw args of every op, before
+    // the schema sees them, so any free-form field a schema declares later is
+    // covered without a test of its own.
     const shape = await clients.default.callTool({
       name: "create_shape_layer",
-      arguments: JSON.parse(`{"compId":1,"shapes":[{"type":"rect","${key}":{"x":1}}]}`),
+      arguments: JSON.parse(`{"compId":1,"name":"x","nested":[{"type":"rect","${key}":{"x":1}}]}`),
     });
-    assert.equal(shape.isError, true, `${key} in create_shape_layer.shapes was forwarded`);
+    assert.equal(shape.isError, true, `${key} in create_shape_layer args was forwarded`);
+    assert.match(shape.content[0].text, new RegExp(`the key "${key}" is not allowed`));
   }
   assert.deepEqual(seen, []);
 });
 
-await check("ordinary keys that merely contain those words still pass", async () => {
+await check("ordinary keys and values that merely contain those words still pass", async () => {
   seen.length = 0;
+  assert.deepEqual(findUnsafeArgKeys({ shapes: [{ constructorName: "a", prototypes: 1, __proto__x: 2 }] }), []);
   const res = await clients.default.callTool({
     name: "create_shape_layer",
-    arguments: { compId: 1, shapes: [{ type: "rect", constructorName: "a", note: "__proto__ in a value is fine" }] },
+    arguments: { compId: 1, name: "__proto__ in a value is fine" },
   });
   assert.equal(res.isError, undefined);
   assert.deepEqual(seen, ["create_shape_layer"]);
@@ -367,7 +371,7 @@ await check("what is still offered still works", async () => {
   seen.length = 0;
   const ro = await clients.readOnly.callTool({ name: "list_comps", arguments: {} });
   assert.equal(ro.isError, undefined);
-  const batch = await clients.noJsx.callTool({ name: "run_batch", arguments: { ops: [{ op: "set_layer", args: {} }] } });
+  const batch = await clients.noJsx.callTool({ name: "run_batch", arguments: { ops: [{ op: "set_layer", args: { compId: 1, layerId: 1, name: "x" } }] } });
   assert.equal(batch.isError, undefined);
   assert.deepEqual(seen, ["list_comps", "run_batch"]);
 });

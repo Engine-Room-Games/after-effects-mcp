@@ -1,6 +1,6 @@
 ---
 name: after-effects
-description: How to drive Adobe After Effects well through the AE MCP tools — orienting in a project, bounding every read, verifying a write with a diff, screenshots as a one-off diagnostic with their cost in tokens, write ordering, and the three bridge failures whose remedies contradict each other. Load whenever a task involves After Effects, motion graphics, comps, layers, or keyframes; it points at one reference per subject for everything else.
+description: How to drive Adobe After Effects well through the AE MCP tools — orienting in a project, bounding every read, verifying a write with a diff, screenshots as a one-off diagnostic with their cost in tokens, write ordering, and the four bridge failures whose remedies contradict each other. Load whenever a task involves After Effects, motion graphics, comps, layers, or keyframes; it points at one reference per subject for everything else.
 ---
 
 # Driving After Effects
@@ -23,7 +23,7 @@ skill, the file beside this one:
 | shots placed into a master comp, markers, retiming a shot | `assembly` | `references/assembly.md` |
 | any raw ExtendScript for `run_jsx` — read it **before** writing the script | `extendscript-gotchas` | `references/extendscript-gotchas.md` |
 | sound effects and beds | `sound` | `references/sound.md` |
-| a `.mogrt` export, importing footage, or the solids a deleted comp leaves behind | `mogrt-and-footage` | `references/mogrt-and-footage.md` |
+| a `.mogrt` export or filling its Essential Graphics panel, importing footage, or the solids a deleted comp leaves behind | `mogrt-and-footage` | `references/mogrt-and-footage.md` |
 | rendering a comp to a movie or image sequence, or the render queue | `rendering` | `references/rendering.md` |
 | a tool that fought back, and what to do with what you learned | `issue-journal` | `references/issue-journal.md` |
 | a call that behaves differently from what you remember | `whats-new` | `references/whats-new.md` |
@@ -62,6 +62,7 @@ bounded form is the one to reach for:
 | What comps exist? | `list_comps({include: []})` — ids and names |
 | What is in this comp? | `list_layers({compId, include: []})` — id, index, name, type; `get_comp_tree` for the nesting |
 | Where is a layer, by name, type or effect? | `find_layers` — `{matches, count, compsSearched, included}`; a match is id, index, name, sourceType, compId and compName, and `include` (`flags`, `timing`, `parent` — the `list_layers` names) widens it. Unlike `list_layers`, omitting `include` here does **not** return everything |
+| What does the user mean by "this" or "these"? | `get_selection` — the active comp, its playhead `time`, the selected layers, and the selected properties as `propertyPath`s with their selected keyframe times. Call it before asking the user to name a layer, and say which layer you took it to mean |
 | One layer, in depth | `get_layer_full({compId, layerId, include: […]})` ⭐ |
 | What did my last change actually do? | `snapshot_comp` → `diff_comp` ⭐ |
 
@@ -230,17 +231,35 @@ a time for the whole session, in the order you issued them, and a long
 `run_batch` holds that lock until its last chunk lands — so nothing drops into
 the middle of work the user asked for as one thing. A call that had to wait says
 so with `queuedBehind` and `waitedMs`. Reads are never queued: `list_*`,
-`get_*`, the screenshots and `await_job` answer while a batch runs.
+`get_*`, the screenshots and `await_job` answer while a batch runs. Other AI
+sessions on the same After Effects take turns with yours the same way; a call
+that waited behind one also carries `queuedBehindSession`, naming it.
 
-## Three failures that read alike, with remedies that contradict
+That queue is this session's only. **A second AI client connected to the same
+After Effects has its own**, and neither sees the other's. After Effects still
+runs one call at a time, so two calls never mix — but while the other client's
+script runs, After Effects answers nothing to anyone, and your call simply
+takes longer, with nothing in its result to say why. The other client's writes
+can also land between the chunks of a long `run_batch` of yours (measured).
+If the user says another session is working in the same project, re-read what
+you are about to build on rather than trusting what you last saw.
+
+## Four failures that read alike, with remedies that contradict
 
 - **Did not answer in time.** The call reached After Effects, which is
   single-threaded, so a long script or a modal dialog nobody has clicked blocks
-  every reply. It may still be running: do **not** re-send it, do not restart
+  every reply — and so does another AI client's call on the same After
+  Effects, which this one waits behind. It may still be running, or not yet
+  started, and either way can still land after the error (measured): do **not**
+  re-send it, do not restart
   After Effects, do not run `setup_panel`. Poll `check_setup` for about a
   minute, and ask the user whether a dialog is hiding behind another window. A
   call that legitimately needs longer gets it from `AE_MCP_OP_TIMEOUT_MS` in the
-  server's environment.
+  server's environment. **The one exception is `render_queue`:** its timeout
+  says no render was started — the error comes from its prepare or save step,
+  before the render — so call `render_queue` again once `check_setup` shows
+  the panel answering. At most the project save lands twice, which changes
+  nothing.
 - **Cannot reach After Effects.** The connection was refused, so nothing
   reached After Effects and nothing changed. The server looks again on its own
   first — 7777, then the port file — and follows a panel that has moved, so a
@@ -253,4 +272,12 @@ so with `queuedBehind` and `waitedMs`. Reads are never queued: `list_*`,
 - **Waited behind another op for the write queue and was dropped.** Nothing
   reached After Effects and nothing changed. Something in front is slow — usually
   a long `run_batch`; find it with `get_job` or `await_job` — then re-send once
-  it has finished. That is the one of the three where re-sending is right.
+  it has finished. That is the one of the four where re-sending is right. When
+  the message says it waited behind *another session*, `get_job` cannot see that
+  work: tell the user another session is writing to the same After Effects.
+- **Dropped the connection mid-call.** Rarer than the first three, and unlike any of them: the call
+  was delivered and the connection broke before any answer came back — After
+  Effects or its panel went away under it. It may or may not have landed. Do
+  not re-send it blind: confirm the panel with `check_setup`, then read the comp
+  or layer back (`diff_comp` against a snapshot, `get_layer_full`) and re-send
+  only if the change is not there.

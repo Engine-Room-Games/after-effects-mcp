@@ -12,17 +12,34 @@ function __makeShape(vertices, inT, outT, closed) {
 OPS.set_shape_path = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
-  var prop = walkProperty(l, args.shapePath);
-  // The shape path is usually a "Path" property whose value is a Shape.
-  var pathProp = prop;
-  // If user passed a group, dig down to "Path"
-  if (pathProp.propertyType === PropertyType.NAMED_GROUP || pathProp.propertyType === PropertyType.INDEXED_GROUP) {
-    try { pathProp = pathProp.property("Path"); } catch (e) {}
-  }
-  var shape = __makeShape(args.vertices, args.inTangents, args.outTangents, args.closed);
+  var pathProp = __shapePathProp(walkProperty(l, args.shapePath), args.shapePath);
+  // Built (and its tangent counts checked) before anything is written.
+  var shape = __reshape("set_shape_path", null, args);
   __setValue(pathProp, shape);
   return { ok: true };
 };
+
+/**
+ * The Path property (matchName "ADBE Vector Shape") that `node` names: the node
+ * itself (or a mask's path, or a mask whose path it is), or — for a "Path N" group (ADBE Vector Shape - Group) — its Path
+ * child. Resolved by match name, never by the display name "Path", which is
+ * localized and missed on a non-English After Effects (issue #163). Anything
+ * else is refused with its match name, rather than handing setValue a group.
+ */
+function __shapePathProp(node, path) {
+  // A mask's path (ADBE Mask Shape) holds a Shape too, and has always been writable here.
+  if (node.matchName === "ADBE Vector Shape" || node.matchName === "ADBE Mask Shape") return node;
+  var child = null;
+  if (node.matchName === "ADBE Mask Atom") {
+    try { child = node.property("ADBE Mask Shape"); } catch (e0) { child = null; }
+  } else if (node.propertyType === PropertyType.NAMED_GROUP || node.propertyType === PropertyType.INDEXED_GROUP) {
+    try { child = node.property("ADBE Vector Shape"); } catch (e) { child = null; }
+  }
+  if (child) return child;
+  throw new Error("set_shape_path: " + JSON.stringify(path) + " resolves to '" + node.name + "' (" + node.matchName +
+    "), which is not a shape path. Point shapePath at a path node (ADBE Vector Shape - Group, e.g. " +
+    "[\"Contents\", \"Group 1\", \"Contents\", \"Path 1\"]) or at its Path property. Nothing was changed.");
+}
 
 var __SHAPE_MATCH = {
   rect: "ADBE Vector Shape - Rect",
@@ -87,6 +104,52 @@ var __SHAPE_ALIASES = {
     mode: ["ADBE Vector Merge Type", "Mode"]
   }
 };
+
+// Popup properties the schema lets a caller name (issue #150), mapped to the
+// 1-based value After Effects stores. Keyed "<content type>.<key>".
+var __SHAPE_NAMED = {
+  "fill.fillRule": { nonzero: 1, evenodd: 2 },
+  "stroke.lineCap": { butt: 1, round: 2, projecting: 3 },
+  "stroke.lineJoin": { miter: 1, round: 2, bevel: 3 }
+};
+
+// The Repeater's Transform group (issue #181): friendly key -> candidates,
+// tried in order like __SHAPE_ALIASES.
+var __REPEATER_TRANSFORM = [
+  ["anchorPoint", ["ADBE Vector Repeater Anchor", "Anchor Point"]],
+  ["position", ["ADBE Vector Repeater Position", "Position"]],
+  ["scale", ["ADBE Vector Repeater Scale", "Scale"]],
+  ["rotation", ["ADBE Vector Repeater Rotation", "Rotation"]],
+  ["startOpacity", ["ADBE Vector Repeater Opacity 1", "Start Opacity"]],
+  ["endOpacity", ["ADBE Vector Repeater Opacity 2", "End Opacity"]]
+];
+
+/** Set each key of a repeater's `transform`; what fails is pushed to `failed` by name. */
+function __applyRepeaterTransform(node, tf, applied, failed) {
+  var group = null;
+  try { group = node.property("ADBE Vector Repeater Transform") || node.property("Transform"); } catch (e) { group = null; }
+  if (!group) { failed.push("transform (no Transform group on the repeater)"); return; }
+  var known = {};
+  for (var i = 0; i < __REPEATER_TRANSFORM.length; i++) {
+    var key = __REPEATER_TRANSFORM[i][0];
+    known[key] = true;
+    if (tf[key] === undefined) continue;
+    var target = null, names = __REPEATER_TRANSFORM[i][1];
+    for (var j = 0; j < names.length && !target; j++) {
+      try { target = group.property(names[j]) || null; } catch (e2) { target = null; }
+    }
+    if (!target) { failed.push("transform." + key); continue; }
+    try {
+      __setValue(target, tf[key]);
+      applied.push("transform." + key);
+    } catch (e3) {
+      failed.push("transform." + key + " (" + e3.message + ")");
+    }
+  }
+  for (var k in tf) {
+    if (tf.hasOwnProperty(k) && !known[k]) failed.push("transform." + k + " (not a Repeater transform key)");
+  }
+}
 
 // Keys consumed by the path builder rather than set as plain properties.
 var __PATH_KEYS = { vertices: 1, points: 1, inTangents: 1, outTangents: 1, closed: 1 };
@@ -187,6 +250,10 @@ OPS.add_shape_content = function (args) {
       if (!content.hasOwnProperty(k)) continue;
       if (k === "type") continue;
       if (type === "path" && __PATH_KEYS[k]) continue;
+      if (type === "repeater" && k === "transform") {
+        __applyRepeaterTransform(node, content.transform || {}, applied, failed);
+        continue;
+      }
       // `name` is a node attribute, not a child property.
       if (k === "name") {
         node.name = String(content[k]);
@@ -195,8 +262,17 @@ OPS.add_shape_content = function (args) {
       }
       var target = __resolveShapeProp(node, type, k);
       if (!target) { failed.push(k); continue; }
+      var val = content[k];
+      // Named menu values (issue #150). AE's popups take 1-based numbers; the
+      // schema offers the names and still passes a bare number through.
+      var named = __SHAPE_NAMED[type + "." + k];
+      if (named && typeof val === "string") {
+        var nk = val.toLowerCase();
+        if (!named.hasOwnProperty(nk)) { failed.push(k + " ('" + val + "' is not a known name)"); continue; }
+        val = named[nk];
+      }
       try {
-        __setValue(target, content[k]);
+        __setValue(target, val);
         applied.push(k);
       } catch (e) {
         failed.push(k + " (" + e.message + ")");
@@ -227,8 +303,7 @@ OPS.set_shape_property = function (args) {
   var node = walkProperty(l, args.contentPath);
   var pp = node.property(args.property);
   if (!pp) throw new Error("No property: " + args.property);
-  if (args.keyframe && args.time !== undefined) pp.setValueAtTime(args.time, args.value);
-  else if (args.time !== undefined && pp.numKeys > 0) pp.setValueAtTime(args.time, args.value);
-  else __setValue(pp, args.value);
+  __requireKeyTime(!!args.keyframe, args.time, "set_shape_property");
+  __setOrKeyAtTime(pp, args.value, args.time, !!args.keyframe, "set_shape_property");
   return { ok: true };
 };

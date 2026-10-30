@@ -1,0 +1,103 @@
+{
+  "recipe": 9,
+  "title": "log_issue counts repeats, keeps reported, and forks per scope",
+  "note": "Sandboxed: the driver points AE_MCP_HOME at its scratch folder, so neither journal is a real one.",
+  "steps": [
+    {
+      "call": "log_issue",
+      "args": {
+        "title": "live driver sample issue",
+        "symptom": "A sample entry written by the live driver.",
+        "workaround": "None needed; it lives in the scratch journal."
+      },
+      "save": "first",
+      "expect": [
+        {
+          "path": "occurrences",
+          "equals": 1
+        },
+        {
+          "path": "previouslyLogged",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "log_issue",
+      "args": {
+        "title": "live driver sample issue",
+        "symptom": "A sample entry written by the live driver.",
+        "workaround": "None needed; it lives in the scratch journal."
+      },
+      "expect": [
+        {
+          "path": "occurrences",
+          "equals": 2
+        },
+        {
+          "path": "previouslyLogged",
+          "equals": true
+        },
+        {
+          "path": "id",
+          "equals": "${first.id}"
+        }
+      ]
+    },
+    {
+      "call": "mark_issue_reported",
+      "args": {
+        "id": "${first.id}"
+      }
+    },
+    {
+      "call": "log_issue",
+      "args": {
+        "title": "live driver sample issue",
+        "symptom": "A sample entry written by the live driver.",
+        "workaround": "None needed; it lives in the scratch journal."
+      },
+      "expect": [
+        {
+          "path": "reported",
+          "equals": true
+        }
+      ]
+    },
+    {
+      "call": "log_issue",
+      "args": {
+        "title": "live driver sample issue",
+        "symptom": "A sample entry written by the live driver.",
+        "workaround": "None needed; it lives in the scratch journal.",
+        "scope": "user"
+      },
+      "expect": [
+        {
+          "path": "occurrences",
+          "equals": 1
+        },
+        {
+          "path": "previouslyLogged",
+          "equals": false
+        },
+        {
+          "path": "alsoIn",
+          "includes": "project"
+        }
+      ]
+    },
+    {
+      "call": "list_known_issues",
+      "args": {
+        "scope": "all"
+      },
+      "expect": [
+        {
+          "path": "$text",
+          "matches": "${first.id}"
+        }
+      ]
+    }
+  ]
+}

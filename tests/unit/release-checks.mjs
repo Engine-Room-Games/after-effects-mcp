@@ -193,6 +193,18 @@ try {
     assert.match(r.reason, /exited/);
   });
 
+  await check("a server that closes stdin before reading does not crash the smoke run (EPIPE)", async () => {
+    // The write lands on a closed pipe and fails asynchronously with EPIPE;
+    // without a stdin error listener that killed the whole test process.
+    const r = await smokeServer({
+      command: process.execPath,
+      args: [stub("close-stdin.mjs", "process.stdin.destroy(); setTimeout(() => process.exit(3), 300)")],
+      opNames,
+    });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /exited|stdin closed/);
+  });
+
   await check("a command that cannot start fails", async () => {
     const r = await smokeServer({ command: path.join(scratch, "no-such-binary"), opNames });
     assert.equal(r.ok, false);

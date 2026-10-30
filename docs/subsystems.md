@@ -69,6 +69,30 @@ Three enforcement points, in order of preference:
 predate `bundleHash` entirely, so `undefined` must always mean "too old to say",
 never "matches".
 
+**The hash names the ExtendScript; `capabilities` names the panel code.**
+`bundleHash` says nothing about `client/main.js`, and a bundle can be current
+while the panel code beside it is not. Since issue #220 (stage 3) `/health`
+also lists `capabilities`, the only word on which panel code is answering.
+`setup/panelCapabilities.ts` reads it, and the gate keeps it with its verdict
+and drops it whenever it drops the verdict (invalidate, port change,
+unreachable), so a panel nobody has asked yet counts as legacy. **A missing or
+malformed field means "legacy", never "broken".** It gates nothing: a
+capability only switches the server onto a path that needs it, and every
+panel without one keeps the path it always had. The server still falls back
+on `Unknown op:` for the op behind a capability, since the list is static in
+`main.js` and stands for an op in the bundle installed beside it — and then
+withdraws the capability (`panelGate.withdraw`) until the verdict is next
+dropped, so the extra round trip is paid once, not on every call.
+
+Internal ops (`_project_path`, `_render_save`, …) are sent only through
+`internalSender` in `tools/internalOps.ts`. Its op name is typed over
+`InternalOpMutation`, and a `"write"` is refused unless the write lease is
+held — internal ops never pass the tool path that takes one.
+
+| Capability | What the server does with it |
+|---|---|
+| `project-path` | Asks `_project_path` for the .aep's path and reads/writes `house-style.md` itself. |
+
 **Install before AE is open.** The panel loads at launch and only at launch, so
 installing while AE is closed costs no restart. `check_setup` reports
 `afterEffectsRunning`, and the guides, the `init-after-effects` prompt and
@@ -137,15 +161,37 @@ The house style is deliberately *not* part of the scaffold — see below.
 
 ## The house style
 
-`house-style.md` lives next to the `.aep`, and is read and written over the
-bridge by `packages/jsx/style.jsx`, not by the MCP server.
+`house-style.md` lives next to the `.aep`. Where it is *found* has always
+been the bridge's job: the bridge is the one channel every client has, so
+asking After Effects for the project's path needs no working directory, no
+`roots` and no filesystem tools on the client, and works identically in Claude
+Desktop and in a source checkout. A file found any other way would need a
+project folder, and the clients that need help most are exactly the ones
+without one.
 
-That looks like the wrong layer until you count clients. The bridge is the one
-channel every client has, because the whole product already depends on it.
-Reading the style over it needs no working directory, no `roots`, and no
-filesystem tools on the client — so it works identically in Claude Desktop and
-in a git checkout. A server-side file would need a project folder, and the
-clients that need help most are exactly the ones that do not have one.
+Where it is *opened* depends on the panel (issue #220, stage 3):
+
+- **A panel reporting `project-path`** answers `_project_path` — the .aep's
+  path and saved state, nothing else — and the server reads and writes the
+  file itself (`style/houseStyleFile.ts`). No file I/O on AE's main thread.
+- **Every other panel** (legacy, or one that answers `Unknown op:` after all)
+  gets `get_house_style` / `set_house_style` exactly as before, and
+  `packages/jsx/style.jsx` opens the file.
+- **A folder the server cannot see** goes to the panel's op too. On macOS,
+  privacy access to Desktop, Documents and removable or network volumes is
+  per app, so After Effects can be allowed where the server is not. A guide is
+  "not there" only when the .aep beside it is visible to the server; any other
+  failure to read, or an `EACCES`/`EPERM` at open on a write, is the panel's
+  to try, and nothing was written by then.
+
+The server's copy is a port of `style.jsx` with the same sentences and result
+shapes, and `tests/unit/panel-capabilities.mjs` holds them to each other on a
+real folder, BOM, CRLF and non-ASCII included. Both write every line ending
+as LF: measured on AE 26.5, `style.jsx` (`lineFeed = "Unix"`) turns a
+caller's `\r\n` and bare `\r` into `\n`, so the server normalises the same
+way before writing. The jsx copy stays: older
+servers use it, and `set_house_style` as a `run_batch` step goes straight to
+ExtendScript. Change both together.
 
 The costs, both reported rather than worked around:
 
@@ -156,6 +202,14 @@ The costs, both reported rather than worked around:
   to replace an existing one. It is not a patch, and quietly half-rewriting
   someone's hand-written style guide is worse than refusing.
 
+**Why `_project_path` and not `get_project_summary`.** Stage 2 of #220 left
+the I/O on the panel because no cheap op reported the path:
+`get_project_summary` does, but walks every project item on AE's main thread
+and checks each one for being a checkpoint. Paying that on every style read,
+on a large project, to save one small file read would have made the call
+slower. `_project_path` reads `app.project.file` and `app.project.dirty` and
+nothing else.
+
 ### The summary, and why it is not on the panel
 
 `get_house_style` answers with a digest by default (`detail: "summary"`), and
@@ -165,11 +219,9 @@ rule in their own build notes telling sessions *not* to call the tool and to rea
 a hand-maintained 40-line digest instead — so the digest and the source drifted,
 and "one cheap call" was neither (issue #59).
 
-**The reading is still over the bridge; only the summarising moved.** Every
-argument in the section above is about *where the file is opened*, and that has
-not changed — the panel opens it beside the .aep and hands back the whole text.
-Summarising is a separate question, and `style/summary.ts` answers it on the
-server for two reasons:
+**Summarising is a separate question from where the file is opened**, and
+`style/summary.ts` answers it on the server whichever side read the document,
+for two reasons:
 
 - **The panel does not update itself.** A summariser in the .jsx bundle would be
   dark until the user reinstalled the panel and relaunched AE, and until then an
@@ -202,6 +254,93 @@ a summary that looks complete and is not:
 `set_house_style` is unchanged: still the whole file, still `overwrite: true`.
 So `detail: "full"` is not optional before an edit — read the document, merge,
 send it back.
+
+## Filesystem checks on the server
+
+Three ops check the filesystem before they touch the project, and since issue
+#220 (stage 2) the server makes those checks before it forwards the call
+(`files/destinations.ts`):
+
+| Op | Checks | Ported from |
+|---|---|---|
+| `add_to_render_queue` | `outputPath` is absolute, its folder exists, an existing file needs `overwrite` | `render.jsx` |
+| `import_footage` | the file exists | `footage.jsx` |
+| `export_mogrt`, with an explicit `destDir` and `name` | the name resolves into the folder, an existing template needs `overwrite` | `mogrt.jsx` |
+
+Two `export_mogrt` checks stay with the jsx alone: creating a folder that does
+not exist yet, and testing that the folder accepts writes. Both write into the
+user's folder. A server killed mid-probe would leave its test file behind, and
+a file already at the probe's name would be emptied and deleted.
+
+**The aim is for these checks to end up on the server only.** For now the jsx
+checks stay and still run, because the panel does not update itself and the
+bundle hash is half the version gate: editing a jsx file would tell every user
+to reinstall the panel and restart AE. So the server makes the same checks
+first, with the same sentences, and the jsx repeats them for the cost of a stat
+or two. A refusal now comes from the server and its wording can be fixed
+without a restart. `tests/unit/destination-checks.mjs` holds each port to its
+jsx on real folders, and its header lists the `File` behaviour only a live AE
+can confirm. The jsx copies also still guard these ops as `run_batch` steps,
+which go straight to ExtendScript. A server refusal reads
+`AE: <the same sentence>` without the old `(line N)`, which was a line in the
+concatenated bundle.
+
+**No side effects.** A server check only reads: a `stat`, and nothing else. It
+never creates, writes or removes anything, so a refused call leaves nothing on
+disk that the jsx alone would not have left.
+
+**"Not allowed to look" is not "missing".** Only a definite `ENOENT` or
+`ENOTDIR` refuses (`pathState()` in `destinations.ts`). It counts as definite
+only when the path's root (the drive, the UNC share, or `/`) is itself visible.
+Windows reports a mapped drive that the server's logon session cannot see as
+`ENOENT`, not `EACCES`, so a missing or erroring root means the server cannot
+tell. `EACCES`, `EPERM` and
+every other failure to look forward the call, and the jsx decides. The server
+and After Effects are different processes with different access. On macOS,
+privacy access (TCC) to Desktop, Documents, removable and network volumes is
+granted per app, so AE can see a folder the server is not allowed to look into.
+On Windows a mapped drive can be invisible to the server's process while AE
+sees it. `tests/unit/destination-checks.mjs` checks this with a real `EACCES`,
+with simulated `EPERM`, `EIO` and others, and with a simulated root that is
+itself missing.
+
+**A check runs only where Node and ExtendScript's `File` read the path the same
+way.** `File` decodes `%XX` escapes, reads `~` as the home folder, and on
+Windows reads a leading `/c/` as a drive. A path that could mean two things is
+not judged by the server at all: it is forwarded untouched, and the jsx decides
+as it always did. A skipped check is never a refusal.
+
+**No extra round trip.** Every check is a stat on the server, and nothing is
+asked of After Effects first. The one AE question that would help,
+"where is the .aep?", has no cheap answer in an installed bundle (see the house
+style above), so `export_mogrt` without `destDir`, which defaults to the .aep's
+folder, is left entirely to the jsx.
+
+**Refusal order: what changed.** Every sentence is unchanged. What can change is
+which refusal comes *first* when a call has more than one fault, because the
+server's checks now run before checks only After Effects can make. In full:
+
+- **`add_to_render_queue`:** the jsx looked the comp up first. A `compId` that
+  is not a comp *and* a bad `outputPath` now reports the path, then the comp
+  once the path is fixed.
+- **`export_mogrt` with `destDir`:** the jsx refused three things before any
+  destination check: a comp that does not exist, a project never saved, and an
+  empty Essential Graphics panel (#71). Any of those *and* a bad destination
+  now reports the destination first.
+- **`export_mogrt` with `destDir` and no `name`:** no change. The template
+  name is read off the comp, so the server checks nothing and the jsx makes
+  every check in its own order.
+- **`export_mogrt` into a folder that does not exist yet:** the jsx created the
+  folder first and reported "Could not create the destination folder" before
+  checking the name. The server checks the name without creating anything, so
+  a name that escapes the folder *and* a folder that cannot be created now
+  reports the name first.
+- **`import_footage`:** no change. The file-existence check was already first.
+
+**The SVG viewBox check (#33) did not move.** It compares the viewBox against
+the *imported item's* size and removes the item when they disagree, and both of
+those need After Effects. Only the 16 KB read and the regex could leave, and
+the jsx has no way to receive a parsed viewBox without a bundle change.
 
 ## Comp snapshots, and why they live in the server
 
@@ -237,6 +376,16 @@ Three further things hold this honest:
   the before, the write and the after are one bridge call, and the diff logic
   lives in `snapshot.jsx` where `raw.jsx` and `batch.jsx` can both reach it —
   each of them gains about six lines and no new contract.
+- **`diff_comp` diffs on the server; `diff:true` still diffs in AE** (issue
+  #220, stage 1). Only the gathering needs After Effects, and the comparison
+  ran on AE's main thread and could only be fixed with a panel reinstall. So
+  `diff_comp` asks for a fresh `_comp_fingerprint` — in every bundle ever
+  shipped, so no panel update is needed — and diffs it in
+  `snapshots/diff.ts`. That leaves two copies of the diff until `diff:true`
+  returns its before/after fingerprints too; `tests/unit/comp-snapshot.mjs`
+  runs every case against both and a seeded parity sweep compares their
+  serialized output byte for byte. `_comp_diff` stays in the bundle, unused,
+  so a newer panel never breaks an older server that still calls it.
 - **A failed write still gets its diff.** Nothing rolls back, so "where did it
   stop" is the most valuable question after a throw. `__diffAnnotateError`
   *mutates* the error's `message` and rethrows the same object, so `line` and
@@ -327,7 +476,7 @@ How the restore is ordered, and why:
   deleted id throws "internal verification failure {Item Not Found}", so a
   checkpoint whose comp was deleted made `list_checkpoints` fail for the whole
   project. Every lookup goes through `__findItem` (`ids.jsx`), which
-  `getCompById`/`getItemById` and `delete_comp`/`duplicate_comp` now use too.
+  `getCompById` and `delete_comp`/`duplicate_comp` now use too.
 - **An explicit `compId` can re-bind an imported checkpoint.** Importing a
   project renumbers every item, so its checkpoints name ids that are gone or
   belong to something else. `revert_comp` accepts a `compId` that differs from

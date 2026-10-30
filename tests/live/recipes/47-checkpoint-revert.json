@@ -1,0 +1,175 @@
+{
+  "recipe": 47,
+  "title": "checkpoint_comp then revert_comp restores into the same comp id",
+  "manual": "Recipe 48: Edit > History after the revert — record the steps and their names against undoSplits.",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_null_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "CTRL"
+      },
+      "save": "ctrl"
+    },
+    {
+      "call": "create_text_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "text": "Title"
+      },
+      "save": "layer"
+    },
+    {
+      "call": "parent_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "parentLayerId": "${ctrl.id}"
+      }
+    },
+    {
+      "call": "set_expression",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Rotation"
+        ],
+        "expression": "wiggle(2, 5)"
+      }
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Opacity"
+        ],
+        "time": 0,
+        "value": 0
+      }
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${layer.id}",
+        "propertyPath": [
+          "Transform",
+          "Opacity"
+        ],
+        "time": 1,
+        "value": 100
+      }
+    },
+    {
+      "call": "add_marker",
+      "args": {
+        "compId": "${comp.id}",
+        "time": 1,
+        "comment": "beat"
+      }
+    },
+    {
+      "call": "checkpoint_comp",
+      "args": {
+        "compId": "${comp.id}",
+        "label": "clean"
+      },
+      "save": "cp",
+      "expect": [
+        {
+          "path": "checkpointId",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "delete_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${ctrl.id}"
+      }
+    },
+    {
+      "call": "create_solid_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "intruder",
+        "color": [
+          0.2,
+          0.4,
+          0.8
+        ]
+      },
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "revert_comp",
+      "args": {
+        "checkpointId": "${cp.checkpointId}"
+      },
+      "expect": [
+        {
+          "path": "compId",
+          "equals": "${comp.id}"
+        },
+        {
+          "path": "verified",
+          "equals": true
+        },
+        {
+          "path": "layersRestored",
+          "equals": 2
+        }
+      ]
+    },
+    {
+      "call": "list_layers",
+      "args": {
+        "compId": "${comp.id}",
+        "include": [
+          "parent"
+        ]
+      },
+      "expect": [
+        {
+          "length": 2
+        },
+        {
+          "path": "$text",
+          "notMatches": "intruder"
+        },
+        {
+          "path": "$text",
+          "matches": "CTRL"
+        }
+      ]
+    }
+  ]
+}

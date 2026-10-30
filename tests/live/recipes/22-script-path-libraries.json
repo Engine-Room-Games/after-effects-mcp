@@ -1,0 +1,53 @@
+{
+  "recipe": 22,
+  "title": "run_jsx scriptPath and libraries are read by the server",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "t",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "set_active_comp",
+      "args": {
+        "compId": "${comp.id}"
+      }
+    },
+    {
+      "writeFile": "rig.jsx",
+      "content": "function rig(c){ return c.name; }\n",
+      "save": "rig"
+    },
+    {
+      "writeFile": "scene.jsx",
+      "content": "return rig(app.project.activeItem);\n",
+      "save": "scene"
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "scriptPath": "${scene}",
+        "libraries": [
+          "${rig}"
+        ]
+      },
+      "expect": [
+        {
+          "equals": "t"
+        }
+      ]
+    }
+  ]
+}

@@ -15,6 +15,8 @@ import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
 import { createPanelGate } from "./bridge/panelGate.js";
 import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge/writeQueue.js";
+import { SessionLine } from "./frontdesk/line.js";
+import type { FrontDeskOptions } from "./frontdesk/config.js";
 import { JobManager, isTerminal, unknownJobMessage } from "./jobs/manager.js";
 import {
   RenderRunner,
@@ -24,12 +26,15 @@ import {
   resolveAerender,
   type RenderPlan,
 } from "./render/aerender.js";
+import { markRendered } from "./render/markDone.js";
 import { aerenderCandidates, afterEffectsInstallRoots } from "./setup/platform.js";
 import { SnapshotStore } from "./snapshots/store.js";
 import type { CompFingerprint } from "./snapshots/store.js";
+import { diffFingerprints } from "./snapshots/diff.js";
 import { descriptions } from "./tools/descriptions.js";
-import { AeError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
+import { AeError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
 import { resolveRunJsxSource, type RunJsxArgs } from "./tools/runJsxSource.js";
+import { toolAnnotations } from "./tools/annotations.js";
 import {
   disabledOps,
   disabledToolMessage,
@@ -39,6 +44,7 @@ import {
   withPolicyNotice,
   type ToolPolicy,
 } from "./tools/policy.js";
+import { batchProblemsMessage, prepareBatchSteps } from "./tools/batchSteps.js";
 import { findUnsafeArgKeys, unsafeArgsMessage } from "./util/argsSafety.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
@@ -50,6 +56,14 @@ import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./gen
 import { archiveIssue, listIssues, logIssue, markReported } from "./issues/journal.js";
 import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
+import { houseStyleOnServer } from "./style/houseStyleFile.js";
+import { internalSender, type SendInternal } from "./tools/internalOps.js";
+import { CAP_PROJECT_PATH } from "./setup/panelCapabilities.js";
+import {
+  checkFootageExists,
+  checkRenderOutput,
+  checkMogrtDestination,
+} from "./files/destinations.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
 import { fileURLToPath } from "node:url";
@@ -109,9 +123,9 @@ export function isWriteOp(name: string): boolean {
 const GUIDE_URI_PREFIX = "ae://guide/";
 
 // Schema for await_job/get_job/cancel_job (defined inline in shared/schemas.ts).
-const AwaitJobSchema = schemas.AwaitJob;
-const GetJobSchema = schemas.GetJob;
-const CancelJobSchema = schemas.CancelJob;
+const AwaitJobSchema = schemas.StrictOpSchemas.await_job;
+const GetJobSchema = schemas.StrictOpSchemas.get_job;
+const CancelJobSchema = schemas.StrictOpSchemas.cancel_job;
 
 export interface CreateServerOptions {
   /**
@@ -130,6 +144,12 @@ export interface CreateServerOptions {
    * cancel, for the stop to be reported. A test shortens it.
    */
   cancelSettleMs?: number;
+  /**
+   * The front desk this server joins or runs (issue #223), from
+   * `frontDeskFromEnv()`. Off unless given: the entry point turns it on, and a
+   * test that builds a server in-process never joins a real session's desk.
+   */
+  frontDesk?: FrontDeskOptions | null;
 }
 
 /**
@@ -166,22 +186,28 @@ export function createServer(opts: CreateServerOptions = {}) {
   // One writer at a time. See bridge/writeQueue.ts for why the panel's own
   // evalScript mutex is not enough.
   const writes = new WriteQueue();
+  // Every After Effects-bound call and every write lease goes through this:
+  // straight to `writes` and `bridge` when there is no front desk, through the
+  // desk shared with every other session on this After Effects when there is
+  // (issue #223; frontdesk/line.ts).
+  const line = new SessionLine(bridge, writes, {
+    desk: opts.frontDesk ?? null,
+    sessionLabel: () => `${server.getClientVersion()?.name ?? "an MCP client"}, pid ${process.pid}`,
+  });
+  // Every internal op goes through one of these: typed over InternalOpMutation,
+  // and a "write" is refused unless the write lock is held (tools/internalOps.ts).
+  // Sent as a write when the op is one or this call holds the lease, as the
+  // tool path sends its own op.
+  const internalVia = (heldByCall: () => boolean, onWait?: (message: string) => void): SendInternal =>
+    internalSender((op, a, write) => line.runOp(op, a, { write: write || heldByCall(), onWait }), line);
   // render_queue's jobs run in an aerender process this server owns; see
   // render/aerender.ts. When a job ends, its verified items are unticked in the
   // live queue so they do not render twice — once, as one named undo step, and
   // a write to the project, so it queues behind any other write like one.
   const renders = new RenderRunner(jobs, {
-    onRendered: async (items) => {
-      const lease = await writes.acquire("render_queue");
-      try {
-        const res = (await bridge.runOp("_render_mark_done", {
-          items: items.map((i) => ({ index: i.index, compId: i.compId, outputPath: i.outputs[0]?.path ?? null })),
-        })) as { results: { index: number; marked: boolean; reason?: string }[] };
-        return res.results;
-      } finally {
-        lease.release();
-      }
-    },
+    // Bounded wait (#163): the job settles after this answers, so an
+    // unbounded queue wait held await_job hostage to an unrelated edit.
+    onRendered: (items) => markRendered(line, internalVia(() => false), items),
   });
   const snapshots = new SnapshotStore();
   // Follows the bridge's port rather than copying it: see wsClient.ts.
@@ -192,6 +218,18 @@ export function createServer(opts: CreateServerOptions = {}) {
   // new) panel is answering, and the verdict about the old one is void (#156).
   ws.onReopen(() => panelGate.invalidate());
   ws.start();
+  line.start();
+  // The event socket and its reconnect timer are what kept an orphaned server
+  // alive after its client went (#163). Closing the server releases them, so
+  // the process can end by draining its event loop — never by process.exit,
+  // which crashes Node 24 on Windows after a fetch.
+  const priorOnClose = server.onclose;
+  server.onclose = () => {
+    ws.stop();
+    // Hands the desk on if this server runs it; see frontdesk/line.ts.
+    void line.close();
+    priorOnClose?.();
+  };
 
   // The issue journal, pushed rather than pulled: every failed tool call is
   // answered with the journal entries that match its tool and error text, so
@@ -222,7 +260,7 @@ export function createServer(opts: CreateServerOptions = {}) {
     }
     let answer: { known: boolean; error?: string };
     try {
-      answer = await bridge.cancel(jobId);
+      answer = await line.cancel(jobId);
     } catch (e) {
       return fail(
         name,
@@ -325,6 +363,9 @@ export function createServer(opts: CreateServerOptions = {}) {
       name,
       description: descriptions[name] ?? `AE op: ${name}`,
       inputSchema: toolInputSchema(name) as any,
+      // Derived from OpMutation and the read-only policy table, never hand-kept:
+      // see tools/annotations.ts for the rule (issue #165).
+      annotations: toolAnnotations(name),
     }));
     return { tools };
   });
@@ -386,7 +427,7 @@ export function createServer(opts: CreateServerOptions = {}) {
     const rawArgs = req.params.arguments ?? {};
     const progressToken = (req.params as any)?._meta?.progressToken as string | number | undefined;
 
-    if (!(name in OpSchemas) && !SERVER_OPS.has(name)) {
+    if (!Object.hasOwn(OpSchemas, name) && !SERVER_OPS.has(name)) {
       return errorResult(`Unknown tool: ${name}`);
     }
     // Not annotated from the journal, like `Unknown tool`: this is the user's
@@ -429,7 +470,10 @@ export function createServer(opts: CreateServerOptions = {}) {
         if (name === "get_job") {
           const a = GetJobSchema.parse(rawArgs);
           const st = jobs.get(a.jobId);
-          return textResult(st ?? null);
+          // A bare `null` read as "no news yet" and invited polling for ever;
+          // say what await_job and cancel_job say about the same id (#163).
+          if (!st) return fail(name, unknownJobMessage(a.jobId, "There is no progress to report."));
+          return textResult(st);
         }
         if (name === "cancel_job") {
           const a = CancelJobSchema.parse(rawArgs);
@@ -455,7 +499,7 @@ export function createServer(opts: CreateServerOptions = {}) {
           return textResult(await checkSetup(setupOpts()));
         }
         if (name === "setup_panel") {
-          const a = schemas.SetupPanel.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.setup_panel.parse(rawArgs);
           const installed = await installPanel({ enableDebugMode: a.enableDebugMode, force: a.force });
           // The panel on disk just changed; whatever was cached about the
           // running one is now the wrong half of the comparison.
@@ -465,7 +509,7 @@ export function createServer(opts: CreateServerOptions = {}) {
           return textResult({ ...installed, setup: await checkSetup(setupOpts()) });
         }
         if (name === "init_project") {
-          const a = schemas.InitProject.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.init_project.parse(rawArgs);
           const client: ClientKind =
             !a.client || a.client === "auto"
               ? detectClient(server.getClientVersion()?.name)
@@ -481,7 +525,7 @@ export function createServer(opts: CreateServerOptions = {}) {
           );
         }
         if (name === "ae_guide") {
-          const a = schemas.AeGuide.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.ae_guide.parse(rawArgs);
           const guide = getGuide(a.topic);
           if (!guide) return errorResult(`Unknown guide topic: ${a.topic}`);
           // Markdown, not JSON: this is prose to be read, and JSON-escaping it
@@ -504,13 +548,13 @@ export function createServer(opts: CreateServerOptions = {}) {
           return { content: [{ type: "text" as const, text: withPolicyNotice(policy, guide.body) }] };
         }
         if (name === "log_issue") {
-          const a = schemas.LogIssue.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.log_issue.parse(rawArgs);
           // The project journal stays the default: an entry is about this
           // project's work unless the agent says it is about the tools.
           return textResult(logIssue({ ...a, scope: a.scope ?? "project" }));
         }
         if (name === "list_known_issues") {
-          const a = schemas.ListKnownIssues.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.list_known_issues.parse(rawArgs);
           return textResult(
             listIssues({
               status: a.status ?? "all",
@@ -531,14 +575,14 @@ export function createServer(opts: CreateServerOptions = {}) {
           );
         }
         if (name === "mark_issue_reported") {
-          const a = schemas.MarkIssueReported.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.mark_issue_reported.parse(rawArgs);
           const entry = markReported(a.id, a.url);
           // The scope goes back too: a bare id can name an entry in either
           // journal, and the caller has to be able to say which one moved.
           return textResult({ ok: true, id: entry.id, scope: entry.scope, reported: true, issueUrl: entry.issueUrl });
         }
         if (name === "archive_issue") {
-          const a = schemas.ArchiveIssue.parse(rawArgs);
+          const a = schemas.StrictOpSchemas.archive_issue.parse(rawArgs);
           const entry = archiveIssue(a.id, a.reason);
           return textResult({
             ok: true,
@@ -558,10 +602,13 @@ export function createServer(opts: CreateServerOptions = {}) {
       }
     }
 
-    // Validate input against zod schema.
+    // Validate input against the op's schema, closed at every depth
+    // (`StrictOpSchemas`, issue #147). The emitted schema has always told the
+    // model an unknown key is refused; the plain schema stripped it, so a
+    // misspelt field reached no handler and the tool answered "done".
     let args: unknown;
     try {
-      args = (OpSchemas[name as keyof typeof OpSchemas] as z.ZodType).parse(rawArgs);
+      args = (schemas.StrictOpSchemas[name as keyof typeof OpSchemas] as z.ZodType).parse(rawArgs);
     } catch (e) {
       return fail(name, invalidArgsText(name, e));
     }
@@ -583,6 +630,18 @@ export function createServer(opts: CreateServerOptions = {}) {
       }
     }
 
+    // Every step is held to the arguments of the tool it names, at every
+    // depth, and the parsed args — defaults applied — are what is forwarded
+    // (issue #157). Before, steps went to ExtendScript raw: no defaults, typos
+    // passed, and a tool whose second half runs outside After Effects
+    // half-worked. Refused whole, like the policy check above.
+    if (name === "run_batch") {
+      const batch = args as { ops: { op: string; args?: unknown }[] };
+      const { ops, problems } = prepareBatchSteps(batch.ops);
+      if (problems.length > 0) return fail(name, batchProblemsMessage(problems));
+      args = { ...batch, ops };
+    }
+
     // run_jsx can take its script, and its helper libraries, from files rather
     // than from the conversation. The server reads them — see runJsxSource.ts;
     // the short version is that Claude Desktop's agent has no filesystem tools
@@ -598,7 +657,12 @@ export function createServer(opts: CreateServerOptions = {}) {
     // Refuse to forward to a panel that predates this server. Without this the
     // agent gets `Unknown op: …` for anything added since the panel was
     // installed and has no way to know an update is the fix.
+    // Timed from here so a timeout can say what the whole call cost (#175): the
+    // gate's /health probe waits on a busy After Effects too, and was measured
+    // turning a 3s op limit into a 5.0s wait the message never mentioned.
+    const calledAt = Date.now();
     const staleness = await panelGate.check();
+    const gateMs = Date.now() - calledAt;
     if (staleness) return errorResult(staleness);
 
     // Serialize writes. Acquiring *before* runOp is what keeps the op timeout
@@ -607,10 +671,21 @@ export function createServer(opts: CreateServerOptions = {}) {
     // call that timed out having never run would report a bridge failure for a
     // bridge that was working, which is the one way this feature could make
     // things worse than they were.
+    // Told only when this call waits behind *another session* at the front
+    // desk: as progress, when the client asked for progress — this request is
+    // still open, so the notifications are ones it is listening for (#82).
+    let progressStep = 0;
+    const onWait = progressToken === undefined
+      ? undefined
+      : (message: string) => {
+          void extra
+            .sendNotification({ method: "notifications/progress", params: { progressToken, progress: ++progressStep, message } })
+            .catch(() => {});
+        };
     let lease: WriteLease | null = null;
     if (isWriteOp(name)) {
       try {
-        lease = await writes.acquire(name, extra?.signal);
+        lease = await line.acquire(name, extra?.signal, onWait);
       } catch (e) {
         // Full, timed out in the queue, or cancelled — all three mean the call
         // never reached After Effects, and all three say so.
@@ -623,17 +698,45 @@ export function createServer(opts: CreateServerOptions = {}) {
     try {
       // Inside this try so the panel's own error mapping — timeouts, AeError,
       // the Unknown-op backstop — applies to the internal ops these forward.
-      if (SNAPSHOT_OPS.has(name)) return await runSnapshotOp(name, args, bridge, snapshots);
+      const runner: OpRunner = { runOp: (op, a) => line.runOp(op, a, { write: lease !== null, onWait }) };
+      const sendInternal = internalVia(() => lease !== null, onWait);
+      if (SNAPSHOT_OPS.has(name)) return await runSnapshotOp(name, args, sendInternal, snapshots);
       // The render runs outside After Effects; only the prepare and the save
       // cross the bridge. The lease is released when this returns, on purpose
       // — see runRender.
-      if (name === "render_queue") return textResult(await runRender(args as RenderQueueArgs, bridge, renders), wait);
+      if (name === "render_queue") return textResult(await runRender(args as RenderQueueArgs, sendInternal, renders), wait);
+
+      // Filesystem checks the server makes itself (issue #220, stage 2), so a
+      // refusal costs After Effects nothing. The jsx copies stay in the bundle
+      // and run again after these: older servers and `run_batch` steps rely on
+      // them. See "Filesystem checks on the server" in docs/subsystems.md.
+      // None of them has a side effect: a refusal leaves nothing behind.
+      if (name === "add_to_render_queue") checkRenderOutput(args as { outputPath: string; overwrite?: boolean });
+      if (name === "import_footage") checkFootageExists(args as { path: string });
+      if (name === "export_mogrt") {
+        checkMogrtDestination(args as { compId: number; destDir?: string; name?: string; overwrite?: boolean });
+      }
 
       // The request's progressToken is deliberately not forwarded. The panel
       // does nothing with it — its WS `progress` events carry a jobId and no
       // token — and progress is delivered on `await_job`, never here; see
       // forwardJobProgress.
-      const result = await bridge.runOp(name, args);
+      // A non-object result that After Effects warned about arrives wrapped
+      // (core.jsx, dialog guard, issue #225); unwrapped here so the value the
+      // agent reads keeps its shape, with the warnings as their own block.
+      // The house style's file I/O is the server's on a panel that can name
+      // the .aep cheaply (issue #220, stage 3); every other panel opens the
+      // file itself, as before. See style/houseStyleFile.ts.
+      const viaServer =
+        (name === "get_house_style" || name === "set_house_style") && panelGate.capabilities().has(CAP_PROJECT_PATH);
+      const lifted = liftAeWarnings(
+        viaServer
+          ? await houseStyleOnServer(name, args, sendInternal, (op, a) => runner.runOp(op, a), () =>
+              panelGate.withdraw(CAP_PROJECT_PATH)
+            )
+          : await runner.runOp(name, args)
+      );
+      const result = lifted.value;
 
       // Async envelope handling for run_batch
       if (ASYNC_OPS.has(name) && isAsyncEnvelope(result)) {
@@ -669,6 +772,10 @@ export function createServer(opts: CreateServerOptions = {}) {
         // below it — a shorter one here would release the lock mid-batch while
         // a writer that queued at the same moment was still waiting.
         lease?.extendUntil(jobs.waitFor(env.jobId, writes.holdCeilingMs));
+        // A desk lease can be lost while the batch still runs, if the front
+        // desk changes hands and it cannot be re-taken (issue #223): other
+        // sessions' writes may then land between its chunks, and the job says so.
+        lease?.onLost?.((why) => jobs.warn(env.jobId, why));
         // The undo fields travel with the envelope because this is the only
         // message the agent sees before it starts describing the work to the
         // user; the measured count arrives much later, with the job's result.
@@ -707,7 +814,7 @@ export function createServer(opts: CreateServerOptions = {}) {
           cellWidth?: number; cellHeight?: number;
           tiles?: unknown[];
         };
-        return imageContent(
+        return withAeWarnings(imageContent(
           {
             width: v.width,
             height: v.height,
@@ -736,7 +843,7 @@ export function createServer(opts: CreateServerOptions = {}) {
             tiles: v.tiles,
           },
           v.base64
-        );
+        ), (result as { aeWarnings?: unknown }).aeWarnings);
       }
 
       // The style guide is read over the bridge and summarised here: the panel
@@ -748,15 +855,19 @@ export function createServer(opts: CreateServerOptions = {}) {
         return textResult(applyHouseStyleDetail(result, detail), wait);
       }
 
-      return textResult(result, wait);
+      return withAeWarnings(textResult(result, wait), lifted.envelopeWarnings);
     } catch (e) {
       // Checked before BridgeUnreachableError because the remedies are
       // opposites: one says restart After Effects, the other says do not.
       // Every branch below goes through `fail`, so a failure the journal already
       // knows about arrives with its pointer attached — that is the push half of
       // the journal, and the error path is the only place it can live.
-      if (e instanceof BridgeTimeoutError) return fail(name, e.message);
+      if (e instanceof BridgeTimeoutError) {
+        e.withTiming({ totalMs: Date.now() - calledAt, gateMs, queueMs: wait?.waitedMs ?? 0 });
+        return fail(name, e.message);
+      }
       if (e instanceof BridgeUnreachableError) return fail(name, e.message);
+      if (e instanceof BridgeResetError) return fail(name, e.message);
       if (e instanceof AeError) {
         // A failure the panel diagnosed itself — a stale render buffer, so far.
         // Those messages are already a complete instruction to the agent, and
@@ -858,9 +969,14 @@ interface RenderQueueArgs {
   saveProject?: boolean;
 }
 
+/** The one thing the helpers below need from the bridge: a way to run an op through the session's line. */
+interface OpRunner {
+  runOp(op: string, args: unknown): Promise<unknown>;
+}
+
 async function runRender(
   args: RenderQueueArgs,
-  bridge: HttpClient,
+  send: SendInternal,
   renders: RenderRunner
 ): Promise<Record<string, unknown>> {
   const busy = renders.activeJobId;
@@ -871,7 +987,17 @@ async function runRender(
         `each render is a whole background copy of After Effects, so they are run one at a time.`
     );
   }
-  const plan = (await bridge.runOp("_render_prepare", { indices: args.indices, all: args.all })) as RenderPlan & {
+  // A timeout in either bridge step escapes before any render starts, so it is
+  // restated as render_queue's, saying what can and cannot still land.
+  const renderStep = async <T>(step: "prepare" | "save", p: Promise<T>): Promise<T> => {
+    try {
+      return await p;
+    } catch (e) {
+      if (e instanceof BridgeTimeoutError) e.asRenderStep(step);
+      throw e;
+    }
+  };
+  const plan = (await renderStep("prepare", send("_render_prepare", { indices: args.indices, all: args.all }))) as RenderPlan & {
     readOnly?: boolean | null;
   };
   // Items the user queued by hand never passed add_to_render_queue's guard.
@@ -897,7 +1023,7 @@ async function runRender(
     beforeSave: () => {
       aerender = resolveAerender(aerenderCandidates(plan.appPackage, { installRoots: afterEffectsInstallRoots() }));
     },
-    save: async (force) => (await bridge.runOp("_render_save", { force })) as { saved: boolean },
+    save: async (force) => (await renderStep("save", send("_render_save", { force }))) as { saved: boolean },
   });
   const save = { saved };
   const footageWarnings = plan.items.flatMap((i) => (i.footageWarnings ?? []).map((w) => `item ${i.index}: ${w}`));
@@ -984,12 +1110,12 @@ function withProgressNote(note: string | undefined, jobId: string): string {
 async function runSnapshotOp(
   name: string,
   args: unknown,
-  bridge: HttpClient,
+  send: SendInternal,
   snapshots: SnapshotStore
 ) {
   if (name === "snapshot_comp") {
     const a = args as { compId: number; includeFingerprint?: boolean };
-    const fingerprint = (await bridge.runOp("_comp_fingerprint", { compId: a.compId })) as CompFingerprint;
+    const fingerprint = (await send("_comp_fingerprint", { compId: a.compId })) as CompFingerprint;
     const snap = snapshots.store(fingerprint);
     return textResult({
       snapshotId: snap.id,
@@ -1014,18 +1140,21 @@ async function runSnapshotOp(
         `A diff only means anything against a snapshot of the same comp — omit compId, or snapshot_comp(${d.compId}) first.`
     );
   }
-  const res = (await bridge.runOp("_comp_diff", {
+  // Only the gathering needs After Effects. The comparison runs here (issue
+  // #220): `_comp_fingerprint` is in every panel ever shipped, so this works
+  // against old bundles too, and the diff no longer costs AE main-thread time.
+  const fingerprint = (await send("_comp_fingerprint", {
     compId: previous.compId,
-    since: previous.fingerprint,
-  })) as { diff: Record<string, unknown>; fingerprint: CompFingerprint };
+  })) as CompFingerprint;
+  const diff = diffFingerprints(previous.fingerprint, fingerprint);
   // The fresh fingerprint becomes a snapshot of its own, so a verify-as-you-go
   // loop can keep diffing forward without a second call per step.
-  const next = snapshots.store(res.fingerprint);
+  const next = snapshots.store(fingerprint);
   return textResult({
-    ...res.diff,
+    ...diff,
     since: d.since,
     snapshotId: next.id,
-    fingerprint: d.includeFingerprint ? res.fingerprint : undefined,
+    fingerprint: d.includeFingerprint ? fingerprint : undefined,
   });
 }
 
@@ -1074,12 +1203,61 @@ async function clientRoots(server: Server): Promise<string[] | undefined> {
  * Vision results never come through here with a wait — screenshots are reads
  * and are never queued — so the image envelope cannot be touched by this.
  */
-function textResult(value: unknown, wait?: QueueWait | null) {
-  const json = (v: unknown) => ({ type: "text" as const, text: JSON.stringify(v, null, 2) });
-  if (!wait) return { content: [json(value)] };
+export function textResult(value: unknown, wait?: QueueWait | null) {
+  // Compact, not pretty-printed (issue #166). The model reads JSON without the
+  // indentation, and every result is re-sent on every later turn of the
+  // session, so the whitespace was paid for many times over: 20–40% of a
+  // nested read like get_layer_full. Content is unchanged — only whitespace.
+  const json = (v: unknown) => ({ type: "text" as const, text: JSON.stringify(v) });
+  const warned = (v: { content: { type: "text"; text: string }[] }) =>
+    withAeWarnings(v, findAeWarnings(value));
+  if (!wait) return warned({ content: [json(value)] });
   const merged = mergeWait(value, wait);
-  if (merged) return { content: [json(merged)] };
-  return { content: [json(value), json(wait)] };
+  if (merged) return warned({ content: [json(merged)] });
+  return warned({ content: [json(value), json(wait)] });
+}
+
+// ---------- What After Effects reported under dialog suppression (#225) ----------
+// dispatch() holds AE's dialogs suppressed for every op and collects whatever
+// app.onError is handed. An object result carries it as `aeWarnings`; any other
+// result arrives in an envelope marked with this key. A warning must never read
+// as a clean success, so it gets its own text block, first, in words that send
+// the agent to read the state back.
+export const AE_WARNED_MARK = "__aemcpWarned";
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+// Top level, or one level down under `result` — the shape await_job and get_job
+// return a finished job in, which is where a chunked batch's warnings land.
+export function findAeWarnings(value: unknown): unknown {
+  if (!isPlainRecord(value)) return undefined;
+  if (Array.isArray(value.aeWarnings) && value.aeWarnings.length > 0) return value.aeWarnings;
+  return isPlainRecord(value.result) ? value.result.aeWarnings : undefined;
+}
+
+export function liftAeWarnings(raw: unknown): { value: unknown; envelopeWarnings: unknown } {
+  if (isPlainRecord(raw) && raw[AE_WARNED_MARK] === true && "value" in raw) {
+    return { value: raw.value, envelopeWarnings: raw.aeWarnings };
+  }
+  return { value: raw, envelopeWarnings: undefined };
+}
+
+export function aeWarningsText(warnings: string[]): string {
+  return (
+    `WARNING: After Effects reported ${warnings.length} message(s) through app.onError while this call ran ` +
+    "with its dialogs suppressed: " + warnings.map((w) => JSON.stringify(w)).join("; ") + ". " +
+    "The call itself did not fail, but do not report it as a clean success: some of these may be a warning " +
+    "After Effects would have shown as a dialog, others an error the tool raised and handled itself. Read the " +
+    "affected state back to confirm the change landed as intended before building on it."
+  );
+}
+
+export function withAeWarnings<T extends { content: unknown[] }>(res: T, warnings: unknown): T {
+  if (!Array.isArray(warnings) || warnings.length === 0) return res;
+  const block = { type: "text" as const, text: aeWarningsText(warnings.map((w) => String(w))) };
+  return { ...res, content: [block, ...res.content] };
 }
 
 function errorResult(message: string) {

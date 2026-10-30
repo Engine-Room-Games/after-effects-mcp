@@ -54,7 +54,8 @@ OPS.list_layers = noUndo(function (args) {
 
 OPS.create_text_layer = function (args) {
   var c = getCompById(args.compId);
-  var l = c.layers.addText(args.text || "");
+  // A box size makes paragraph text (issue #181): it wraps inside the box.
+  var l = args.boxSize ? c.layers.addBoxText([args.boxSize[0], args.boxSize[1]], args.text || "") : c.layers.addText(args.text || "");
   if (args.name) l.name = args.name;
   // `anchorAlign` is paragraph justification, not geometry. Offsetting the
   // anchor to the measured bbox edge (what this did before) looks right at
@@ -113,6 +114,16 @@ OPS.create_text_layer = function (args) {
     out.justification = __justificationName(verified.justification);
     out.justificationReasserted = verified.reasserted;
   }
+  if (args.boxSize) {
+    var boxSrc = l.property("Source Text");
+    try {
+      out.boxSize = __verifyBoxSize(boxSrc, args.boxSize, "create_text_layer", "");
+    } catch (eBox) {
+      try { l.remove(); } catch (eRm) {}
+      eBox.message = String(eBox.message) + "The new layer was removed, so nothing was created.";
+      throw eBox;
+    }
+  }
   return out;
 };
 
@@ -168,6 +179,22 @@ function __shapeSpawnPosition(comp, position) {
 }
 
 OPS.create_shape_layer = function (args) {
+  // Issue #148: these were once advertised and silently dropped, so a caller
+  // asking for a red rect got an empty layer and a success. The schema no longer
+  // declares them; this refuses them on the way in too, before anything is
+  // created, for any caller that reaches the handler without that parse.
+  var dropped = [];
+  var unsupported = ["shapes", "fill", "stroke", "strokeWidth"];
+  for (var u = 0; u < unsupported.length; u++) {
+    if (args[unsupported[u]] !== undefined) dropped.push(unsupported[u]);
+  }
+  if (dropped.length) {
+    throw new Error(
+      "create_shape_layer does not take " + dropped.join(", ") + ": it only creates the empty layer. " +
+      "Add contents with add_shape_content afterwards — a group, then a rect/ellipse/path, then a " +
+      "{type:\"fill\", color} or {type:\"stroke\", color, width} inside it. Nothing was created."
+    );
+  }
   var c = getCompById(args.compId);
   var pos = __shapeSpawnPosition(c, args.position);
   var l = c.layers.addShape();
@@ -185,7 +212,6 @@ OPS.create_shape_layer = function (args) {
       "The empty layer was removed, so nothing changed."
     );
   }
-  // shapes payload kept loose for v1 — the agent can use add_shape_content for detail
   var out = __layerSummary(l);
   // Read both back rather than echoing what we asked for: together they are the
   // coordinate space every subsequent path on this layer is measured in, and a
@@ -210,7 +236,16 @@ OPS.create_camera_layer = function (args) {
   var c = getCompById(args.compId);
   var center = (args.position && args.position.length >= 2) ? [args.position[0], args.position[1]] : [c.width / 2, c.height / 2];
   var l = c.layers.addCamera(args.name || "Camera", center);
-  if (args.oneNode) { try { l.autoOrient = AutoOrientType.NO_AUTO_ORIENT; } catch (e) {} }
+  if (args.oneNode) {
+    // Issue #150: this used to swallow its failure and hand back a two-node
+    // camera as if it were the one asked for.
+    try { l.autoOrient = AutoOrientType.NO_AUTO_ORIENT; }
+    catch (e) {
+      try { l.remove(); } catch (eRm) {}
+      throw new Error("create_camera_layer could not make the camera one-node (autoOrient = NO_AUTO_ORIENT): " + e.message +
+        ". The camera was removed, so nothing changed.");
+    }
+  }
   return __layerSummary(l);
 };
 
@@ -237,40 +272,341 @@ OPS.duplicate_layer = function (args) {
   return out;
 };
 
+// Removing a layer has fallout After Effects does not announce (issue #160):
+// its children lose their parent, layers using it as a track matte lose the
+// matte, and a solid's footage item is left in the project. All of it is read
+// before the removal — afterwards there is nothing left to ask — and reported,
+// each key present only when non-empty.
 OPS.delete_layer = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
+  var layerId = l.id;
+  var layerName = l.name;
+  var children = [];
+  var matteUsers = [];
+  for (var i = 1; i <= c.numLayers; i++) {
+    var o = c.layer(i);
+    if (o.id === layerId) continue;
+    var par = null;
+    try { par = o.parent; } catch (e) { par = null; }
+    if (par && par.id === layerId) children.push({ id: o.id, name: o.name });
+    var mt = null;
+    try { mt = o.trackMatteLayer; } catch (e2) { mt = null; }
+    if (mt && mt.id === layerId) matteUsers.push({ id: o.id, name: o.name });
+  }
+  var srcId = null;
+  try { if (l.source && __isSolidItem(l.source)) srcId = l.source.id; } catch (e3) { srcId = null; }
+
   l.remove();
-  return { ok: true };
+
+  var out = { ok: true, layerId: layerId, name: layerName };
+  if (children.length > 0) out.unparentedChildren = children;
+  if (matteUsers.length > 0) out.lostTrackMatte = matteUsers;
+  if (srcId !== null) {
+    var item = __findItem(srcId);
+    var solidUses = item ? __usedInList(item) : null;
+    if (solidUses && solidUses.unreadable) {
+      out.solidUseUnknown = { id: item.id, name: item.name, reason: solidUses.unreadable };
+    } else if (solidUses && solidUses.length === 0) {
+      out.unusedSolidLeft = { id: item.id, name: item.name };
+      out.note = "The solid item \"" + item.name + "\" is now used by nothing and remains in the project; purge_unused_footage removes it.";
+    }
+  }
+  return out;
 };
 
 OPS.set_layer = function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
-  if (args.name !== undefined) l.name = args.name;
-  if (args.enabled !== undefined) l.enabled = args.enabled;
-  if (args.locked !== undefined) l.locked = args.locked;
-  if (args.shy !== undefined) l.shy = args.shy;
-  if (args.solo !== undefined) l.solo = args.solo;
-  if (args.threeDLayer !== undefined) l.threeDLayer = args.threeDLayer;
+
+  // Resolve every enumeration name and the matte layer before anything is
+  // written (issues #149, #150). A name After Effects does not define used to
+  // leave the layer as it was behind an {ok}; now it refuses, and refuses
+  // before the name or switches in the same call have changed.
+  var blend;
   if (args.blendingMode !== undefined) {
-    try { l.blendingMode = BlendingMode[args.blendingMode] || l.blendingMode; }
-    catch (e) {}
-  }
-  if (args.label !== undefined) l.label = args.label;
-  if (args.inPoint !== undefined) l.inPoint = args.inPoint;
-  if (args.outPoint !== undefined) l.outPoint = args.outPoint;
-  if (args.startTime !== undefined) l.startTime = args.startTime;
-  if (args.stretch !== undefined) l.stretch = args.stretch;
-  if (args.preserveTransparency !== undefined) l.preserveTransparency = args.preserveTransparency;
-  if (args.trackMatte) {
-    if (args.trackMatte.type) {
-      try { l.trackMatteType = TrackMatteType[args.trackMatte.type] || l.trackMatteType; }
-      catch (e2) {}
+    blend = BlendingMode[args.blendingMode];
+    // Adobe documents SILHOUETE_ALPHA with one T; should a build ever define
+    // the English spelling instead, take that rather than refuse.
+    if (blend === undefined && args.blendingMode === "SILHOUETE_ALPHA") blend = BlendingMode.SILHOUETTE_ALPHA;
+    if (blend === undefined) {
+      throw new Error("set_layer: blendingMode '" + args.blendingMode + "' is not one of After Effects' BlendingMode names. Nothing was changed.");
     }
   }
-  return __layerSummary(l);
+  var tm = args.trackMatte, tmType, tmLayer = null;
+  if (tm) {
+    tmType = TrackMatteType[tm.type];
+    if (tmType === undefined) {
+      throw new Error("set_layer: trackMatte.type '" + tm.type + "' is not one of After Effects' TrackMatteType names. Nothing was changed.");
+    }
+    if (__isCamOrLight(l)) {
+      throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") is a " + __layerKind(l) + "; track mattes apply only to layers with pixels, not cameras or lights. Nothing was changed.");
+    }
+    if (tm.layerId !== undefined && tm.layerId !== null) {
+      if (tm.type === "NO_TRACK_MATTE") {
+        throw new Error("set_layer: trackMatte.type NO_TRACK_MATTE removes the matte, so it takes no layerId. Nothing was changed.");
+      }
+      if (tm.layerId === l.id) {
+        throw new Error("set_layer: a layer cannot be its own track matte (trackMatte.layerId " + tm.layerId + "). Nothing was changed.");
+      }
+      try { tmLayer = getLayerById(c, tm.layerId); }
+      catch (eM) {
+        throw new Error("set_layer: trackMatte.layerId " + tm.layerId + " is not a layer in comp " + c.id + ". Nothing was changed.");
+      }
+      if (__isCamOrLight(tmLayer)) {
+        throw new Error("set_layer: trackMatte.layerId " + tm.layerId + " is a " + __layerKind(tmLayer) + "; a camera or light has no pixels to use as a matte. Nothing was changed.");
+      }
+      if (typeof l.setTrackMatte !== "function") {
+        throw new Error("set_layer: trackMatte.layerId needs After Effects 2023 or later (Layer.setTrackMatte). Nothing was changed.");
+      }
+    } else if (tm.type !== "NO_TRACK_MATTE") {
+      // A type alone re-reads the current matte. With none there is nothing to
+      // re-read: measured on 26.5, assigning trackMatteType to a layer with no
+      // matte layer reports success and sets no matte (PR #205 live pass).
+      var curM = null;
+      try { curM = l.trackMatteLayer || null; } catch (eCurM) { curM = null; }
+      if (!curM) {
+        throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") has no track matte layer, so trackMatte.type " + tm.type +
+          " alone has nothing to apply to. Pass trackMatte.layerId to choose the matte layer. Nothing was changed.");
+      }
+    }
+  }
+
+  // The switch enumerations (issue #181), resolved by name like blendingMode.
+  var switchEnums = {};
+  for (var ei = 0; ei < __LAYER_SWITCH_ENUMS.length; ei++) {
+    var ef = __LAYER_SWITCH_ENUMS[ei][0];
+    if (args[ef] === undefined) continue;
+    var en = __LAYER_SWITCH_ENUMS[ei][1];
+    var table = __layerSwitchEnum(en);
+    var ev = table ? table[args[ef]] : undefined;
+    if (ev === undefined) {
+      throw new Error("set_layer: " + ef + " '" + args[ef] + "' is not one of After Effects' " + en + " names. Nothing was changed.");
+    }
+    switchEnums[ef] = ev;
+  }
+
+  // What can be known to fail without writing anything is refused here too.
+  var camOrLight = __isCamOrLight(l);
+  var pixelOnly = ["blendingMode", "threeDLayer", "preserveTransparency", "motionBlur", "collapseTransformation",
+    "adjustmentLayer", "guideLayer", "effectsActive", "audioEnabled", "quality", "samplingQuality", "frameBlendingType"];
+  for (var pi = 0; pi < pixelOnly.length; pi++) {
+    if (camOrLight && args[pixelOnly[pi]] !== undefined) {
+      throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") is a " + __layerKind(l) + ", which has no " + pixelOnly[pi] + ". Nothing was changed.");
+    }
+  }
+  if (args.collapseTransformation !== undefined && l.canSetCollapseTransformation === false) {
+    throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") has no collapse-transformations / continuous-rasterize switch " +
+      "(After Effects offers it on precomp, shape, text and vector-footage layers). Nothing was changed.");
+  }
+  if (args.audioEnabled !== undefined && l.hasAudio === false) {
+    throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") has no audio, so it has no audio switch. Nothing was changed.");
+  }
+  if (args.autoOrient === "CHARACTERS_TOWARD_CAMERA" && !(l instanceof TextLayer)) {
+    throw new Error("set_layer: autoOrient CHARACTERS_TOWARD_CAMERA applies only to a 3D text layer with per-character 3D; layer " + l.id +
+      " (\"" + l.name + "\") is a " + __layerKind(l) + ". Nothing was changed.");
+  }
+  // Orienting toward the camera is 3D-only, and After Effects answers it on a
+  // 2D layer with a modal warning rather than a throw: the call blocks until
+  // someone clicks OK (measured on AE 2026, PR #216 live pass). So it is
+  // refused here, judged by the 3D switch as it will be once this call's own
+  // threeDLayer — written before autoOrient when it turns 3D on — has landed. Cameras and lights
+  // are always 3D.
+  if ((args.autoOrient === "CAMERA_OR_POINT_OF_INTEREST" || args.autoOrient === "CHARACTERS_TOWARD_CAMERA") && !camOrLight) {
+    var threeDAfter = args.threeDLayer !== undefined ? !!args.threeDLayer : !!l.threeDLayer;
+    if (!threeDAfter) {
+      throw new Error("set_layer: autoOrient " + args.autoOrient + " needs a 3D layer, and layer " + l.id + " (\"" + l.name + "\") " +
+        (args.threeDLayer === false ? "is made 2D by this call" : "is 2D") +
+        " — set threeDLayer:true first (the same call will do). Nothing was changed.");
+    }
+    if (args.autoOrient === "CHARACTERS_TOWARD_CAMERA" && l.threeDPerChar !== true) {
+      throw new Error("set_layer: autoOrient CHARACTERS_TOWARD_CAMERA needs per-character 3D, which text layer " + l.id + " (\"" + l.name +
+        "\") does not have enabled (Animate > Enable Per-character 3D). Nothing was changed.");
+    }
+  }
+  // The same modal from the other side: turning 3D off under a toward-camera
+  // orient leaves a 2D layer oriented at the camera. With no autoOrient in the
+  // call that would be the end state, so it is refused; with one (which, by
+  // the check above, is not toward-camera) autoOrient is written before
+  // threeDLayer below, so the 2D-and-oriented state never exists, even briefly.
+  var orientFirst = args.threeDLayer === false && args.autoOrient !== undefined;
+  if (args.threeDLayer === false && args.autoOrient === undefined && !camOrLight) {
+    var AO = __layerSwitchEnum("AutoOrientType");
+    var curOrient = null, orientUnread = false;
+    try { curOrient = l.autoOrient; } catch (eAO) { orientUnread = true; }
+    // Fail closed: an orient that cannot be named could be the modal one, so a
+    // 3D layer is not turned 2D on a guess.
+    if ((!AO || orientUnread) && l.threeDLayer) {
+      throw new Error("set_layer: cannot tell whether layer " + l.id + " (\"" + l.name + "\") is auto-oriented toward the camera " +
+        "(" + (AO ? "its autoOrient cannot be read" : "this After Effects has no AutoOrientType") + "), and threeDLayer:false on such a " +
+        "layer blocks After Effects with a warning dialog. Nothing was changed. Clear its auto-orient by hand first.");
+    }
+    var curName = null;
+    if (AO && curOrient === AO.CAMERA_OR_POINT_OF_INTEREST) curName = "CAMERA_OR_POINT_OF_INTEREST";
+    else if (AO && curOrient === AO.CHARACTERS_TOWARD_CAMERA) curName = "CHARACTERS_TOWARD_CAMERA";
+    if (curName !== null) {
+      throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") is auto-oriented " + curName + ", which needs a 3D layer, so " +
+        "threeDLayer:false alone would leave it oriented at the camera in 2D. Pass autoOrient:\"NO_AUTO_ORIENT\" (or ALONG_PATH) " +
+        "in the same call. Nothing was changed.");
+    }
+  }
+  if (args.stretch !== undefined && args.stretch === 0) {
+    throw new Error("set_layer: stretch 0 is not a speed After Effects accepts. Nothing was changed.");
+  }
+  if (args.inPoint !== undefined && args.outPoint !== undefined && args.outPoint <= args.inPoint) {
+    throw new Error("set_layer: outPoint " + args.outPoint + " must be after inPoint " + args.inPoint + ". Nothing was changed.");
+  }
+
+  // Writes from here on. AE can still refuse one that nothing above could
+  // predict (an in-point it will not take), so every write that landed is
+  // recorded and a refusal part-way names what this call already changed and
+  // what it never reached, rather than implying it changed nothing.
+  //
+  // Order: an unlock first and a lock last, so the call's own locked switch
+  // never stands between it and its other fields. The matte next: it is the
+  // write whose result is read back, so its failure comes as early as it can.
+  //
+  // A toward-camera orient with threeDLayer:true writes the 3D switch first,
+  // read back like the switches: should After Effects ignore it (a layer that
+  // cannot be 3D), the call stops there with nothing else written, rather
+  // than going on to orient a 2D layer — the modal.
+  var towardCam = !camOrLight && (args.autoOrient === "CAMERA_OR_POINT_OF_INTEREST" || args.autoOrient === "CHARACTERS_TOWARD_CAMERA");
+  var threeDFirst = towardCam && args.threeDLayer === true;
+  var applied = [];
+  var steps = [];
+  if (args.locked === false) steps.push(["locked", false]);
+  if (threeDFirst) steps.push(["threeDLayer", true]);
+  if (tm) steps.push(["trackMatte", tm]);
+  steps.push(
+    ["name", args.name], ["enabled", args.enabled], ["shy", args.shy],
+    ["solo", args.solo], ["autoOrient", orientFirst ? switchEnums.autoOrient : undefined],
+    ["threeDLayer", threeDFirst ? undefined : args.threeDLayer], ["blendingMode", blend], ["label", args.label],
+    ["inPoint", args.inPoint], ["outPoint", args.outPoint], ["startTime", args.startTime],
+    ["stretch", args.stretch], ["preserveTransparency", args.preserveTransparency],
+    ["motionBlur", args.motionBlur], ["collapseTransformation", args.collapseTransformation],
+    ["adjustmentLayer", args.adjustmentLayer], ["guideLayer", args.guideLayer],
+    ["effectsActive", args.effectsActive], ["audioEnabled", args.audioEnabled],
+    ["quality", switchEnums.quality], ["samplingQuality", switchEnums.samplingQuality],
+    ["frameBlendingType", switchEnums.frameBlendingType], ["autoOrient", orientFirst ? undefined : switchEnums.autoOrient]
+  );
+  if (args.locked === true) steps.push(["locked", true]);
+
+  var out;
+  for (var si = 0; si < steps.length; si++) {
+    var field = steps[si][0];
+    if (steps[si][1] === undefined) continue;
+    try {
+      // Last line before the modal: whatever the checks above assumed, a
+      // toward-camera orient is never written onto a layer that reads 2D.
+      if (field === "autoOrient" && towardCam && !l.threeDLayer) {
+        throw new Error("set_layer: autoOrient " + args.autoOrient + " needs a 3D layer, and this layer reads 2D, so it was not written.");
+      }
+      if (field === "trackMatte") out = __setTrackMatte(l, tm, tmType, tmLayer);
+      else l[field] = steps[si][1];
+      // The switches are read back (issue #181): After Effects can take an
+      // assignment it does not apply (frame blending on a still) and say nothing.
+      if (__LAYER_READBACK[field] && l[field] !== steps[si][1]) {
+        throw new Error("set_layer: After Effects took " + field + " but reads " + String(l[field]) + " afterwards, not " +
+          String(steps[si][1]) + "; this layer does not hold that setting.");
+      }
+    } catch (eW) {
+      var notReached = [];
+      for (var sj = si + 1; sj < steps.length; sj++) if (steps[sj][1] !== undefined) notReached.push(steps[sj][0]);
+      throw new Error("set_layer could not set " + field + ": " + String(eW.message || eW).replace(/^set_layer: /, "") + " " +
+        (applied.length ? "Already applied by this call: " + applied.join(", ") + "." : "Nothing else in this call was written.") +
+        (notReached.length ? " Not written: " + notReached.join(", ") + "." : ""));
+    }
+    if (field === "trackMatte") {
+      applied.push("trackMatte" + (out.layerId !== null && out.matteEnabled === false ? " (matte layer " + out.layerId + "'s video is now off)" : ""));
+    } else {
+      applied.push(field);
+    }
+  }
+  var summary = __layerSummary(l);
+  if (out) summary.trackMatte = out;
+  // The switches this call set, as After Effects now holds them.
+  var switches = null;
+  for (var ri = 0; ri < __LAYER_SWITCHES.length; ri++) {
+    var rf = __LAYER_SWITCHES[ri];
+    if (args[rf] === undefined) continue;
+    if (!switches) switches = {};
+    switches[rf] = switchEnums[rf] !== undefined ? args[rf] : l[rf];
+  }
+  if (switches) summary.switches = switches;
+  return summary;
 };
+
+// set_layer's timeline switches (issue #181). Booleans and enum-valued ones;
+// the enum names are keys into the After Effects enumeration named beside them.
+var __LAYER_SWITCHES = ["motionBlur", "collapseTransformation", "adjustmentLayer", "guideLayer", "effectsActive",
+  "audioEnabled", "quality", "samplingQuality", "frameBlendingType", "autoOrient"];
+var __LAYER_SWITCH_ENUMS = [
+  ["quality", "LayerQuality"], ["samplingQuality", "LayerSamplingQuality"],
+  ["frameBlendingType", "FrameBlendingType"], ["autoOrient", "AutoOrientType"]
+];
+// Named one by one: an enumeration a build lacks reads undefined, not a throw.
+function __layerSwitchEnum(name) {
+  if (name === "LayerQuality") return typeof LayerQuality !== "undefined" ? LayerQuality : undefined;
+  if (name === "LayerSamplingQuality") return typeof LayerSamplingQuality !== "undefined" ? LayerSamplingQuality : undefined;
+  if (name === "FrameBlendingType") return typeof FrameBlendingType !== "undefined" ? FrameBlendingType : undefined;
+  if (name === "AutoOrientType") return typeof AutoOrientType !== "undefined" ? AutoOrientType : undefined;
+  return undefined;
+}
+var __LAYER_READBACK = {};
+(function () { for (var i = 0; i < __LAYER_SWITCHES.length; i++) __LAYER_READBACK[__LAYER_SWITCHES[i]] = true; })();
+// The 3D switch too: a toward-camera orient is only safe once it has landed.
+__LAYER_READBACK.threeDLayer = true;
+
+/**
+ * Apply a resolved track matte and read it back (issue #149). The 2023+ API is
+ * `setTrackMatte(layer, type)` / `removeTrackMatte()`. A type without a
+ * layerId re-applies the current matte layer with the new type; set_layer
+ * refuses it up front when there is no current matte, because assigning
+ * `trackMatteType` alone then reports success and sets nothing (26.5).
+ * Whatever AE ends up holding is checked against the request: a matte that
+ * did not land is an error, not an {ok}.
+ */
+function __isCamOrLight(l) {
+  return (typeof CameraLayer !== "undefined" && l instanceof CameraLayer) ||
+    (typeof LightLayer !== "undefined" && l instanceof LightLayer);
+}
+
+function __setTrackMatte(l, tm, tmType, tmLayer) {
+  var cur = null;
+  try { cur = l.trackMatteLayer || null; } catch (eCur) { cur = null; }
+  if (tm.type === "NO_TRACK_MATTE") {
+    // Measured on 26.5: removeTrackMatte() clears the matte layer but leaves
+    // trackMatteType as it was (ALPHA, say); assigning NO_TRACK_MATTE after it
+    // clears the type. Both, in that order.
+    if (typeof l.removeTrackMatte === "function") l.removeTrackMatte();
+    if (l.trackMatteType !== tmType) l.trackMatteType = tmType;
+  } else if (tmLayer) {
+    l.setTrackMatte(tmLayer, tmType);
+  } else {
+    // Validated above: a type alone only reaches here with a matte layer set.
+    l.setTrackMatte(cur, tmType);
+  }
+
+  var gotType = l.trackMatteType;
+  var gotLayer = null;
+  try { gotLayer = l.trackMatteLayer || null; } catch (eGot) { gotLayer = null; }
+  if (gotType !== tmType) {
+    throw new Error("set_layer: asked for trackMatte.type " + tm.type + " but After Effects reports a different matte type afterwards. " +
+      "Read the layer back with get_layer_full.");
+  }
+  var wantLayer = tm.type === "NO_TRACK_MATTE" ? null : (tmLayer || cur);
+  if (wantLayer ? (!gotLayer || gotLayer.id !== wantLayer.id) : gotLayer) {
+    throw new Error("set_layer: asked for " + (wantLayer ? "layer " + wantLayer.id + " (\"" + wantLayer.name + "\")" : "no matte layer") +
+      " as the track matte, but After Effects reports " +
+      (gotLayer ? "layer " + gotLayer.id + " (\"" + gotLayer.name + "\")" : "no matte layer") + " afterwards. Read the layer back with get_layer_full.");
+  }
+  return {
+    type: tm.type,
+    layerId: gotLayer ? gotLayer.id : null,
+    // After Effects switches a layer's video off when it becomes a matte.
+    matteEnabled: gotLayer ? gotLayer.enabled : null
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Parenting that does not move the layer

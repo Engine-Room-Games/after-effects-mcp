@@ -102,7 +102,7 @@ function load() {
       return out;
     }
     function avItem(it) {
-      Object.defineProperty(it, "usedIn", { get: function () { return compsUsing(it); } });
+      Object.defineProperty(it, "usedIn", { configurable: true, get: function () { return compsUsing(it); } });
       it.remove = function () { removeSelf(it); };
       return it;
     }
@@ -138,7 +138,25 @@ function load() {
     }
     function mkLayer(name, source, ctor) {
       var l = new (ctor || AVLayer)();
+      l.id = ++NEXT_ID;
       l.name = name;
+      l.parent = null;
+      l.trackMatteLayer = null;
+      // AE: removing a layer unparents its children and clears mattes on it.
+      l.remove = function () {
+        for (var i = 0; i < ITEMS.length; i++) {
+          var h = ITEMS[i];
+          if (!(h instanceof CompItem)) continue;
+          var at = -1;
+          for (var j = 0; j < h._layers.length; j++) {
+            var o = h._layers[j];
+            if (o === l) at = j;
+            if (o.parent === l) o.parent = null;
+            if (o.trackMatteLayer === l) o.trackMatteLayer = null;
+          }
+          if (at >= 0) { h._layers.splice(at, 1); h.numLayers = h._layers.length; }
+        }
+      };
       l.source = source || null;
       return l;
     }
@@ -152,7 +170,20 @@ function load() {
       c._layers = layers || [];
       c.numLayers = c._layers.length;
       c.layer = function (i) { return c._layers[i - 1]; };
-      return addItem(avItem(c), folder);
+      avItem(c);
+      // AE removes every precomp layer nesting a comp along with it (#160).
+      c.remove = function () {
+        removeSelf(c);
+        for (var i = 0; i < ITEMS.length; i++) {
+          var h = ITEMS[i];
+          if (!(h instanceof CompItem)) continue;
+          for (var j = h._layers.length - 1; j >= 0; j--) {
+            if (h._layers[j].source === c) h._layers.splice(j, 1);
+          }
+          h.numLayers = h._layers.length;
+        }
+      };
+      return addItem(c, folder);
     }
 
     var app = {
@@ -176,7 +207,7 @@ function load() {
   // core.jsx for dispatch/noUndoWhen, comps.jsx for delete_comp and __folderArg,
   // footage.jsx for the purge and the helpers both share, explore.jsx for
   // __itemKind. In the shipped bundle all of them share one scope.
-  for (const f of ["core.jsx", "ids.jsx", "comps.jsx", "footage.jsx", "explore.jsx"]) {
+  for (const f of ["core.jsx", "ids.jsx", "comps.jsx", "footage.jsx", "explore.jsx", "layers.jsx"]) {
     vm.runInContext(read(f), ctx, { filename: f });
   }
   const get = (expr) => vm.runInContext(expr, ctx);
@@ -237,6 +268,85 @@ check("delete_comp by default leaves the solids and says so", () => {
   eq(res.removedSolids, undefined, "nothing claims to have been removed");
   eq(get("has(S1) && has(S2) && has(U1) && has(U2) && has(F1) && has(N)"), true, "every project item survives");
   eq(undo(), ["begin:AE MCP: delete_comp", "end"], "one undo step");
+});
+
+check("delete_comp refuses a comp another comp nests, naming that comp, and deletes nothing (#160)", () => {
+  const { ctx, get, data, call, failure } = load();
+  fixture(ctx);
+  const ids = data("({ N: N.id, A: A.id })");
+  const msg = failure(call("delete_comp", { compId: ids.N }));
+  ok(/refused/.test(msg) && /Nothing was deleted/.test(msg), "it says it refused and that nothing happened");
+  ok(msg.indexOf('"A" (id ' + ids.A + ", 1 layer(s))") >= 0, "the nesting comp is named by name and id");
+  ok(/force:true/.test(msg), "and the opt-in is named");
+  eq(get("has(N)"), true, "the comp survives");
+  eq(get("A.numLayers"), 6, "and so does the precomp layer nesting it");
+});
+
+check("delete_comp force:true deletes a nested comp and reports the layers that went with it (#160)", () => {
+  const { ctx, get, data, call, success } = load();
+  fixture(ctx);
+  const ids = data("({ N: N.id, A: A.id, nested: A._layers[4].id })");
+  const res = success(call("delete_comp", { compId: ids.N, force: true }));
+  eq(get("has(N)"), false, "the comp is gone");
+  eq(get("A.numLayers"), 5, "AE took the nesting layer with it");
+  eq(res.removedFromComps, [{ id: ids.A, name: "A", layers: [{ id: ids.nested, name: "nested" }] }], "and the result says so, per comp");
+});
+
+check("delete_comp fails closed when usedIn cannot be read (#160)", () => {
+  const { ctx, get, call, failure, success } = load();
+  fixture(ctx);
+  vm.runInContext('Object.defineProperty(LOOSE, "usedIn", { get: function () { throw new Error("usedIn exploded"); } });', ctx);
+  const msg = failure(call("delete_comp", { compId: get("LOOSE.id") }));
+  ok(/could not read/.test(msg) && /usedIn exploded/.test(msg) && /Nothing was deleted/.test(msg), "refused, naming the reason");
+  eq(get("has(LOOSE)"), true);
+  const res = success(call("delete_comp", { compId: get("LOOSE.id"), force: true }));
+  ok(/could not be read/.test(res.nestingUnknown), "forced, and the unknown fallout is said");
+});
+
+check("delete_comp names a nesting checkpoint copy and points at the checkpoint tools (#160)", () => {
+  const { ctx, get, call, failure } = load();
+  fixture(ctx);
+  vm.runInContext('function __cpIsCheckpoint(it) { return it === A; }', ctx);
+  const msg = failure(call("delete_comp", { compId: get("N.id") }));
+  ok(/1 layer\(s\), checkpoint\)/.test(msg), "the nesting comp is flagged as a checkpoint");
+  ok(/checkpoint copy/.test(msg) && /delete_checkpoints/.test(msg) && !/Re-point/.test(msg), "and the advice is the checkpoint one");
+});
+
+check("delete_comp on a comp nothing nests carries no removedFromComps (#160)", () => {
+  const { ctx, get, call, success } = load();
+  fixture(ctx);
+  const res = success(call("delete_comp", { compId: get("LOOSE.id") }));
+  eq(res.removedFromComps, undefined);
+});
+
+check("delete_layer reports unparented children, lost mattes and an orphaned solid (#160)", () => {
+  const { ctx, get, data, call, success } = load();
+  fixture(ctx);
+  vm.runInContext("B._layers[1].parent = B._layers[0]; B._layers[1].trackMatteLayer = B._layers[0]; " +
+    "var own = B._layers[1]; var shared = B._layers[0];", ctx);
+  const ids = data("({ B: B.id, own: own.id, shared: shared.id, S3: S3.id })");
+  // "shared" (S2) is still used by A, so no solid is reported; "own" loses its parent and matte.
+  const res = success(call("delete_layer", { compId: ids.B, layerId: ids.shared }));
+  eq(res.name, "shared");
+  eq(res.unparentedChildren, [{ id: ids.own, name: "own" }], "the child is named");
+  eq(res.lostTrackMatte, [{ id: ids.own, name: "own" }], "and so is the matte user");
+  eq(res.unusedSolidLeft, undefined, "S2 is still A's");
+  // "own" is B's only use of S3: deleting it orphans the solid.
+  const res2 = success(call("delete_layer", { compId: ids.B, layerId: ids.own }));
+  eq(res2.unusedSolidLeft, { id: ids.S3, name: "B Only Solid" }, "the orphaned solid is reported");
+  ok(/purge_unused_footage/.test(res2.note), "with the way to clean it up");
+  eq(res2.unparentedChildren, undefined, "empty fallout is omitted");
+  eq(get("B.numLayers"), 0);
+});
+
+check("delete_layer reports an unreadable solid as unknown, not unused (#160)", () => {
+  const { ctx, get, data, call, success } = load();
+  fixture(ctx);
+  vm.runInContext('Object.defineProperty(S3, "usedIn", { configurable: true, get: function () { throw new Error("usedIn exploded"); } });', ctx);
+  const ids = data("({ B: B.id, own: B._layers[1].id, S3: S3.id })");
+  const res = success(call("delete_layer", { compId: ids.B, layerId: ids.own }));
+  eq(res.unusedSolidLeft, undefined, "not claimed unused");
+  eq(res.solidUseUnknown, { id: ids.S3, name: "B Only Solid", reason: "usedIn exploded" });
 });
 
 check("delete_comp with no unused solids reports zero and no note", () => {
