@@ -491,16 +491,13 @@ interface Running {
    * asked path held a file from before the render. The job folder is then
    * kept (only the copy is removed) so these survive the job's end.
    */
-  kept: string[];
+  kept: Map<string, string>;
   /** Set while cancel() runs; run() waits on it before removing the job folder. */
   cancelDone: Promise<void> | null;
   /** The current item's aerender exited 0: it is finished and being verified, not interrupted (#217). */
   exitedOk: boolean;
   /** A cancel came while the current item was being verified: decide it, then start no other. */
   stopAfterItem: boolean;
-  /** Resolves once the current item is decided — listed in `rendered`, or the job failed. */
-  itemDecided: Promise<void>;
-  decideItem: () => void;
 }
 
 export interface RenderRunnerOptions {
@@ -766,14 +763,14 @@ export function relocateShadowOutputs(
   /**
    * A cancelled render's partial output must never replace a file that was
    * there before the render: when this says so for a destination, the file
-   * stays in the job folder and is named in `kept` — each file exactly, a
-   * sequence's frames one by one — instead of being moved.
+   * stays in the job folder and is named in `kept` with the exact path it
+   * belongs at — a sequence's frames one by one — instead of being moved.
    */
   keep?: (dest: string) => boolean
-): { moved: string[]; problems: string[]; kept: string[] } {
+): { moved: string[]; problems: string[]; kept: { from: string; to: string }[] } {
   const moved: string[] = [];
   const problems: string[] = [];
-  const kept: string[] = [];
+  const kept: { from: string; to: string }[] = [];
   const claims = outputs
     .filter((o): o is RenderOutputPlan & { path: string } => !!o.path)
     .map((o) => {
@@ -788,7 +785,7 @@ export function relocateShadowOutputs(
     if (owners.length !== 1) continue;
     const to = path.join(path.dirname(owners[0].o.path), name);
     if (keep?.(to)) {
-      if (!kept.includes(f)) kept.push(f);
+      kept.push({ from: f, to });
       continue;
     }
     try {
@@ -1530,12 +1527,10 @@ export class RenderRunner {
       touchedAt: Date.now(),
       relocateProblems: [],
       before: new Map(),
-      kept: [],
+      kept: new Map(),
       cancelDone: null,
       exitedOk: false,
       stopAfterItem: false,
-      itemDecided: Promise.resolve(),
-      decideItem: () => {},
     };
     this.current = r;
     this.arm();
@@ -1558,7 +1553,6 @@ export class RenderRunner {
         }
         const item = items[i];
         r.exitedOk = false;
-        r.itemDecided = new Promise<void>((res) => (r.decideItem = res));
         r.itemPos = i;
         r.itemFrames = 0;
         const label = `"${item.compName ?? "?"}" (render queue item ${item.index}, ${i + 1} of ${items.length})`;
@@ -1628,16 +1622,15 @@ export class RenderRunner {
         if (!problems.length) {
           const promoted = this.promoteKept(r, item);
           problems.push(...promoted);
-          for (const v of verified) {
-            const o = item.outputs.find((x) => x.path && v.path !== x.path && path.basename(v.path) === path.basename(x.path));
-            if (o?.path) v.path = o.path;
-          }
+          if (!promoted.length) verified.forEach((v, n) => (v.path = checked.finals[n]));
         }
         if (problems.length) {
           status = "failed";
           r.settled = true;
           await this.unqueue(r);
-          const stray = strayFiles(r.layout);
+          // A file kept on purpose (writtenText names it) is not an
+          // unforeseen #215 resolution, and is not deleted with the job.
+          const stray = strayFiles(r.layout).filter((f) => !r.kept.has(f));
           this.jobs.fail(
             r.jobId,
             `aerender reported success on ${label} but the output cannot be verified: ${problems.join("; ")}. ` +
@@ -1681,7 +1674,6 @@ export class RenderRunner {
         }
         r.rendered.push(done);
         r.framesBefore += Math.max(item.frames, r.itemFrames);
-        r.decideItem();
       }
       if (r.cancelled) {
         status = "cancelled";
@@ -1690,27 +1682,20 @@ export class RenderRunner {
         // under it (#215 review: a cancelled partial beside the project was
         // deleted with the copy, and partialFiles came back empty).
         if (r.cancelDone) await r.cancelDone;
-        // Normally cancel() has settled the job with its own report. When it
-        // could not see the process exit it reported stopped:false and left the
-        // job open — and this is that exit, arriving late. Settle it here, or
-        // await_job waits for ever on a render that is over.
-        if (!r.settled && r.cancelGaveUp) {
-          r.settled = true;
-          const pos = r.plan.items[r.itemPos];
-          const cut = pos && !r.rendered.some((x) => x.index === pos.index) ? pos : undefined;
-          if (cut) this.relocate(r, cut);
-          await this.unqueue(r);
-          const partialFiles = cut ? cancelledPartials(cut.outputs, r.before, r.kept) : [];
-          this.jobs.cancel(r.jobId, {
-            jobId: r.jobId,
-            stopped: true,
-            wasRunning: true,
-            rendered: r.rendered,
-            partialFiles,
-            note:
-              "aerender exited after cancel_job had reported it still running; the render is stopped now. " +
-              this.partialNote(r, cut, partialFiles),
-          });
+        // Normally cancel() has settled the job with its own report. Two cases
+        // are left to here: cancel() could not see the process exit and
+        // reported stopped:false (this is that exit, arriving late), or the
+        // cancel came while an item aerender had finished was being verified
+        // and returned at once (stopAfterItem). Settle it, or await_job waits
+        // for ever on a render that is over.
+        if (!r.settled && (r.cancelGaveUp || r.stopAfterItem)) {
+          await this.settleCancelled(
+            r,
+            r.cancelGaveUp
+              ? "aerender exited after cancel_job had reported it still running. "
+              : "Cancelled after an item aerender had already finished when the cancel came; that item was " +
+                  "verified (see `rendered`) and no later item was started. "
+          );
         }
         return;
       }
@@ -1738,7 +1723,6 @@ export class RenderRunner {
       }
     } finally {
       this.finished.set(r.jobId, status);
-      r.decideItem();
       if (this.current === r) this.current = null;
       removeJobFolder(r);
       this.disarm?.();
@@ -1780,7 +1764,7 @@ export class RenderRunner {
     // previous render's and complete. promoteKept moves it over once verified.
     const keep = (dest: string) => unchangedSince(dest, r.before);
     const res = relocateShadowOutputs(item.outputs, r.plan.projectPath, r.layout, keep);
-    for (const k of res.kept) if (!r.kept.includes(k)) r.kept.push(k);
+    for (const k of res.kept) r.kept.set(k.from, k.to);
     if (res.moved.length) {
       logger.info(`render ${r.jobId}: moved ${res.moved.length} output file(s) out of the copy's folder (#215)`);
     }
@@ -1788,11 +1772,52 @@ export class RenderRunner {
     return res;
   }
 
-  /** The kept files that belong to `o`: its file name, or its `[####]` pattern. */
+  /**
+   * The kept files that belong to output `o`, by the full path each one
+   * belongs at — never by file name alone: two outputs may share a name in
+   * different folders.
+   */
   private keptFor(r: Running, o: string): string[] {
-    const base = path.basename(o);
-    const re = sequenceMatcher(base);
-    return r.kept.filter((k) => (re ? re.test(path.basename(k)) : path.basename(k) === base));
+    const re = sequenceMatcher(path.basename(o));
+    const out: string[] = [];
+    for (const [from, to] of r.kept) {
+      if (path.dirname(to) !== path.dirname(o)) continue;
+      if (re ? re.test(path.basename(to)) : to === o) out.push(from);
+    }
+    return out;
+  }
+
+  /**
+   * run()'s own cancel report, for the two cases cancel() leaves to it. The
+   * render engine is stopped first and `stopped` says whether it went — the
+   * same rule as cancel()'s, so the two never disagree.
+   */
+  private async settleCancelled(r: Running, lead: string): Promise<void> {
+    r.settled = true;
+    const pos = r.plan.items[r.itemPos];
+    const cut = pos && !r.rendered.some((x) => x.index === pos.index) ? pos : undefined;
+    if (cut) this.relocate(r, cut);
+    await this.signalEngines(r, true).catch(() => 0);
+    const survivors = await this.engineSurvivors(r, this.graceMs).catch(() => [] as number[]);
+    await this.unqueue(r);
+    const partialFiles = cut ? cancelledPartials(cut.outputs, r.before, [...r.kept.keys()]) : [];
+    this.jobs.cancel(r.jobId, {
+      jobId: r.jobId,
+      stopped: survivors.length === 0,
+      wasRunning: true,
+      rendered: r.rendered,
+      interruptedItem: cut ? { index: cut.index, compName: cut.compName, framesDone: r.itemFrames, frames: cut.frames } : null,
+      partialFiles,
+      note:
+        lead +
+        (survivors.length
+          ? `Render engine process(es) ${survivors.join(", ")} for this job are still alive after SIGKILL — the ` +
+            "render may still be running. Ask the user to end any aerender / aerendercore (Windows: aerender.exe, " +
+            "AfterFX) process in Activity Monitor or Task Manager. "
+          : "aerender and its render engine have exited. ") +
+        this.partialNote(r, cut, partialFiles) +
+        (r.rendered.length ? "Items listed in `rendered` finished and were verified." : "No item had finished."),
+    } satisfies CancelReport);
   }
 
   /**
@@ -1805,20 +1830,21 @@ export class RenderRunner {
     r: Running,
     item: RenderItemPlan,
     since: number
-  ): { verified: VerifiedOutput[]; problems: string[]; framesOnDisk: number | null } {
+  ): { verified: VerifiedOutput[]; finals: string[]; problems: string[]; framesOnDisk: number | null } {
     const verified: VerifiedOutput[] = [];
+    const finals: string[] = [];
     const problems: string[] = [];
     for (const o of item.outputs) {
       const kept = o.path ? this.keptFor(r, o.path) : [];
       if (!o.path || !kept.length) {
         const c = verifyOutputs([o], since);
-        verified.push(...c.verified);
+        for (const v of c.verified) (verified.push(v), finals.push(v.path));
         problems.push(...c.problems);
         continue;
       }
       if (!sequenceMatcher(path.basename(o.path))) {
         const c = verifyOutputs([{ ...o, path: kept[0] }], since);
-        verified.push(...c.verified);
+        for (const v of c.verified) (verified.push(v), finals.push(o.path));
         problems.push(...c.problems);
         continue;
       }
@@ -1833,9 +1859,9 @@ export class RenderRunner {
         }
       }
       if (files === 0) problems.push(`no frames matching ${o.path} were written by this render`);
-      else verified.push({ path: o.path, bytes, files });
+      else (verified.push({ path: o.path, bytes, files }), finals.push(o.path));
     }
-    return { verified, problems, framesOnDisk: problems.length ? null : verifiedFrameCount(item, verified) };
+    return { verified, finals, problems, framesOnDisk: problems.length ? null : verifiedFrameCount(item, verified) };
   }
 
   /** Move a verified item's kept files over the earlier files at the asked paths. Returns problems. */
@@ -1844,10 +1870,10 @@ export class RenderRunner {
     for (const o of item.outputs) {
       if (!o.path) continue;
       for (const k of this.keptFor(r, o.path)) {
-        const to = path.join(path.dirname(o.path), path.basename(k));
+        const to = r.kept.get(k) as string;
         try {
           moveFile(k, to);
-          r.kept.splice(r.kept.indexOf(k), 1);
+          r.kept.delete(k);
         } catch (e) {
           problems.push(`the verified output ${k} could not be moved over the earlier ${to}: ${(e as Error).message}`);
         }
@@ -1864,8 +1890,8 @@ export class RenderRunner {
    */
   private partialNote(r: Running, item: RenderItemPlan | undefined, partialFiles: string[]): string {
     const leftAlone = item ? [...r.before.keys()].filter((f) => unchangedSince(f, r.before)) : [];
-    const moved = partialFiles.filter((f) => !r.kept.includes(f));
-    const kept = partialFiles.filter((f) => r.kept.includes(f));
+    const moved = partialFiles.filter((f) => !r.kept.has(f));
+    const kept = partialFiles.filter((f) => r.kept.has(f));
     const list = (xs: string[]) => xs.slice(0, 10).join(", ") + (xs.length > 10 ? ` and ${xs.length - 10} more` : "");
     return (
       (partialFiles.length
@@ -1884,10 +1910,10 @@ export class RenderRunner {
 
   /** partialNote's facts for a failure message: where this item's output is, if anywhere. */
   private writtenText(r: Running, item: RenderItemPlan): string {
-    const files = cancelledPartials(item.outputs, r.before, r.kept);
+    const files = cancelledPartials(item.outputs, r.before, [...r.kept.keys()]);
     const leftAlone = [...r.before.keys()].filter((f) => unchangedSince(f, r.before));
-    const moved = files.filter((f) => !r.kept.includes(f));
-    const kept = files.filter((f) => r.kept.includes(f));
+    const moved = files.filter((f) => !r.kept.has(f));
+    const kept = files.filter((f) => r.kept.has(f));
     const list = (xs: string[]) => xs.slice(0, 10).join(", ") + (xs.length > 10 ? ` and ${xs.length - 10} more` : "");
     return (
       (moved.length ? ` Files this item wrote: ${list(moved)}.` : "") +
@@ -2078,6 +2104,32 @@ export class RenderRunner {
       // Nothing is rendering, and nothing it wrote is partial (#217 review).
       return this.finishedReport(r);
     }
+    if (r.exitedOk && !r.cancelled) {
+      // aerender already exited 0 on this item: it is finished, not
+      // interrupted, and is being verified — which can wait up to the drain
+      // cap while its render engine closes the output. Do not hold the
+      // caller for that: say so now, start no later item, and let run()
+      // report the item and settle the job.
+      r.stopAfterItem = true;
+      const item = r.plan.items[r.itemPos];
+      const what = `render queue item ${item?.index ?? "?"} ("${item?.compName ?? "?"}")`;
+      this.jobs.reportProgress(
+        jobId,
+        Math.min(r.framesBefore + r.itemFrames, r.totalFrames),
+        r.totalFrames,
+        `Cancel requested: aerender had already finished ${what}; verifying its output, then stopping — no later item will start`
+      );
+      return {
+        jobId,
+        stopped: false,
+        wasRunning: false,
+        status: "finishing",
+        note:
+          `aerender had already finished ${what} when the cancel came, so it was not interrupted: its output is ` +
+          "being verified now (this can take up to a minute while the render engine closes the file), and it will " +
+          "be reported as rendered or failed. No later item will start. Call await_job for the outcome.",
+      };
+    }
     if (r.cancelDone) {
       // A second cancel while the first is still stopping: wait for it, then
       // answer from where things stand (finished, or this cancel tries again).
@@ -2087,14 +2139,6 @@ export class RenderRunner {
     let done = () => {};
     r.cancelDone = new Promise<void>((res) => (done = res));
     try {
-      if (r.exitedOk && !r.cancelled) {
-        // aerender already exited 0 on this item: it is finished and being
-        // verified (the output may still be draining), not interrupted. Let
-        // it be decided and reported as rendered or failed; stop after it.
-        r.stopAfterItem = true;
-        await r.itemDecided;
-        if (r.settled) return this.finishedReport(r);
-      }
       return await this.cancelRunning(r);
     } finally {
       done();
@@ -2148,7 +2192,7 @@ export class RenderRunner {
     // run() relocates as aerender exits; this catches what an engine that
     // outlived aerender wrote after that (#215).
     if (item) this.relocate(r, item);
-    const partialFiles = item ? cancelledPartials(item.outputs, r.before, r.kept) : [];
+    const partialFiles = item ? cancelledPartials(item.outputs, r.before, [...r.kept.keys()]) : [];
     const report: CancelReport = {
       jobId,
       stopped,
@@ -2229,7 +2273,7 @@ export class RenderRunner {
       const cut = r.plan.items[r.itemPos];
       if (cut) {
         const res = relocateShadowOutputs(cut.outputs, r.plan.projectPath, r.layout, (dest) => unchangedSince(dest, r.before));
-        for (const k of res.kept) if (!r.kept.includes(k)) r.kept.push(k);
+        for (const k of res.kept) r.kept.set(k.from, k.to);
       }
       removeJobFolder(r);
     }
@@ -2243,7 +2287,7 @@ export class RenderRunner {
  * started a day or more later.
  */
 function removeJobFolder(r: Running): void {
-  if (!r.kept.length) {
+  if (!r.kept.size) {
     removeSnapshot(r.layout.jobDir);
     return;
   }

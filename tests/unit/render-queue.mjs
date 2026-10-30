@@ -472,20 +472,22 @@ if (mode === "relative") {
   const path = require("path");
   const project = args[args.indexOf("-project") + 1];
   const spell = (d) => (process.env.FAKE_SPELLING === "given" ? path.resolve(d) : fs.realpathSync(d));
-  const a = spell(process.env.FAKE_REAL_PROJ_DIR).split(path.sep);
-  const b = spell(path.dirname(out)).split(path.sep);
-  let k = 0;
-  while (k < a.length && k < b.length && a[k] === b[k]) k++;
-  let base = path.dirname(project);
-  for (let n = 0; n < a.length - k; n++) base = path.dirname(base);
-  const rel = path.join(base, ...b.slice(k));
-  const dir = fs.existsSync(rel) ? rel : path.dirname(out);
-  const name = path.basename(out);
   for (let n = 0; n < 4; n++) console.log("PROGRESS:  0:00:00:0" + n + " (" + (n + 1) + "): 0 Seconds");
-  if (name.includes("[####]")) {
-    for (let n = 0; n < 4; n++) fs.writeFileSync(path.join(dir, name.replace("[####]", String(n).padStart(4, "0"))), "png");
-  } else {
-    writeMovie(path.join(dir, name));
+  for (const o of [out, process.env.FAKE_OUT2].filter(Boolean)) {
+    const a = spell(process.env.FAKE_REAL_PROJ_DIR).split(path.sep);
+    const b = spell(path.dirname(o)).split(path.sep);
+    let k = 0;
+    while (k < a.length && k < b.length && a[k] === b[k]) k++;
+    let base = path.dirname(project);
+    for (let n = 0; n < a.length - k; n++) base = path.dirname(base);
+    const rel = path.join(base, ...b.slice(k));
+    const dir = fs.existsSync(rel) ? rel : path.dirname(o);
+    const name = path.basename(o);
+    if (name.includes("[####]")) {
+      for (let n = 0; n < 4; n++) fs.writeFileSync(path.join(dir, name.replace("[####]", String(n).padStart(4, "0"))), "png");
+    } else {
+      writeMovie(path.join(dir, name));
+    }
   }
   process.exit(0);
 }
@@ -980,13 +982,39 @@ function alive(pid) {
     const { jobId } = runner.start(plan(out), fake);
     for (let i = 0; i < 200 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
     await sleep(500); // aerender has exited 0; its engine still holds the output open
+    const t0 = Date.now();
     const report = await runner.cancel(jobId);
+    assert.ok(Date.now() - t0 < 1000, `the cancel held the caller ${Date.now() - t0}ms for the drain`);
+    assert.equal(report.status, "finishing");
+    assert.match(report.note, /being verified now/);
+    assert.match(jobs.get(jobId).message ?? "", /Cancel requested/);
     const st = await jobs.waitFor(jobId, 15_000);
     assert.equal(st.status, "completed", st.error);
     assert.equal(st.result.rendered[0].outputs[0].path, out);
     assert.ok(!(report.partialFiles ?? []).includes(out), `a finished file was called partial: ${report.note}`);
     assert.doesNotMatch(report.note, /INCOMPLETE/);
     assert.equal(report.wasRunning, false);
+  });
+
+  await check("cancel while a finished item drains, with a later item queued: verified, the later one never starts, the job is cancelled (#217 round 4)", async () => {
+    const jobs = new JobManager();
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, drainCapMs: 1500 });
+    const out = path.join(tmp, "draining2.mov");
+    env("stuckengine", out);
+    const p = plan(out);
+    p.items.push({ ...p.items[0], index: 3, outputs: [{ index: 1, path: path.join(tmp, "never.mov") }] });
+    const { jobId } = runner.start(p, fake);
+    for (let i = 0; i < 200 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
+    await sleep(500);
+    const report = await runner.cancel(jobId);
+    assert.equal(report.status, "finishing");
+    const st = await jobs.waitFor(jobId, 15_000).catch((e) => ({ status: "threw", error: e.message }));
+    const final = jobs.get(jobId);
+    assert.equal(final.status, "cancelled", JSON.stringify(st));
+    assert.deepEqual(final.result.rendered.map((x) => x.index), [2]);
+    assert.equal(final.result.stopped, true, final.result.note);
+    assert.match(final.result.note, /no later item was started/);
+    assert.ok(!fs.existsSync(path.join(tmp, "never.mov")));
   });
 
   for (const [ok, dur] of [[false, 2 / 30], [true, 4 / 30]]) {
@@ -1018,10 +1046,38 @@ function alive(pid) {
         assert.ok(fs.existsSync(kept), "the failed render's file is kept in the temp folder");
         assert.ok(err.includes(kept) && /NOT replaced/.test(err), err);
         assert.ok(err.includes(`Unchanged from before this render, not its output: ${out}`), err);
+        assert.doesNotMatch(err, /deleted as the job ends/, "a kept file is not an unforeseen #215 stray");
       }
       delete process.env.FAKE_REAL_PROJ_DIR;
     });
   }
+
+  await check("two same-named outputs in different folders over earlier files: each lands at its own path (#217 round 4)", async () => {
+    const top = path.join(tmp, "twin");
+    const projDir = path.join(top, "show");
+    fs.mkdirSync(projDir, { recursive: true });
+    const proj = path.join(projDir, "show.aep");
+    fs.writeFileSync(proj, "aep bytes");
+    const a = path.join(projDir, "out.mov");
+    const b = path.join(top, "out.mov");
+    fs.writeFileSync(a, "old a");
+    fs.writeFileSync(b, "old b");
+    process.env.FAKE_REAL_PROJ_DIR = projDir;
+    const jobs = new JobManager();
+    const runner = runnerFor(jobs, { tmpRoot: runTmp });
+    env("relative", a);
+    process.env.FAKE_OUT2 = b;
+    const p = { ...plan(a), projectPath: proj };
+    p.items[0].outputs = [{ index: 1, path: a }, { index: 2, path: b }];
+    const { jobId } = runner.start(p, fake);
+    const st = await jobs.waitFor(jobId, 10_000);
+    delete process.env.FAKE_OUT2;
+    delete process.env.FAKE_REAL_PROJ_DIR;
+    assert.equal(st.status, "completed", st.error);
+    assert.deepEqual(st.result.rendered[0].outputs.map((o) => o.path), [a, b]);
+    assert.notEqual(fs.readFileSync(a, "utf8"), "old a");
+    assert.notEqual(fs.readFileSync(b, "utf8"), "old b", "the second folder's earlier file must be replaced too");
+  });
 
   await check("a stuck engine cannot hold the job open: killed at the cap, then decided", async () => {
     const jobs = new JobManager();
