@@ -611,12 +611,29 @@ await check("sticky: a Save As or a first save is the same document, and keeps t
   {
     const { t, live, read } = stickyRig();
     await live.poll();
-    t.comps["/a-v2.aep|xmp.did:A"] = t.comps["/a.aep|xmp.did:A"];
-    t.p = { path: "/a-v2.aep", docId: "xmp.did:A", activeItemId: null };
+    // Save As gives the project a NEW DocumentID (measured on AE 26.5); the
+    // comp under the remembered id, with the remembered signature, says it is
+    // still the same work.
+    t.comps["/a-v2.aep|xmp.did:A2"] = t.comps["/a.aep|xmp.did:A"];
+    t.p = { path: "/a-v2.aep", docId: "xmp.did:A2", activeItemId: null };
     await live.poll();
+    assert.deepEqual(t.notes, [], "a Save As is not a change");
     const a = await read();
     assert.equal(a.compId, 2, `Save As dropped the comp: ${JSON.stringify(a)}`);
     assert.equal(t.asked.at(-1).knownPath, "/a-v2.aep", "the remembered path follows the document");
+  }
+  {
+    // Another project whose comp under the same id differs in its signature
+    // — here only in width — is another project: dropped.
+    const { t, live, read } = stickyRig();
+    t.comps["/a.aep|xmp.did:A"][2] = { id: 2, name: "Main", width: 1920, height: 1080, duration: 10, frameRate: 30 };
+    await live.poll();
+    t.comps["/b.aep|xmp.did:B"] = { 2: { id: 2, name: "Main", width: 1080, height: 1080, duration: 10, frameRate: 30 } };
+    t.p = { path: "/b.aep", docId: "xmp.did:B", activeItemId: null };
+    await live.poll();
+    const a = await read();
+    assert.equal(a.compId, null, `served ${JSON.stringify(a)} from the other project`);
+    assert.match(a.reason, /different project/);
   }
   {
     const { t, live, read } = stickyRig();

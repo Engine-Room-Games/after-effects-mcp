@@ -338,12 +338,20 @@ every click in that panel would flip both resources and cost a walk. So:
   save.
 
   The decision, in `sameProject`:
-  - Two known DocumentIDs decide it. The same document is the same project
-    under any path, so a Save As keeps the comp. Different documents are
-    different projects, so one unsaved project replaced by another drops it.
-  - Otherwise the path decides. An unchanged path is the same project. A
-    different saved path is a different project. An unsaved project gaining
-    its first path is its first save, so the comp is kept.
+  - **Unchanged path, or a first save** (no path, then a path): the same
+    project, unless two known DocumentIDs differ. One unsaved project replaced
+    by another is caught that way. A first save keeps the DocumentID
+    (measured on AE 26.5).
+  - **Any other path change**: Save As gives the project a *new* DocumentID
+    (measured on AE 26.5), so the IDs cannot tell a Save As from opening
+    another project. Equal IDs still mean the same document. Otherwise the
+    comp itself decides: it is kept only if a comp still exists under the
+    remembered id with the remembered signature (name, width, height,
+    duration, frame rate, refreshed every time the comp is served). A
+    same-id comp in another project with a different signature is dropped.
+    Two projects whose same-id comps match on all five fields cannot be told
+    apart; that is the accepted residue. Without the probe (an old panel)
+    there is no cheap check, so any path change drops the comp.
   - The comp is also dropped when it no longer exists. The reason it was dropped is kept until a comp
   becomes active, so the tick after a drop does not notify a second time. Two
   unsaved projects that both lack a DocumentID can be told apart only by the

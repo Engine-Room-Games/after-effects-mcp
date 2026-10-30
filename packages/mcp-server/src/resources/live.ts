@@ -138,26 +138,40 @@ export interface Sticky {
   id: number;
   path: string | null;
   docId: string | null;
+  /** The comp's signature when last served: what a Save As must still match. */
+  sig: string | null;
+}
+
+/** Cheap, and specific enough that a same-id comp in another project rarely shares it. */
+export function compSignature(comp: unknown): string | null {
+  if (!comp || typeof comp !== "object") return null;
+  const c = comp as Record<string, unknown>;
+  return JSON.stringify([c.name ?? null, c.width ?? null, c.height ?? null, c.duration ?? null, c.frameRate ?? null]);
 }
 
 /**
- * Whether a probe describes the project the sticky comp was remembered in.
+ * Whether a probe describes the project the sticky comp was remembered in:
+ * `"same"`, `"different"`, or `"verify"` — decided by the comp itself.
  *
- * - Two DocumentIDs, when both are known, decide it: the same document is the
- *   same project whatever its path (a Save As, a first save), and different
- *   ones are different projects (one unsaved project replaced by another).
- * - Otherwise the path does: unchanged is the same project; a different saved
- *   path is a different one. An unsaved project getting its first path is the
- *   same one — its first save — unless the DocumentIDs said otherwise.
+ * - Path unchanged: the same project, unless two known DocumentIDs differ
+ *   (one unsaved project replaced by another).
+ * - Path changed from none (a first save): After Effects keeps the
+ *   DocumentID (measured), so the same project unless two known IDs differ.
+ * - Path changed otherwise: Save As gives a NEW DocumentID (measured on AE
+ *   26.5), so the IDs cannot tell a Save As from opening another project.
+ *   Equal IDs are the same document; anything else is `"verify"`: kept only
+ *   if a comp still exists under the remembered id with the remembered
+ *   signature (name, size, duration, frame rate).
  * - With no DocumentID on either side and both unsaved, the comp lookup by id
  *   is the only check left (documented).
  */
-export function sameProject(s: Sticky, p: { path: string | null; docId?: string | null }): boolean {
+export function sameProject(s: Sticky, p: { path: string | null; docId?: string | null }): "same" | "different" | "verify" {
   const path = p.path ?? null;
   const docId = p.docId ?? null;
-  if (docId !== null && s.docId !== null) return docId === s.docId;
-  if (path === s.path) return true;
-  return s.path === null;
+  const idsDiffer = docId !== null && s.docId !== null && docId !== s.docId;
+  if (path === s.path || s.path === null) return idsDiffer ? "different" : "same";
+  if (docId !== null && s.docId !== null && docId === s.docId) return "same";
+  return "verify";
 }
 
 interface Summary {
@@ -389,14 +403,16 @@ export class LiveResources {
       // The packet is not re-read for a saved project already known, so a
       // DocumentID learned earlier is carried over while the path holds.
       const carried = this.sticky && this.sticky.path === (p.path ?? null) ? this.sticky.docId : null;
-      this.sticky = { id: p.activeItemId, path: p.path ?? null, docId: p.docId ?? carried };
+      this.sticky = { id: p.activeItemId, path: p.path ?? null, docId: p.docId ?? carried, sig: compSignature(p.activeComp) };
       this.noComp = noActiveComp();
       return { compId: p.activeItemId, comp: p.activeComp };
     }
     if (this.sticky !== null) {
-      if (!sameProject(this.sticky, p)) return this.drop(otherProject());
+      const same = sameProject(this.sticky, p);
+      if (same === "different") return this.drop(otherProject());
+      if (same === "verify" && (!p.comp || compSignature(p.comp) !== this.sticky.sig)) return this.drop(otherProject());
       // Same document under a new path (a Save As, a first save): follow it.
-      this.sticky = { id: this.sticky.id, path: p.path ?? null, docId: p.docId ?? this.sticky.docId };
+      this.sticky = { id: this.sticky.id, path: p.path ?? null, docId: p.docId ?? this.sticky.docId, sig: p.comp ? compSignature(p.comp) : this.sticky.sig };
       if (p.comp) return { compId: this.sticky.id, comp: p.comp };
       return this.drop(compGone());
     }
@@ -411,12 +427,13 @@ export class LiveResources {
     const id = summary?.activeItemId ?? null;
     const item = id === null ? undefined : summary.items?.find((i) => i.id === id);
     const path = summary?.path ?? null;
-    if (item?.type !== "comp" && this.sticky && !sameProject(this.sticky, { path })) return this.drop(otherProject());
+    // Without the probe there is no cheap way to verify: a moved path is a different project here.
+    if (item?.type !== "comp" && this.sticky && sameProject(this.sticky, { path }) !== "same") return this.drop(otherProject());
     const target = item?.type === "comp" ? id : (this.sticky?.id ?? null);
     if (target === null) return this.noComp;
     try {
       const comp = await this.opts.read("get_comp", { compId: target }, background);
-      this.sticky = { id: target, path, docId: null };
+      this.sticky = { id: target, path, docId: null, sig: compSignature(comp) };
       this.noComp = noActiveComp();
       return { compId: target, comp };
     } catch (e) {
