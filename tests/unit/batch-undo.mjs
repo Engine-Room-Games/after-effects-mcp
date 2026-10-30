@@ -471,7 +471,75 @@ let passed = 0;
     "the panel must take its chunk size from the job envelope"
   );
   assert.match(main, /chunkSize: size/, "and drive _continue_job with it");
-  passed += 2;
+  // The server drives with the same number (issue #220, stage 5).
+  const driver = fs.readFileSync(path.join(root, "packages", "mcp-server", "src", "jobs", "batchDriver.ts"), "utf8");
+  assert.match(driver, /env\.chunkSize/, "the server's driver takes its chunk size from the envelope too");
+  passed += 3;
+}
+
+// ---------------------------------------------------------------------------
+// 11. An orphaned job (issue #220, stage 5). A server that drives its batch
+//     stops sending chunks when it dies; the job it leaves is retired after
+//     __JOB_ORPHAN_MS without a continuation, keeps saying how far it got, and
+//     can never be continued into running more ops. A job being driven is not.
+// ---------------------------------------------------------------------------
+{
+  const { ctx, call } = load();
+  const orphan = call("run_batch", { ops: makeOps(ctx, 600) }).result;
+  const first = call("_continue_job", { jobId: orphan.jobId, chunkSize: orphan.chunkSize }).result;
+  assert.equal(first.progress, 25);
+  const live = call("run_batch", { ops: makeOps(ctx, 600) }).result;
+  const g0 = call("_get_job", { jobId: orphan.jobId }).result;
+  assert.equal(typeof g0.idleMs, "number", "_get_job says how long since a chunk last ran");
+  assert.equal(g0.abandoned, false);
+  // Its server died 31 minutes ago.
+  ctx.JOBS[orphan.jobId].touchedAt -= 31 * 60 * 1000;
+  const ranBefore = ctx.ran.length;
+  // The sweep runs where a job is created or continued.
+  const step = call("_continue_job", { jobId: live.jobId, chunkSize: live.chunkSize }).result;
+  assert.equal(step.done, false, "a job being driven is untouched by the sweep");
+  const g = call("_get_job", { jobId: orphan.jobId }).result;
+  assert.equal(g.finished, true);
+  assert.equal(g.abandoned, true);
+  assert.equal(g.cursor, 25, "the tombstone keeps how far it got");
+  assert.equal(ctx.JOBS[orphan.jobId].ops, undefined, "its ops are freed");
+  const late = call("_continue_job", { jobId: orphan.jobId, chunkSize: orphan.chunkSize });
+  assert.equal(late.ok, false, "an abandoned job is never continued");
+  assert.match(late.error, /was abandoned: no continuation reached it for 30 minutes.*25 of 600 ops had been attempted.*Nothing ran now/);
+  assert.equal(ctx.ran.length, ranBefore + 25, "only the live job's chunk ran");
+  passed += 11;
+}
+
+// A continuation that reaches its own job proves someone is still driving it,
+// however long since the last chunk — a laptop asleep for an hour mid-batch must
+// not wake to find its batch retired by its own next chunk.
+{
+  const { ctx, call } = load();
+  const env = call("run_batch", { ops: makeOps(ctx, 600) }).result;
+  call("_continue_job", { jobId: env.jobId, chunkSize: env.chunkSize });
+  ctx.JOBS[env.jobId].touchedAt -= 60 * 60 * 1000;
+  const next = call("_continue_job", { jobId: env.jobId, chunkSize: env.chunkSize });
+  assert.equal(next.ok, true, `the driver's own next chunk retired its batch: ${next.error}`);
+  assert.equal(next.result.progress, 50);
+  assert.equal(ctx.JOBS[env.jobId].finished, undefined, "still a live job");
+  passed += 3;
+}
+
+// The tombstone says whether a transactional failure ended the job, so a lost
+// last answer is never reported as having run to the end.
+{
+  const { ctx, call, drive } = load();
+  const ops = makeOps(ctx, 600);
+  ops[580] = { op: "nope", args: {} };
+  const env = call("run_batch", { ops }).result;
+  call("_continue_job", { jobId: env.jobId, chunkSize: env.chunkSize });
+  let r;
+  do { r = call("_continue_job", { jobId: env.jobId, chunkSize: env.chunkSize }).result; } while (!r.done);
+  assert.equal(r.failed, true);
+  const g = call("_get_job", { jobId: env.jobId }).result;
+  assert.equal(g.failed, true);
+  assert.equal(g.finished, true);
+  passed += 3;
 }
 
 console.log(`batch-undo: ${passed} assertions passed`);

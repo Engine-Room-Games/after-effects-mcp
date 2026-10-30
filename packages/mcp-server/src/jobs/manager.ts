@@ -219,10 +219,17 @@ export class JobManager {
     return true;
   }
 
-  /** Attach a warning the job's state must carry (issue #223). The first one stands. */
+  /**
+   * Attach a warning the job's state must carry (issue #223). Sticky; a
+   * different later one is added after it, never in its place — a batch can
+   * both lose the shared lock and recover a lost chunk (issue #220), and each
+   * says something the result cannot.
+   */
   warn(jobId: string, warning: string): void {
     const s = this.jobs.get(jobId);
-    if (s && !s.warning) s.warning = warning;
+    if (!s) return;
+    if (!s.warning) s.warning = warning;
+    else if (!s.warning.includes(warning)) s.warning = `${s.warning}\n\n${warning}`;
   }
 
   get(jobId: string): JobState | undefined { return this.jobs.get(jobId); }

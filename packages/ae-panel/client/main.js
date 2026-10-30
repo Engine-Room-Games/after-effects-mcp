@@ -624,12 +624,39 @@
   // these mid-run; it reads this to refuse instead (issue #163).
   var jobsInFlight = {};
 
+  // ---------- Batches the server drives (issue #220, stage 5) ----------
+  // A server that asks (`__driver: "server"` on run_batch's args) gets the
+  // envelope back with `driver: "server"` and sends each `_continue_job`
+  // itself, so progress, cancel and the job's state are the server's. A server
+  // that does not ask — an older one — gets the loop below, as before. Only
+  // what /reload-jsx needs is kept here: those jobs are tracked as their chunks
+  // pass through, and one no chunk has reached for SERVER_JOB_IDLE_MS is taken
+  // for a batch whose server stopped (it died), so it no longer blocks a reload.
+  PANEL_CAPABILITIES.push("server-drives-jobs");
+  var SERVER_JOB_IDLE_MS = 10 * 60 * 1000;
+
+  function trackServerJob(jobId, total) {
+    jobsInFlight[jobId] = { attempted: 0, total: (typeof total === "number") ? total : null, server: true, seenAt: Date.now() };
+  }
+
+  function noteServerChunk(jobId, res) {
+    var j = jobsInFlight[jobId];
+    if (!j || !j.server) return;
+    if (!res || res.done) { delete jobsInFlight[jobId]; return; }
+    if (typeof res.progress === "number") j.attempted = res.progress;
+    if (typeof res.total === "number") j.total = res.total;
+    j.seenAt = Date.now();
+  }
+
   function jobsInFlightText() {
     var parts = [];
+    var now = Date.now();
     for (var id in jobsInFlight) {
       if (!jobsInFlight.hasOwnProperty(id)) continue;
       var j = jobsInFlight[id];
-      parts.push(id + " (" + j.attempted + " of " + (j.total === null ? "?" : j.total) + " ops attempted)");
+      if (j.server && now - j.seenAt > SERVER_JOB_IDLE_MS) continue;
+      parts.push(id + " (" + j.attempted + " of " + (j.total === null ? "?" : j.total) + " ops attempted" +
+        (j.server ? ", driven by the MCP server" : "") + ")");
     }
     return parts.join(", ");
   }
@@ -1102,7 +1129,29 @@
     // Long batches: returns {jobId, async, total}. We kick off background drive
     // and return the jobId immediately.
     if (op === "run_batch") {
+      // The driver flag is the server's word to this panel, never an op
+      // argument: ExtendScript does not see it.
+      var serverDrives = !!(args && args.__driver === "server");
+      if (args && args.__driver !== undefined) {
+        var stripped = {};
+        for (var ak in args) { if (args.hasOwnProperty(ak) && ak !== "__driver") stripped[ak] = args[ak]; }
+        args = stripped;
+      }
       return runOp(op, args).then(function (res) {
+        if (res && res.async && res.jobId && serverDrives) {
+          trackServerJob(res.jobId, res.total);
+          return {
+            jobId: res.jobId,
+            async: true,
+            total: res.total,
+            chunkSize: res.chunkSize,
+            undoStepsEstimate: res.undoStepsEstimate,
+            undoGroupName: res.undoGroupName,
+            note: res.note,
+            aeWarnings: res.aeWarnings,
+            driver: "server",
+          };
+        }
         if (res && res.async && res.jobId) {
           driveJob(res.jobId, progressToken, res.chunkSize, res.total).catch(function (e) {
             var stoppedEvt = { type: "error", jobId: res.jobId, error: e.message };
@@ -1124,6 +1173,18 @@
           };
         }
         return res; // small batch: inline result already
+      });
+    }
+    // One chunk of a batch the server drives: passed through untouched,
+    // watched only for /reload-jsx.
+    if (op === "_continue_job" && args && jobsInFlight[args.jobId] && jobsInFlight[args.jobId].server) {
+      var cj = args.jobId;
+      return runOp(op, args).then(function (res) {
+        noteServerChunk(cj, res);
+        return res;
+      }, function (e) {
+        noteServerChunk(cj, null);
+        throw e;
       });
     }
     return runOp(op, args);
