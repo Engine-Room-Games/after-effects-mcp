@@ -45,12 +45,29 @@ export interface ForwardRequest {
   /** A write: refused unless `leaseId` is the lease holding the lock now. */
   write?: boolean;
   leaseId?: string;
+  /**
+   * Wall-clock time after which the requester has given up on this call, or
+   * may have. Checked immediately before forwarding: a desk that was stalled
+   * and wakes up must never forward what its requester already reported as
+   * lost and may have re-sent elsewhere. Same machine, so one clock.
+   */
+  deadline?: number;
 }
 
 export interface ForwardHooks {
   /** Called immediately before the call is posted to the panel, with what is ahead of it. */
   onStart?: (ahead: DeskAhead[]) => Promise<void> | void;
   onAhead?: (ahead: DeskAhead[]) => void;
+  /** False once the requester is known to have gone. Asked right before forwarding. */
+  stillWanted?: () => boolean;
+}
+
+/** The call's deadline passed before it could be forwarded. Nothing was sent. */
+export class DeadlinePassedError extends Error {
+  constructor() {
+    super("The call's deadline passed before the front desk could forward it; nothing was sent.");
+    this.name = "DeadlinePassedError";
+  }
 }
 
 /** The write claimed a lease that is not the one holding the lock. Nothing was sent. */
@@ -207,6 +224,14 @@ export class FrontDesk {
     };
     const before = ahead();
     await hooks.onStart?.(before);
+    // The last moment before the panel: let pending I/O land first — a closed
+    // requester or a released lease is often already in the kernel's queue when
+    // a stalled desk wakes up and reads the request ahead of it — then check
+    // everything again. Measured as a double write on SIGSTOP/SIGCONT before this.
+    await new Promise<void>((r) => setImmediate(r));
+    if (req.deadline !== undefined && Date.now() > req.deadline) throw new DeadlinePassedError();
+    if (hooks.stillWanted && !hooks.stillWanted()) throw new CallerGoneError();
+    if (req.write && (!req.leaseId || !this.lock.isHolder(req.leaseId))) throw new LeaseNotHeldError();
     entry.since = Date.now();
     this.inflight.push(entry);
     let ticker: NodeJS.Timeout | null = null;
@@ -365,6 +390,7 @@ export class FrontDesk {
           timeoutMs: typeof b.timeoutMs === "number" && b.timeoutMs > 0 ? b.timeoutMs : undefined,
           write: b.write === true,
           leaseId: typeof b.leaseId === "string" ? b.leaseId : undefined,
+          deadline: typeof b.deadline === "number" ? b.deadline : undefined,
         },
         {
           onStart: (ahead) => {
@@ -373,6 +399,7 @@ export class FrontDesk {
             res.write(line({ t: "start", ahead }));
           },
           onAhead: (ahead) => { if (!gone) res.write(line({ t: "ahead", ahead })); },
+          stillWanted: () => !gone && !res.destroyed && !(res.socket?.destroyed ?? true),
         }
       );
       if (!gone) res.end(line({ t: "ok", result, panelPort: panelPort() }));
@@ -380,6 +407,10 @@ export class FrontDesk {
       if (e instanceof CallerGoneError) return;
       if (e instanceof LeaseNotHeldError) {
         if (!gone) res.end(line({ t: "lost" }));
+        return;
+      }
+      if (e instanceof DeadlinePassedError) {
+        if (!gone) res.end(line({ t: "expired" }));
         return;
       }
       if (!gone) res.end(line({ t: "err", error: toWire(e), panelPort: panelPort() }));
@@ -401,7 +432,7 @@ export class FrontDesk {
   }
 }
 
-class CallerGoneError extends Error {}
+export class CallerGoneError extends Error {}
 
 function line(l: LockLine | OpLine): string {
   return JSON.stringify(l) + "\n";

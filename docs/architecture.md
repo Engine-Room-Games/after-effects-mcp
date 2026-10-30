@@ -410,6 +410,22 @@ follower that hears nothing for five beats gives up on it: a lock wait fails as
 `DeskPlaceLostError` (nothing was sent), a write in flight as
 `FrontDeskLostError` (may have run), a read is re-sent, and the session goes to
 After Effects directly for 10 s before asking again. Never an indefinite wait.
+Giving up is only safe if the desk can never forward the call afterwards, and
+measured on SIGSTOP/SIGCONT it could: a woken desk reads the queued request
+before it notices the requester's closed connection or released lease, so the
+lease check passes and the write lands a second time, possibly after the agent's
+read-back. So every forwarded call carries a deadline — half the stall threshold
+after it was sent, so it always passes before the requester can give up — and
+the desk, after yielding once so pending closes land, refuses unsent (`expired`)
+anything past its deadline, whose requester has gone, or whose lease no longer
+holds the lock. The leader's own session's calls carry the same deadline. A
+follower that was itself blocked reads the beats waiting in its socket before
+it calls the desk stalled (a `setImmediate` re-check), so a long synchronous
+stretch or a sleeping laptop is not a stall. A 413 is its own error — the
+request is too large — not a refusal to re-elect over. On Windows, a new desk
+may be unable to bind for minutes after the old one exits, while its closed
+connections sit in TIME_WAIT under `SO_EXCLUSIVEADDRUSE`; that is reported as
+such and retried every 5 s (recipe 75 checks it).
 A follower also joins a desk only after the desk proves it knows the token — an
 HMAC of a fresh nonce — so a process that merely answers 200 with the desk's id
 is treated as foreign.

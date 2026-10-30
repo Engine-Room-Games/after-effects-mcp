@@ -6,7 +6,7 @@ import type { QueueWait, WriteLease, WriteQueue } from "../bridge/writeQueue.js"
 import { BridgeTimeoutError, DeskPlaceLostError, FrontDeskLostError, WriteQueueCancelledError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { DESK_ID, DESK_NONCE_HEADER, DESK_PROTOCOL, DESK_TOKEN_HEADER, STALL_BEATS, readDeskFile, type FrontDeskOptions } from "./config.js";
-import { FrontDesk, LeaseNotHeldError, deskProof, type DeskForwarder } from "./desk.js";
+import { DeadlinePassedError, FrontDesk, LeaseNotHeldError, deskProof, type DeskForwarder } from "./desk.js";
 import { DeskClosedError } from "./lock.js";
 import { describeAhead, describeLockWait, fromWire, type DeskAhead, type GrantWait, type LockLine, type OpLine } from "./protocol.js";
 
@@ -272,7 +272,17 @@ export class SessionLine {
         }
         try {
           return await mode.desk.forward(
-            { sessionId: this.sessionId, session: this.opts.sessionLabel(), ...body, write, leaseId: slot?.id },
+            {
+              sessionId: this.sessionId,
+              session: this.opts.sessionLabel(),
+              ...body,
+              write,
+              leaseId: slot?.id,
+              // The same rule as a follower's: if this process stalls between
+              // here and the panel, followers have given up on the desk and gone
+              // direct, and what was queued here must not go out on waking.
+              deadline: Date.now() + forwardWindowMs(mode.desk.beatMs * STALL_BEATS),
+            },
             { onStart: (ahead) => surfaceAhead(op, ahead, onWait), onAhead: (ahead) => surfaceAhead(op, ahead, onWait) }
           );
         } catch (e) {
@@ -280,6 +290,8 @@ export class SessionLine {
             this.holding?.invalidate(slot.id);
             continue;
           }
+          // Never forwarded: safe to go again, with a fresh deadline.
+          if (e instanceof DeadlinePassedError) continue;
           throw e;
         }
       }
@@ -291,7 +303,17 @@ export class SessionLine {
       const leaseId = slot?.id;
       const r = await remoteOp(
         mode,
-        { ...body, write, leaseId, sessionId: this.sessionId, session: this.opts.sessionLabel() },
+        {
+          ...body,
+          write,
+          leaseId,
+          sessionId: this.sessionId,
+          session: this.opts.sessionLabel(),
+          // Strictly before this side can declare the desk stalled (no sooner
+          // than `idleMs` after sending), so a desk that wakes from a stall
+          // finds the deadline passed and never forwards what was given up on.
+          deadline: Date.now() + forwardWindowMs(mode.idleMs),
+        },
         (ahead) => surfaceAhead(op, ahead, onWait)
       );
       switch (r.kind) {
@@ -307,6 +329,18 @@ export class SessionLine {
         case "refused":
           this.deskLost(mode);
           continue;
+        case "expired":
+          // The desk was slow to reach it and said so; it was never forwarded.
+          continue;
+        case "rejected":
+          throw new Error(
+            r.status === 413
+              ? `\`${op}\` was not sent: its request is larger than the front desk accepts (256 MB). Nothing reached ` +
+                  "After Effects. Split the work into smaller calls — several run_batch calls, or a script read from scriptPath."
+              : `\`${op}\` was not sent: the front desk refused it with HTTP ${r.status}, which this server does not ` +
+                  "expect — probably a different version of the server is running the desk. Nothing reached After Effects; " +
+                  "re-sending is safe, and restarting the other AI session's MCP server would end the mismatch."
+          );
         case "dropped":
           this.deskLost(mode);
           if (write) throw new FrontDeskLostError(mode.port, op, "exited");
@@ -386,6 +420,7 @@ export class SessionLine {
     const cfg = this.opts.desk!;
     const port = cfg.port;
     const deadline = Date.now() + (cfg.electionDeadlineMs ?? ELECTION_DEADLINE_MS);
+    let portStuck = false;
     const direct = (why: string, retryMs: number): Mode => {
       logger.warn(`Front desk: ${why} This session talks to After Effects directly, as before; other sessions are not serialized against it.`);
       return { kind: "direct", retryAt: Date.now() + retryMs };
@@ -433,7 +468,21 @@ export class SessionLine {
       }
       // A desk whose file is not there yet or is a dead desk's, or one that
       // died between the bind and the hello: go round again.
-      if (Date.now() > deadline) return direct(`no desk on 127.0.0.1:${port} answered within ${Math.round((cfg.electionDeadlineMs ?? ELECTION_DEADLINE_MS) / 1000)}s.`, 10_000);
+      if (hello.kind === "refused") portStuck = true;
+      if (Date.now() > deadline) {
+        // Bind refused, yet nothing listening: on Windows the previous desk's
+        // closed connections can hold the port (TIME_WAIT under
+        // SO_EXCLUSIVEADDRUSE) for minutes after it exits. Said as such, and
+        // tried again soon rather than after the usual wait.
+        if (portStuck && hello.kind === "refused") {
+          return direct(
+            `127.0.0.1:${port} cannot be bound although nothing is listening on it — the previous desk's closed connections ` +
+              "are probably still holding it (Windows keeps them for up to 4 minutes). Trying again every 5s.",
+            5_000
+          );
+        }
+        return direct(`no desk on 127.0.0.1:${port} answered within ${Math.round((cfg.electionDeadlineMs ?? ELECTION_DEADLINE_MS) / 1000)}s.`, 10_000);
+      }
       await new Promise((r) => setTimeout(r, 60 + Math.random() * 120));
     }
   }
@@ -451,6 +500,14 @@ export class SessionLine {
       logger.info(`Front desk: closed; the next server to need it takes it over.`);
     }
   }
+}
+
+/**
+ * How long the desk has to forward a call: half the stall threshold, so the
+ * deadline always passes before the requester can give up on the desk.
+ */
+function forwardWindowMs(stallMs: number): number {
+  return Math.max(50, Math.floor(stallMs / 2));
 }
 
 function stalledWhy(mode: Follower, when: string): string {
@@ -602,11 +659,20 @@ function deskStream(
     agent: false,
     headers: { "content-type": "application/json", "content-length": payload.length, [DESK_TOKEN_HEADER]: token },
   });
+  let heardCount = 0;
   const heard = () => {
+    heardCount++;
     if (idle) clearTimeout(idle);
+    const at = heardCount;
     idle = setTimeout(() => {
-      settle({ kind: "stalled" });
-      req.destroy();
+      // After this process was itself blocked (a long synchronous stretch, the
+      // machine asleep), timers fire before the beats waiting in the socket are
+      // read. Let the poll phase read them, then decide.
+      setImmediate(() => {
+        if (heardCount !== at || settled) return;
+        settle({ kind: "stalled" });
+        req.destroy();
+      });
     }, idleMs);
   };
   heard();
@@ -693,6 +759,10 @@ type OpOutcome =
   | { kind: "lost" }
   /** Provably never forwarded. */
   | { kind: "refused" }
+  /** The desk refused it as malformed or too large: never forwarded, and re-sending will not help. */
+  | { kind: "rejected"; status: number }
+  /** The desk reached it after its deadline and did not forward it. */
+  | { kind: "expired" }
   /** Lost after the request may have been delivered. */
   | { kind: "dropped" }
   | { kind: "stalled" }
@@ -724,9 +794,13 @@ function remoteOp(mode: Follower, body: { timeoutMs: number } & Record<string, u
       else if (l.t === "ok") finish({ kind: "ok", result: l.result, panelPort: l.panelPort });
       else if (l.t === "err") finish({ kind: "err", error: fromWire(l.error), panelPort: l.panelPort });
       else if (l.t === "lost") finish({ kind: "lost" });
+      else if (l.t === "expired") finish({ kind: "expired" });
     });
     s.closed.then((end) => {
-      if (end.kind === "refused" || end.kind === "status") finish({ kind: "refused" });
+      if (end.kind === "refused") finish({ kind: "refused" });
+      // A token refusal means the desk changed hands: look again. Anything else
+      // is a refusal of this request itself, and looking again changes nothing.
+      else if (end.kind === "status") finish(end.status === 401 || end.status === 403 ? { kind: "refused" } : { kind: "rejected", status: end.status });
       else if (end.kind === "stalled") finish({ kind: "stalled" });
       else finish({ kind: "dropped" });
     });

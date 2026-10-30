@@ -251,7 +251,7 @@ process.env.HOME = home;
 process.env.USERPROFILE = home;
 const { SessionLine } = await import(dist("frontdesk", "line.js"));
 const { WriteQueue } = await import(dist("bridge", "writeQueue.js"));
-const { deskProof } = await import(dist("frontdesk", "desk.js"));
+const { deskProof, FrontDesk } = await import(dist("frontdesk", "desk.js"));
 
 function fakeBridge() {
   const calls = [];
@@ -359,6 +359,49 @@ await check("a leftover desk file costs a lone session nothing; one left by a ru
   assert.ok(Date.now() - t1 >= 400, "a batch was holding the lock: its session gets its grace");
   assert.ok(said.some((m) => /is waiting up to 1s for the write queue: the previous front desk went away while another session's long write held it/.test(m)), said.join("\n"));
   await M.close();
+});
+
+await check("a request too large for the desk is its own error, not four handovers", async () => {
+  const port = await freePort();
+  const token = "fake-desk-413";
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4244, port, token, startedAt: 1 }));
+  let posts = 0;
+  const fake = http.createServer((q, r) => {
+    if (q.url === "/desk/hello") {
+      r.setHeader("content-type", "application/json");
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4244, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+    }
+    posts++;
+    q.resume();
+    r.statusCode = 413;
+    r.end(JSON.stringify({ error: "body too large" }));
+  });
+  await new Promise((r) => fake.listen(port, "127.0.0.1", r));
+  const L = line(port, "L");
+  assert.equal(await L.ready(), "follower");
+  await assert.rejects(L.runOp("list_comps", {}), /`list_comps` was not sent: its request is larger than the front desk accepts/);
+  assert.equal(posts, 1, "refused once, never re-elected and re-sent");
+  assert.deepEqual(L.bridge_.calls, []);
+  await L.close();
+  await new Promise((r) => fake.close(r));
+});
+
+await check("a port that will not bind with nothing listening is reported as such, and retried soon", async () => {
+  const port = await freePort();
+  const real = FrontDesk.prototype.listen;
+  const logged = [];
+  const realError = console.error;
+  FrontDesk.prototype.listen = () => Promise.reject(Object.assign(new Error("listen EADDRINUSE"), { code: "EADDRINUSE" }));
+  console.error = (...a) => logged.push(a.join(" "));
+  try {
+    const L = line(port, "L", { electionDeadlineMs: 400 });
+    assert.equal(await L.ready(), "direct");
+    assert.ok(logged.some((m) => /cannot be bound although nothing is listening on it .*Trying again every 5s/.test(m)), logged.join("\n"));
+    await L.close();
+  } finally {
+    FrontDesk.prototype.listen = real;
+    console.error = realError;
+  }
 });
 
 await check("a desk that cannot prove it knows the token is never joined, and never crashes the server", async () => {
@@ -775,6 +818,68 @@ try {
       } finally {
         process.kill(K.pid, "SIGCONT");
       }
+    });
+  }
+
+  if (process.platform !== "win32") {
+    await check("a desk that wakes from a stall never forwards a write its requester gave up on", async () => {
+      const desk5 = await freePort();
+      const K = await startSession("desk-test-K2", desk5);
+      await until("K2 to run the desk", () => readDesk(desk5)?.pid === K.pid);
+      const L = line(desk5, "L");
+      assert.equal(await L.ready(), "follower");
+      seen.length = 0;
+      const lease = await L.acquire("run_jsx");
+      process.kill(K.pid, "SIGSTOP");
+      try {
+        await assert.rejects(L.runOp("run_jsx", jsx("DW1", 5), { write: true }), (e) => {
+          assert.ok(e instanceof errors.FrontDeskLostError, e.message);
+          return true;
+        });
+        lease.release();
+      } finally {
+        process.kill(K.pid, "SIGCONT");
+      }
+      // K wakes with L's request still queued in its socket. Make sure it has
+      // caught up — it answers status again — and then some, before looking.
+      const token = readDesk(desk5).token;
+      await until("K2 to answer again", () =>
+        new Promise((resolve) => {
+          http.get({ host: "127.0.0.1", port: desk5, path: "/desk/status", headers: { "x-ae-mcp-desk-token": token } }, (res) => {
+            res.resume();
+            resolve(res.statusCode === 200);
+          }).on("error", () => resolve(false));
+        })
+      );
+      await sleep(500); // proving a negative: nothing more should arrive
+      assert.equal(ran("DW1").length, 0, "the woken desk forwarded a write its requester had already reported lost");
+      await L.close();
+      await stop(K);
+    });
+
+    await check("a follower that was itself blocked does not mistake buffered heartbeats for a stall", async () => {
+      const desk6 = await freePort();
+      const K = await startSession("desk-test-K3", desk6);
+      await until("K3 to run the desk", () => readDesk(desk6)?.pid === K.pid);
+      const L = line(desk6, "L");
+      assert.equal(await L.ready(), "follower");
+      seen.length = 0;
+      const lease = await L.acquire("run_jsx");
+      const p = L.runOp("run_jsx", jsx("BL1", 2500), { write: true });
+      await until("BL1 at the panel", () => ran("BL1").length === 1);
+      // Block this process well past the 1s stall threshold; the desk keeps beating.
+      // From the check phase, so the next thing the event loop does is run the
+      // expired timers — before the poll phase reads the beats waiting in the socket.
+      await new Promise((r) => setImmediate(() => {
+        const end = Date.now() + 1800;
+        while (Date.now() < end) {}
+        r();
+      }));
+      // The fake panel runs in this process too, so it finishes BL1 only now.
+      assert.deepEqual(await p, { tag: "BL1" });
+      lease.release();
+      await L.close();
+      await stop(K);
     });
   }
 

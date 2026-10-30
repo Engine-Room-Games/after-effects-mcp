@@ -54,6 +54,8 @@ export type OpLine =
   | { t: "err"; error: WireError; panelPort: number }
   /** The lease this write claimed is not the one holding the lock. Nothing was sent. */
   | { t: "lost" }
+  /** The call's deadline passed before the desk could forward it. Nothing was sent. */
+  | { t: "expired" }
   | { t: "beat" };
 
 /** What a grant reports when the call waited behind another session. */
