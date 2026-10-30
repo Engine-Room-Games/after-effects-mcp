@@ -6,6 +6,15 @@ rendered frame, the audio on a RAM preview, CEP's own log. Where a recipe says
 **record what you see**, the measurement is the deliverable: write it back into
 the matching entry under `docs/fragile-areas-*.md`.
 
+**Reach After Effects only through the bridge.** Never send a script by
+osascript `DoScript`/`DoScriptFile`, `-r` or File > Scripts during a pass:
+on those routes any throw is shown as a modal alert that blocks AE until a
+person dismisses it, where the panel's `evalScript` returns the same error to
+the caller. If the bridge will not come up, the installed panel predates the
+checkout — install it with AE quit; do not route around it. Close projects
+with `CloseOptions.DO_NOT_SAVE_CHANGES` (there is no `DO_NOT_SAVE`), as
+`tests/live/lib/runner.mjs` does.
+
 **Scripted half.** The JSON-answerable part of 27 of these recipes (1–10, 15,
 20–23, 25, 26, 28–30, 33, 36, 37, 39, 47, 57, 58) is scripted as fixtures in
 `tests/live/recipes/`, run by `tests/live/run.mjs` against a fresh server from
