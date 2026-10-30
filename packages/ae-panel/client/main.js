@@ -660,7 +660,10 @@
           var failedMsg = (res.error || "batch failed") + (res.note ? " || " + res.note : "") +
             (aeWarnings.length ? " || After Effects also reported, through app.onError while dialogs were suppressed: " +
               aeWarnings.join(" | ") : "");
-          broadcast({ type: "error", jobId: jobId, error: failedMsg });
+          // Where it stopped travels with the error (issue #222): the last
+          // progress event is the boundary before the failing chunk.
+          var failedAt = (res.results ? res.results.length : 0) + (res.errors ? res.errors.length : 0);
+          broadcast({ type: "error", jobId: jobId, error: failedMsg, progress: failedAt });
           var failedOut = { done: true, failed: true, jobId: jobId, error: res.error, results: res.results, errors: res.errors, atIndex: res.atIndex, undoSteps: res.undoSteps, note: res.note };
           if (aeWarnings.length) failedOut.aeWarnings = aeWarnings;
           return failedOut;
@@ -711,6 +714,7 @@
           : "";
         var stopped = new Error("Batch " + jobId + " stopped mid-run: " + cause + " " + landed + warned);
         stopped.code = e && e.code;
+        stopped.progress = attempted;
         if (aeWarnings.length) stopped.aeWarnings = aeWarnings;
         log("error", stopped.message);
         throw stopped;
@@ -1085,7 +1089,9 @@
       return runOp(op, args).then(function (res) {
         if (res && res.async && res.jobId) {
           driveJob(res.jobId, progressToken, res.chunkSize, res.total).catch(function (e) {
-            broadcast({ type: "error", jobId: res.jobId, error: e.message });
+            var stoppedEvt = { type: "error", jobId: res.jobId, error: e.message };
+            if (typeof e.progress === "number") stoppedEvt.progress = e.progress;
+            broadcast(stoppedEvt);
           });
           // The undo fields ride out with the envelope so the agent is told the
           // batch will be several steps *before* it goes and says otherwise —
