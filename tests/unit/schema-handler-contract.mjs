@@ -102,9 +102,12 @@ const SERVER_READERS = {
   // The one op whose input is rewritten: scriptPath -> code, libraries ->
   // {path, text}, before OPS.run_jsx reads the rest.
   run_jsx: { fns: ["resolveRunJsxSource"], files: ["tools/runJsxSource.ts"], ops: ["run_jsx"] },
-  // `detail` is applied by the server's summariser, not the panel (the panel
-  // does not update itself — see style/summary.ts).
-  get_house_style: { branch: true, files: ["style/summary.ts"], ops: ["get_house_style"] },
+  // Read beside the .aep and summarised by the server (#220 stage 2); `detail`
+  // never reaches the panel. It is refused as a batch step, so no jsx reads it.
+  get_house_style: { branch: true, files: ["style/summary.ts", "files/houseStyle.ts"] },
+  // Written by the server (#220 stage 2). OPS.set_house_style still reads the
+  // same fields when the op arrives as a run_batch step.
+  set_house_style: { branch: true, files: ["files/houseStyle.ts"], ops: ["set_house_style"] },
   await_job: { branch: true, files: ["jobs/manager.ts"] },
   get_job: { branch: true, files: ["jobs/manager.ts"] },
   cancel_job: { branch: true, files: ["jobs/manager.ts", "render/aerender.ts"] },

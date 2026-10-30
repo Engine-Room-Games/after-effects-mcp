@@ -1400,7 +1400,7 @@ export const RenderQueue = crossField(
   }
 );
 
-// ---------- house style (a markdown file beside the .aep, read over the bridge) ----------
+// ---------- house style (a markdown file beside the .aep; the server reads it, the path comes from AE) ----------
 export const GetHouseStyle = z
   .object({
     detail: z.enum(["summary", "full"]).optional().meta({ default: "summary" })

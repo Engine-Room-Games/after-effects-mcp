@@ -54,6 +54,14 @@ import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./gen
 import { archiveIssue, listIssues, logIssue, markReported } from "./issues/journal.js";
 import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
+import { readHouseStyle, writeHouseStyle } from "./files/houseStyle.js";
+import {
+  checkFootageExists,
+  checkRenderOutput,
+  prepareMogrtDestination,
+  type MogrtDestination,
+  type ProjectFacts,
+} from "./files/destinations.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
 import { fileURLToPath } from "node:url";
@@ -660,11 +668,49 @@ export function createServer(opts: CreateServerOptions = {}) {
       // — see runRender.
       if (name === "render_queue") return textResult(await runRender(args as RenderQueueArgs, bridge, renders), wait);
 
+      // File work the server does itself (issue #220, stage 2). After Effects
+      // is asked only for what needs it — which .aep is open — through
+      // `get_project_summary`, which every panel ever shipped answers. The jsx
+      // copies of all of this stay in the bundle: older servers and `run_batch`
+      // steps still use them. See "Filesystem checks on the server" in
+      // docs/subsystems.md.
+      if (name === "get_house_style") {
+        const project = (await bridge.runOp("get_project_summary", {})) as ProjectFacts;
+        // Summarised here too, which predates the move: a summariser in the
+        // bundle would have been dark until the panel was reinstalled. See
+        // style/summary.ts.
+        const detail = (args as { detail?: "summary" | "full" }).detail ?? "summary";
+        return textResult(applyHouseStyleDetail(readHouseStyle(project.path), detail), wait);
+      }
+      if (name === "set_house_style") {
+        const project = (await bridge.runOp("get_project_summary", {})) as ProjectFacts;
+        return textResult(writeHouseStyle(project.path, args as { content: string; overwrite?: boolean }), wait);
+      }
+      if (name === "add_to_render_queue") checkRenderOutput(args as { outputPath: string; overwrite?: boolean });
+      if (name === "import_footage") checkFootageExists(args as { path: string });
+      let destination: MogrtDestination | null = null;
+      if (name === "export_mogrt") {
+        const project = (await bridge.runOp("get_project_summary", {})) as ProjectFacts;
+        destination = prepareMogrtDestination(args as { compId: number; destDir?: string; name?: string; overwrite?: boolean }, project);
+      }
+
       // The request's progressToken is deliberately not forwarded. The panel
       // does nothing with it — its WS `progress` events carry a jobId and no
       // token — and progress is delivered on `await_job`, never here; see
       // forwardJobProgress.
-      const result = await bridge.runOp(name, args);
+      let result: unknown;
+      try {
+        result = await bridge.runOp(name, args);
+      } catch (e) {
+        // A folder made above for an export After Effects then refused goes
+        // again, empty: the jsx refused before making one (#71's check runs first).
+        destination?.rollback();
+        throw e;
+      }
+      // The folder existed by the time the jsx looked, because it was made here.
+      if (destination && destination.created.length > 0 && result && typeof result === "object") {
+        (result as { createdDir?: boolean }).createdDir = true;
+      }
 
       // Async envelope handling for run_batch
       if (ASYNC_OPS.has(name) && isAsyncEnvelope(result)) {
@@ -768,15 +814,6 @@ export function createServer(opts: CreateServerOptions = {}) {
           },
           v.base64
         );
-      }
-
-      // The style guide is read over the bridge and summarised here: the panel
-      // does not update itself, so a summariser shipped in the .jsx bundle would
-      // answer `detail: "summary"` with the whole document until the user
-      // reinstalled the panel and relaunched AE. See style/summary.ts.
-      if (name === "get_house_style") {
-        const detail = (args as { detail?: "summary" | "full" }).detail ?? "summary";
-        return textResult(applyHouseStyleDetail(result, detail), wait);
       }
 
       return textResult(result, wait);

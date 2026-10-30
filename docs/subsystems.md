@@ -1,8 +1,9 @@
 # Subsystems
 
-Five things this server does that are not simply "forward an op": gating on the
-panel's version, scaffolding a project folder, reading a house style, keeping
-comp fingerprints, and carrying a journal of known problems between sessions.
+Six things this server does that are not simply "forward an op": gating on the
+panel's version, scaffolding a project folder, reading a house style, checking
+export and render destinations, keeping comp fingerprints, and carrying a
+journal of known problems between sessions.
 Each one exists for a reason that is easy to undo by accident, so the reasoning
 is here rather than in the code.
 
@@ -137,21 +138,41 @@ The house style is deliberately *not* part of the scaffold — see below.
 
 ## The house style
 
-`house-style.md` lives next to the `.aep`, and is read and written over the
-bridge by `packages/jsx/style.jsx`, not by the MCP server.
+`house-style.md` lives next to the `.aep`. Since issue #220 (stage 2) the MCP
+server reads and writes it (`files/houseStyle.ts`); After Effects is asked one
+thing only, *which* `.aep` is open, through `get_project_summary`, which every
+panel ever shipped answers.
 
-That looks like the wrong layer until you count clients. The bridge is the one
-channel every client has, because the whole product already depends on it.
-Reading the style over it needs no working directory, no `roots`, and no
-filesystem tools on the client — so it works identically in Claude Desktop and
-in a git checkout. A server-side file would need a project folder, and the
-clients that need help most are exactly the ones that do not have one.
+It used to be the other way round, read and written by
+`packages/jsx/style.jsx` over the bridge, and the reason given was that the
+bridge is the one channel every client has. That reason was about the **path**,
+and it still holds: a server-side guide found through the client's working
+directory or `roots` would fail in Claude Desktop, which starts servers at the
+filesystem root and gives its agent no filesystem tools. The path still comes
+over the bridge, from After Effects. Nothing about *where the file is opened*
+needed the panel, though. The server runs on the same machine, as the same user,
+and sees the same files. Doing the I/O there costs AE no main-thread time, and
+a fix to it ships with a server update instead of a panel reinstall and an AE
+restart.
+
+`style.jsx` stays in the bundle, unchanged: an older server against a newer
+panel still calls it, and `set_house_style` as a `run_batch` step reaches it
+(batch steps go straight to ExtendScript). So there are two copies until a panel
+release drops the jsx one. `tests/unit/house-style-files.mjs` runs both against
+the same real folders and compares the answers as serialized JSON, key order
+included, and the bytes left on disk. The port reproduces two ExtendScript
+behaviours the old answers depended on: `File.read` normalises CR and CRLF to
+`\n` and consumes a BOM, and the write is `\n` as given (the jsx needs
+`lineFeed = "Unix"` for that; Node writes what it is handed). A refusal reads
+`AE: <the same sentence>` without the old `(line N)` suffix, which was a line in
+the concatenated bundle and meant nothing to anyone.
 
 The costs, both reported rather than worked around:
 
-- **The project must have been saved once.** `app.project.file` is null until
-  then and there is no folder to write into. `get_house_style` returns
-  `projectSaved: false` with an explanation; `set_house_style` throws it.
+- **The project must have been saved once.** `get_project_summary` answers
+  `path: null` until then, and there is no folder to write into.
+  `get_house_style` returns `projectSaved: false` with an explanation;
+  `set_house_style` throws it.
 - **`set_house_style` replaces the whole file** and requires `overwrite: true`
   to replace an existing one. It is not a patch, and quietly half-rewriting
   someone's hand-written style guide is worse than refusing.
@@ -165,11 +186,10 @@ rule in their own build notes telling sessions *not* to call the tool and to rea
 a hand-maintained 40-line digest instead — so the digest and the source drifted,
 and "one cheap call" was neither (issue #59).
 
-**The reading is still over the bridge; only the summarising moved.** Every
-argument in the section above is about *where the file is opened*, and that has
-not changed — the panel opens it beside the .aep and hands back the whole text.
-Summarising is a separate question, and `style/summary.ts` answers it on the
-server for two reasons:
+**The summarising moved to the server first, before the reading did.** It was a
+separate question from where the file is opened, and `style/summary.ts`
+answered it on the server for two reasons, the first of which later moved the
+reading too:
 
 - **The panel does not update itself.** A summariser in the .jsx bundle would be
   dark until the user reinstalled the panel and relaunched AE, and until then an
@@ -202,6 +222,60 @@ a summary that looks complete and is not:
 `set_house_style` is unchanged: still the whole file, still `overwrite: true`.
 So `detail: "full"` is not optional before an edit — read the document, merge,
 send it back.
+
+## Filesystem checks on the server
+
+Three ops check the filesystem before they touch the project, and since issue
+#220 (stage 2) the server makes those checks before it forwards the call
+(`files/destinations.ts`):
+
+| Op | Checks | Ported from |
+|---|---|---|
+| `add_to_render_queue` | `outputPath` is absolute, its folder exists, an existing file needs `overwrite` | `render.jsx` |
+| `import_footage` | the file exists | `footage.jsx` |
+| `export_mogrt` | the destination folder is created, the name resolves into it, an existing template needs `overwrite`, the folder accepts a write | `mogrt.jsx` |
+
+**The jsx checks were not removed, and they still run.** The panel does not
+update itself, and the bundle hash is half the version gate, so editing a jsx
+file would tell every user to reinstall the panel and restart AE. The server
+makes the same checks first, with the same sentences, and the jsx repeats them
+for the cost of a stat or two. That has two consequences. A refusal now comes
+from the server and its wording can be fixed without a restart. And the server
+check only ever makes a refusal *earlier*, never different, but only while each
+port refuses exactly when its jsx does. `tests/unit/destination-checks.mjs`
+holds them to that on real folders. The jsx copies also still guard these ops
+as `run_batch` steps, which go straight to ExtendScript.
+
+**A check runs only where Node and ExtendScript's `File` read the path the same
+way.** `File` decodes `%XX` escapes, reads `~` as the home folder, and on
+Windows reads a leading `/c/` as a drive. A path that could mean two things is
+not judged by the server at all: it is forwarded untouched, and the jsx decides
+as it always did. A skipped check is never a refusal. The same goes for every
+case where a jsx check the server cannot make would decide first: an unsaved
+project, a comp id that is not a comp, a blank `name`.
+
+**`export_mogrt` is the one with an ordering problem.** Its first jsx check,
+an empty Essential Graphics panel (#71), needs After Effects, and no op in an
+old bundle reports the controller count, so the server's checks now run before
+it. Two things keep that honest:
+
+- **A folder the server made for an export AE then refused is removed**, if it
+  is still empty. The jsx refused before making any folder, and a refusal is
+  supposed to leave nothing behind. When the export succeeds, `createdDir` is
+  set to true on the answer, because the jsx found the folder already there.
+- **The name checks need the name.** When `name` is omitted the template name
+  is read off the comp, so the server creates and probes the folder and leaves
+  the name and overwrite checks to the jsx.
+
+With more than one fault at once, the first refusal can differ from before. For
+example, an unwritable folder and an empty Essential Graphics panel used to
+report the panel, and now report the folder. Each sentence is unchanged.
+
+**The SVG viewBox check (#33) did not move.** It compares the viewBox against
+the *imported item's* size and removes the item when they disagree, and both of
+those need After Effects. Only the 16 KB read and the regex could leave, and
+the jsx has nowhere to receive a parsed viewBox without a bundle change.
+That waits for the next panel release, alongside stage 4.
 
 ## Comp snapshots, and why they live in the server
 
