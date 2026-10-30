@@ -120,6 +120,89 @@ function makeDom() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// The panel's port numbers, private to this process (issue #260).
+//
+// The port-drift checks below are about what the panel decides when a port is
+// taken, and they used to decide it in the machine's one shared port space.
+// Under parallel load that is not ours alone: the moment a test frees a port,
+// another process can bind it — another run's panel took a freshly unloaded
+// one and answered /health, and something took a port in the gap before the
+// waiting panel's retry, so it walked. And an ephemeral port can be 65535,
+// which leaves no next port to walk to.
+//
+// So every socket the panel binds is a real socket on a real ephemeral port,
+// but the number the panel asks for, reads back with address(), announces and
+// probes is a number in this table — which only this process can hold. A
+// port is free in it exactly when no server here holds it, and EADDRINUSE is
+// raised exactly when one does, so the panel's code paths are the real ones.
+// ---------------------------------------------------------------------------
+const portTable = new Map(); // the panel's port number -> the http.Server holding it
+const realAddress = new WeakMap(); // http.Server -> its unpatched address()
+let nextEphemeral = 40000;
+
+/** Give `server` the table semantics: listen/address/close speak table numbers. */
+function tablePorts(server) {
+  const listen = server.listen.bind(server);
+  const address = server.address.bind(server);
+  const close = server.close.bind(server);
+  realAddress.set(server, address);
+  let held = null;
+  server.listen = (port, host, cb) => {
+    if (typeof host === "function") { cb = host; host = "127.0.0.1"; }
+    // Out of range is the real listen's to refuse, with its own error.
+    if (!(port >= 0 && port <= 65535)) return listen(port, host, cb);
+    let p = port;
+    if (p === 0) { while (portTable.has(nextEphemeral)) nextEphemeral++; p = nextEphemeral++; }
+    if (portTable.has(p)) {
+      const e = Object.assign(new Error(`listen EADDRINUSE: address already in use ${host}:${p}`), {
+        code: "EADDRINUSE", errno: -48, syscall: "listen", address: host, port: p,
+      });
+      process.nextTick(() => server.emit("error", e));
+      return server;
+    }
+    portTable.set(p, server);
+    held = p;
+    return listen(0, host, cb);
+  };
+  server.address = () => {
+    const a = address();
+    return a && held !== null ? { ...a, port: held } : a;
+  };
+  server.close = (cb) => {
+    if (held !== null && portTable.get(held) === server) portTable.delete(held);
+    held = null;
+    return close(cb);
+  };
+  return server;
+}
+
+/** The real port behind a table number, or null when nothing here holds it. */
+function realPortOf(port) {
+  const s = portTable.get(Number(port));
+  return s ? realAddress.get(s)().port : null;
+}
+
+/** A URL on the panel's port, as the MCP server would reach it. */
+function panelUrl(port, route) {
+  const real = realPortOf(port);
+  if (real === null) throw new Error(`nothing in this test holds port ${port}`);
+  return `http://127.0.0.1:${real}${route}`;
+}
+
+/** A plain HTTP server — not a panel — holding `port` in the table (0: any). */
+async function stranger(port = 0) {
+  const s = tablePorts(http.createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ hello: true }));
+  }));
+  await new Promise((resolve, reject) => {
+    s.once("error", reject);
+    s.listen(port, "127.0.0.1", resolve);
+  });
+  return s;
+}
+
 /**
  * Run main.js the way CEP does, and resolve once it stops changing status.
  *
@@ -172,10 +255,12 @@ function bootPanel(extDir, { dirnameAt = extDir, config = { port: 0 } } = {}) {
         return {
           ...realHttp,
           createServer: (...a) => {
-            const s = realHttp.createServer(...a);
+            const s = tablePorts(realHttp.createServer(...a));
             servers.push(s);
             return s;
           },
+          // The holder probe: a table number, reached on its real socket.
+          get: (opts, cb) => realHttp.get({ ...opts, port: realPortOf(opts.port) ?? opts.port }, cb),
         };
       }
       if (["path", "fs", "crypto", "zlib", "net", "url", "stream", "events", "util", "buffer"].includes(id)) {
@@ -195,7 +280,7 @@ function bootPanel(extDir, { dirnameAt = extDir, config = { port: 0 } } = {}) {
     for (const s of servers) { try { s.closeAllConnections?.(); s.close(); } catch {} }
     fs.rmSync(fakeHome, { recursive: true, force: true });
   };
-  return { sandbox, dom, host, close, fire, portFile: path.join(configDir, "port") };
+  return { sandbox, dom, host, close, fire, servers, portFile: path.join(configDir, "port") };
 }
 
 function settled(dom, timeoutMs = 8000) {
@@ -261,12 +346,12 @@ await check("loaded the bundle and reported the host", () => {
 await check("serves /health on the port it announced", async () => {
   const port = Number(booted.dom.nodes.port.textContent);
   assert.ok(port > 0, `no port announced (got "${booted.dom.nodes.port.textContent}")`);
-  const res = await fetch(`http://127.0.0.1:${port}/health`);
+  const res = await fetch(panelUrl(port, "/health"));
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.bundleLoaded, true);
   assert.ok(body.bundleHash, "health did not report a bundle hash");
-  // Read off the socket, not the configured number: the config said 0.
+  // Read off the server's address(), not the configured number: the config said 0.
   assert.equal(body.port, port, "health must report the port actually bound");
   // Issue #220, stage 3: the one word on which panel code is answering. The
   // server uses `_project_path` only when this lists `project-path`.
@@ -287,7 +372,7 @@ await check("wrote the port file the MCP server discovers it by", () => {
 await check("sends every op through __AEMCP, and reloads the bundle once when another script removed it", async () => {
   const port = Number(booted.dom.nodes.port.textContent);
   const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
-  const post = () => fetch(`http://127.0.0.1:${port}/op`, {
+  const post = () => fetch(panelUrl(port, "/op"), {
     method: "POST",
     headers: { "content-type": "application/json", "x-ae-mcp-token": token },
     body: JSON.stringify({ op: "list_comps", args: {} }),
@@ -315,7 +400,7 @@ await check("sends every op through __AEMCP, and reloads the bundle once when an
 await check("a run_batch the server asked to drive: no panel loop, no flag in ExtendScript, a reload still refused", async () => {
   const port = Number(booted.dom.nodes.port.textContent);
   const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
-  const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
+  const health = await (await fetch(panelUrl(port, "/health"))).json();
   assert.ok(health.capabilities.includes("server-drives-jobs"), "the panel must report server-drives-jobs");
   const seenArgs = [];
   let continued = 0;
@@ -332,7 +417,7 @@ await check("a run_batch the server asked to drive: no panel loop, no flag in Ex
     }
     return {};
   };
-  const post = (route, body) => fetch(`http://127.0.0.1:${port}${route}`, {
+  const post = (route, body) => fetch(panelUrl(port, route), {
     method: "POST",
     headers: { "content-type": "application/json", "x-ae-mcp-token": token },
     body: JSON.stringify(body),
@@ -372,7 +457,7 @@ await check("a run_batch the server asked to drive: no panel loop, no flag in Ex
 await check("the heal will not load a newer installed bundle into a running panel: the gate keeps saying restart", async () => {
   const port = Number(booted.dom.nodes.port.textContent);
   const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
-  const health = () => fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json());
+  const health = () => fetch(panelUrl(port, "/health")).then((r) => r.json());
   const runningHash = (await health()).bundleHash;
   const bundleFile = path.join(dir, "jsx", "bundle.jsx");
   const original = fs.readFileSync(bundleFile);
@@ -380,7 +465,7 @@ await check("the heal will not load a newer installed bundle into a running pane
   try {
     const loadsBefore = booted.host.evalCalls.filter((s) => s.indexOf("$.evalFile") >= 0).length;
     booted.host.namespaceGone = true;
-    const body = await fetch(`http://127.0.0.1:${port}/op`, {
+    const body = await fetch(panelUrl(port, "/op"), {
       method: "POST",
       headers: { "content-type": "application/json", "x-ae-mcp-token": token },
       body: JSON.stringify({ op: "list_comps", args: {} }),
@@ -451,7 +536,7 @@ await check("does not walk past another AE MCP panel: waits, names the holder, t
     assert.equal(after, "ready", `status: ${after}\n--- panel log ---\n${logText(second.dom)}`);
     assert.equal(Number(second.dom.nodes.port.textContent), held, "should have taken over the same port, not walked");
     assert.equal(fs.readFileSync(second.portFile, "utf8").trim(), String(held));
-    const res = await fetch(`http://127.0.0.1:${held}/health`);
+    const res = await fetch(panelUrl(held, "/health"));
     assert.equal((await res.json()).ok, true);
     booted = second;
   } catch (e) {
@@ -461,12 +546,8 @@ await check("does not walk past another AE MCP panel: waits, names the holder, t
 });
 
 await check("walks past a holder that is not an AE MCP panel, and says which port it chose and why", async () => {
-  const stranger = http.createServer((req, res) => {
-    res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ hello: true }));
-  });
-  await new Promise((r) => stranger.listen(0, "127.0.0.1", r));
-  const q = stranger.address().port;
+  const other = await stranger();
+  const q = other.address().port;
   const p = bootPanel(dir, { config: { port: q } });
   try {
     const status = await settled(p.dom);
@@ -481,8 +562,28 @@ await check("walks past a holder that is not an AE MCP panel, and says which por
     assert.equal(fs.readFileSync(p.portFile, "utf8").trim(), String(got), "the port file names the port actually bound");
   } finally {
     p.close();
-    stranger.closeAllConnections?.();
-    stranger.close();
+    other.closeAllConnections?.();
+    other.close();
+  }
+});
+
+await check("walking off the top of the port range refuses, naming the range, instead of asking for port 65536", async () => {
+  // Only reachable when the configured port is 65535 — or, in this test
+  // before #260, when the ephemeral port the first panel drew was.
+  const top = await stranger(65535);
+  const p = bootPanel(dir, { config: { port: 65535 } });
+  try {
+    const status = await settled(p.dom);
+    assert.equal(status, "failed", `status: ${status}\n${logText(p.dom)}`);
+    const log = logText(p.dom);
+    assert.match(log, /ports 65535 through 65535 are all in use/);
+    assert.match(log, /Last holder: something that is not an AE MCP panel/);
+    assert.match(log, /65535 is the highest port there is/, `the refusal must say why there is nowhere to walk\n${log}`);
+    assert.doesNotMatch(log, /65536/, "no port past the range may be named, or tried");
+    assert.equal(fs.existsSync(p.portFile), false, "no port file for a panel that bound nothing");
+  } finally {
+    p.close();
+    top.close();
   }
 });
 
@@ -503,24 +604,45 @@ await check("allowPortWalk opts back into walking past our own panel", async () 
   }
 });
 
+/**
+ * After unload, the panel gives its port back: nothing in this test holds the
+ * port number any more, the panel's socket has stopped listening, and the real
+ * socket answers nobody with this panel's token. That last probe used to be a
+ * bare /health — and under parallel load another process bound the freed real
+ * port and answered it (#260). Any process may take a free port; what must
+ * never answer is THIS panel, and only it knows this token.
+ */
+async function assertGaveBack(panel, port, real, token) {
+  assert.equal(portTable.has(port), false, `port ${port} should have been given back`);
+  for (const s of panel.servers) assert.equal(s.listening, false, "the panel's socket is still listening");
+  const status = await fetch(`http://127.0.0.1:${real}/op`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-ae-mcp-token": token },
+    body: JSON.stringify({ op: "list_comps", args: {} }),
+    signal: AbortSignal.timeout(2000),
+  }).then((r) => r.status, () => "no answer");
+  assert.notEqual(status, 200, "the panel still answers its own token after unloading");
+}
+
 await check("unloading frees the port, and removes only this panel's own port-file entry", async () => {
   const port = Number(walker.dom.nodes.port.textContent);
+  const real = realPortOf(port);
+  const token = fs.readFileSync(path.join(path.dirname(walker.portFile), `token-${port}`), "utf8").trim();
   // Another panel has written the file since; that entry is not ours to erase.
   fs.writeFileSync(walker.portFile, "1");
   walker.fire("unload");
   assert.equal(fs.readFileSync(walker.portFile, "utf8"), "1", "another panel's port-file entry was removed");
-  await assert.rejects(
-    fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) }),
-    "the port should have been given back"
-  );
+  await assertGaveBack(walker, port, real, token);
   walker.close();
 
   // And the survivor: its own entry goes with it.
   const own = Number(booted.dom.nodes.port.textContent);
+  const ownReal = realPortOf(own);
+  const ownToken = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${own}`), "utf8").trim();
   assert.equal(fs.readFileSync(booted.portFile, "utf8").trim(), String(own));
   booted.fire("unload");
   assert.equal(fs.existsSync(booted.portFile), false, "the port file must go with the panel that wrote it");
-  await assert.rejects(fetch(`http://127.0.0.1:${own}/health`, { signal: AbortSignal.timeout(1000) }));
+  await assertGaveBack(booted, own, ownReal, ownToken);
 });
 
 await check("a config with a bad key is tolerated: the bad key is named, the good one honoured", async () => {

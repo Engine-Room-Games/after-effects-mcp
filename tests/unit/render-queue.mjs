@@ -28,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, duplicateOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo, snapshotLayout, jobFolder, shadowDirs, strayFiles, relocateShadowOutputs, stampOutputs, cancelledPartials } =
+const { renderJobId, parseAerenderLine, LineSplitter, aerenderArgs, resolveAerender, verifyOutputs, RenderRunner, occupiedOutputs, duplicateOutputs, snapshotProject, removeSnapshot, missingFootageHint, sweepStaleSnapshots, isMissingFootageLine, touchSnapshot, loggedErrorCount, isoMediaProblem, isoMediaInfo, snapshotLayout, jobFolder, shadowDirs, strayFiles, relocateShadowOutputs, stampOutputs, cancelledPartials } =
   await import(dist("render", "aerender.js"));
 const { aerenderCandidates, renderPidsFromPs, isRenderProcessArgs, isRenderProcessWin, stopProcessTreeSync, snapshotMarker } = await import(dist("setup", "platform.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
@@ -304,6 +304,20 @@ await check("a chained snapshot path still identifies its job, and only its job 
   ].join("\n");
   assert.deepEqual(renderPidsFromPs(ps, a), [201], "another job on the same project is not this one");
   assert.equal(snapshotMarker("/var/folders/xx/T/ae-mcp-render/r_1_2/rq.aep"), "ae-mcp-render/r_1_2/rq.aep");
+});
+await check("two MCP servers starting a render in the same millisecond never share a job, so never kill each other's aerender (#260)", () => {
+  // Same clock, same per-process counter: what two sessions' first renders
+  // get when they start together. Only the process tells them apart.
+  const one = renderJobId(1793394836543, 4101, 1);
+  const two = renderJobId(1793394836543, 4102, 1);
+  assert.notEqual(one, two, "the job id must differ between servers");
+  const snapOf = (id) => snapshotLayout("/Users/me/show/show.aep", id, "/tmp/T", [], path.posix, (d) => d).snap;
+  const ps = [
+    `  301 /Applications/Adobe After Effects 2026/aerender -project ${snapOf(one)} -rqindex 1`,
+    `  302 /Applications/Adobe After Effects 2026/aerender -project ${snapOf(two)} -rqindex 1`,
+  ].join("\n");
+  assert.deepEqual(renderPidsFromPs(ps, snapOf(one)), [301], "a cancel must not reach the other server's aerender");
+  assert.deepEqual(renderPidsFromPs(ps, snapOf(two)), [302]);
 });
 await check("the copy sits under a chain of one-letter folders as deep as the project's, on both hosts (#215)", () => {
   const id = (d) => d;
@@ -658,12 +672,57 @@ function env(mode, out) {
   fs.rmSync(process.env.FAKE_GRANDCHILD, { force: true });
 }
 function alive(pid) {
+  // kill(0) and kill(-1) mean "my own process group" and "everything I may
+  // signal": a pid that is not a real one must never reach a signal (#260).
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error(`alive(${pid}): not a pid`);
   try {
     process.kill(pid, 0);
     return true;
   } catch {
     return false;
   }
+}
+
+// Every wait below is on something observed, bounded, and names what it was
+// waiting for when it gives up (issue #260). A loaded machine makes these
+// things slow; it does not change whether they happen. The old waits were
+// fixed counts of short sleeps that fell through to the assertion after a
+// second or two, which under load read as a product failure.
+const WAIT_MS = win ? 60_000 : 20_000;
+async function until(cond, what, timeoutMs = WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await cond())) {
+    if (Date.now() > deadline) throw new Error(`gave up after ${timeoutMs / 1000}s waiting for ${what}`);
+    await sleep(20);
+  }
+}
+// A pid file written by the fake or its engine. Existing is not enough:
+// writeFileSync creates the file before it writes the number, a reader in
+// between gets "", and Number("") is 0 — which alive() reported as a running
+// process (kill(0, 0) signals this test's own group) and a cleanup
+// kill(0, "SIGKILL") turned into the test killing its own process group (#260).
+function pidIn(file) {
+  try {
+    const pid = Number(fs.readFileSync(file, "utf8"));
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+async function pidFrom(file, what) {
+  await until(() => pidIn(file) !== null, `${what} to write its pid to ${file}`);
+  return pidIn(file);
+}
+// Cleanup for a process the cancel should already have ended.
+function killLeftover(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try { process.kill(pid, "SIGKILL"); } catch {}
+}
+// aerender has exited 0 on the current item, and the runner has seen it. The
+// draining checks used to sleep 500ms and assume this; under load the cancel
+// then came while aerender was still running, and took the other path.
+async function exitedOk(runner) {
+  await until(() => runner.current?.exitedOk === true, "the runner to see aerender exit 0");
 }
 
 {
@@ -848,13 +907,13 @@ function alive(pid) {
     env("hang", path.join(tmp, "cancel215-elsewhere.mov"));
     const { jobId } = runner.start({ ...plan(out, 100), projectPath: proj }, fake);
     const shadow = path.join(path.dirname(snapshotLayout(proj, jobId, runTmp, [out]).snap), "partial.mov");
-    for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_SELF); i++) await sleep(20);
+    await pidFrom(process.env.FAKE_SELF, "the fake aerender");
     fs.writeFileSync(shadow, "partial");
     const report = await runner.cancel(jobId);
     assert.equal(report.stopped, true, report.note);
     assert.deepEqual(report.partialFiles, [out]);
     assert.equal(fs.readFileSync(out, "utf8"), "partial");
-    try { process.kill(Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8")), "SIGKILL"); } catch {}
+    killLeftover(pidIn(process.env.FAKE_GRANDCHILD));
   });
 
   // The live AE check of #215: aerender exits on cancel at once, while its
@@ -883,10 +942,9 @@ function alive(pid) {
     const { jobId } = runner.start({ ...plan(out, 100), projectPath: proj }, fake);
     const shadowDir = path.dirname(snapshotLayout(proj, jobId, runTmp, [out]).snap);
     const shadow = path.join(shadowDir, outName);
-    for (let i = 0; i < 200 && !fs.existsSync(process.env.FAKE_SELF); i++) await sleep(20);
-    const aerenderPid = Number(fs.readFileSync(process.env.FAKE_SELF, "utf8"));
+    const aerenderPid = await pidFrom(process.env.FAKE_SELF, "the fake aerender");
     const cancelling = runner.cancel(jobId);
-    for (let i = 0; i < 200 && alive(aerenderPid); i++) await sleep(20);
+    await until(() => !alive(aerenderPid), "aerender to exit on the cancel");
     await sleep(300);
     // The engine writes its partial file after aerender has gone — into the
     // job folder as it stands, never re-creating a folder that was removed.
@@ -897,7 +955,7 @@ function alive(pid) {
     } catch { wrote = false; }
     sleeper.kill("SIGKILL");
     const report = await cancelling;
-    for (let i = 0; i < 200 && runner.activeJobId; i++) await sleep(20);
+    await until(() => !runner.activeJobId, "the cancelled job to end");
     return { out, shadow, shadowDir, projDir, wrote, report, priorStat, jobs, jobId };
   }
 
@@ -1033,8 +1091,8 @@ function alive(pid) {
     const out = path.join(tmp, "draining.mov");
     env("stuckengine", out);
     const { jobId } = runner.start(plan(out), fake);
-    for (let i = 0; i < 200 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
-    await sleep(500); // aerender has exited 0; its engine still holds the output open
+    await pidFrom(process.env.FAKE_GRANDCHILD, "the stuck engine");
+    await exitedOk(runner); // aerender has exited 0; its engine still holds the output open
     const t0 = Date.now();
     const report = await runner.cancel(jobId);
     assert.ok(Date.now() - t0 < 1000, `the cancel held the caller ${Date.now() - t0}ms for the drain`);
@@ -1057,8 +1115,8 @@ function alive(pid) {
     const p = plan(out);
     p.items.push({ ...p.items[0], index: 3, outputs: [{ index: 1, path: path.join(tmp, "never.mov") }] });
     const { jobId } = runner.start(p, fake);
-    for (let i = 0; i < 200 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
-    await sleep(500);
+    await pidFrom(process.env.FAKE_GRANDCHILD, "the stuck engine");
+    await exitedOk(runner);
     const report = await runner.cancel(jobId);
     assert.equal(report.status, "finishing");
     const st = await jobs.waitFor(jobId, 15_000).catch((e) => ({ status: "threw", error: e.message }));
@@ -1142,9 +1200,8 @@ function alive(pid) {
     const st = await jobs.waitFor(jobId, 15_000);
     assert.equal(st.status, "completed");
     assert.ok(Date.now() - t0 < 10_000);
-    const engine = Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8"));
-    for (let i = 0; i < 50 && alive(engine); i++) await sleep(20);
-    assert.ok(!alive(engine), "the stuck engine is killed at the cap");
+    const engine = await pidFrom(process.env.FAKE_GRANDCHILD, "the stuck engine");
+    await until(() => !alive(engine), "the stuck engine, killed at the cap, to exit");
   });
 
   await check("an aerender that prints nothing and exits 0 is not a render", async () => {
@@ -1221,8 +1278,7 @@ function alive(pid) {
     const out = path.join(tmp, "engine.mov");
     env("engine", out);
     const { jobId } = runner.start(plan(out, 100), fake);
-    for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
-    const engine = Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8"));
+    const engine = await pidFrom(process.env.FAKE_GRANDCHILD, "the detached render engine");
     assert.ok(alive(engine));
     const report = await runner.cancel(jobId);
     assert.equal(report.stopped, true, report.note);
@@ -1236,7 +1292,7 @@ function alive(pid) {
     const out = path.join(tmp, "decoy.mov");
     env("hang", out);
     const { jobId } = runner.start(plan(out, 100), fake);
-    for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
+    await pidFrom(process.env.FAKE_GRANDCHILD, "the fake's grandchild");
     const snapPath = snapshotLayout(projectFile, jobId, runTmp, [out]).snap;
     // A non-aerender process whose arguments hold this job's snapshot path and id.
     const decoy = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)", "--", jobId, snapPath], { detached: true, stdio: "ignore" });
@@ -1246,7 +1302,7 @@ function alive(pid) {
     assert.equal(report.stopped, true, report.note);
     assert.ok(alive(decoy.pid), "a process that only mentions the snapshot must survive the cancel");
     process.kill(decoy.pid, "SIGKILL");
-    try { process.kill(Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8")), "SIGKILL"); } catch {}
+    killLeftover(pidIn(process.env.FAKE_GRANDCHILD));
   });
 
   await check("exit 0 with missing footage is a failure, even with a fresh file on disk", async () => {
@@ -1299,12 +1355,11 @@ function alive(pid) {
     const out = path.join(tmp, "hang.mov");
     env("hang", out);
     const { jobId } = runner.start(plan(out, 100), fake);
-    for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
-    const grandchild = Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8"));
+    const grandchild = await pidFrom(process.env.FAKE_GRANDCHILD, "the fake's grandchild");
     assert.ok(alive(grandchild), "the fake's grandchild should be running before the cancel");
     // The fake writes its partial file just after the grandchild's pid: wait
     // for it, or a fast cancel lands in between (a CI flake, #217).
-    for (let i = 0; i < 100 && !fs.existsSync(out); i++) await sleep(20);
+    await until(() => fs.existsSync(out), `the fake to write its partial file ${out}`);
     const report = await runner.cancel(jobId);
     assert.equal(report.stopped, true);
     assert.equal(report.wasRunning, true);
@@ -1312,10 +1367,10 @@ function alive(pid) {
     assert.match(report.note, /may be INCOMPLETE/);
     assert.equal(jobs.get(jobId).status, "cancelled");
     assert.equal(jobs.get(jobId).result.stopped, true);
-    for (let i = 0; i < 50 && alive(grandchild); i++) await sleep(20);
-    assert.ok(!alive(grandchild), "cancel must stop the render engine too, not only aerender");
-    await sleep(50);
-    assert.equal(runner.activeJobId, null);
+    // The signal has been sent; on a loaded machine the exit can take a while.
+    // A grandchild the cancel never signalled stays alive, and this times out.
+    await until(() => !alive(grandchild), "the grandchild to exit — cancel must stop the render engine too, not only aerender");
+    await until(() => runner.activeJobId === null, "the runner to let go of the cancelled job");
   });
 
   await check("a cancel that could not see the exit still settles the job when the exit comes", async () => {
@@ -1326,9 +1381,8 @@ function alive(pid) {
     const out = path.join(tmp, "stubborn.mov");
     env("hang", out);
     const { jobId } = runner.start(plan(out, 100), fake);
-    for (let i = 0; i < 100 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
-    const pid = Number(fs.readFileSync(process.env.FAKE_SELF, "utf8"));
-    const grandchild = Number(fs.readFileSync(process.env.FAKE_GRANDCHILD, "utf8"));
+    const pid = await pidFrom(process.env.FAKE_SELF, "the fake aerender");
+    const grandchild = await pidFrom(process.env.FAKE_GRANDCHILD, "the fake's grandchild");
     const report = await runner.cancel(jobId);
     assert.equal(report.stopped, false);
     assert.equal(jobs.get(jobId).status, "running");
@@ -1339,7 +1393,7 @@ function alive(pid) {
     assert.equal(st.result.stopped, true);
     assert.match(st.result.note, /after cancel_job had reported it still running/);
     assert.match(st.result.note, /may be INCOMPLETE|No partial output was found/, "the follow-up names where the partial is, like a normal cancel");
-    try { process.kill(grandchild, "SIGKILL"); } catch {}
+    killLeftover(grandchild);
   });
 
   await check("cancelling a finished render says there was nothing to cancel", async () => {

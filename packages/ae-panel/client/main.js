@@ -708,6 +708,7 @@
   // 7777 through 7799 was the old ceiling; kept as a distance so a configured
   // start port walks the same number of steps.
   var WALK_LIMIT = 22;
+  var MAX_PORT = 65535;
 
   /**
    * Bind the configured port, and decide what to do when it is taken.
@@ -764,8 +765,13 @@
 
     function walk(p, tries, why) {
       var next = p + 1;
-      if (tries >= WALK_LIMIT) {
-        throw new Error("ports " + startPort + " through " + p + " are all in use — nothing free to bind. Last holder: " + why);
+      // There is no port past 65535: asking for one made listen() throw a
+      // RangeError that named no port the user had configured (issue #260).
+      var offTheTop = next > MAX_PORT;
+      if (tries >= WALK_LIMIT || offTheTop) {
+        throw new Error("ports " + startPort + " through " + p + " are all in use — nothing free to bind" +
+          (offTheTop ? " (" + MAX_PORT + " is the highest port there is; set a lower \"port\" in " + configFile + ")" : "") +
+          ". Last holder: " + why);
       }
       log("warn", "port " + p + " is held by " + why + " — moving to port " + next + ". " +
         "The MCP server finds this port through the port file; if tool calls fail on " + p +
