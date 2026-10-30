@@ -15,8 +15,14 @@ import { logger } from "../util/logger.js";
  * one is harmless, because nobody believes it without the port answering.
  */
 
-/** The wire protocol. A desk speaking another one is not joined; see line.ts. */
-export const DESK_PROTOCOL = 1;
+/**
+ * The wire protocol. A desk speaking another one is not joined; see line.ts.
+ *
+ * 2 (issue #248): an op may carry `yieldToWrites`, and the desk may answer it
+ * with a `busy` error. A protocol-1 desk would ignore the flag and forward the
+ * poll read into another session's batch, so the two never share a desk.
+ */
+export const DESK_PROTOCOL = 2;
 
 /** What a desk says it is, so a foreign listener on the port is never mistaken for one. */
 export const DESK_ID = "ae-mcp-front-desk";

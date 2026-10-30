@@ -240,7 +240,7 @@ export function createServer(opts: CreateServerOptions = {}) {
   // Sent as a write when the op is one or this call holds the lease, as the
   // tool path sends its own op.
   const internalVia = (heldByCall: () => boolean, onWait?: (message: string) => void): SendInternal =>
-    internalSender((op, a, write) => line.runOp(op, a, { write: write || heldByCall(), onWait }), line);
+    internalSender((op, a, write, o) => line.runOp(op, a, { write: write || heldByCall(), onWait, ...o }), line);
   // render_queue's jobs run in an aerender process this server owns; see
   // render/aerender.ts. When a job ends, its verified items are unticked in the
   // live queue so they do not render twice — once, as one named undo step, and
@@ -295,6 +295,8 @@ export function createServer(opts: CreateServerOptions = {}) {
   // read yields to writes: this session's, and any session's at the desk.
   const live = new LiveResources({
     read: (op, a, background) => line.runOp(op, a, { write: false, yieldToWrites: background }),
+    // An internal op, so through the sender every internal op takes.
+    probe: (a, background) => internalVia(() => false)("_live_probe", a, { yieldToWrites: background }),
     notify: (uri) => server.sendResourceUpdated({ uri }),
     writing: () => writes.held !== null || writes.depth > 0,
     gate: () => panelGate.check(),

@@ -439,6 +439,9 @@ export class FrontDesk {
           write: b.write === true,
           leaseId: typeof b.leaseId === "string" ? b.leaseId : undefined,
           deadline: typeof b.deadline === "number" ? b.deadline : undefined,
+          // Absent means an agent's own read or a write: forwarded as ever.
+          // Only an explicit true yields, and only protocol-2 followers send
+          // it (config.ts) — a desk never infers it.
           yieldToWrites: b.yieldToWrites === true,
         },
         {

@@ -69,6 +69,7 @@ function answer(op, args) {
       activeItemId: project.activeItemId,
       activeType: a ? a.type : null,
       activeComp: a && a.type === "comp" ? { ...comps[a.id] } : null,
+      comp: args && args.compId && comps[args.compId] ? { ...comps[args.compId] } : null,
     };
   }
   if (op === "get_comp") return { ...comps[args.compId] };
@@ -168,10 +169,11 @@ await check("with nobody subscribed, nothing reaches After Effects", async () =>
 
 await check("a read answers with the project, and the guides still read", async () => {
   const body = JSON.parse((await client.readResource({ uri: "ae://project/summary" })).contents[0].text);
-  assert.equal(body.activeItemId, 2);
+  assert.equal("activeItemId" in body, false, "focus is the active-comp resource's business, not the summary's");
   assert.equal(body.items.length, 2);
   const a = JSON.parse((await client.readResource({ uri: "ae://project/active-comp" })).contents[0].text);
-  assert.equal(a.comp.name, "Main");
+  assert.equal(a.compId, 2);
+  assert.deepEqual(a.comp, comps[2], "comp is get_comp's answer");
   const g = await client.readResource({ uri: "ae://guide/after-effects" });
   assert.ok(g.contents[0].text.startsWith("# Driving After Effects"));
 });
@@ -206,6 +208,27 @@ await check("the active comp notifies on a switch and on a settings change, from
   project.activeItemId = 3;
   await until(() => updates.includes("ae://project/active-comp"));
   assert.ok(updates.includes("ae://project/active-comp"), `got ${JSON.stringify(updates)}`);
+  await sleep(POLL * 3);
+});
+
+await check("focus moving to the Project panel is not a change: no notification, no walk", async () => {
+  await sleep(POLL * 3);
+  updates.length = 0;
+  const from = seen.length;
+  const was = project.activeItemId;
+  project.activeItemId = null; // the Project panel took focus
+  await sleep(POLL * 4);
+  project.activeItemId = 1; // a folder selected there
+  await sleep(POLL * 4);
+  assert.deepEqual(updates, [], "a click in the Project panel notified");
+  assert.equal(count("get_project_summary", from), 0, "a click in the Project panel cost a walk");
+  // The sticky comp still tracks its own settings while focus is elsewhere.
+  comps[was].numLayers += 1;
+  await until(() => updates.includes("ae://project/active-comp"));
+  assert.deepEqual(updates, ["ae://project/active-comp"]);
+  const a = JSON.parse((await client.readResource({ uri: "ae://project/active-comp" })).contents[0].text);
+  assert.equal(a.compId, was);
+  project.activeItemId = was;
   await sleep(POLL * 3);
 });
 
@@ -314,6 +337,138 @@ await check("the desk refuses a yielding read, unsent, while another session hol
   assert.deepEqual(sent, ["_live_probe", "_live_probe"]);
   // And the refusal crosses the wire as itself.
   assert.ok(fromWire(toWire(new BridgeBusyError("_live_probe", "run_batch"))) instanceof BridgeBusyError);
+});
+
+// ---------------------------------------------------------------------------
+// Each guard on its own, with a hand-driven clock and timer: nothing fires
+// unless the test calls poll(), so no guard can pass by a timer being pushed
+// back. Each check fails when its guard is removed.
+// ---------------------------------------------------------------------------
+
+const { LiveResources } = await import(dist("resources", "live.js"));
+const { SessionLine } = await import(dist("frontdesk", "line.js"));
+const { WriteQueue } = await import(dist("bridge", "writeQueue.js"));
+
+function rig() {
+  const t = { now: 100_000, delays: [], reads: [], notes: [], writing: false, stale: null, probe: null, numItems: 2 };
+  const live = new LiveResources({
+    read: async (op) => {
+      t.reads.push(op);
+      return { path: "/p.aep", numItems: t.numItems, activeItemId: 2, items: [{ id: 2, name: "Main", type: "comp" }] };
+    },
+    probe: async () => {
+      t.reads.push("_live_probe");
+      if (t.probe) return t.probe();
+      return { path: "/p.aep", numItems: t.numItems, activeItemId: 2, activeType: "comp", activeComp: { id: 2 }, comp: { id: 2 } };
+    },
+    notify: async (uri) => void t.notes.push(uri),
+    writing: () => t.writing,
+    gate: async () => t.stale,
+    intervalMs: 5_000,
+    quietMs: 2_000,
+    sweepMs: 60_000,
+    now: () => t.now,
+    setTimer: (fn, ms) => (t.delays.push(ms), {}),
+    clearTimer: () => {},
+  });
+  live.subscribe("ae://project/summary");
+  return { t, live };
+}
+
+await check("guard: no tick runs while this session holds or waits on the write lease", async () => {
+  const { t, live } = rig();
+  t.writing = true;
+  await live.poll();
+  assert.deepEqual(t.reads, [], "a tick ran during a write");
+  t.writing = false;
+  await live.poll();
+  assert.ok(t.reads.length > 0);
+});
+
+await check("guard: no tick runs inside the quiet period after this session's last write", async () => {
+  const { t, live } = rig();
+  await live.poll();
+  live.noteWrite("set_transform");
+  t.reads.length = 0;
+  t.now += 1_999;
+  await live.poll();
+  assert.deepEqual(t.reads, [], "a tick ran inside the quiet period");
+  t.now += 1;
+  await live.poll();
+  assert.deepEqual(t.reads, ["_live_probe"], "after the quiet period: the probe, and no walk for a non-renaming write");
+});
+
+await check("guard: the poll goes through the panel version gate", async () => {
+  const { t, live } = rig();
+  t.stale = "The running panel is older than this server.";
+  await live.poll();
+  assert.deepEqual(t.reads, [], "a stale panel was polled");
+});
+
+await check("guard: the summary is walked on the sweep even when the probe never moves", async () => {
+  const { t, live } = rig();
+  await live.poll();
+  assert.deepEqual(t.reads, ["_live_probe", "get_project_summary"], "the first tick takes the baseline");
+  t.reads.length = 0;
+  t.now += 59_999;
+  await live.poll();
+  assert.deepEqual(t.reads, ["_live_probe"]);
+  t.reads.length = 0;
+  t.now += 1;
+  await live.poll();
+  assert.deepEqual(t.reads, ["_live_probe", "get_project_summary"], "no walk when the sweep fell due");
+});
+
+await check("guard: a poll refused as busy is skipped quietly — no warning, no backoff", async () => {
+  const { t, live } = rig();
+  await live.poll();
+  t.probe = () => { throw new BridgeBusyError("_live_probe", "run_batch"); };
+  const logged = [];
+  const orig = console.error;
+  console.error = (...a) => logged.push(a.join(" "));
+  try {
+    await live.poll();
+    await live.poll();
+  } finally {
+    console.error = orig;
+  }
+  assert.deepEqual(t.delays.slice(-2), [5_000, 5_000], `a busy tick backed off: ${t.delays.slice(-2)}`);
+  assert.deepEqual(logged.filter((l) => /could not refresh/.test(l)), [], "a busy tick was logged as a failure");
+});
+
+await check("guard: SessionLine refuses a yielding read, unsent, while this session holds the write lease", async () => {
+  const sent = [];
+  const fakeBridge = { port: 1, runOp: async (op) => (sent.push(op), {}), cancel: async () => ({ known: true }), onPortChange() {} };
+  const writes = new WriteQueue();
+  const line = new SessionLine(fakeBridge, writes, { desk: null, sessionLabel: () => "test" });
+  const lease = await writes.acquire("set_transform");
+  await assert.rejects(line.runOp("_live_probe", {}, { yieldToWrites: true }), (e) => e instanceof BridgeBusyError);
+  assert.deepEqual(sent, [], "a yielding read reached the panel during this session's write");
+  await line.runOp("get_comp", { compId: 1 });
+  assert.deepEqual(sent, ["get_comp"], "an agent's read is never held back");
+  lease.release();
+  await line.runOp("_live_probe", {}, { yieldToWrites: true });
+  assert.deepEqual(sent, ["get_comp", "_live_probe"]);
+});
+
+await check("guard: the desk re-checks the lock at the last moment before sending", async () => {
+  const sent = [];
+  const desk = new FrontDesk(
+    { runOp: async (op) => (sent.push(op), { ok: true }), cancel: async () => ({ known: true }), port: 1 },
+    { port: 0, token: "t" }
+  );
+  const req = { sessionId: "me", session: "me", kind: "op", op: "_live_probe", args: {}, yieldToWrites: true };
+  // The lock is free when the read arrives, and taken by another session's
+  // write between the desk's first look and the post to the panel.
+  await assert.rejects(
+    desk.forward(req, {
+      onStart: async () => {
+        await desk.lock.acquire({ op: "run_batch", sessionId: "other", session: "another session", maxWaitMs: 1000, maxDepth: 4 });
+      },
+    }),
+    (e) => e instanceof BridgeBusyError
+  );
+  assert.deepEqual(sent, [], "the read went out after another session took the lock");
 });
 
 // ---------------------------------------------------------------------------

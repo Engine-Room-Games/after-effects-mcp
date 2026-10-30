@@ -297,8 +297,9 @@ checks in handlers) stay: a hand-rolled `POST /op` still reaches them.
 ## Live resources (issue #248)
 
 `ae://project/summary` and `ae://project/active-comp` are listed beside the
-guides. A read answers with `get_project_summary`, and with the active comp's
-`get_comp` summary. The server declares `resources.subscribe`. A guide can be
+guides. The summary is `get_project_summary`'s answer without `activeItemId`.
+The active comp is `{compId, comp}`, where `comp` is `get_comp`'s answer for
+the comp last active in a viewer. The server declares `resources.subscribe`. A guide can be
 subscribed to, but it never notifies, because it cannot change while the
 process runs. Live reads go through the panel version gate like a tool call
 does. A client's own read that fails is thrown with the tool path's sentence,
@@ -314,13 +315,25 @@ read. `tests/unit/live-resources.mjs` fails if any op reaches the stub panel
 while nobody is subscribed.
 
 **A tick is constant time.** `_live_probe` (explore.jsx) returns the project
-path, the item count, the active item and the active comp's `__compSummary`.
-It does no walk.
+path, the item count, the active item and the active comp's `__compSummary`,
+plus the summary of the comp named by `compId` (the sticky one, below). It
+does no walk. It is an internal op, sent through the same `internalSender` as
+every other one.
+
+**Focus is not a change.** After Effects' `activeItem` goes null, or becomes a
+folder or footage item, whenever the Project panel takes focus. Tracked as-is,
+every click in that panel would flip both resources and cost a walk. So:
+
+- the active comp is **sticky**. It changes only when another comp becomes
+  active. While focus is elsewhere, the probe reads the sticky comp by id, so
+  its settings are still tracked. It clears only when that comp is deleted.
+- the active item is **kept out of the summary**, from both the body and the
+  key that decides whether to walk.
 
 - `ae://project/active-comp` is answered from the probe outright.
 - `ae://project/summary` needs the `get_project_summary` walk, which is linear
   in project items. It walks only when one of these holds:
-  - the probe's path, count or active item moved;
+  - the probe's path or item count moved;
   - this session ran a write that can rename an item while leaving the count
     alone (`RENAMING_OPS`: `set_comp`, `run_jsx`, `run_batch`, the checkpoint
     ops);
@@ -349,8 +362,10 @@ It does no walk.
   its chunks, so no poll read lands in the middle of another session's batch.
   The refusal crosses the wire as `{kind: "busy"}`. The tick is skipped, which
   is not a failure and causes no backoff. A read an agent asked for never
-  carries the flag. An older desk ignores the field and forwards, which is the
-  behaviour before this change.
+  carries the flag. The flag is why `DESK_PROTOCOL` is 2: a protocol-1 desk
+  would ignore it and forward the read into another session's batch, so mixed
+  versions never share a desk. A desk treats an absent flag as an agent's read,
+  never as one that yields.
 - **The remaining exposure** is one tick's reads already queued in the panel's
   evalScript chain when a write arrives. That write waits behind them. With the
   probe, that wait is one constant-time eval. It is a full walk only on the
