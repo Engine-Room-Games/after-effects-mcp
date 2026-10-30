@@ -119,7 +119,7 @@
   // setup/panelHash.ts; the signature files a self-signed install adds are
   // left out of both, so a signed install is a current install.
   var loadedClientHash = panelHashModule.panelClientHash(extDir);
-  if (!loadedClientHash) log("warn", "could not hash the panel's own files in " + extDir + "; the MCP server will report this panel as out of date");
+  if (!loadedClientHash) log("warn", "could not hash the panel's own files in " + extDir + "; the MCP server cannot confirm this panel is current and will ask for it to be reinstalled");
 
   var bundlePath = path.join(extDir, "jsx", "bundle.jsx");
 

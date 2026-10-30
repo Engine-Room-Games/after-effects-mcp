@@ -81,6 +81,9 @@ export interface BridgeProbe {
   probed: ProbeResult[];
 }
 
+/** check_setup's detail for an "unverifiable" running panel; nextSteps keys on it. */
+export const UNVERIFIABLE_DETAIL = "the running panel could not read its own files to report its version";
+
 /**
  * Where is the panel, and does that agree with where ops are going?
  *
@@ -368,7 +371,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
         : assessment.state === "partial-install"
           ? "the installed panel files are a mix of versions — a restart cannot resolve this"
           : assessment.state === "unverifiable"
-            ? "the running panel could not read its own files to report its version"
+            ? UNVERIFIABLE_DETAIL
           : assessment.state === "restart-needed"
             ? "After Effects is still running the previous panel — the update needs a restart to take effect"
             : assessment.state === "unknown"
@@ -520,7 +523,12 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
 
   // A half-updated install or a missing dependency is not fixed by restarting;
   // both are fixed by reinstalling, and reinstalling only works with AE closed.
-  const brokenInstall = by("panelUpToDate")?.ok === false || by("panelDependencies")?.ok === false;
+  // An unverifiable running panel (it could not hash its own folder) is the
+  // same: a restart re-reads the same folder, so the remedy is a reinstall.
+  const brokenInstall =
+    by("panelUpToDate")?.ok === false ||
+    by("panelDependencies")?.ok === false ||
+    by("panelRunningCurrent")?.detail === UNVERIFIABLE_DETAIL;
   const needsInstall = by("panelInstalled")?.ok === false || brokenInstall;
   const needsDebug = by("cepDebugMode")?.ok === false;
   const aeRunning = by("afterEffectsRunning")?.ok === true;

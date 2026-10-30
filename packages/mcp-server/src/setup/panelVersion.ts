@@ -145,16 +145,20 @@ const CAPABILITY_WORDS: Readonly<Record<string, string>> = {
 export function panelDrivenBatchMessage(jobId: string): string {
   return (
     `The After Effects panel started batch ${jobId} and is running it itself, so these tools cannot follow it or ` +
-    `report when it finishes. Do not send the batch again: it is still applying in After Effects. Only a panel ` +
-    `older than these tools runs a batch on its own. ${STALE_PANEL_ADVICE}`
+    `report when it finishes — get_job and await_job do not know it. It must not be sent again: it is still ` +
+    `applying in After Effects, and a second copy would apply every op twice. Tell the user it is running, and wait ` +
+    `until After Effects responds again before doing anything else in it. Only then, because only a panel older than ` +
+    `these tools runs a batch on its own: run setup_panel, and ask the user to quit and reopen After Effects — never ` +
+    `while the batch is still applying.`
   );
 }
 
 const UNVERIFIABLE_ADVICE =
   "The After Effects panel is running but could not read its own files to report its version, so these tools " +
   "cannot tell whether it is current. Restarting After Effects will not change that — it reads the same folder " +
-  "again. Run check_setup and relay what it reports. If it names no other problem, tell the user to quit After " +
-  "Effects completely, then run setup_panel to reinstall the panel, then reopen it.";
+  "again. Tell the user to quit After Effects completely, then run setup_panel to reinstall the panel, then " +
+  "reopen it. If this comes back after a reinstall, After Effects cannot read the panel's own folder — ask the " +
+  "user to check the permissions on it.";
 
 const PARTIAL_INSTALL_ADVICE =
   "The installed After Effects panel is a mix of two versions — some files were updated and others were not, which " +
@@ -200,7 +204,7 @@ export function assessPanel(
     return {
       state: "update-needed",
       message:
-        `The After Effects panel is out of date: it cannot do ${missing.map((c) => CAPABILITY_WORDS[c] ?? c).join(", ")}, ` +
+        `The After Effects panel is out of date: it lacks support for ${missing.map((c) => CAPABILITY_WORDS[c] ?? c).join(", ")}, ` +
         "which these tools need. " +
         STALE_PANEL_ADVICE +
         " If setup_panel says it has no panel to install, these tools are installed incompletely — reinstall them first.",

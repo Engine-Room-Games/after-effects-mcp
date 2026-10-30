@@ -23,6 +23,7 @@ const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "
 const { assessPanel, panelDrivenBatchMessage, sourcePanelHashes, sourceBundleHash, sourceClientHash, unknownOpMessage } = await import(
   dist("setup", "panelVersion.js")
 );
+const { buildNextSteps, UNVERIFIABLE_DETAIL } = await import(dist("setup", "check.js"));
 const { REQUIRED_PANEL_CAPABILITIES, missingCapabilities, panelCapabilities } = await import(
   dist("setup", "panelCapabilities.js")
 );
@@ -103,7 +104,9 @@ for (const missing of [undefined, null, ""]) {
 for (const diskNow of [CURRENT_DISK, OLD_DISK]) {
   const v = assessPanel(run(SHIPPED.bundle, null), diskNow);
   check(`clientHash null (${diskNow === CURRENT_DISK ? "current" : "old"} disk)`, v.state, "unverifiable");
-  assert.match(v.message, /check_setup/);
+  // The gate's text is quoted inside check_setup's own output, so it must not
+  // send that reader back to check_setup.
+  assert.doesNotMatch(v.message, /check_setup/);
   assert.match(v.message, /setup_panel/);
   assert.match(v.message, /will not change that/, "says a restart alone is not the fix");
   assert.doesNotMatch(v.message, /^Ask the user to quit and reopen/m);
@@ -175,7 +178,11 @@ check("no source, no health", assessPanel(null, null, { shipped: null }).state, 
 {
   const m = panelDrivenBatchMessage("j_1");
   assert.match(m, /j_1/);
-  assert.match(m, /Do not send the batch again/);
+  assert.match(m, /must not be sent again/);
+  // The batch is still applying: nothing may tell the agent to retry it, or the
+  // user to quit After Effects before it has finished.
+  assert.doesNotMatch(m, /retry/i);
+  assert.match(m, /never while the batch is still applying/);
   assert.match(m, /older than these tools/);
   assert.match(m, /setup_panel/);
   assert.doesNotMatch(m, /does not recognise/);
@@ -189,6 +196,23 @@ assert.deepEqual(panelCapabilities(null), []);
 assert.deepEqual(missingCapabilities({ capabilities: ALL }), []);
 assert.deepEqual(missingCapabilities({}), ALL);
 passed += 5;
+
+// check_setup's next steps for an unverifiable panel: reinstall with After
+// Effects closed, never a bare restart (which re-reads the same folder).
+{
+  const steps = buildNextSteps(
+    [
+      { name: "afterEffectsRunning", ok: true, detail: "" },
+      { name: "panelRunningCurrent", ok: false, detail: UNVERIFIABLE_DETAIL, fix: "x" },
+    ],
+    false
+  ).join("\n");
+  assert.match(steps, /Quit After Effects completely/);
+  assert.match(steps, /setup_panel/);
+  assert.match(steps, /Reopen After Effects/);
+  assert.doesNotMatch(steps, /Quit and reopen After Effects so it picks up the panel/);
+  passed++;
+}
 
 // Unknown-op is always a version mismatch: server.ts rejects unknown tool names
 // before forwarding, so anything the panel rejects is an op this server defines.

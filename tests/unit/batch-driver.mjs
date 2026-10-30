@@ -614,7 +614,7 @@ try {
       assert.equal(rb.res.isError, true, rb.text);
       assert.match(rb.text, /older than these tools/);
       assert.match(rb.text, /setup_panel/);
-      assert.match(rb.text, /Do not send the batch again/);
+      assert.match(rb.text, /must not be sent again/);
       assert.doesNotMatch(rb.text, /does not recognise/, "the panel did recognise run_batch: it started the batch");
       const jobId = [...ae.jobs.keys()].pop();
       await sleep(300);

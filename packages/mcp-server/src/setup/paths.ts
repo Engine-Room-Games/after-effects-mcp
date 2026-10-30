@@ -178,7 +178,9 @@ function listPanelFiles(dir: string, prefix = ""): string[] {
     // node_modules is excluded on both sides: the installed panel gets `ws`
     // copied in beside these files and a checkout carries a dev copy, so its
     // presence says nothing about whether the panel itself is current.
-    if (entry.name === "node_modules" || entry.name === ".DS_Store") continue;
+    // So is file-browser litter: Finder's .DS_Store, Explorer's Thumbs.db and
+    // desktop.ini — the same names the client hash leaves out (panelHash.ts).
+    if (entry.name === "node_modules" || entry.name === ".DS_Store" || entry.name === "Thumbs.db" || entry.name === "desktop.ini") continue;
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (entry.isDirectory()) out.push(...listPanelFiles(path.join(dir, entry.name), rel));
     else out.push(rel);
