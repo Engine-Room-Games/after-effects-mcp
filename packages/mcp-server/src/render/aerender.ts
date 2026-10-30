@@ -75,8 +75,8 @@ export interface RenderPlan {
   version?: string;
   dirty?: boolean;
   items: RenderItemPlan[];
-  /** QUEUED items this render does not render, by output path only — for `duplicateOutputs` (#228). */
-  otherQueued?: { index: number; compName: string | null; outputs: RenderOutputPlan[] }[];
+  /** Every item but DONE ones that this render does not render, by output path — for `duplicateOutputs` (#228). */
+  otherQueued?: { index: number; compName: string | null; status?: string; outputs: RenderOutputPlan[] }[];
 }
 
 /**
@@ -1418,40 +1418,41 @@ export function outputPathKey(p: string, platform: NodeJS.Platform = process.pla
 }
 
 /**
- * Output files that more than one QUEUED item writes, where at least one of
- * them is being rendered: aerender refuses the later item ("output module name
- * already in use") only when it gets to it, after the save and the earlier
- * renders. add_to_render_queue refuses the clash when it is made; this catches
- * items queued by hand and spellings ExtendScript cannot resolve. One line per
- * file, naming every item and output module that writes it.
+ * Output files that more than one item has, where at least one of them is
+ * being rendered. Measured on 26.5 (#235 live check): aerender will not render
+ * an item when any other item in the project, DONE ones aside and UNQUEUED
+ * included, has the same output path — and it exits 0 having written nothing.
+ * The same holds for two items sharing a [####] sequence pattern, even over
+ * frame ranges that do not overlap. add_to_render_queue refuses the clash when
+ * it is made; this catches items queued by hand and spellings ExtendScript
+ * cannot resolve. One line per file, naming every item and output module.
  */
 export function duplicateOutputs(plan: RenderPlan, platform: NodeJS.Platform = process.platform): string[] {
-  type Writer = { item: number; comp: string | null; output: number; path: string; rendered: boolean };
+  type Writer = { item: number; comp: string | null; status?: string; output: number; path: string; rendered: boolean };
   const byKey = new Map<string, Writer[]>();
   const seen = new Set<number>();
-  const add = (item: { index: number; compName: string | null; outputs: RenderOutputPlan[] }, rendered: boolean) => {
+  const add = (item: { index: number; compName: string | null; status?: string; outputs: RenderOutputPlan[] }, rendered: boolean) => {
     // An item named twice is one item, never a clash with itself.
     if (seen.has(item.index)) return;
     seen.add(item.index);
     for (const o of item.outputs) {
-      // Image sequences are left alone: one pattern across items is how a
-      // render is split by frame range, and which frame numbers each writes
-      // cannot be told from here. Unmeasured whether aerender accepts it.
-      if (!o.path || /\[#+\]/.test(o.path)) continue;
+      if (!o.path) continue;
       const key = outputPathKey(o.path, platform);
       const list = byKey.get(key) ?? [];
-      list.push({ item: item.index, comp: item.compName, output: o.index, path: o.path, rendered });
+      list.push({ item: item.index, comp: item.compName, status: item.status, output: o.index, path: o.path, rendered });
       byKey.set(key, list);
     }
   };
   for (const item of plan.items) add(item, true);
-  for (const item of plan.otherQueued ?? []) add(item, false);
+  for (const item of plan.otherQueued ?? []) if (item.status !== "DONE") add(item, false);
   const out: string[] = [];
   for (const list of byKey.values()) {
     if (list.length < 2 || !list.some((w) => w.rendered)) continue;
     list.sort((a, b) => a.item - b.item || a.output - b.output);
     const who = list.map(
-      (w) => `item ${w.item} ("${w.comp}")${w.output > 1 ? ` output module ${w.output}` : ""}${w.path !== list[0].path ? ` as ${w.path}` : ""}`
+      (w) =>
+        `item ${w.item} ("${w.comp}")${!w.rendered && w.status && w.status !== "QUEUED" ? `, ${w.status},` : ""}` +
+        `${w.output > 1 ? ` output module ${w.output}` : ""}${w.path !== list[0].path ? ` as ${w.path}` : ""}`
     );
     out.push(`${list[0].path} is written by ${who.join(" and ")}`);
   }

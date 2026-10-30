@@ -366,13 +366,34 @@ function __rqResolveFolders(p) {
     else cur = cur + "/" + parts[i];
     try {
       var f = new Folder(cur);
-      if (f.alias) {
-        var r = f.resolve();
-        if (r && r.fsName) cur = String(r.fsName).replace(/\\/g, "/").replace(/\/+$/, "");
-      }
+      if (f.alias) cur = __rqLinkTarget(f, cur);
     } catch (e) {}
   }
   return cur + "/" + name;
+}
+
+/**
+ * Where a linked folder leads. Measured on 26.5 (macOS): Folder("/tmp").resolve()
+ * answers /Volumes/private/tmp — ExtendScript resolves the link's RELATIVE
+ * target (private/tmp) against /Volumes rather than the link's own folder. So
+ * an answer that does not exist is re-read relative to the link's parent, then
+ * to the root; one that still names nothing is not used and the path is kept
+ * as written (render_queue's check, with Node's realpath, still catches it).
+ */
+function __rqLinkTarget(folder, cur) {
+  var r = null;
+  try { r = folder.resolve(); } catch (e) { r = null; }
+  if (!r || !r.fsName) return cur;
+  var rp = String(r.fsName).replace(/\\/g, "/").replace(/\/+$/, "");
+  try { if (new Folder(rp).exists) return rp; } catch (e2) {}
+  var m = /^\/Volumes\/(.+)$/.exec(rp);
+  if (m) {
+    var tries = [cur.substring(0, cur.lastIndexOf("/")) + "/" + m[1], "/" + m[1]];
+    for (var t = 0; t < tries.length; t++) {
+      try { if (new Folder(tries[t]).exists) return tries[t]; } catch (e3) {}
+    }
+  }
+  return cur;
 }
 
 /** What two output paths are compared by: the same file gives the same key. */
@@ -384,25 +405,25 @@ function __rqPathKey(p) {
 }
 
 /**
- * The first QUEUED item, other than `skipIndex`, with an output module writing
- * to the file `key` names. Items that will not render (UNQUEUED, DONE) do not
- * count: re-queueing a comp to the file its last render wrote is the ordinary
- * way to render it again.
+ * The first item other than `skipIndex`, DONE ones aside, with an output module
+ * writing to the file `key` names. Measured on 26.5 (#235 live check): aerender
+ * refuses to render an item when ANY other item in the project has the same
+ * output path, UNQUEUED included, exits 0 and writes nothing; only DONE items
+ * are ignored. render_queue unticks what it rendered (UNQUEUED), so queueing a
+ * comp to its last render's file again needs the old item removed first — the
+ * message says so.
  *
- * Image sequences ([####]) are not checked at all. Two items sharing a pattern
- * is how a render is split across frame ranges, and which frame numbers each
- * writes depends on the output module's "Use Comp Frame Number" and the comp's
- * start frame — not something to guess at. Whether aerender accepts two items
- * with one pattern is unmeasured (issue #228); movie files are refused.
+ * Image sequences count: aerender refuses two items sharing a [####] pattern
+ * even when their frame ranges do not overlap (measured, same check).
  */
 function __rqOutputClash(rq, key, skipIndex) {
-  if (!key || __rqIsSequencePath(key)) return null;
+  if (!key) return null;
   for (var i = 1; i <= rq.numItems; i++) {
     if (i === skipIndex) continue;
     var item = rq.item(i);
     var status = null;
     try { status = __rqStatusName(item.status); } catch (e) {}
-    if (status !== "QUEUED") continue;
+    if (status === "DONE") continue;
     var n = 0;
     try { n = item.numOutputModules; } catch (e2) { n = 0; }
     for (var o = 1; o <= n; o++) {
@@ -410,7 +431,7 @@ function __rqOutputClash(rq, key, skipIndex) {
       if (omPath && __rqPathKey(omPath) === key) {
         var compName = null;
         try { compName = item.comp.name; } catch (e3) {}
-        return { index: i, compName: compName, output: o, path: omPath };
+        return { index: i, compName: compName, output: o, path: omPath, status: status };
       }
     }
   }
@@ -418,12 +439,16 @@ function __rqOutputClash(rq, key, skipIndex) {
 }
 
 function __rqClashMessage(clash, path) {
-  return "Render queue item " + clash.index + " (\"" + clash.compName + "\") already renders to " + clash.path +
+  var unticked = clash.status !== "QUEUED";
+  return "Render queue item " + clash.index + " (\"" + clash.compName + "\")" +
+    (unticked ? ", " + clash.status + (clash.status === "UNQUEUED" ? " (already rendered, or switched off)," : ",") : "") +
+    " already has the output " + clash.path +
     (clash.output > 1 ? " (its output module " + clash.output + ")" : "") +
     (clash.path !== path ? ", the same file as " + path : "") +
-    ". aerender refuses a second item with the same output (\"output module name already in use\"), and only " +
-    "when it renders. Choose another outputPath, or remove item " + clash.index + " first with remove_render_item. " +
-    "Nothing was queued.";
+    ". aerender will not render an item whose output another item in the queue also has" +
+    (unticked ? ", even an unticked one" : "") + " (\"output module name already in use\"), and it fails silently, " +
+    "writing nothing. Remove item " + clash.index + " first with remove_render_item" +
+    (unticked ? " (a file it rendered stays on disk)" : "") + ", or choose another outputPath. Nothing was queued.";
 }
 
 OPS.add_to_render_queue = function (args) {
@@ -457,9 +482,9 @@ OPS.add_to_render_queue = function (args) {
   }
 
   var rq = app.project.renderQueue;
-  // Another queued item writing the same file (issue #228). overwrite:true
-  // does not lift this: it is about a file on disk, and this is aerender
-  // refusing the second item outright.
+  // Another item with the same output, unless it is DONE (issue #228).
+  // overwrite:true does not lift this: it is about a file on disk, and this is
+  // aerender refusing the item outright.
   var clash = __rqOutputClash(rq, __rqPathKey(outFile.fsName), 0);
   if (clash) throw new Error(__rqClashMessage(clash, outFile.fsName));
 
@@ -653,15 +678,15 @@ OPS._render_prepare = noUndo(function (args) {
   if (problems.length) {
     throw new Error("render_queue refused before saving or rendering anything: " + problems.join("; ") + ".");
   }
-  // The QUEUED items this render leaves alone, by output path only: the server
-  // refuses a rendered item whose file one of them also writes (issue #228).
+  // Every item this render leaves alone, DONE ones aside, by output path: aerender
+  // refuses an item whose path any of them shares, UNQUEUED included (#228).
   var otherQueued = [];
   for (i = 1; i <= rq.numItems; i++) {
     var isPicked = false;
     for (var pk = 0; pk < picked.length; pk++) { if (picked[pk] === i) isPicked = true; }
-    if (isPicked || __rqStatusName(rq.item(i).status) !== "QUEUED") continue;
+    if (isPicked || __rqStatusName(rq.item(i).status) === "DONE") continue;
     var other = __rqItemSummary(rq, i, false);
-    otherQueued.push({ index: other.index, compName: other.compName, outputs: other.outputs });
+    otherQueued.push({ index: other.index, compName: other.compName, status: other.status, outputs: other.outputs });
   }
 
 

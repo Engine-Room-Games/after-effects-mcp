@@ -1001,15 +1001,16 @@ async function runRender(
   const plan = (await renderStep("prepare", send("_render_prepare", { indices: args.indices, all: args.all }))) as RenderPlan & {
     readOnly?: boolean | null;
   };
-  // Two queued items writing one file: aerender refuses the later one, but only
-  // when it reaches it (issue #228). overwrite:true does not lift this.
+  // An item whose output another item also has: aerender will not render it,
+  // exits 0 and writes nothing (issue #228, measured on 26.5). An unticked
+  // (UNQUEUED) item counts; a DONE one does not. overwrite:true does not lift it.
   const duplicates = duplicateOutputs(plan);
   if (duplicates.length) {
     throw new Error(
-      `Nothing was saved or rendered: more than one QUEUED render queue item writes the same file, and aerender ` +
-        `refuses the later one ("output module name already in use"): ${duplicates.join("; ")}. Point all but one ` +
-        `elsewhere, or remove the extra items with remove_render_item (list_render_queue shows the queue), then call ` +
-        `render_queue again.`
+      `Nothing was saved or rendered: an item to render shares its output with another render queue item, and ` +
+        `aerender will not render it ("output module name already in use") — an unticked item still counts: ` +
+        `${duplicates.join("; ")}. Remove the extra items with remove_render_item (an already-rendered item's ` +
+        `file stays on disk) or point them elsewhere, then call render_queue again. list_render_queue shows the queue.`
     );
   }
   // Items the user queued by hand never passed add_to_render_queue's guard.
