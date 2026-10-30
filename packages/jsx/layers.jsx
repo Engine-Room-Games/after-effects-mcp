@@ -410,7 +410,7 @@ OPS.set_layer = function (args) {
   // 2D layer with a modal warning rather than a throw: the call blocks until
   // someone clicks OK (measured on AE 2026, PR #216 live pass). So it is
   // refused here, judged by the 3D switch as it will be once this call's own
-  // threeDLayer — written before autoOrient — has landed. Cameras and lights
+  // threeDLayer — written before autoOrient when it turns 3D on — has landed. Cameras and lights
   // are always 3D.
   if ((args.autoOrient === "CAMERA_OR_POINT_OF_INTEREST" || args.autoOrient === "CHARACTERS_TOWARD_CAMERA") && !camOrLight) {
     var threeDAfter = args.threeDLayer !== undefined ? !!args.threeDLayer : !!l.threeDLayer;
@@ -422,6 +422,25 @@ OPS.set_layer = function (args) {
     if (args.autoOrient === "CHARACTERS_TOWARD_CAMERA" && l.threeDPerChar !== true) {
       throw new Error("set_layer: autoOrient CHARACTERS_TOWARD_CAMERA needs per-character 3D, which text layer " + l.id + " (\"" + l.name +
         "\") does not have enabled (Animate > Enable Per-character 3D). Nothing was changed.");
+    }
+  }
+  // The same modal from the other side: turning 3D off under a toward-camera
+  // orient leaves a 2D layer oriented at the camera. With no autoOrient in the
+  // call that would be the end state, so it is refused; with one (which, by
+  // the check above, is not toward-camera) autoOrient is written before
+  // threeDLayer below, so the 2D-and-oriented state never exists, even briefly.
+  var orientFirst = args.threeDLayer === false && args.autoOrient !== undefined;
+  if (args.threeDLayer === false && args.autoOrient === undefined && !camOrLight) {
+    var AO = __layerSwitchEnum("AutoOrientType");
+    var curOrient = null;
+    try { curOrient = l.autoOrient; } catch (eAO) { curOrient = null; }
+    var curName = null;
+    if (AO && curOrient === AO.CAMERA_OR_POINT_OF_INTEREST) curName = "CAMERA_OR_POINT_OF_INTEREST";
+    else if (AO && curOrient === AO.CHARACTERS_TOWARD_CAMERA) curName = "CHARACTERS_TOWARD_CAMERA";
+    if (curName !== null) {
+      throw new Error("set_layer: layer " + l.id + " (\"" + l.name + "\") is auto-oriented " + curName + ", which needs a 3D layer, so " +
+        "threeDLayer:false alone would leave it oriented at the camera in 2D. Pass autoOrient:\"NO_AUTO_ORIENT\" (or ALONG_PATH) " +
+        "in the same call. Nothing was changed.");
     }
   }
   if (args.stretch !== undefined && args.stretch === 0) {
@@ -445,14 +464,15 @@ OPS.set_layer = function (args) {
   if (tm) steps.push(["trackMatte", tm]);
   steps.push(
     ["name", args.name], ["enabled", args.enabled], ["shy", args.shy],
-    ["solo", args.solo], ["threeDLayer", args.threeDLayer], ["blendingMode", blend], ["label", args.label],
+    ["solo", args.solo], ["autoOrient", orientFirst ? switchEnums.autoOrient : undefined],
+    ["threeDLayer", args.threeDLayer], ["blendingMode", blend], ["label", args.label],
     ["inPoint", args.inPoint], ["outPoint", args.outPoint], ["startTime", args.startTime],
     ["stretch", args.stretch], ["preserveTransparency", args.preserveTransparency],
     ["motionBlur", args.motionBlur], ["collapseTransformation", args.collapseTransformation],
     ["adjustmentLayer", args.adjustmentLayer], ["guideLayer", args.guideLayer],
     ["effectsActive", args.effectsActive], ["audioEnabled", args.audioEnabled],
     ["quality", switchEnums.quality], ["samplingQuality", switchEnums.samplingQuality],
-    ["frameBlendingType", switchEnums.frameBlendingType], ["autoOrient", switchEnums.autoOrient]
+    ["frameBlendingType", switchEnums.frameBlendingType], ["autoOrient", orientFirst ? undefined : switchEnums.autoOrient]
   );
   if (args.locked === true) steps.push(["locked", true]);
 

@@ -238,11 +238,13 @@ function __applyTemporalEase(prop, keyIndex, easeIn, easeOut, resolved) {
   if (skipped.length) {
     // Which side made a count unwritable: the per-dimension list passed, unless
     // it is uniform (any count carries that) and so the kept side is the cause.
-    var passedList = (easeIn && easeIn.length) ? easeIn : ((easeOut && easeOut.length) ? easeOut : null);
-    var blamePassed = passedList !== null && !__easeUniform(passedList);
+    // Both sides are checked: with both passed nothing is kept (`known` is null).
+    var blameList = null;
+    if (easeIn && easeIn.length && !__easeUniform(easeIn)) blameList = easeIn;
+    else if (easeOut && easeOut.length && !__easeUniform(easeOut)) blameList = easeOut;
     detail = " Not tried at " + skipped.join(", ") + ": " +
-      (blamePassed
-        ? "the " + asked + " per-dimension eases passed cannot be written at another count without changing them" +
+      (blameList !== null || known === null
+        ? "the " + (blameList ? blameList.length : asked) + " per-dimension eases passed cannot be written at another count without changing them" +
           " — pass one pair, or one per dimension this property has"
         : "the kept side reads back as " + known + " different per-dimension eases, which cannot be written at another count without changing them") + ".";
   }

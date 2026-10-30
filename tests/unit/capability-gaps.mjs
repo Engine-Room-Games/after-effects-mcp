@@ -204,6 +204,33 @@ check("toward-camera auto-orient on a 2D layer is refused before anything is wri
   assert.deepEqual(ae.json("[SOLID.threeDLayer, ORIENTED.length]"), [true, 0]);
 });
 
+check("turning 3D off under a toward-camera orient never passes through 2D-and-oriented", () => {
+  const ae = scene();
+  // Record every moment a layer is 2D while oriented at the camera — the state
+  // After Effects answers with a modal.
+  ae.run(`var MODAL = [];
+    function watch(l) {
+      var o = l.autoOrient, d = l.threeDLayer;
+      function bad() { return !d && (o === AutoOrientType.CAMERA_OR_POINT_OF_INTEREST || o === AutoOrientType.CHARACTERS_TOWARD_CAMERA); }
+      Object.defineProperty(l, "autoOrient", { get: function () { return o; }, set: function (x) { o = x; if (bad()) MODAL.push(l.name); } });
+      Object.defineProperty(l, "threeDLayer", { get: function () { return d; }, set: function (x) { d = x; if (bad()) MODAL.push(l.name); } });
+    }
+    watch(CARD);
+    CARD.threeDLayer = true; CARD.autoOrient = AutoOrientType.CAMERA_OR_POINT_OF_INTEREST;
+    var TXT = textLayer(C, 9, "Hi", null); TXT.threeDPerChar = true; watch(TXT);
+    TXT.threeDLayer = true; TXT.autoOrient = AutoOrientType.CHARACTERS_TOWARD_CAMERA;`);
+  refused(ae.call("set_layer", { compId: 100, layerId: 2, name: "Flat", threeDLayer: false }),
+    /is auto-oriented CAMERA_OR_POINT_OF_INTEREST.*threeDLayer:false alone.*NO_AUTO_ORIENT.*Nothing was changed/, "3D off alone");
+  refused(ae.call("set_layer", { compId: 100, layerId: 9, threeDLayer: false }),
+    /is auto-oriented CHARACTERS_TOWARD_CAMERA.*Nothing was changed/, "per-character text 3D off alone");
+  assert.deepEqual(ae.json("[CARD.name, CARD.threeDLayer, TXT.threeDLayer, MODAL.length]"), ["Card", true, true, 0]);
+  // With the orient cleared in the same call, the orient goes first.
+  const r = ok(ae.call("set_layer", { compId: 100, layerId: 2, threeDLayer: false, autoOrient: "NO_AUTO_ORIENT" }), "3D off + orient off");
+  assert.equal(r.switches.autoOrient, "NO_AUTO_ORIENT");
+  ok(ae.call("set_layer", { compId: 100, layerId: 9, threeDLayer: false, autoOrient: "ALONG_PATH" }), "text 3D off + along path");
+  assert.deepEqual(ae.json("[CARD.threeDLayer, TXT.threeDLayer, MODAL]"), [false, false, []]);
+});
+
 check("characters-toward-camera needs a 3D text layer with per-character 3D", () => {
   const ae = scene();
   ae.run(`var TXT = textLayer(C, 9, "Hi", null);
@@ -349,6 +376,15 @@ check("a per-dimension ease of a length the property does not take is refused, n
   const notTried = (msg.match(/Not tried at ([\d, ]+):/) || [])[1].split(", ").map(Number);
   assert.deepEqual(rejected, [2], msg);
   assert.ok(notTried.length > 0 && notTried.every((n) => !rejected.includes(n)), msg);
+  // Both sides passed: nothing is kept, so the blame is the passed list that
+  // differs per dimension — even when the other one is uniform.
+  const both = ae.call("set_temporal_ease", {
+    compId: 100, layerId: 2, propertyPath: SCALE, keyIndex: 1,
+    easeIn: [{ influence: 50, speed: 0 }, { influence: 50, speed: 0 }],
+    easeOut: [{ influence: 80, speed: 0 }, { influence: 20, speed: 0 }],
+  }).error;
+  assert.doesNotMatch(both, /kept side|null/, both);
+  assert.match(both, /the 2 per-dimension eases passed cannot be written at another count/, both);
   const after = ok(ae.call("get_keyframes", { compId: 100, layerId: 2, propertyPath: SCALE }), "after");
   assert.deepEqual(after, before);
 });
