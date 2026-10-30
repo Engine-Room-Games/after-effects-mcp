@@ -8,8 +8,9 @@ import { AeError } from "../util/errors.js";
  * `import_footage` make before they touch the project, done by the server
  * (issue #220, stage 2).
  *
- * None of these needs After Effects: they ask whether a folder exists, whether
- * a file is already there, whether a folder accepts writes. Run here they cost
+ * None of these needs After Effects: they ask whether a folder exists and
+ * whether a file is already there, and nothing else. They read, never write,
+ * so a check leaves nothing behind. Run here they cost
  * AE no main-thread time, and their wording can be fixed with a server update
  * rather than a panel reinstall and an AE restart.
  *
@@ -27,6 +28,9 @@ import { AeError } from "../util/errors.js";
  * different to the two is not judged here at all — it is forwarded untouched,
  * and the jsx check, which is the one that always ran, decides as before.
  * Skipping is never a refusal.
+ *
+ * The same goes for a path the server is not allowed to look at: only a
+ * definite ENOENT/ENOTDIR counts as missing (see `pathState`).
  */
 
 /** `/a/b`, `C:\a\b`, `\\server\share` — a path Node and `File` read the same way on this platform. */
@@ -42,6 +46,29 @@ function expandHome(p: string, platform: NodeJS.Platform): string {
   if (p === "~") return os.homedir();
   if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
   return p;
+}
+
+/**
+ * What the server can say for certain about a path: it is there, it is
+ * definitely not there, or the server cannot tell.
+ *
+ * Only ENOENT and ENOTDIR mean "not there". Anything else, EACCES and EPERM
+ * above all, means this process was not allowed to look, and that says
+ * nothing about After Effects: on macOS, privacy access (TCC) to Desktop,
+ * Documents, removable and network volumes is granted per app, and on Windows
+ * a mapped drive can be invisible to the server's process while AE sees it.
+ * "unknown" is never a refusal; the call is forwarded and the jsx decides.
+ */
+export type PathState = "exists" | "missing" | "unknown";
+
+export function pathState(p: string): PathState {
+  try {
+    fs.statSync(p);
+    return "exists";
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
+  }
 }
 
 // ---------- add_to_render_queue (render.jsx) ----------
@@ -82,13 +109,13 @@ export function checkRenderOutput(
 
   const file = path.resolve(expanded);
   const parent = path.dirname(file);
-  if (!fs.existsSync(parent)) {
+  if (pathState(parent) === "missing") {
     throw new AeError(
       "The folder for outputPath does not exist: " + parent + ". " +
         "Create it first — a render into a missing folder fails only when it runs."
     );
   }
-  if (!isSequencePath(outputPath) && fs.existsSync(file) && args.overwrite !== true) {
+  if (!isSequencePath(outputPath) && pathState(file) === "exists" && args.overwrite !== true) {
     throw new AeError(
       "A file already exists at " + file + ". Pass overwrite:true to replace it when the " +
         "render runs, or choose another outputPath."
@@ -108,7 +135,7 @@ export function checkFootageExists(args: { path?: unknown }, platform: NodeJS.Pl
   const p = args && args.path;
   if (typeof p !== "string" || p.length === 0) return; // the jsx's own "path is required"
   if (!isPlainAbsolute(p, platform)) return;
-  if (!fs.existsSync(p)) throw new AeError("No file at " + p);
+  if (pathState(p) === "missing") throw new AeError("No file at " + p);
 }
 
 // ---------- export_mogrt (mogrt.jsx) ----------
@@ -141,36 +168,16 @@ export function isBlank(s: string): boolean {
   return true;
 }
 
-/** `__folderIsWritable`: write a probe, remove it on every path. */
-export function folderIsWritable(folder: string): boolean {
-  const probe = joinPath(folder, ".ae-mcp-write-probe");
-  let opened = false;
-  try {
-    fs.writeFileSync(probe, "");
-    opened = true;
-  } catch {
-    opened = false;
-  }
-  try {
-    if (fs.existsSync(probe)) fs.unlinkSync(probe);
-  } catch {
-    /* never outlives the call, but a failed unlink is not the caller's problem */
-  }
-  return opened;
-}
-
 /**
  * The destination checks `export_mogrt` makes before it renames, saves or
- * exports anything: the name resolves into the folder, an existing file needs
- * `overwrite`, the folder accepts writes. Throws the jsx's own refusal;
- * returns quietly when every check it could make passed.
+ * exports anything that need neither After Effects nor a write: the name
+ * resolves into the folder, and an existing template needs `overwrite`.
+ * Throws the jsx's own refusal; returns quietly otherwise.
  *
- * **No side effects.** It never creates the destination folder. A folder that
- * does not exist yet is left for the jsx to create, after its own checks, so a
- * refusal here never leaves a folder behind. In that case the only check made
- * here is the one that needs no folder, that the name resolves into it; the
- * existing-template check is moot and the write probe has nowhere to run. The
- * probe's test file is removed on every path.
+ * **No side effects.** It creates nothing and writes nothing. A folder that
+ * does not exist yet is the jsx's to create, and whether the folder accepts
+ * writes is the jsx's to test: its probe is a file written into the user's
+ * folder, which a server killed mid-check would leave behind.
  *
  * Only for an explicit `destDir`. The default is the .aep's folder, and the
  * only op in an installed bundle that reports the .aep path,
@@ -180,8 +187,7 @@ export function folderIsWritable(folder: string): boolean {
  *
  * Nothing is checked either when `name` is blank, which the jsx refuses
  * first, or `destDir` is not a plain absolute path. When `name` is omitted,
- * the template name is read off the comp, so the two name checks are left to
- * the jsx and only the probe runs here.
+ * the template name is read off the comp, so nothing is checked here.
  *
  * The refusals reach the caller in a different order from the jsx's in some
  * cases; "Filesystem checks on the server" in docs/subsystems.md lists them.
@@ -198,7 +204,6 @@ export function checkMogrtDestination(
   if (!isPlainAbsolute(destDir, platform)) return;
 
   const folder = path.resolve(destDir);
-  const folderExists = fs.existsSync(folder);
 
   // A name the two path readers might split differently is left to the jsx.
   const templateName = hasName ? (args.name as string) : null;
@@ -214,19 +219,11 @@ export function checkMogrtDestination(
           "a `destDir` if you want it written somewhere else."
       );
     }
-    if (folderExists && fs.existsSync(outPath) && args.overwrite !== true) {
+    if (pathState(outPath) === "exists" && args.overwrite !== true) {
       throw new AeError(
         "A template already exists at " + outPath + ". Pass overwrite: true to replace it, or a " +
           "different `name`."
       );
     }
-  }
-
-  if (folderExists && !folderIsWritable(folder)) {
-    throw new AeError(
-      "After Effects cannot write into " + folder + " — a test file could not be created there. " +
-        "Nothing was exported. Pass a `destDir` the user can write to, or ask them to fix the folder's " +
-        "permissions."
-    );
   }
 }

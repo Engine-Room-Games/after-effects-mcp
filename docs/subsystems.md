@@ -224,7 +224,12 @@ Three ops check the filesystem before they touch the project, and since issue
 |---|---|---|
 | `add_to_render_queue` | `outputPath` is absolute, its folder exists, an existing file needs `overwrite` | `render.jsx` |
 | `import_footage` | the file exists | `footage.jsx` |
-| `export_mogrt`, with an explicit `destDir` | the name resolves into the folder; and, when the folder already exists, an existing template needs `overwrite` and the folder accepts a write | `mogrt.jsx` |
+| `export_mogrt`, with an explicit `destDir` and `name` | the name resolves into the folder, an existing template needs `overwrite` | `mogrt.jsx` |
+
+Two `export_mogrt` checks stay with the jsx alone: creating a folder that does
+not exist yet, and testing that the folder accepts writes. Both write into the
+user's folder. A server killed mid-probe would leave its test file behind, and
+a file already at the probe's name would be emptied and deleted.
 
 **The aim is for these checks to end up on the server only.** For now the jsx
 checks stay and still run, because the panel does not update itself and the
@@ -239,12 +244,19 @@ which go straight to ExtendScript. A server refusal reads
 `AE: <the same sentence>` without the old `(line N)`, which was a line in the
 concatenated bundle.
 
-**No side effects.** A server check never creates, moves or leaves anything.
-`export_mogrt`'s write probe is a test file removed on every path, and a
-destination folder that does not exist yet is not created by the server. It is
-left to the jsx, which creates it after its own earlier checks, exactly as
-before. A refused call therefore leaves nothing on disk that the jsx alone
-would not have left.
+**No side effects.** A server check only reads: a `stat`, and nothing else. It
+never creates, writes or removes anything, so a refused call leaves nothing on
+disk that the jsx alone would not have left.
+
+**"Not allowed to look" is not "missing".** Only a definite `ENOENT` or
+`ENOTDIR` refuses (`pathState()` in `destinations.ts`). `EACCES`, `EPERM` and
+every other failure to look forward the call, and the jsx decides. The server
+and After Effects are different processes with different access. On macOS,
+privacy access (TCC) to Desktop, Documents, removable and network volumes is
+granted per app, so AE can see a folder the server is not allowed to look into.
+On Windows a mapped drive can be invisible to the server's process while AE
+sees it. `tests/unit/destination-checks.mjs` checks this with a real `EACCES`
+and with simulated `EPERM`, `EIO` and others.
 
 **A check runs only where Node and ExtendScript's `File` read the path the same
 way.** `File` decodes `%XX` escapes, reads `~` as the home folder, and on
@@ -252,8 +264,8 @@ Windows reads a leading `/c/` as a drive. A path that could mean two things is
 not judged by the server at all: it is forwarded untouched, and the jsx decides
 as it always did. A skipped check is never a refusal.
 
-**No extra round trip.** Every check is a stat or a probe on the server, and
-nothing is asked of After Effects first. The one AE question that would help,
+**No extra round trip.** Every check is a stat on the server, and nothing is
+asked of After Effects first. The one AE question that would help,
 "where is the .aep?", has no cheap answer in an installed bundle (see the house
 style above), so `export_mogrt` without `destDir`, which defaults to the .aep's
 folder, is left entirely to the jsx.
@@ -269,11 +281,9 @@ server's checks now run before checks only After Effects can make. In full:
   destination check: a comp that does not exist, a project never saved, and an
   empty Essential Graphics panel (#71). Any of those *and* a bad destination
   now reports the destination first.
-- **`export_mogrt` with `destDir` and no `name`:** the template name is read
-  off the comp, so the server cannot make the two name checks and runs only
-  the write probe. The jsx ran the probe *last*. A read-only folder now reports
-  "cannot write" before the "is not inside" refusal for a comp-derived name
-  containing a separator, and before "A template already exists".
+- **`export_mogrt` with `destDir` and no `name`:** no change. The template
+  name is read off the comp, so the server checks nothing and the jsx makes
+  every check in its own order.
 - **`export_mogrt` into a folder that does not exist yet:** the jsx created the
   folder first and reported "Could not create the destination folder" before
   checking the name. The server checks the name without creating anything, so

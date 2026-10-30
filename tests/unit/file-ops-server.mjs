@@ -132,7 +132,7 @@ r = await call("export_mogrt", { compId: 7, name: "LT", destDir: out });
 assert.equal(r.isError, true);
 assert.match(r.text, /^AE: A template already exists at /);
 assert.deepEqual(ops(), [], "refused before After Effects is asked to export");
-assert.deepEqual(fs.readdirSync(out), ["LT.mogrt"], "no write probe left behind");
+assert.deepEqual(fs.readdirSync(out), ["LT.mogrt"], "nothing written into the folder");
 passed++;
 
 r = await call("export_mogrt", { compId: 7, name: "LT" });

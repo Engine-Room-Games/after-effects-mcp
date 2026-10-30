@@ -211,34 +211,36 @@ parity("mogrt: a dot-dot name escapes the folder", and(saved, () => fs.mkdirSync
 parity("mogrt: existing template, no overwrite", and(saved, touch("out", "LT.mogrt")), ...mogrt({ name: "LT", destDir: at("out") }), /^A template already exists at /);
 parity("mogrt: existing template, overwrite", and(saved, touch("out", "LT.mogrt")), ...mogrt({ name: "LT", destDir: at("out"), overwrite: true }), /^PASSED$/);
 parity("mogrt: no name, folder exists", and(saved, () => fs.mkdirSync(at("auto"))), ...mogrt({ destDir: at("auto") }), /^PASSED$/);
-if (canChmod) {
-  parity("mogrt: a folder that refuses writes", and(saved, () => { fs.mkdirSync(at("ro")); fs.chmodSync(at("ro"), 0o555); }),
-    ...mogrt({ name: "LT", destDir: at("ro") }), /cannot write into .* a test file could not be created/);
-}
 
 // A destination that does not exist yet: the port makes nothing.
 parityNoFolder("mogrt: new destDir passes, and is left to the jsx to create", saved, ...mogrt({ name: "LT", destDir: at("new", "deeper") }), /^PASSED$/);
 parityNoFolder("mogrt: new destDir, a slash in the name", saved, ...mogrt({ name: "a/b", destDir: at("new") }), /is not inside/);
 parityNoFolder("mogrt: new destDir, no name", saved, ...mogrt({ destDir: at("auto") }), /^PASSED$/);
 
-// The one disagreement a missing folder allows, and the reason it is allowed:
-// the jsx fails to create the folder; the port, which creates nothing, passes
-// and leaves that refusal to the jsx, word for word, after it.
+// Left to the jsx, by design: whether the folder accepts writes (the jsx's
+// test is a file written into the folder, which the server will not do) and
+// whether a new folder can be created. The port passes, creates and writes
+// nothing, and the jsx then refuses in its own words, as it always did.
 if (canChmod) {
   const ro = and(saved, () => { fs.mkdirSync(at("ro")); fs.chmodSync(at("ro"), 0o555); });
-  resetDir(dir);
-  ro();
-  assert.match(jsxResult(mogrt({ name: "LT", destDir: at("ro", "sub") })[0]), /^Could not create the destination folder /);
-  resetDir(dir);
-  ro();
-  assert.equal(result(mogrt({ name: "LT", destDir: at("ro", "sub") })[1]), PASSED);
-  assert.equal(fs.existsSync(at("ro", "sub")), false);
-  resetDir(dir);
-  passed++;
+  for (const [why, destDir, jsxSays] of [
+    ["a folder that refuses writes", () => at("ro"), /cannot write into .* a test file could not be created/],
+    ["a folder that cannot be created", () => at("ro", "sub"), /^Could not create the destination folder /],
+  ]) {
+    resetDir(dir);
+    ro();
+    assert.match(jsxResult(mogrt({ name: "LT", destDir: destDir() })[0]), jsxSays, why);
+    resetDir(dir);
+    ro();
+    const before = snapshotTree(dir);
+    assert.equal(result(mogrt({ name: "LT", destDir: destDir() })[1]), PASSED, why);
+    assert.deepEqual(snapshotTree(dir), before, why + ": the port wrote nothing");
+    resetDir(dir);
+    passed++;
+  }
 }
 
-// No side effects on any refusal, nor on a pass: the write probe never
-// outlives the call, and a refused call leaves the folder as it was.
+// No side effects on any refusal, nor on a pass.
 resetDir(dir);
 saved();
 fs.mkdirSync(at("out"));
@@ -246,9 +248,8 @@ fs.writeFileSync(at("out", "LT.mogrt"), "zip");
 const beforeRefusal = snapshotTree(dir);
 assert.match(result(() => D.checkMogrtDestination({ compId: 7, name: "LT", destDir: at("out") })), /already exists/);
 assert.match(result(() => D.checkMogrtDestination({ compId: 7, name: "a/b", destDir: at("nowhere", "deep") })), /is not inside/);
-assert.deepEqual(snapshotTree(dir), beforeRefusal, "a refusal leaves no folder and no probe");
 assert.equal(result(() => D.checkMogrtDestination({ compId: 7, name: "LT", destDir: at("out"), overwrite: true })), PASSED);
-assert.deepEqual(fs.readdirSync(at("out")), ["LT.mogrt"], "the probe is gone after a pass");
+assert.deepEqual(snapshotTree(dir), beforeRefusal, "nothing created, written or removed");
 passed++;
 
 // Not judged: no destDir, a blank name the jsx refuses first, or a path the
@@ -267,6 +268,58 @@ for (const [args, why] of declined) {
 }
 assert.deepEqual(fs.readdirSync(dir), ["proj"], "a declined check makes no folder");
 passed++;
+
+// ---------- not allowed to look is not "missing" ----------
+//
+// macOS grants privacy access (TCC) to Desktop, Documents, removable and
+// network volumes per app, and a Windows mapped drive can be invisible to the
+// server's process while After Effects sees it. So only a definite ENOENT or
+// ENOTDIR is "missing"; EACCES, EPERM or any other failure to look forwards
+// the call and the jsx decides.
+
+// Real EACCES: a folder this process may not search.
+if (canChmod) {
+  resetDir(dir);
+  fs.mkdirSync(at("locked", "inner"), { recursive: true });
+  fs.writeFileSync(at("locked", "LT.mogrt"), "zip");
+  fs.chmodSync(at("locked"), 0o000);
+  let code = null;
+  try { fs.statSync(at("locked", "inner")); } catch (e) { code = e.code; }
+  assert.equal(code, "EACCES", "the fixture really cannot be looked into");
+  assert.equal(D.pathState(at("locked", "inner")), "unknown");
+  assert.equal(result(() => D.checkRenderOutput({ outputPath: at("locked", "inner", "x.mov") })), PASSED, "render: forwarded");
+  assert.equal(result(() => D.checkFootageExists({ path: at("locked", "clip.mov") })), PASSED, "footage: forwarded");
+  assert.equal(result(() => D.checkMogrtDestination({ compId: 7, name: "LT", destDir: at("locked") })), PASSED, "mogrt: forwarded");
+  fs.chmodSync(at("locked"), 0o755);
+  resetDir(dir);
+  passed++;
+}
+
+// Simulated, on every platform: each errno a stat can fail with.
+{
+  const realStat = fs.statSync;
+  const failWith = (code) => {
+    fs.statSync = () => { const e = new Error(code); e.code = code; throw e; };
+  };
+  try {
+    for (const code of ["EACCES", "EPERM", "EIO", "ELOOP", "ENAMETOOLONG", "EBUSY"]) {
+      failWith(code);
+      assert.equal(D.pathState(at("x")), "unknown", code);
+      assert.equal(result(() => D.checkRenderOutput({ outputPath: at("a", "x.mov") })), PASSED, `render forwarded on ${code}`);
+      assert.equal(result(() => D.checkFootageExists({ path: at("clip.mov") })), PASSED, `footage forwarded on ${code}`);
+      assert.equal(result(() => D.checkMogrtDestination({ compId: 7, name: "LT", destDir: at("out") })), PASSED, `mogrt forwarded on ${code}`);
+    }
+    for (const code of ["ENOENT", "ENOTDIR"]) {
+      failWith(code);
+      assert.equal(D.pathState(at("x")), "missing", code);
+      assert.match(result(() => D.checkRenderOutput({ outputPath: at("a", "x.mov") })), /does not exist/, `render refused on ${code}`);
+      assert.match(result(() => D.checkFootageExists({ path: at("clip.mov") })), /^No file at /, `footage refused on ${code}`);
+    }
+  } finally {
+    fs.statSync = realStat;
+  }
+  passed++;
+}
 
 // The ported helpers match the jsx's on the inputs they exist for.
 for (const p of ["/a", "~/a", "C:\\a", "c:/a", "\\\\srv\\a", "a/b", "", ".", "C:a"]) {
