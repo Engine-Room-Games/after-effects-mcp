@@ -16,7 +16,7 @@ Describe the animation you want — a lower third, a logo reveal, an animated co
 [![MCP](https://img.shields.io/badge/MCP-server-000000)](https://modelcontextprotocol.io)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/migus88)
 
-Works with **Claude**, **Cursor**, **VS Code**, **Codex**, **Windsurf** and any other MCP client.
+Works with **Claude Desktop**, **Claude Code**, **Cursor**, **VS Code**, **Codex**, **Windsurf** and any other local MCP client.
 
 </div>
 

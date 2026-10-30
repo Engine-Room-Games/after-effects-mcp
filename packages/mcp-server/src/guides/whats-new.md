@@ -243,9 +243,9 @@ the old shape gets nothing rather than an error.
   `text`, `assembly`, `extendscript-gotchas`, `sound`, `mogrt-and-footage`,
   `issue-journal`, `whats-new` — twelve `ae_guide` topics in all with
   `style-guide` and `ae-setup`. Where the Claude Code plugin is installed, the
-  references are the files in the `after-effects` skill's `references/` folder, opened
-  only when the core points at them. Keyframes, easing and rigging are in
-  `animation`; raw scripting, with the ease-arity table, in
+  references are the files in the `after-effects` skill's `references/`
+  folder, opened only when the core points at them. Keyframes, easing and
+  rigging are in `animation`; raw scripting, with the ease-arity table, in
   `extendscript-gotchas` and nowhere else.
   supersedes: the after-effects skill covers keyframes text and shapes in one file
   supersedes: the ease arity table is in the main guide
