@@ -274,7 +274,13 @@ function stopsAt(key: RawKey): boolean {
   return side(key[1], key[4]) && side(key[2], key[6]);
 }
 
-/** True when the travel into key m turns back on itself leaving it (within ~25°). */
+/**
+ * True when the travel into key m turns back leaving it: straight back (within
+ * ~25°), or any backwards turn whose return is small next to the travel in —
+ * a 2-D overshoot that settles a little off its line (100 → 900 → 880, with a
+ * few pixels of drift) is still a reversal, where a corner of comparable
+ * length (right 500, then 500 back and down) is not.
+ */
 function reversesAt(k: RawKey[], m: number): boolean {
   const a = k[m - 1][7], b = k[m][7], c = k[m + 1][7];
   if (!a || !b || !c || a.length !== b.length || b.length !== c.length) return false;
@@ -287,7 +293,8 @@ function reversesAt(k: RawKey[], m: number): boolean {
     lb += v * v;
   }
   if (la < EPS || lb < EPS) return false;
-  return dot / Math.sqrt(la * lb) < -0.9;
+  if (dot / Math.sqrt(la * lb) < -0.9) return true;
+  return dot < 0 && Math.sqrt(lb) <= MAX_REVERSAL * Math.sqrt(la);
 }
 
 /**
@@ -895,6 +902,11 @@ export function summarizeMotion(raw: MotionKeys) {
 
 // ---------------------------------------------------------------- lines for the house style
 
+/** A percentage of the travel: one decimal under 10 (a 2.6% overshoot is not "3%"), whole above. */
+function amountText(n: number): string {
+  return n < 10 ? String(round(n, 1)) : String(Math.round(n));
+}
+
 /** "(on X)" when one property is named, "(mostly X, Y)" when there are several to choose from. */
 function whereLabel(labels: string[], total: number): string {
   if (!labels.length) return "";
@@ -961,11 +973,12 @@ export function suggestLines(x: LineInputs): string[] {
     lines.push(`Ease: ${ease}, speed 0 (${pct(top.share)}% of segments)`);
   }
   if (x.segments >= FEW_MOVES) {
+    // A share that rounds to 0% is left out rather than printed as "0%".
     if (x.kinds.linear === 0) lines.push("No linear motion");
-    else lines.push(`Linear on ${pct(x.kinds.linear / x.segments)}% of segments`);
+    else if (pct(x.kinds.linear / x.segments) > 0) lines.push(`Linear on ${pct(x.kinds.linear / x.segments)}% of segments`);
     if (x.kinds.mixed / x.segments >= 0.1) lines.push(`Eased one end only on ${pct(x.kinds.mixed / x.segments)}% of segments`);
   }
-  if (x.overshoot && x.overshoot.amountPercent && x.overshoot.settleSeconds) {
+  if (x.overshoot && x.overshoot.amountPercent && x.overshoot.settleSeconds && pct(x.overshoot.share) > 0) {
     const on = whereLabel(x.overshoot.mostOn, x.overshoot.mostOn.length);
     const e = x.overshoot.elastic;
     const elastic = !e
@@ -974,12 +987,12 @@ export function suggestLines(x: LineInputs): string[] {
         ? "; elastic (oscillating before settling)"
         : `; ${e} of ${x.overshoot.moves} elastic (oscillating before settling)`;
     lines.push(
-      `Overshoot on ${pct(x.overshoot.share)}% of moves${on}: ~${Math.round(x.overshoot.amountPercent.median)}% of the travel past the target, settling over ${x.overshoot.settleSeconds.median}s${elastic}`
+      `Overshoot on ${pct(x.overshoot.share)}% of moves${on}: ~${amountText(x.overshoot.amountPercent.median)}% of the travel past the target, settling over ${x.overshoot.settleSeconds.median}s${elastic}`
     );
   }
-  if (x.anticipation && x.anticipation.amountPercent && x.anticipation.seconds) {
+  if (x.anticipation && x.anticipation.amountPercent && x.anticipation.seconds && pct(x.anticipation.share) > 0) {
     lines.push(
-      `Anticipation on ${pct(x.anticipation.share)}% of moves: ~${Math.round(x.anticipation.amountPercent.median)}% of the travel back, over ${x.anticipation.seconds.median}s`
+      `Anticipation on ${pct(x.anticipation.share)}% of moves: ~${amountText(x.anticipation.amountPercent.median)}% of the travel back, over ${x.anticipation.seconds.median}s`
     );
   }
   if (x.staggers.length) {

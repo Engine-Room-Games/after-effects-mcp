@@ -405,7 +405,30 @@ await check("'mostly' only when there is more than one property to choose from",
 await check("anticipation is worded as a share of the travel", () => {
   const p = prop(1, "Position", "ADBE Position", [key(0, [100, 500]), key(0.2, [80, 500]), key(0.7, [900, 500])]);
   const s = summarizeMotion(raw([comp([p])]));
-  assert.ok(s.suggestedLines.some((l) => /~3% of the travel back, over 0\.2s/.test(l)), s.suggestedLines.join("\n"));
+  assert.ok(s.suggestedLines.some((l) => /~2\.5% of the travel back, over 0\.2s/.test(l)), s.suggestedLines.join("\n"));
+});
+
+// Live-test fixtures (#254, AE 26.5).
+await check("a small 2-D overshoot that settles a little off its line is one move, ~2.6% (live: 100 → 900 → 880)", () => {
+  for (const peak of [[900, 540], [900, 560]]) {
+    const p = prop(1, "Position", "ADBE Position", [key(0, [100, 540]), key(0.5, peak), key(1, [880, 540])]);
+    const s = summarizeMotion(raw([comp([p])]));
+    assert.equal(s.moves, 1, `peak ${peak}`);
+    assert.equal(s.overshoot.amountPercent.median, 2.6);
+    assert.ok(s.suggestedLines.some((l) => /~2\.6% of the travel past the target/.test(l)), s.suggestedLines.join("\n"));
+  }
+  // A corner whose second leg is as long as the first is still two moves.
+  const corner = prop(1, "Position", "ADBE Position", [key(0, [0, 0]), key(0.5, [500, 0]), key(1, [250, 433])]);
+  assert.equal(summarizeMotion(raw([comp([corner])])).moves, 2);
+});
+
+await check("a share that rounds to 0% is left out, never printed as '0%' (live)", () => {
+  const props = [prop(1, "Position", "ADBE Position", [key(0, [0, 0], linear), key(f(10), [100, 0], linear)])];
+  for (let i = 0; i < 300; i++) props.push(prop(i + 2, "Opacity", "ADBE Opacity", [key(0, [0]), key(f(10), [100])]));
+  const s = summarizeMotion(raw([comp(props)]));
+  assert.equal(s.eases.segments.linear, 1);
+  assert.ok(!s.suggestedLines.some((l) => /\b0% of/.test(l)), s.suggestedLines.join("\n"));
+  assert.ok(!s.suggestedLines.includes("No linear motion"), "one linear segment is not none");
 });
 
 await check("holds and steps split moves: equal values hold, a hold keyframe into a new value steps", () => {
