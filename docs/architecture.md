@@ -16,7 +16,7 @@ Numbered recipes referenced below are in [verification-recipes.md](verification-
 | `packages/jsx/explore.jsx` | `get_layer_full` — the deep one-shot dump. The whole reason this MCP exists. Spend disproportionate care here. |
 | `packages/jsx/snapshot.jsx` | The comp fingerprint and the diff of two of them. The fingerprint backs `snapshot_comp` / `diff_comp`; the diff here backs only the `diff:true` flag on `run_jsx` / `run_batch` now — `diff_comp` diffs on the server (issue #220). `_comp_diff` stays in the bundle, unused, so a newer panel never breaks an older server. The diff is pure — two objects in, one out — which is what lets it be tested with no AE. |
 | `packages/jsx/checkpoint.jsx` | `checkpoint_comp`, `list_checkpoints`, `revert_comp`, `delete_checkpoints` (issue #136). A checkpoint is a tagged `CompItem.duplicate()`; a revert copies its layers back *into the original comp* so the comp id never changes, then verifies the result with `snapshot.jsx`'s fingerprint. Why it is not a swap is in [subsystems.md](subsystems.md), "Comp checkpoints". |
-| `packages/jsx/batch.jsx` | `run_batch` for ≤500 ops inline in one undo group; otherwise registers a job and yields chunks via `_continue_job`, one undo group per chunk. `singleUndo:true` forces the inline path at any size up to 2000. |
+| `packages/jsx/batch.jsx` | `run_batch` for ≤500 ops inline in one undo group; otherwise registers a job and yields chunks via `_continue_job`, one undo group per chunk. `singleUndo:true` forces the inline path at any size up to 2000. A job no `_continue_job` has reached for 30 minutes (`__JOB_ORPHAN_MS`) is retired to an `abandoned` tombstone — what a batch whose server died leaves behind (issue #220, stage 5). `_get_job` is After Effects' own record of how far a job got. |
 | `packages/jsx/vision.jsx` | `saveFrameToPng` wrapper. Returns a temp path; the panel base64-encodes. |
 | `packages/jsx/footage.jsx` | `import_footage` / `create_footage_layer` / `purge_unused_footage`. The SVG viewBox check lives here because import is the only place that has the file path and the resulting item together. Also holds `__importFile()` and `__itemPathMap()` — the one import in the codebase and the one project-by-path scan, both shared with `audio.jsx` — and the solid/`usedIn`/remove helpers that `delete_comp`'s `purgeUnusedSolids` (in `comps.jsx`) shares with the sweep. |
 | `packages/jsx/audio.jsx` | `place_audio_cues`. Plans the whole cue list with no side effects, then imports each distinct file once and builds a layer per cue, rolling back everything it made if any of it fails. The per-cue `loop`, `fadeIn`/`fadeOut` and `stretch` options (#85) live in `__placeAudioCue`, whose statement order is load-bearing — stretch before `startTime`, remap before the extent, fade keys last — because each one moves something AE then resets; see [fragile-areas-ae.md](fragile-areas-ae.md). `loop` keeps the two Time Remap keys AE creates (removing them hides the property, #86). `__fadeFitProblem` is pure and runs twice: at plan time on what is known, and again after the imports on the durations it could not know, still before any layer exists. The dryRun report is counts plus `wouldImport`/`wouldReuse` plus the failing cues, never the resolved list (#88). |
@@ -27,7 +27,7 @@ Numbered recipes referenced below are in [verification-recipes.md](verification-
 | `packages/jsx/values.jsx` | `__setValue`, which every first-class `setValue` goes through: on AE's spurious `invalid numeric result` throw (issue #129) it reads the property back and drops the throw only if the value landed. See [fragile-areas-ae](fragile-areas-ae.md#shapes). |
 | `packages/jsx/helpers.jsx` | The helper scope a `run_jsx` script runs in: `compById`, `layerById`, `ease`, `addKeys`, `shape`, `setValueChecked`. Top-level functions on purpose: in the bundle they are locals of its closure, which `run_jsx`'s direct `eval` sees — never globals, since the ExtendScript engine is shared with other scripts (issue #185). Every one is listed by signature in the `run_jsx` description — change both together, since that is the only place a caller sees them. |
 | `packages/ae-panel/CSXS/manifest.xml` | CEP manifest. Auto-start on AE activate. Node enabled. |
-| `packages/ae-panel/client/main.js` | HTTP+WS server, `evalScript` mutex, JSON envelope, job driver, PNG reader. Also `startServers`: on `EADDRINUSE` it asks `/health` who holds the port and **waits** for one of our own panels rather than walking past it (issue #92) — see [fragile-areas-bridge.md](fragile-areas-bridge.md). Reads `~/.engineroom-ae-mcp/config.json` (`port`, `allowPortWalk`) because a CEP panel has no environment variables of the user's; writes the port file only for a port actually bound, and removes its own entry on unload. Mints the bridge token and writes `token-<port>` beside the port file from inside `bindWith`, before the bind promise resolves — the socket is already accepting by then (issue #106). |
+| `packages/ae-panel/client/main.js` | HTTP+WS server, `evalScript` mutex, JSON envelope, job driver (only for a server that does not ask to drive — see "The batch driver" below), PNG reader. Also `startServers`: on `EADDRINUSE` it asks `/health` who holds the port and **waits** for one of our own panels rather than walking past it (issue #92) — see [fragile-areas-bridge.md](fragile-areas-bridge.md). Reads `~/.engineroom-ae-mcp/config.json` (`port`, `allowPortWalk`) because a CEP panel has no environment variables of the user's; writes the port file only for a port actually bound, and removes its own entry on unload. Mints the bridge token and writes `token-<port>` beside the port file from inside `bindWith`, before the bind promise resolves — the socket is already accepting by then (issue #106). |
 | `packages/ae-panel/client/pngcodec.js` | 16-bit→8-bit PNG conversion, empty-frame detection, decoded pixels for the stale check, and `inspectPngStructure` — the chunk walk that says whether a file is a whole PNG yet. Node builtins only, requireable by a test. |
 | `packages/ae-panel/client/framereader.js` | The poll loop that decides when After Effects has *finished* writing a frame, and the two error messages that come out of it. Issue #45 lives here. |
 | `packages/ae-panel/client/contactsheet.js` | Tiles several frames into one labelled sheet, bitmap font included. Everything `times[]` needs that ExtendScript cannot do. |
@@ -40,11 +40,12 @@ Numbered recipes referenced below are in [verification-recipes.md](verification-
 | `packages/mcp-server/src/tools/policy.ts` | Read-only mode and the `run_jsx` switch (`AE_MCP_READ_ONLY`, `AE_MCP_DISABLE_RUN_JSX`). Which ops are offered, the refusal for one that is not, the batch-step check, and the runtime notice prepended to the guidance. See "Tool switches" below. |
 | `packages/mcp-server/src/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing. `discovery.ts` holds the candidate ports (`AE_MCP_PORT` alone if pinned; otherwise 7777 *then* the port file) and `isPanelHealth`, the test that decides whether something on a port is the panel — mirrored by `isOurHealth` in the panel's `main.js`; keep the two in step. `httpClient.ts` re-runs discovery when a call is **refused** (never on a timeout) and re-sends once if a different port answers as the panel; `wsClient.ts` follows the client's port through `onPortChange` instead of keeping a copy. `discovery.ts` also owns `panelToken`/`authHeaders`, read from disk on **every** call rather than cached — a panel that rebinds mints a new token, and a cached one would outlive it (issue #106). |
 | `packages/mcp-server/src/bridge/panelGate.ts` | The panel-version gate: caches the verdict from the *running* bundle hash on `/health`. Healthy is re-checked every minute, stale every 5s — never cached for good, because restarting AE rebinds the same port and no port change fires (issue #156). Invalidated on port change, `setup_panel` and `WsClient.onReopen`; concurrent callers share one in-flight probe, and a generation counter stops a probe that started before an invalidate from restoring the old verdict. Unreachable drops the verdict; a timeout keeps it and waits 5s before probing again. |
-| `packages/mcp-server/src/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` — the lease that outlives its own call so a long `run_batch` keeps the lock while the panel drives it. Classification comes from `OpMutation` in `schemas.ts`. |
+| `packages/mcp-server/src/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` — the lease that outlives its own call so a long `run_batch` keeps the lock while an older panel drives it (a batch the server drives owns its lease outright — see "The batch driver"). Classification comes from `OpMutation` in `schemas.ts`. |
 | `packages/mcp-server/src/frontdesk/line.ts` | `SessionLine` — every server's one way to After Effects when several sessions share it (issue #223): the session's own `WriteQueue`, then the desk's cross-session lock; `runOp`/`cancel` through the desk; the election, and the handover rule. With no desk configured every method is a plain pass-through. See "The front desk" below. |
 | `packages/mcp-server/src/frontdesk/desk.ts` | `FrontDesk` — the loopback HTTP server the leading session runs: token-gated, NDJSON answers, the in-flight record, the `start` line flushed before a call is posted to the panel. |
 | `packages/mcp-server/src/frontdesk/lock.ts` | `DeskLock` — the cross-session write lock: positions, who is in front and for how long, resumed leases first, the takeover grace period, a hold ceiling. |
 | `packages/mcp-server/src/frontdesk/{config,protocol}.ts` | The desk port and its file (`desk-<port>.json`, 0600); the wire format, and the error round-trip that keeps the five bridge failures five. |
+| `packages/mcp-server/src/jobs/batchDriver.ts` | `BatchDriver` — the chunked `run_batch` loop, on the server since issue #220 stage 5: one `_continue_job` per chunk under the batch's lease, progress and the final state into `JobManager`, a lost answer recovered from `_get_job`'s cursor, every stop worded with how far the batch got. `foreignJobText` answers for a batch id another server process started. See "The batch driver" below. |
 | `packages/mcp-server/src/jobs/manager.ts` | In-memory job table, `waitFor(jobId)` for the `await_job` tool, and the progress emitters `await_job` binds for exactly the span of its own call — `bindProgressEmitter` hands back the unbind, and the caller must use it. See "Long batch" under "Special return shapes" and the #82 entry in [fragile-areas-server.md](fragile-areas-server.md). |
 | `packages/mcp-server/src/snapshots/diff.ts` | `diff_comp`'s diff — a line-for-line port of `snapshot.jsx`'s, kept byte-for-byte identical to it by a parity sweep in `tests/unit/comp-snapshot.mjs` until `diff:true` moves too (#220). Change one, change both. |
 | `packages/mcp-server/src/snapshots/store.ts` | In-memory comp fingerprints for `snapshot_comp` / `diff_comp`. Bounded ring; `missingMessage()` is the whole reason it is a class rather than a `Map`. |
@@ -230,7 +231,7 @@ checks in handlers) stay: a hand-rolled `POST /op` still reaches them.
 
 - **Vision** (`screenshot_frame`, `screenshot_layer`): JSX returns `{path, width, height, time, compId, layerId?}`. Panel waits for the file to be a *complete* PNG (`framereader.js`), normalises it to 8-bit, base64-encodes, returns `{base64, bytes, ...}`. Server packages as MCP `image` content block. Four outcomes are deliberately *not* images: a fully transparent frame comes back as `{empty:true, reason}` and goes through `textResult`; a frame whose pixels match a different earlier request is refused as `STALE_FRAME`; a file After Effects wrote and abandoned is refused as `FRAME_INCOMPLETE`; and a render that never finished is refused as `RENDER_TIMEOUT`. Those last two must never share a sentence — see [fragile-areas-bridge.md](fragile-areas-bridge.md).
 - **Contact sheet** (`screenshot_frame` with `times`): 2-6 times in one call, exclusive with `time` — a declared `atMostOne` cross-field rule, so two readings of "which frame" can never reach ExtendScript *and* the exclusion is in the emitted JSON Schema rather than only in the rejection. JSX renders one temp PNG per time at a shared per-tile factor and returns `{contactSheet:true, tiles:[{path,time}|{error}], downsample, ...}`; the panel reads each, composites them into one labelled image (`contactsheet.js`) and returns the same `base64` shape plus `tiles`, `cols`, `rows`, `cellWidth`/`cellHeight`. Three properties hold it together: **every requested time keeps its cell**, so a failed tile is a marked block rather than a gap that renumbers the rest; **the time is burned into the picture**, because metadata beside an image is not what a model compares; and **a bad tile never invalidates the sheet** — it is named and counted in `warning`, and only a sheet where *nothing* rendered is refused outright. Inside one sheet, two tiles with identical pixels are a static comp, not the #29 stale buffer, so they are flagged in `note` rather than refused; a match against a frame from *outside* the sheet is still a stale tile and is drawn as a block.
-- **Long batch** (`run_batch` >500 ops): JSX returns `{jobId, async:true, total, chunkSize, undoStepsEstimate, undoGroupName, note}`. Panel drives `_continue_job` in chunks of `chunkSize` in the background, broadcasting `progress` events on WS. **Those reach the client as `notifications/progress` on `await_job`, and never on `run_batch`** — `run_batch` has answered before the first chunk runs, and a notification sent on a request's token after that request's response is one every spec-compliant client has already stopped correlating (issue #82; the entry in [fragile-areas-server.md](fragile-areas-server.md)). So `server.ts` appends a sentence to the envelope's `note` saying where progress goes, and `await_job` binds an emitter to *its own* request's `progressToken` for exactly the span of that call, sending through the SDK's request-scoped `extra.sendNotification` and draining every send before it returns (`forwardJobProgress`). `get_job` reads the same state and never notifies. The undo fields ride the envelope because it is the only message the agent sees before it starts describing the work — the *measured* `undoSteps` arrives much later, on the completion event. `singleUndo:true` takes the inline path instead, so no envelope and no progress at all.
+- **Long batch** (`run_batch` >500 ops): JSX returns `{jobId, async:true, total, chunkSize, undoStepsEstimate, undoGroupName, note}`. On a panel reporting `server-drives-jobs` the server sends `_continue_job` itself, one chunk per call, and writes progress straight into `JobManager` (see "The batch driver" below); an older panel drives it in the background and broadcasts `progress` events on WS. **Progress reaches the client as `notifications/progress` on `await_job`, and never on `run_batch`** — `run_batch` has answered before the first chunk runs, and a notification sent on a request's token after that request's response is one every spec-compliant client has already stopped correlating (issue #82; the entry in [fragile-areas-server.md](fragile-areas-server.md)). So `server.ts` appends a sentence to the envelope's `note` saying where progress goes, and `await_job` binds an emitter to *its own* request's `progressToken` for exactly the span of that call, sending through the SDK's request-scoped `extra.sendNotification` and draining every send before it returns (`forwardJobProgress`). `get_job` reads the same state and never notifies. The undo fields ride the envelope because it is the only message the agent sees before it starts describing the work — the *measured* `undoSteps` arrives much later, on the completion event. `singleUndo:true` takes the inline path instead, so no envelope and no progress at all.
 - **Render** (`render_queue`): a write op handled in `server.ts` by `runRender`. It forwards `_render_prepare` (refuses a never-saved project, an item not QUEUED, and a call naming neither `indices` nor `all:true` — the schema's `exactlyOne`), refuses existing outputs without `overwrite`, footage whose file is gone or that the saved .aep does not record at a path leading to it (`checkPlanFootage`, issue #145 — the latter is fixed by a save, so it needs `saveProject:true` and the saved file is re-read afterwards), and unsaved changes without `saveProject:true` (a clean project is otherwise never saved), resolves aerender from the `appPackage` that answered, forwards `_render_save` only when there is something to save (dialogs suppressed; a save that silently did not happen — read-only, locked, converted — is detected and refused), then hands the plan to `RenderRunner`, which copies the .aep into the OS temp folder (`snapshotProject`) while the lease is still held and renders every item from that copy. When the job ends it takes the lease once more to send `_render_mark_done` for every verified item, which unticks each Render box that still matches by comp and output path, all in one named undo step ("AE MCP: mark rendered") and answers `{jobId, async:true, total, items, note}`. Everything that can refuse does so **before** the save. The job lives entirely in the server — no WS events, no `_continue_job` — and `await_job`/`get_job` read it from the same `JobManager`. `cancel_job` asks `RenderRunner` first and only falls back to the batch path for a jobId it has never seen; a render that would not exit is reported as a failure, never as cancelled, and if it exits later `run()` settles the job then, so `await_job` cannot hang. While a render runs, `exit`, SIGTERM/SIGINT/SIGHUP and stdin closing kill its process group; the handlers are installed only for the length of the render, and a signal is re-raised after the kill when nothing else listens, so the server's own shutdown is unchanged. **The write lease is released when `runRender` returns**, unlike `run_batch`'s `extendUntil`: a batch's chunks run in the live session, so a write between two of them lands inside the batch, whereas a render reads a file finished before it began, and holding every write for the length of a render would protect nothing.
 - **Server-resident** (`await_job`, `get_job`, `cancel_job`, `check_setup`, `setup_panel`, `init_project`, `ae_guide`, `log_issue`, `list_known_issues`, `mark_issue_reported`, `archive_issue`): handled in `server.ts`; never forwarded to the panel (except `cancel_job`, which also sends `_cancel_job` to the bridge to set the JSX-side flag). A batch cancel is reported `ok:true` only once the panel has confirmed it **and** the batch's `complete` event with `cancelled:true` has arrived; until then the job is `cancelling`, which is not terminal. Terminal states are sticky — a late `complete`/`fail` is dropped — and a `complete` carrying `cancelled:true` settles the job as `cancelled` with its partial result (issue #158). `await_job` on an id this process never registered fails at once, its timeout says the job is still running, and the request's abort signal releases the wait (issue #159). They're still listed in `OpSchemas` so `tools/list` picks them up — membership in `SERVER_OPS` is what stops the forwarding.
 - **Half server-resident** (`snapshot_comp`, `diff_comp`): the panel gathers, the server remembers. `SNAPSHOT_OPS` in `server.ts` routes them to `runSnapshotOp`, which forwards the internal read op `_comp_fingerprint`, keeps the answer in `SnapshotStore`, and for `diff_comp` diffs it against the stored one in `snapshots/diff.ts`. It never calls `_comp_diff`: the fingerprint op is in every bundle ever shipped, so the server-side diff needs no panel update (issue #220). Deliberately *not* in `SERVER_OPS` — unlike those, these do touch the bridge, and they are dispatched from inside the same `try` as `bridge.runOp` so the timeout, `AeError` and Unknown-op mappings all apply unchanged.
@@ -300,7 +301,9 @@ FIFO mutex; `server.ts` takes a lease before forwarding any op classified
   waiting reports nothing about the batch it exists to watch.
 - **The lease outlives its own call.** `extendUntil` is the whole fix. When
   `run_batch` answers with a jobId, the lock is held until `JobManager` reports
-  the job finished — releasing it when the HTTP call returned would leave
+  the job finished (when the server drives the batch, the driver owns the lease
+  and releases it when the batch is over in After Effects — no ceiling, because
+  a chunk sent after one had freed the lock would land between other writes) — releasing it when the HTTP call returned would leave
   precisely the gap described above. A leak guard at twice the wait ceiling
   covers a job that never reports (a dropped WS); it is set *above* the wait
   ceiling so that any writer queued behind the batch has hit its own deadline
@@ -373,8 +376,9 @@ it runs in — and that record is what "AE is still running session X's
 for how long — as `notifications/progress` while it waits, when the client asked
 for progress (the request is still open, so #82 does not apply), and in the
 result as `queuedBehind`/`waitedMs` plus `queuedBehindSession`. A read is
-told too: a batch's chunks run inside the panel, not through the desk, so the
-lease its session still holds is what names it. A queue timeout
+told too: the lease a batch's session still holds is what names it (an older
+panel runs the chunks itself, out of the desk's sight; a server-driven batch
+sends each one through the desk). A queue timeout
 behind another session is a `DeskWaitError`: still a `WriteQueueWaitError`, same
 remedy, but it says `get_job` cannot see the other session's work. None of this
 appears unless the call waited behind **another** session, so a single session's
@@ -436,8 +440,10 @@ is treated as foreign.
 
 **Decided, not inherited.** Jobs stay with the session that started them —
 `await_job`, `get_job`, `cancel_job` and the event socket are per server as
-before, and each server still hears every completion from the panel directly, so
-a handover loses no job. The panel version gate stays per session and reads
+before. A batch an older panel drives reports to every server directly, so a
+handover loses nothing; one the server drives is driven by its own server
+through whichever desk there is, and a chunk lost in the handover is recovered
+from After Effects' cursor (see "The batch driver"). The panel version gate stays per session and reads
 `/health` directly: every server judges the same running panel against the same
 disk, and `/health` is not work the desk could queue. Read-only mode stays per
 client: each server refuses before anything reaches the desk, and a read-only
@@ -448,6 +454,60 @@ at `start` — never in the queue. `createServer` leaves the desk off unless
 joins a real session's desk. `tests/unit/front-desk.mjs` runs real server
 processes against a fake panel for all of it.
 
+
+## The batch driver: a long `run_batch` is driven by the server (issue #220, stage 5)
+
+A chunked batch used to be driven by the panel: `driveJob` sent `_continue_job`
+until the job was done and reported over the `/events` WebSocket. It now runs in
+`jobs/batchDriver.ts`, so the server owns progress, cancel and the job's state.
+Nothing about a chunk changed — each is one `evalScript` with one undo group
+opened and closed inside it (issue #69); only who asks for the next one did.
+
+**Negotiated per call, never assumed.** A panel lists `server-drives-jobs` on
+`/health`; the server then forwards `run_batch` with `__driver: "server"` on its
+args, and the panel strips it (ExtendScript never sees it), sends no chunk of
+its own, and answers the envelope with `driver: "server"`. The server drives
+only an envelope that says so. Anything else — a stale capability, an older
+panel behind the same port, an older desk — gets the old path: the panel drives
+and the server follows the event socket. Two drivers on one job cannot happen.
+A newer panel talking to an older server is unchanged too: no flag, so the
+panel drives. That is why the WebSocket, `ws` and `wsClient.ts` all stay until
+older panels have aged out.
+
+**The lease.** The driver owns the batch's lease outright and releases it once
+the batch is over in After Effects, cancel included. Every chunk is an internal
+write (`InternalOpMutation._continue_job`), so it goes through the desk under
+that lease like any other write: a lease lost for good refuses the next chunk
+unsent, and the batch stops there.
+
+**What it costs: a dead server stops the batch.** The panel finished a batch
+even when the server died; now it stops at a chunk boundary. Every way the loop
+can stop is worded with how far it got, and nothing runs an op twice:
+
+- **The cursor is After Effects'.** `_continue_job` runs from the job's own
+  cursor, so re-sending it can only ever run the *next* ops. A chunk whose answer
+  was lost — the desk died or stalled with it in flight (`FrontDeskLostError`,
+  any `BridgeResetError`) — is followed by `_get_job`, a read; the loop carries
+  on from the cursor it reports and the job carries a `warning` saying so. If the
+  lost chunk was the last one, the job is over in After Effects, its per-op
+  results are lost, and the job fails with the tombstone's counts.
+- **A chunk that timed out is not followed.** It may still be running; the job
+  fails with `unsureThrough` and the job is cancelled so no later continuation
+  can run more of it. `_continue_job` uses the slow-op limit (300 s).
+- **A session that closes** stops its batch at the next boundary and cancels it:
+  after `close` the line no longer holds the desk, and a chunk sent then would
+  bypass every other session.
+- **A server that is killed** leaves the job in ExtendScript, not running.
+  Nothing resumes it. `await_job`/`get_job` in any other server process, or in
+  the restarted one, answer an id they never registered from `_get_job`
+  (`foreignJobText`): how far it got, how long since its last chunk, and that
+  nothing in this process will continue it. The orphan is retired after 30
+  minutes without a continuation (`__sweepOrphanJobs`), and the panel stops
+  counting it against `/reload-jsx` after 10.
+
+A batch longer than the desk's hold ceiling (~21 minutes by default) still has
+the lock freed under it once; its next chunk re-takes the lease with priority.
+That limit predates this change.
 
 ## Tool switches: read-only mode and `run_jsx` (issue #135)
 

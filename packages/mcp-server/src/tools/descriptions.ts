@@ -113,7 +113,7 @@ export const descriptions: Record<string, string> = {
   // ---------- batch ----------
   run_batch:
     "Many ops in one ExtendScript pass — far faster, and far fewer undo steps, than separate calls. " +
-    "**Up to 500 ops it is exactly one undo step.** Over 500 it is chunked into a background job: this call returns a jobId at once; finish with await_job (a progressToken goes on THAT call; get_job polls) — and it lands as **one undo step per chunk of 25**, since AE discards an undo group that spans two script calls. Read `undoSteps` and its `note` before telling anyone how to undo the work; never say \"one Cmd-Z\" for a chunked batch. " +
+    "**Up to 500 ops it is exactly one undo step.** Over 500 it is chunked into a background job: this call returns a jobId at once; finish with await_job (a progressToken goes on THAT call; get_job polls) — and it lands as **one undo step per chunk of 25**, since AE discards an undo group that spans two script calls. Read `undoSteps` and its `note` before telling anyone how to undo the work; never say \"one Cmd-Z\" for a chunked batch. This server sends the chunks, so if it stops mid-batch (client quit or restarted) the batch stops at a chunk boundary: read the comp back, never re-send it whole. " +
     "`singleUndo:true` forces one undo step up to 2000 ops, freezing AE with no progress until done; over 2000 is refused. " +
     "Each step's `args` are checked as that tool's own; a batch with any bad step is refused whole before anything runs. Not allowed as steps: screenshot_frame, screenshot_layer, snapshot_comp, diff_comp, export_mogrt, render_queue, get_house_style and the server-side tools (ae_guide, await_job, log_issue, …). " +
     "transactional:true (default) stops at the first error; nothing rolls back either way — read the state back rather than re-running. " +
@@ -190,7 +190,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- jobs ----------
   await_job:
-    "Block until a job is done — a chunked run_batch, or a render_queue render — and return the tool's payload, `undoSteps` included. Default 10min timeout; a timeout stops only the wait, never the job — call await_job again rather than re-sending the work. An unknown jobId (mistyped, or from before a server restart) fails at once. " +
+    "Block until a job is done — a chunked run_batch, or a render_queue render — and return the tool's payload, `undoSteps` included. Default 10min timeout; a timeout stops only the wait, never the job — call await_job again rather than re-sending the work. An unknown jobId (mistyped, or from before a server restart) fails at once — for a batch After Effects still knows, saying how far it got. " +
     "**This is the call that carries progress**: send the progressToken here, since run_batch answers before its first chunk runs.",
   get_job:
     "Non-blocking job status: progress/total/state/error. `status` is running, cancelling (cancel_job accepted; not stopped yet), completed, failed or cancelled — the last three are final. Poll this when you cannot keep an await_job open; it sends no progress notifications. An id this server process does not know is an error, never an empty result.",

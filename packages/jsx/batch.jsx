@@ -26,6 +26,32 @@ var __BATCH_CHUNK = 25;
 // After Effects for long enough that the user will think it has hung, with no
 // progress events to say otherwise — so it is refused rather than attempted.
 var __BATCH_SINGLE_UNDO_MAX = 2000;
+// How long a chunked job may go without a continuation before it is taken for
+// orphaned (issue #220, stage 5). A server that drives its own batch stops
+// sending chunks when it dies, and the job it leaves would otherwise hold every
+// op's args and results for the rest of the After Effects session. Generous:
+// a live driver sends the next chunk as soon as the last one answers, and the
+// clock restarts at the start and end of every chunk, so only a job nobody is
+// driving any more can reach it.
+var __JOB_ORPHAN_MS = 30 * 60 * 1000;
+
+function __nowMs() {
+  return new Date().getTime();
+}
+
+// Retire every job no continuation has reached for __JOB_ORPHAN_MS: cut down
+// to a tombstone marked `abandoned`, so `_get_job` still says how far it got.
+// Run where a job is created or continued — the only calls that can find one.
+function __sweepOrphanJobs() {
+  var now = __nowMs();
+  var stale = [];
+  for (var id in JOBS) {
+    if (!JOBS.hasOwnProperty(id)) continue;
+    var j = JOBS[id];
+    if (j && !j.finished && typeof j.touchedAt === "number" && now - j.touchedAt > __JOB_ORPHAN_MS) stale.push(id);
+  }
+  for (var i = 0; i < stale.length; i++) __finishJob(stale[i], null, true);
+}
 
 OPS.run_batch = function (args) {
   var ops = args.ops || [];
@@ -54,13 +80,16 @@ OPS.run_batch = function (args) {
     return __batchInline(ops, transactional, name, diffState);
   }
 
-  // Long batches: register job, return jobId; panel polls _continue_job.
+  // Long batches: register job, return jobId; the server (or, on an older
+  // panel, the panel) sends _continue_job once per chunk.
   // No undo group is opened here on purpose. One opened now would be closed
   // from a different call and AE would throw it away, which is exactly how this
   // op spent three releases reporting one undo step and delivering hundreds.
+  __sweepOrphanJobs();
   var jobId = __newJobId();
   var estimate = Math.ceil(ops.length / __BATCH_CHUNK);
   JOBS[jobId] = {
+    touchedAt: __nowMs(),
     cursor: 0,
     total: ops.length,
     ops: ops,
@@ -208,10 +237,17 @@ function __batchUndoNote(steps, name, nested, chunked) {
 // `j.undoOpen` flag was for, and it was tracking a group AE had already dropped.
 OPS._continue_job = noUndo(function (args) {
   var jobId = args.jobId;
+  __sweepOrphanJobs();
   var j = JOBS[jobId];
   if (!j) throw new Error("No job: " + jobId);
+  if (j.finished && j.abandoned) {
+    throw new Error("Job " + jobId + " was abandoned: no continuation reached it for " +
+      Math.round(__JOB_ORPHAN_MS / 60000) + " minutes, so its record was freed. " + j.cursor + " of " + j.total +
+      " ops had been attempted, in " + j.undoSteps + " undo step(s); they stay applied. Nothing ran now.");
+  }
   // Its result was returned by the call that finished it, and freed then.
   if (j.finished) throw new Error("Job " + jobId + " has already finished; its result was delivered when it did.");
+  j.touchedAt = __nowMs();
   if (j.cancelled) {
     var stopped = {
       done: true, cancelled: true, jobId: jobId,
@@ -245,6 +281,8 @@ OPS._continue_job = noUndo(function (args) {
     }
   });
   j.undoSteps += __undoGroupsOpened() - before;
+  // A long chunk restarts the orphan clock at its end too.
+  j.touchedAt = __nowMs();
 
   if (failure) {
     // No rollback is attempted. The old code fired one `Undo` menu command
@@ -289,12 +327,19 @@ OPS._cancel_job = noUndo(function (args) {
   return { ok: true };
 });
 
+// After Effects' own record of how far a job got. The server reads it when a
+// chunk's answer was lost on the way back (the front desk changed hands mid
+// call), and for a job id it never started itself — a server that restarted
+// mid-batch. `cursor` is ops attempted; `idleMs` how long since a chunk last
+// started or ended.
 OPS._get_job = noUndo(function (args) {
   var j = JOBS[args.jobId];
   if (!j) return null;
   return {
-    cursor: j.cursor, total: j.total, cancelled: j.cancelled,
+    cursor: j.cursor, total: j.total, cancelled: !!j.cancelled,
     errorCount: j.finished ? j.errorCount : j.errors.length, undoSteps: j.undoSteps,
     finished: !!j.finished,
+    abandoned: !!j.abandoned,
+    idleMs: typeof j.touchedAt === "number" ? __nowMs() - j.touchedAt : null,
   };
 });

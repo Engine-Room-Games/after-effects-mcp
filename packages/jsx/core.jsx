@@ -106,16 +106,21 @@ function __newJobId() {
 var __JOBS_FINISHED = __JOBS_FINISHED || [];
 var __JOBS_FINISHED_MAX = 64;
 
-function __finishJob(jobId, result) {
+// `abandoned` marks a job no continuation reached for __JOB_ORPHAN_MS (see
+// __sweepOrphanJobs in batch.jsx), so a later question about it is answered
+// with how far it got rather than with "finished".
+function __finishJob(jobId, result, abandoned) {
   var j = JOBS[jobId];
   if (j && !j.finished) {
     JOBS[jobId] = {
       finished: true,
       cancelled: !!j.cancelled,
+      abandoned: abandoned === true,
       cursor: j.cursor,
       total: j.total,
       errorCount: j.errors ? j.errors.length : 0,
       undoSteps: j.undoSteps,
+      touchedAt: j.touchedAt,
     };
     __JOBS_FINISHED.push(jobId);
     while (__JOBS_FINISHED.length > __JOBS_FINISHED_MAX) {
