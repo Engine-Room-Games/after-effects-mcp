@@ -72,6 +72,32 @@ function tokenFileHint(port: number): string {
 }
 
 /**
+ * Where a timed-out tool call's time went, measured by the server. `totalMs`
+ * runs from the moment the tool was called; `gateMs` is the panel-version check
+ * and `queueMs` this session's write queue, both spent before the request was
+ * sent.
+ */
+export interface TimeoutTiming { totalMs: number; gateMs: number; queueMs: number; }
+
+/** "3s", "0.3s" — a limit as the reader set it. */
+function secondsText(ms: number): string {
+  const s = ms / 1000;
+  return Number.isInteger(s) ? `${s}s` : `${s.toFixed(1)}s`;
+}
+
+/** "5.0s" under ten seconds, whole seconds above — a measured span. */
+function elapsedText(ms: number): string {
+  return ms < 10_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 1000)}s`;
+}
+
+function beforeSendText(t: TimeoutTiming): string {
+  const parts: string[] = [];
+  if (t.gateMs >= 250) parts.push(`checking the panel's version (${elapsedText(t.gateMs)}, a probe that waits on a busy After Effects too)`);
+  if (t.queueMs >= 250) parts.push(`waiting behind this session's own earlier write (${elapsedText(t.queueMs)})`);
+  return parts.length ? parts.join(" and ") : "work in this server before the request was sent";
+}
+
+/**
  * The panel accepted the connection and then did not answer in time.
  *
  * This is a completely different diagnosis from a refused connection and must
@@ -89,29 +115,57 @@ export class BridgeTimeoutError extends Error {
   constructor(
     public port: number,
     public timeoutMs: number,
-    opts: { op?: string; adjustable?: boolean } = {}
+    public opts: { op?: string; adjustable?: boolean; timing?: TimeoutTiming } = {}
   ) {
     super(BridgeTimeoutError.message(port, timeoutMs, opts));
     this.name = "BridgeTimeoutError";
   }
+
+  /**
+   * Restate the message with what the whole tool call cost, not just the op's
+   * own limit (issue #175). The limit starts when the request is sent; before
+   * that the call can spend time on the panel-version check (its own 2s probe,
+   * which waits on a busy After Effects like anything else) and in this
+   * session's write queue. Measured on 26.5: a 3s limit was reported to the
+   * agent after 5.0s, and "did not answer within 3s" was the only number it saw.
+   */
+  withTiming(timing: TimeoutTiming): this {
+    this.opts = { ...this.opts, timing };
+    this.message = BridgeTimeoutError.message(this.port, this.timeoutMs, this.opts);
+    return this;
+  }
+
   static message(
     port: number,
     timeoutMs: number,
-    opts: { op?: string; adjustable?: boolean } = {}
+    opts: { op?: string; adjustable?: boolean; timing?: TimeoutTiming } = {}
   ): string {
-    const secs = Math.round(timeoutMs / 1000);
+    const secs = secondsText(timeoutMs);
     const what = opts.op ? `\`${opts.op}\`` : "the call";
+    const t = opts.timing;
+    // Only worth a sentence when the call visibly outlasted its limit; a few
+    // hundred milliseconds of scheduling is not a story.
+    const before = t ? Math.max(0, t.totalMs - timeoutMs) : 0;
+    const head =
+      t && before >= 500
+        ? [
+            `The After Effects panel at http://127.0.0.1:${port} did not answer ${what} in time: this tool call gave up ${elapsedText(t.totalMs)} after it was made.`,
+            `The op's own limit is ${secs} and starts when the request is sent; the ${elapsedText(before)} before that went on ${beforeSendText(t)}.`,
+          ]
+        : [`The After Effects panel at http://127.0.0.1:${port} did not answer within ${secs} for ${what}.`];
     return [
-      `The After Effects panel at http://127.0.0.1:${port} did not answer within ${secs}s for ${what}.`,
+      ...head,
       "",
       "This is a timeout, not a lost connection — the panel is very probably still",
       "there. ExtendScript is single-threaded, so while After Effects is busy running a",
       "script it cannot answer the bridge at all, and a busy AE looks exactly like a",
       "dead one from here. It usually recovers on its own.",
       "",
-      "The call may also be waiting its turn behind another MCP client connected to the",
-      "same After Effects: the panel runs one call at a time for every client. Either",
-      "way it can still land after this message — that has been measured.",
+      "The call may still run and land after this message: it reached the panel, or is",
+      "queued there, and nothing cancels it. That has been measured — a write that timed",
+      "out this way appeared in the comp once After Effects was free. One possible reason",
+      "for the wait is another MCP client connected to the same After Effects, since the",
+      "panel runs one call at a time for every client; this message cannot tell which.",
       "",
       "What to do, in order:",
       "1. Do not restart After Effects, and do not run setup_panel. Do not re-send the",
@@ -128,7 +182,7 @@ export class BridgeTimeoutError extends Error {
       "   treat this as a real disconnection and follow its nextSteps.",
       opts.adjustable === false
         ? ""
-        : `\nIf this work legitimately takes longer than ${secs}s, the limit is settable: start the\nserver with AE_MCP_OP_TIMEOUT_MS set to a larger number of milliseconds.`,
+        : `\nIf this work legitimately takes longer than ${secs}, the limit is settable: start the\nserver with AE_MCP_OP_TIMEOUT_MS set to a larger number of milliseconds.`,
     ].filter(Boolean).join("\n");
   }
 }

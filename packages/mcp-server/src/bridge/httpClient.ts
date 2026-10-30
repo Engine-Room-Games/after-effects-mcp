@@ -3,26 +3,9 @@ import { AeError, BridgeAuthError, BridgeResetError, BridgeTimeoutError, BridgeU
 import { logger } from "../util/logger.js";
 import { authHeaders, DEFAULT_PORT, discoverPort, locatePanel, panelToken, pinnedPort, portCandidates, type LocateResult } from "./discovery.js";
 
-/**
- * How long the call sat on the panel's own `evalScript` mutex before it ran,
- * and what held it (issue #175). The server's write queue knows only its own
- * process; this is the only sign of a wait behind *another* MCP client's call
- * on the same panel. Absent from panels that predate it and from calls that did
- * not wait.
- */
-export interface PanelWait { behind: string; waitedMs: number; }
-interface OpResultOk { ok: true; result: unknown; panelWait?: PanelWait; }
+interface OpResultOk { ok: true; result: unknown; }
 interface OpResultErr { ok: false; error: string; code?: string; stack?: string; line?: number; source?: AeSourceInfo; }
 type OpResult = OpResultOk | OpResultErr;
-export interface OpOutcome { result: unknown; panelWait?: PanelWait; }
-
-/** The panel's field, or undefined if it is missing or not the shape it should be. */
-function validPanelWait(w: unknown): PanelWait | undefined {
-  if (!w || typeof w !== "object") return undefined;
-  const { behind, waitedMs } = w as Record<string, unknown>;
-  if (typeof behind !== "string" || typeof waitedMs !== "number" || !Number.isFinite(waitedMs)) return undefined;
-  return { behind, waitedMs };
-}
 
 /** Long enough that a normal op never trips it; short enough to be a signal. */
 const DEFAULT_OP_TIMEOUT_MS = 120_000;
@@ -182,7 +165,7 @@ export class HttpClient {
    * here, so a retry after a port switch gets the full budget rather than the
    * remainder of a clock that started before the refusal.
    */
-  private async postOp(op: string, args: unknown, progressToken?: string | number): Promise<OpOutcome> {
+  private async postOp(op: string, args: unknown, progressToken?: string | number): Promise<unknown> {
     let resp: Response;
     const timeoutMs = opTimeoutMs(op);
     try {
@@ -214,7 +197,7 @@ export class HttpClient {
     if (!data.ok) {
       throw new AeError(data.error, data.stack, data.line, data.code, data.source);
     }
-    return { result: data.result, panelWait: validPanelWait(data.panelWait) };
+    return data.result;
   }
 
   /**
@@ -235,11 +218,6 @@ export class HttpClient {
    * something else, and that is the original error's story to tell.
    */
   async runOp(op: string, args: unknown, progressToken?: string | number): Promise<unknown> {
-    return (await this.runOpWithWait(op, args, progressToken)).result;
-  }
-
-  /** `runOp`, plus how long the call waited on the panel's mutex, when it did. */
-  async runOpWithWait(op: string, args: unknown, progressToken?: string | number): Promise<OpOutcome> {
     try {
       return await this.postOp(op, args, progressToken);
     } catch (e) {

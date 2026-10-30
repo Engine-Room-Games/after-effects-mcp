@@ -246,51 +246,9 @@ export class WriteQueue {
  * caller reads. The server sends those as a second text block instead, which
  * cannot corrupt any envelope.
  */
-export function mergeWait(value: unknown, wait: WaitNote): Record<string, unknown> | null {
+export function mergeWait(value: unknown, wait: QueueWait): Record<string, unknown> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const obj = value as Record<string, unknown>;
-  // A key the result already has would be overwritten by the note, or the note
-  // by it. Neither is acceptable, so the note goes in its own block.
-  if (Object.keys(wait).some((k) => k in obj)) return null;
+  if ("queuedBehind" in obj || "waitedMs" in obj) return null;
   return { ...obj, ...wait };
-}
-
-/**
- * A wait on the panel's own mutex shorter than this is not reported. The
- * panel's chain also orders this server's reads against its writes (reads are
- * never in the write queue), so a few hundred milliseconds behind our own
- * `get_*` is ordinary and not worth a field on every result.
- */
-export const PANEL_WAIT_NOTE_MS = 1000;
-
-/** The panel's half of a wait note: what it was busy with, and for how long. */
-export interface PanelWaitNote {
-  panelBusyWith: string;
-  panelWaitedMs: number;
-}
-
-/** Everything a result can say about having waited. Each half is present only when it happened. */
-export type WaitNote = Partial<QueueWait> & Partial<PanelWaitNote>;
-
-/**
- * Combine this process's queue wait with the panel's mutex wait (issue #175).
- *
- * The two are different waits and keep different names. `queuedBehind` /
- * `waitedMs` are this server's own queue — a write from this session ahead of
- * it. `panelBusyWith` / `panelWaitedMs` are the panel's `evalScript` chain,
- * which every MCP server pointed at the panel shares: the one place a second
- * client's write is visible at all, since this server's queue never sees it.
- * `null` when neither waited, so an uncontended result is unchanged.
- */
-export function waitNote(
-  queue: QueueWait | null,
-  panel: { behind: string; waitedMs: number } | undefined
-): WaitNote | null {
-  const note: WaitNote = {};
-  if (queue) Object.assign(note, queue);
-  if (panel && panel.waitedMs >= PANEL_WAIT_NOTE_MS) {
-    note.panelBusyWith = panel.behind;
-    note.panelWaitedMs = Math.round(panel.waitedMs);
-  }
-  return Object.keys(note).length ? note : null;
 }

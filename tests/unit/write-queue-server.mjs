@@ -32,8 +32,12 @@ const behaviour = new Map();
 /** Every op the stub saw, with the moment it entered and left. */
 const seen = [];
 
-const bridge = http.createServer((req, res) => {
+/** How long the stub's /health takes to answer — a busy After Effects blocks it too. */
+let healthDelayMs = 0;
+
+const bridge = http.createServer(async (req, res) => {
   if (req.url === "/health") {
+    if (healthDelayMs) await new Promise((r) => setTimeout(r, healthDelayMs));
     res.setHeader("content-type", "application/json");
     // Report the hash this server ships so the panel-version gate is a no-op
     // rather than a variable of whatever is installed on the test machine.
@@ -50,7 +54,7 @@ const bridge = http.createServer((req, res) => {
     await new Promise((r) => setTimeout(r, b.ms));
     entry.leftAt = Date.now();
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, result: b.result, panelWait: b.panelWait }));
+    res.end(JSON.stringify({ ok: true, result: b.result }));
   });
 });
 const wss = new WebSocketServer({ server: bridge, path: "/events" });
@@ -155,76 +159,39 @@ await check("an uncontended write is byte-identical to what it always was", asyn
   assert.deepEqual(payload(res), { id: 42, name: "t" });
 });
 
-// Issue #175: two MCP servers on one panel. Each server's queue sees only its
-// own writes, so a write from the second client waited on the panel's
-// evalScript mutex and said nothing (measured on 26.5: six seconds, silent).
-// The panel now reports that wait beside the result; these pin the server half.
-await check("a long wait on the panel's mutex is reported under its own names", async () => {
-  seen.length = 0;
-  behaviour.set("set_layer", {
-    ms: 5,
-    result: { ok: true, which: "set_layer" },
-    panelWait: { behind: "run_jsx", waitedMs: 6371.4 },
-  });
-  const res = await call("set_layer", { compId: 1, layerId: 1, name: "n" });
-  assert.equal(res.content.length, 1);
-  assert.deepEqual(payload(res), { ok: true, which: "set_layer", panelBusyWith: "run_jsx", panelWaitedMs: 6371 });
-  // Not this server's queue: that would tell the agent its own write was ahead.
-  assert.equal("queuedBehind" in payload(res), false);
+await check("a timeout says what the whole call cost, not only the op's limit", async () => {
+  // Issue #175, measured on 26.5: AE_MCP_OP_TIMEOUT_MS=3000 and the agent was
+  // told "did not answer within 3s" after 5.0 s. A fresh server's first call
+  // asks /health for the panel-version gate first — a 2 s probe that a busy
+  // After Effects blocks too — and only then starts the op's own clock.
+  const fresh = createServer();
+  const c2 = new Client({ name: "timeout-test", version: "0" }, { capabilities: {} });
+  const [cs2, ss2] = InMemoryTransport.createLinkedPair();
+  await Promise.all([fresh.connect(ss2), c2.connect(cs2)]);
+  healthDelayMs = 2300;
+  process.env.AE_MCP_OP_TIMEOUT_MS = "400";
+  behaviour.set("set_layer", { ms: 1500, result: { ok: true } });
+  try {
+    const t0 = Date.now();
+    const res = await c2.callTool({ name: "set_layer", arguments: { compId: 1, layerId: 1, name: "n" } });
+    const took = Date.now() - t0;
+    assert.equal(res.isError, true);
+    const text = res.content[0].text;
+    const m = /gave up (\d+\.\d)s after it was made/.exec(text);
+    assert.ok(m, text.split("\n")[0]);
+    const reported = Number(m[1]) * 1000;
+    assert.ok(Math.abs(reported - took) <= 200, `reported ${reported} ms, took ${took} ms`);
+    assert.match(text, /limit is 0\.4s/);
+    assert.match(text, /checking the panel's version/);
+    assert.doesNotMatch(text, /did not answer within/, "the bare limit is not what the call cost");
+    assert.match(text, /may still run and land after this message/);
+  } finally {
+    healthDelayMs = 0;
+    delete process.env.AE_MCP_OP_TIMEOUT_MS;
+    behaviour.delete("set_layer");
+    await c2.close();
+  }
 });
-
-await check("a short wait on the panel's mutex is not reported", async () => {
-  seen.length = 0;
-  behaviour.set("set_layer", { ms: 5, result: { ok: true }, panelWait: { behind: "get_comp", waitedMs: 40 } });
-  const res = await call("set_layer", { compId: 1, layerId: 1, name: "n" });
-  assert.equal(res.content.length, 1);
-  assert.deepEqual(payload(res), { ok: true });
-});
-
-await check("a panel wait on a run_jsx array arrives as a second block", async () => {
-  seen.length = 0;
-  behaviour.set("run_jsx", { ms: 5, result: [1, 2], panelWait: { behind: "run_batch", waitedMs: 2500 } });
-  const res = await call("run_jsx", { code: "return [1,2]" });
-  assert.equal(res.content.length, 2);
-  assert.deepEqual(payload(res, 0), [1, 2]);
-  assert.deepEqual(payload(res, 1), { panelBusyWith: "run_batch", panelWaitedMs: 2500 });
-});
-
-await check("a malformed panelWait is ignored rather than reported", async () => {
-  seen.length = 0;
-  behaviour.set("set_layer", { ms: 5, result: { ok: true }, panelWait: { behind: 7, waitedMs: "lots" } });
-  const res = await call("set_layer", { compId: 1, layerId: 1, name: "n" });
-  assert.deepEqual(payload(res), { ok: true });
-});
-await check("a read that waited on the panel's mutex reports it too", async () => {
-  // Reads never enter this server's queue, but they share the panel's chain
-  // with every client's writes — so a read can wait behind another client too.
-  seen.length = 0;
-  behaviour.set("get_comp", { ms: 5, result: { id: 1 }, panelWait: { behind: "run_batch", waitedMs: 3000 } });
-  const res = await call("get_comp", { compId: 1 });
-  assert.equal(res.content.length, 1);
-  assert.deepEqual(payload(res), { id: 1, panelBusyWith: "run_batch", panelWaitedMs: 3000 });
-  behaviour.delete("get_comp");
-});
-
-await check("a write that waited in both places reports both, under their own names", async () => {
-  seen.length = 0;
-  behaviour.set("set_transform", { ms: 120, result: { ok: true } });
-  behaviour.set("set_layer", { ms: 5, result: { ok: true }, panelWait: { behind: "run_jsx", waitedMs: 1500 } });
-  const [, second] = await Promise.all([
-    call("set_transform", { compId: 1, layerId: 1, properties: { opacity: 50 } }),
-    call("set_layer", { compId: 1, layerId: 1, name: "n" }),
-  ]);
-  const b = payload(second);
-  assert.equal(b.queuedBehind, "set_transform");
-  assert.ok(b.waitedMs >= 80, `waitedMs was ${b.waitedMs}`);
-  assert.equal(b.panelBusyWith, "run_jsx");
-  assert.equal(b.panelWaitedMs, 1500);
-  assert.equal(b.ok, true);
-  behaviour.delete("set_transform");
-});
-behaviour.delete("set_layer");
-behaviour.delete("run_jsx");
 
 await check("a long batch holds the queue until the job finishes", async () => {
   // The gap the panel's own evalScript mutex leaves, and the whole reason for

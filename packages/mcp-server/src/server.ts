@@ -14,7 +14,7 @@ import { schemas } from "@engineroom/shared";
 import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
 import { createPanelGate } from "./bridge/panelGate.js";
-import { WriteQueue, mergeWait, waitNote, type QueueWait, type WaitNote, type WriteLease } from "./bridge/writeQueue.js";
+import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge/writeQueue.js";
 import { JobManager, isTerminal, unknownJobMessage } from "./jobs/manager.js";
 import {
   RenderRunner,
@@ -623,7 +623,12 @@ export function createServer(opts: CreateServerOptions = {}) {
     // Refuse to forward to a panel that predates this server. Without this the
     // agent gets `Unknown op: …` for anything added since the panel was
     // installed and has no way to know an update is the fix.
+    // Timed from here so a timeout can say what the whole call cost (#175): the
+    // gate's /health probe waits on a busy After Effects too, and was measured
+    // turning a 3s op limit into a 5.0s wait the message never mentioned.
+    const calledAt = Date.now();
     const staleness = await panelGate.check();
+    const gateMs = Date.now() - calledAt;
     if (staleness) return errorResult(staleness);
 
     // Serialize writes. Acquiring *before* runOp is what keeps the op timeout
@@ -658,11 +663,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       // does nothing with it — its WS `progress` events carry a jobId and no
       // token — and progress is delivered on `await_job`, never here; see
       // forwardJobProgress.
-      const { result, panelWait } = await bridge.runOpWithWait(name, args);
-      // This server's queue wait, plus the panel's mutex wait when it was long
-      // enough to matter — the only trace of another MCP client's call ahead of
-      // this one (issue #175). Null when neither happened.
-      const waited = waitNote(wait, panelWait);
+      const result = await bridge.runOp(name, args);
 
       // Async envelope handling for run_batch
       if (ASYNC_OPS.has(name) && isAsyncEnvelope(result)) {
@@ -711,7 +712,7 @@ export function createServer(opts: CreateServerOptions = {}) {
             undoGroupName: env.undoGroupName,
             note: withProgressNote(env.note, env.jobId),
           },
-          waited
+          wait
         );
       }
 
@@ -774,17 +775,20 @@ export function createServer(opts: CreateServerOptions = {}) {
       // reinstalled the panel and relaunched AE. See style/summary.ts.
       if (name === "get_house_style") {
         const detail = (args as { detail?: "summary" | "full" }).detail ?? "summary";
-        return textResult(applyHouseStyleDetail(result, detail), waited);
+        return textResult(applyHouseStyleDetail(result, detail), wait);
       }
 
-      return textResult(result, waited);
+      return textResult(result, wait);
     } catch (e) {
       // Checked before BridgeUnreachableError because the remedies are
       // opposites: one says restart After Effects, the other says do not.
       // Every branch below goes through `fail`, so a failure the journal already
       // knows about arrives with its pointer attached — that is the push half of
       // the journal, and the error path is the only place it can live.
-      if (e instanceof BridgeTimeoutError) return fail(name, e.message);
+      if (e instanceof BridgeTimeoutError) {
+        e.withTiming({ totalMs: Date.now() - calledAt, gateMs, queueMs: wait?.waitedMs ?? 0 });
+        return fail(name, e.message);
+      }
       if (e instanceof BridgeUnreachableError) return fail(name, e.message);
       if (e instanceof BridgeResetError) return fail(name, e.message);
       if (e instanceof AeError) {
@@ -1104,7 +1108,7 @@ async function clientRoots(server: Server): Promise<string[] | undefined> {
  * Vision results never come through here with a wait — screenshots are reads
  * and are never queued — so the image envelope cannot be touched by this.
  */
-function textResult(value: unknown, wait?: WaitNote | null) {
+function textResult(value: unknown, wait?: QueueWait | null) {
   // Compact, not pretty-printed (issue #166). The model reads JSON without the
   // indentation, and every result is re-sent on every later turn of the
   // session, so the whitespace was paid for many times over: 20–40% of a

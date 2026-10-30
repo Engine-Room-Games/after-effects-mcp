@@ -106,6 +106,26 @@ check("the two diagnoses share no remedy", () => {
   assert.doesNotMatch(timeout.message, /Cannot reach the After Effects panel at/i);
 });
 
+// Issue #175: a write that timed out landed afterwards, and the agent was told
+// "within 3s" after 5.0s — the panel-version probe ran first and also waited.
+check("timeout always says the call may still land", () =>
+  assert.match(timeout.message, /may still run and land after this message/)
+);
+check("a timeout restated with its timing names the whole span and where it went", () => {
+  const e = new BridgeTimeoutError(7777, 3000, { op: "create_null_layer" });
+  e.withTiming({ totalMs: 5012, gateMs: 2004, queueMs: 0 });
+  assert.match(e.message, /gave up 5\.0s after it was made/);
+  assert.match(e.message, /limit is 3s/);
+  assert.match(e.message, /2\.0s before that went on checking the panel's version/);
+  assert.doesNotMatch(e.message, /did not answer within/);
+  assert.doesNotMatch(e.message, /behind this session's own earlier write/, "no queue wait happened");
+});
+check("a timeout that kept to its limit keeps the plain sentence", () => {
+  const e = new BridgeTimeoutError(7777, 3000, { op: "set_layer" });
+  e.withTiming({ totalMs: 3040, gateMs: 2, queueMs: 0 });
+  assert.match(e.message, /did not answer within 3s for `set_layer`/);
+});
+
 // ---------- opTimeoutMs ----------
 
 const ENV = "AE_MCP_OP_TIMEOUT_MS";
