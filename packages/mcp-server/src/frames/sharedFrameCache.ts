@@ -19,23 +19,26 @@
  *   short lock file, so a compaction can never drop a line another process
  *   appended while it ran. A check reads without the lock: appends are single
  *   small writes and a compaction lands by rename, so a reader sees whole
- *   lines. A lock that cannot be had within LOCK_WAIT_MS is broken if it is
- *   older than LOCK_STALE_MS (a writer that died holding it), and otherwise
- *   the append goes ahead unlocked and the compaction is skipped. The one
- *   way to lose a line is that unlocked append landing inside another
- *   process's compaction after half a second of contention, which a compaction
- *   of a few hundred short lines does not take.
+ *   lines. A lock older than LOCK_STALE_MS is a writer that died holding it,
+ *   and is broken. Nothing is ever written to the file without the lock.
  * - **Semantics.** A check replays the file through `createFrameCache` — the
  *   panel's own window logic — line by line at each line's own time, so the
  *   answers are the in-memory cache's exactly. Torn or foreign lines are
  *   skipped; an unreadable or unwritable file falls back to this process's own
  *   window, never to a failed screenshot.
- * - **Private.** 0600 inside a 0700 directory, like the token and desk files.
+ * - **Private.** The file is 0600, set on every append (an append's `mode`
+ *   does nothing to an existing file), and its directory is tightened to 0700
+ *   (see privateDir). Not on Windows, where POSIX modes do not apply and the
+ *   profile directory's ACL is what protects it.
+ * - **Never a hang.** A lock that cannot be taken in LOCK_WAIT_MS — held, or
+ *   stale and unremovable — skips the shared record (this process keeps it)
+ *   and warns once on stderr.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { logger } from "../util/logger.js";
 import { createFrameCache, type FrameCache, type FrameCacheMatch, type FrameCacheMeta } from "./frameCache.js";
 
 /** frameCache.ts's defaults; compaction must keep the same window the replay sees. */
@@ -75,6 +78,8 @@ export interface SharedFrameCacheOptions {
   limit?: number;
   ttlMs?: number;
   compactAt?: number;
+  /** Where the one "could not write the shared window" warning goes. Defaults to stderr. */
+  warn?: (message: string) => void;
 }
 
 function readLines(file: string, instance: string): Line[] {
@@ -99,11 +104,36 @@ function readLines(file: string, instance: string): Line[] {
   return out;
 }
 
+/**
+ * Create the state directory 0700, and tighten it to 0700 if it exists: the
+ * panel creates `~/.engineroom-ae-mcp` with no mode (so 0755 under a usual
+ * umask), and mkdir's mode does nothing to a directory that is already there.
+ * Safe for everything else in it — the port, token and desk files are read
+ * and written only by this same user (the panel runs as the user, inside AE).
+ * Best effort: a directory this user does not own stays as it is.
+ */
+function privateDir(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (process.platform === "win32") return;
+  try {
+    if ((fs.statSync(dir).mode & 0o777) !== 0o700) fs.chmodSync(dir, 0o700);
+  } catch {
+    /* not ours to change */
+  }
+}
+
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** Run `fn` holding `<file>.lock`. Returns false, without running it, when the lock cannot be had. */
+/**
+ * Run `fn` holding `<file>.lock`. Returns false, without running it, when the
+ * lock cannot be had within LOCK_WAIT_MS. Every failed attempt — a held lock, a
+ * stale one that will not unlink (EACCES, a Windows sharing violation, a lock
+ * path that is a directory), a stat that fails — goes through the same
+ * deadline and sleep, so no path can spin: a stuck lock costs half a second,
+ * never a hung server.
+ */
 function withLock(file: string, fn: () => void): boolean {
   const lock = `${file}.lock`;
   const deadline = Date.now() + LOCK_WAIT_MS;
@@ -114,12 +144,9 @@ function withLock(file: string, fn: () => void): boolean {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") return false;
       try {
-        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) {
-          fs.unlinkSync(lock);
-          continue;
-        }
+        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) fs.unlinkSync(lock);
       } catch {
-        continue; // released between the open and the stat
+        /* released meanwhile, or not removable: the deadline below decides */
       }
       if (Date.now() > deadline) return false;
       sleepSync(5);
@@ -148,6 +175,8 @@ export function createSharedFrameCache(where: () => SharedWindow | null, opts: S
   const limit = opts.limit ?? DEFAULT_LIMIT;
   const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
   const compactAt = opts.compactAt ?? DEFAULT_COMPACT_AT;
+  const warn = opts.warn ?? ((m: string) => logger.warn(m));
+  let warned = false;
   // What could not be written to the file (or every frame, when no window is known).
   const local = createFrameCache({ now, limit, ttlMs });
 
@@ -217,20 +246,45 @@ export function createSharedFrameCache(where: () => SharedWindow | null, opts: S
       const text = JSON.stringify(line) + "\n";
       let appended = false;
       const append = () => {
-        fs.appendFileSync(w.file, text, { mode: 0o600 });
+        // `mode` applies only when the append creates the file; a file left
+        // 0644 by an earlier writer is tightened on every append.
+        const fd = fs.openSync(w.file, "a", 0o600);
+        try {
+          if (process.platform !== "win32") fs.fchmodSync(fd, 0o600);
+          fs.writeSync(fd, text);
+        } finally {
+          fs.closeSync(fd);
+        }
         appended = true;
       };
+      let locked = false;
+      let failure: string | null = null;
       try {
-        fs.mkdirSync(path.dirname(w.file), { recursive: true, mode: 0o700 });
-        const locked = withLock(w.file, () => {
+        privateDir(path.dirname(w.file));
+        locked = withLock(w.file, () => {
           append();
           if (lineCount(w.file) > compactAt) compact(w);
         });
-        if (!locked) append();
-      } catch {
-        /* fall through */
+      } catch (e) {
+        failure = (e as Error).message;
       }
-      if (!appended) local.remember(key, hash, meta);
+      // Not written to the shared file: this process still keeps it, and says
+      // why once rather than on every screenshot.
+      if (!appended) {
+        local.remember(key, hash, meta);
+        if (!warned) {
+          warned = true;
+          warn(
+            `the shared stale-frame window ${w.file} could not be written` +
+              (failure !== null
+                ? ` (${failure})`
+                : locked
+                  ? ""
+                  : ` (its lock ${w.file}.lock could not be taken within ${LOCK_WAIT_MS}ms)`) +
+              "; this server keeps its own window until it can. Screenshots are unaffected."
+          );
+        }
+      }
     },
   };
 }

@@ -198,6 +198,49 @@ await check("the instance tag is a hash of the token, never the token", async ()
   assert.equal(panelInstanceId(null), null);
 });
 
+await check("a lock that can never be removed costs half a second, not a hung server", () => {
+  // A stale "lock" that is a directory: unlink fails (EISDIR / EPERM), as an
+  // EACCES or a Windows sharing violation would. Run in its own process with a
+  // hard timeout, so a regression fails here instead of hanging the suite.
+  const f = path.join(work, "stuck.jsonl");
+  fs.mkdirSync(f + ".lock");
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(f + ".lock", old, old);
+  const STUCK = `
+const { createSharedFrameCache } = await import(${JSON.stringify(url("sharedFrameCache.js"))});
+const warnings = [];
+const c = createSharedFrameCache(() => ({ file: ${JSON.stringify(f)}, instance: "i" }), { warn: (m) => warnings.push(m) });
+const t0 = Date.now();
+c.remember("a", "h-stuck", { label: "a", bytes: 1 });
+c.remember("b", "h-stuck-2", { label: "b", bytes: 1 });
+process.stderr.write(JSON.stringify({ ms: Date.now() - t0, warnings, kept: !!c.match("z", "h-stuck") }));
+`;
+  const sf = path.join(work, "stuck.mjs");
+  fs.writeFileSync(sf, STUCK);
+  const r = spawnSync(process.execPath, [sf], { encoding: "utf8", timeout: 10_000 });
+  assert.notEqual(r.signal, "SIGTERM", "remember() hung on a lock it could not remove");
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stderr);
+  assert.ok(out.ms < 3000, `two records took ${out.ms}ms`);
+  assert.equal(out.warnings.length, 1, "warned once, not per frame");
+  assert.match(out.warnings[0], /could not be taken/);
+  assert.equal(out.kept, true, "the frame is still in this process's own window");
+  assert.ok(!fs.existsSync(f), "nothing was written without the lock");
+});
+
+await check("an existing 0755 directory and 0644 file are tightened to 0700 and 0600", () => {
+  if (process.platform === "win32") return;
+  const dir = path.join(work, "loose");
+  fs.mkdirSync(dir, { mode: 0o755 });
+  fs.chmodSync(dir, 0o755);
+  const f = path.join(dir, "frames-1.jsonl");
+  fs.writeFileSync(f, "");
+  fs.chmodSync(f, 0o644);
+  createSharedFrameCache(() => ({ file: f, instance: "i" })).remember("k", "h", { label: "k", bytes: 1 });
+  assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+});
+
 await check("a torn line or an unwritable file never fails a check", () => {
   const f = path.join(work, "torn.jsonl");
   fs.writeFileSync(f, '{"key":"k","hash":"h","at":' + Date.now() + ',"label":"k","bytes":1,"inst":"i"}\n{"key":"k2","ha');
