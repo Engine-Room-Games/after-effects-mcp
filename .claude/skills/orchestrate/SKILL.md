@@ -115,6 +115,16 @@ maintainer or another session may be mid-project. Brief the agent to:
   worktree** (from the main checkout it installs main's panel) → launch →
   test → quit → restore the folder byte-identical → relaunch. Ask before every
   quit. A restore takes effect only at the next launch;
+- **reach AE only through the bridge — never osascript `DoScript` /
+  `DoScriptFile`, `-r`, or File > Scripts.** On those routes any throw becomes
+  a modal alert on the maintainer's screen that blocks AE until he clicks it
+  (it happened on 2026-10-30: a misspelled `CloseOptions.DO_NOT_SAVE` — the
+  member is `DO_NOT_SAVE_CHANGES` — sent by `DoScript` because the bridge was
+  down). A bridge that will not come up means the installed panel predates
+  the branch: install the branch's panel as above, or stop and report — never
+  route around it. Close and quit the way `tests/live/lib/runner.mjs` does;
+  prefer `tests/live/run.mjs` (its `prefs backup`/`restore` and runner) over
+  hand-rolled scripts;
 - report what was observed, not inferred, and what could not be exercised.
 
 Plan a live run before merging any AE-facing change; only the maintainer can
