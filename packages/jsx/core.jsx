@@ -143,34 +143,10 @@ var __UNDO_GROUPS = 0;
 
 function __beginUndoGroup(name) {
   __UNDO_GROUPS += 1;
-  __aeBeginUndo(name || "AE MCP");
+  app.beginUndoGroup(name || "AE MCP");
 }
 
 function __undoGroupsOpened() { return __UNDO_GROUPS; }
-
-// While a run_jsx script runs, app.beginUndoGroup / app.endUndoGroup are the
-// script's counted wrappers (raw.jsx, issue #221) and __UNDO_RAW holds the
-// originals. The bundle's own calls must still reach After Effects, so these
-// two put the original back for exactly one call. Swapping rather than calling
-// the saved function with .call(app): the swap relies only on the assignment
-// the guard already proved works, nothing else about the host object.
-var __UNDO_RAW = null;
-
-function __aeBeginUndo(name) {
-  var o = __UNDO_RAW;
-  if (!o) { app.beginUndoGroup(name); return; }
-  app.beginUndoGroup = o.begin;
-  try { app.beginUndoGroup(name); }
-  finally { app.beginUndoGroup = o.wrapBegin; }
-}
-
-function __aeEndUndo() {
-  var o = __UNDO_RAW;
-  if (!o) { app.endUndoGroup(); return; }
-  app.endUndoGroup = o.end;
-  try { app.endUndoGroup(); }
-  finally { app.endUndoGroup = o.wrapEnd; }
-}
 
 // An undo group must open and close inside ONE evalScript call. After Effects
 // discards one that spans two — see the note in CLAUDE.md; measured, not
@@ -179,7 +155,7 @@ function withUndo(name, fn) {
   __beginUndoGroup(name || "AE MCP");
   __UNDO_OPEN = true;
   try { return fn(); }
-  finally { __UNDO_OPEN = false; __aeEndUndo(); }
+  finally { __UNDO_OPEN = false; app.endUndoGroup(); }
 }
 
 // Run fn with the dispatcher's undo group closed, then reopen it.
@@ -189,7 +165,7 @@ function withUndo(name, fn) {
 // to call. The work inside becomes its own undo step, separate from the rest.
 function withoutUndoGroup(fn) {
   if (!__UNDO_OPEN) return fn();
-  __aeEndUndo();
+  app.endUndoGroup();
   __UNDO_OPEN = false;
   try { return fn(); }
   finally { __beginUndoGroup("AE MCP: continue"); __UNDO_OPEN = true; }
@@ -225,21 +201,30 @@ function __mkError(e) {
 //
 // So dispatch() runs every op between app.beginSuppressDialogs() and
 // app.endSuppressDialogs(false), inside the same evalScript and outside the
-// undo group — the group's own close is where a mismatch would be raised. What
-// is known, measured on 26.3 for export_mogrt and 26.5 for render_queue's save:
-// suppression stops a blocking dialog, and endSuppressDialogs(false) belongs
-// in a finally. What is NOT yet measured, and must be before this is described
-// as working (see the issue): whether the mismatch and auto-orient modals are
-// among the dialogs it suppresses, and whether app.onError receives what was
-// suppressed. The capture below is therefore best-effort: when app.onError
-// takes a handler, whatever it is handed comes back on the result
-// (`aeWarnings`) or on the error text; when it does not, nothing is
-// claimed. An op that manages its own suppression (export_mogrt, whose
-// suppressDialogs:false must still be honoured) opts out with __meta.ownDialogs.
+// undo group — the group's own close is where a mismatch would be raised — and
+// points app.onError at a collector for the duration, restoring whatever was
+// there before. Measured on AE 26.5 (#226 live pass): no modal appeared in any
+// test; `typeof app.beginSuppressDialogs` is "function"; app.onError is called
+// as (message, severity), and the auto-orient-on-2D warning and the undo-group
+// mismatch both arrive with severity WARNING; suppression and onError are
+// restored after a throwing op; a 520-op chunked batch carried its warnings to
+// the job result; the whole guard costs about 9 µs per call. What it collects
+// comes back as `aeWarnings` on the result, or on the error text. An op that
+// manages its own suppression (export_mogrt, whose suppressDialogs:false must
+// still be honoured) opts out with __meta.ownDialogs.
+//
+// Severity PROBLEM is dropped. Also measured: an error a script throws and
+// catches itself fires onError too, with severity PROBLEM — a handled error,
+// not something After Effects would have shown. Kept, it would put a warning on
+// every result whose code used a try/catch. WARNING and anything else is kept.
 //
 // __DIALOG_GUARD is the switch: false restores the old behaviour exactly.
 var __DIALOG_GUARD = true;
 var __DIALOGS_SUPPRESSED = false;
+
+function __isHandledProblem(severity) {
+  try { return String(severity).toUpperCase().indexOf("PROBLEM") >= 0; } catch (e) { return false; }
+}
 
 function __dialogGuardStart() {
   if (!__DIALOG_GUARD || __DIALOGS_SUPPRESSED) return null;
@@ -257,6 +242,7 @@ function __dialogGuardStart() {
     g.previousOnError = app.onError;
     app.onError = function (message, severity) {
       try {
+        if (__isHandledProblem(severity)) return;
         var m = String(message);
         if (typeof severity !== "undefined" && severity !== null) m += " (severity " + String(severity) + ")";
         g.messages.push(m);
@@ -280,11 +266,10 @@ function __dialogGuardEnd(g) {
 
 // Puts what app.onError was handed where the agent will read it.
 //
-// The labelling is deliberately neutral. Whether app.onError fires only for
-// what would have been a dialog, or also for errors raised and caught inside
-// an op (explore.jsx alone has many such catches, and #129's false
-// "invalid numeric result" is caught on purpose), is not measured — so these
-// are "After Effects reported", never "a dialog was suppressed".
+// The labelling stays neutral — "After Effects reported", never "a dialog was
+// suppressed". Caught errors arrive as PROBLEM and are dropped above, and on
+// 26.5 get_layer_full and the other reads produced no false warnings. But
+// nobody has catalogued every WARNING After Effects can raise.
 //
 // The panel forwards `result` on success and `error` on failure, nothing else.
 // An object result gets a top-level `aeWarnings`. Anything else (array, scalar,

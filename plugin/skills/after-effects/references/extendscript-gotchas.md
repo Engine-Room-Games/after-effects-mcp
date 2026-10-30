@@ -332,13 +332,16 @@ output modules anyway.
 - **Do not call `app.beginUndoGroup` / `app.endUndoGroup` in a script.**
   `run_jsx` already makes the script one undo step. An unbalanced pair broke
   undo for a whole project on AE 26.5, the damage survived a reopen, and the
-  next stray end crashed After Effects. *The tool already does:* these calls are
-  rerouted through a counter. Inside the open group they do nothing. Under
-  `undoGroup:false` the first one opens a single real group. A stray end is
-  ignored, and a group left open is closed before the call returns. The result
-  then carries `undoGuard`; read its `note`. If the note begins CAUTION, only
-  calls written out as `app.beginUndoGroup(...)` were counted. Calls made
-  through `eval` or an alias were not, so check Edit > Undo in After Effects.
+  next stray end crashed After Effects. *The tool already does:* calls written
+  out as `app.beginUndoGroup(...)` / `app.endUndoGroup()` are rerouted through a
+  counter. Inside the open group they do nothing. Under `undoGroup:false` the
+  first one opens a single real group. A stray end is ignored, and a group left
+  open is closed before the call returns. The result then carries `undoGuard`;
+  read its `note`. **Only written-out calls are covered.** A call made through
+  `eval`, `Function`, `$.evalFile`, an alias of `app` or a computed name reaches
+  After Effects uncounted. Measured: one stray end that way cost two undo steps.
+  A script that uses `eval`, `Function` or `$.evalFile` gets a note beginning
+  CAUTION; then check Edit > Undo in After Effects.
 - **A result with `aeWarnings` is not a clean success.** After Effects reported
   something while its dialogs were held back. Read the state back before going
   on.

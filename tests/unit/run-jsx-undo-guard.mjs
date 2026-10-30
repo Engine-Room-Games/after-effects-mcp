@@ -23,9 +23,10 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (f) => fs.readFileSync(path.join(root, "packages", "jsx", f), "utf8");
 
-// `locked`: an After Effects whose host object ignores assignment to its
-// methods. The guard must notice, fall back to the text rewrite, and say so.
-function load({ dialogs = false, locked = false } = {}) {
+// The methods are left writable on purpose: AE 26.5 silently ignores an
+// assignment to them, so a guard that assigned would work here and not there.
+// Writable, any assignment shows up as a changed method (balanced() checks).
+function load({ dialogs = false } = {}) {
   const log = [];
   const state = { depth: 0, maxDepth: 0, strayEnds: 0, onError: null, suppressed: 0 };
   const app = {
@@ -40,11 +41,6 @@ function load({ dialogs = false, locked = false } = {}) {
       state.depth--;
     },
   };
-  if (locked) {
-    for (const k of ["beginUndoGroup", "endUndoGroup"]) {
-      Object.defineProperty(app, k, { value: app[k], writable: false, enumerable: true });
-    }
-  }
   state.origBegin = app.beginUndoGroup;
   state.origEnd = app.endUndoGroup;
   if (dialogs) {
@@ -56,7 +52,9 @@ function load({ dialogs = false, locked = false } = {}) {
       enumerable: true,
     });
     // What After Effects would do with a warning it has been told not to show.
-    app.__warn = (msg) => { if (state.onError) state.onError(msg, 2); else log.push(`MODAL:${msg}`); };
+    // Measured on 26.5: onError(message, severity), WARNING for the mismatch and
+    // auto-orient warnings, PROBLEM for an error thrown and caught.
+    app.__warn = (msg, sev = "WARNING") => { if (state.onError) state.onError(msg, sev); else log.push(`MODAL:${msg}`); };
   }
   const ctx = { app, log };
   vm.createContext(ctx);
@@ -216,17 +214,15 @@ check("a run_jsx step in a chunked batch stays inside its chunk's group", () => 
   assert.equal(res.result.undoSteps, 3, "one group per chunk, none extra");
 });
 
-// ---------- Every route to the methods is guarded, not just the spelled-out one ----------
-// Each of these got past the first version's text scanner and reached the real
-// endUndoGroup (#226 review). With the methods replaced on `app` itself, the
-// route no longer matters.
+// ---------- Literal direct calls are guarded; what it cannot see is said ----------
+// Measured on AE 26.5: assigning to app.beginUndoGroup does not throw and the
+// native method stays, so the guard rewrites the script's text and covers
+// literal direct calls only. The fake `app` here refuses assignment the same
+// way (see load()).
 
 for (const [name, code] of [
-  ["eval", 'eval("app.endUndoGroup()");'],
-  ["computed name", 'app["end" + "UndoGroup"]();'],
-  ["escaped name", 'app["end\\x55ndoGroup"]();'],
-  ["Function", 'Function("app.endUndoGroup()")();'],
-  ["alias", "var a = app; a.endUndoGroup();"],
+  ["plain", "app.endUndoGroup();"],
+  ["spaced and split", "app\n  . endUndoGroup();"],
   ["after ++, where a / is division", "var i = 4; i++ / 2; app.endUndoGroup(); var z = i / 2;"],
 ]) {
   check(`guarded: ${name}`, () => {
@@ -236,18 +232,48 @@ for (const [name, code] of [
     balanced(log, state, name);
     assert.deepEqual(log, ["begin:AE MCP: run_jsx", "end"], `${name}: the stray end reached After Effects`);
     assert.equal(r.result.undoGuard.ignoredEnds, 1);
-    assert.equal(r.result.undoGuard.mode, "override");
     assert.match(r.result.undoGuard.note, /UNBALANCED/);
   });
 }
 
-check("guarded: an eval'd begin under undoGroup:false is closed in the same call", () => {
-  const { log, state, call } = load();
-  const r = call("run_jsx", { undoGroup: false, code: 'eval("app.beginUndoGroup(\'x\')"); return 1;' });
+for (const [name, code, route] of [
+  ["eval", 'var x = eval("1 + 1");', "eval"],
+  ["Function", 'var f = Function("return 1"); f();', "Function"],
+  ["$.evalFile", 'if (false) $.evalFile("/tmp/rig.jsx");', "$.evalFile"],
+]) {
+  check(`CAUTION for code the guard cannot see into: ${name}`, () => {
+    const { call } = load();
+    const r = call("run_jsx", { code: `${code} return 1;` });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.result.returned, 1);
+    assert.deepEqual(plain(r.result.undoGuard.uncountedRoutes), [route]);
+    assert.match(r.result.undoGuard.note, /^CAUTION: this script uses /);
+    assert.match(r.result.undoGuard.note, /NOT seen by the guard/);
+  });
+}
+
+check("a $.evalFile in a library is cautioned too", () => {
+  const { call } = load();
+  const r = call("run_jsx", {
+    libraries: [{ path: "/lib/load.jsx", text: 'function load() { $.evalFile("/x.jsx"); }\n' }],
+    code: "return 1;",
+  });
+  assert.deepEqual(plain(r.result.undoGuard.uncountedRoutes), ["$.evalFile"]);
+});
+
+check("eval and Function inside longer names are not routes", () => {
+  const { call } = load();
+  const r = call("run_jsx", { code: "function myFunction(a) { return a; } var retrieval = myFunction; return retrieval(3);" });
+  assert.equal(r.result, 3, "no caution, no envelope");
+});
+
+check("an alias is not claimed as guarded", () => {
+  const { call } = load();
+  const r = call("run_jsx", { code: 'var a = app; var n = a.beginUndoGroup; return typeof n;' });
   assert.equal(r.ok, true, r.error);
-  balanced(log, state, "eval'd begin");
-  assert.deepEqual(log, ["begin:x", "end"]);
-  assert.equal(r.result.undoGuard.closedForScript, 1);
+  assert.equal(r.result.undoGuard.beginUndoGroupCalls, 0);
+  assert.match(r.result.undoGuard.note, /Only calls written out as app\.beginUndoGroup/);
+  assert.match(r.result.undoGuard.note, /\(0 found\)/);
 });
 
 check("names used as data are not refused", () => {
@@ -256,11 +282,12 @@ check("names used as data are not refused", () => {
     code: 'var o = {}; o.s = "endUndoGroup"; o.beginUndoGroup = function () { return 7; }; return o.beginUndoGroup();',
   });
   assert.equal(r.ok, true, r.error);
-  assert.equal(r.result, 7, "nothing undo-related happened, so no envelope");
+  assert.equal(r.result.returned, 7);
+  assert.equal(r.result.undoGuard.beginUndoGroupCalls, 0);
   balanced(log, state, "data");
 });
 
-check("a run_jsx inside a run_jsx counts its own calls and leaves the methods to the outer one", () => {
+check("a run_jsx inside a run_jsx counts its own calls", () => {
   const { log, state, call } = load();
   const r = call("run_jsx", {
     code: 'var inner = OPS.run_jsx({ code: "app.endUndoGroup(); return 1;" }); app.beginUndoGroup("o"); app.endUndoGroup(); return inner;',
@@ -271,10 +298,10 @@ check("a run_jsx inside a run_jsx counts its own calls and leaves the methods to
   assert.equal(r.result.undoGuard.balanced, true);
 });
 
-check("the bundle's own undo calls inside a script are not counted as the script's", () => {
+check("withoutUndoGroup is the bundle's, not the script's: no report, no rewrite", () => {
   const { log, state, call } = load();
   const r = call("run_jsx", { code: "withoutUndoGroup(function () {}); return 2;" });
-  assert.equal(r.result, 2, "withoutUndoGroup is the bundle's, not the script's: no report");
+  assert.equal(r.result, 2);
   balanced(log, state, "withoutUndoGroup");
 });
 
@@ -285,12 +312,12 @@ check("names in strings and comments are left alone", () => {
       "// app.endUndoGroup() would be bad here",
       "/* app.beginUndoGroup(\"x\") */",
       "var s = \"never call app.endUndoGroup() twice\";",
-      "var re = /app.endUndoGroup/;",
-      "return s.length > 0 && re.source.length > 0;",
+      "return s.length > 0;",
     ].join("\n"),
   });
   assert.equal(r.ok, true, r.error);
-  assert.equal(r.result, true, "no envelope: the script never called either");
+  assert.equal(r.result.returned, true);
+  assert.equal(r.result.undoGuard.beginUndoGroupCalls + r.result.undoGuard.endUndoGroupCalls, 0);
   balanced(log, state, "strings and comments");
 });
 
@@ -305,39 +332,30 @@ check("a library's undo calls are guarded too", () => {
   assert.equal(r.result.undoGuard.closedForScript, 1);
 });
 
-// ---------- Fallback: an After Effects that will not take the override ----------
-
-check("fallback: direct calls are still guarded, and the report says only those were", () => {
-  const { log, state, call } = load({ locked: true });
+check("the report counts what it rewrote", () => {
+  const { log, state, call } = load();
   const r = call("run_jsx", { code: 'app.beginUndoGroup("x"); app.endUndoGroup(); app.endUndoGroup(); return 1;' });
-  assert.equal(r.ok, true, r.error);
-  balanced(log, state, "fallback direct");
-  assert.equal(r.result.undoGuard.mode, "text");
-  assert.equal(r.result.undoGuard.ignoredEnds, 1);
-  assert.match(r.result.undoGuard.note, /did not accept the guard's method override/);
+  balanced(log, state, "count");
   assert.match(r.result.undoGuard.note, /\(3 found\)/);
+  assert.equal("mode" in r.result.undoGuard, false, "there is only one mode now");
 });
 
-check("fallback: a route it cannot see is not claimed as guarded", () => {
-  const { call } = load({ locked: true });
-  const r = call("run_jsx", { code: 'eval("app.beginUndoGroup(\'x\')"); return 1;' });
-  assert.equal(r.ok, true, r.error);
-  assert.equal(r.result.undoGuard.beginUndoGroupCalls, 0);
-  assert.match(r.result.undoGuard.note, /CAUTION/);
-  assert.match(r.result.undoGuard.note, /eval, Function, \$\.evalFile/);
+check("the guard never assigns to app's methods", () => {
+  const { ctx, call } = load();
+  vm.runInContext("app.__assigned = 0;", ctx);
+  const plainApp = vm.runInContext("app", ctx);
+  // A setter on a fresh property would not catch it; check the methods are
+  // still the very functions load() installed after a guarded call.
+  const before = [plainApp.beginUndoGroup, plainApp.endUndoGroup];
+  call("run_jsx", { code: 'app.beginUndoGroup("x"); eval("1"); return 1;' });
+  assert.equal(plainApp.beginUndoGroup, before[0]);
+  assert.equal(plainApp.endUndoGroup, before[1]);
 });
 
-check("fallback: a script that never mentions undo gets its bare result", () => {
-  const { log, call } = load({ locked: true });
-  const r = call("run_jsx", { code: "return 5;" });
-  assert.equal(r.result, 5);
-  assert.deepEqual(log, ["begin:AE MCP: run_jsx", "end"]);
-});
-
-check("fallback: app . beginUndoGroup across lines keeps every later line number", () => {
-  const { ctx, log, state, call } = load({ locked: true });
+check("app . beginUndoGroup across lines keeps every later line number", () => {
+  const { ctx, log, state, call } = load();
   const code = 'app\n  .beginUndoGroup("x"); // why\napp /* c */ . endUndoGroup();\nreturn 4;';
-  const built = vm.runInContext("__rjBuildSource", ctx)(code, null, true);
+  const built = vm.runInContext("__rjBuildSource", ctx)(code, null);
   const lines = built.wrapper.split("\n");
   assert.equal(lines.length, code.split("\n").length + 1, "one extra line: the wrapper's closer");
   // The name lands where `app` was; the newline that followed it stays put.
@@ -350,10 +368,22 @@ check("fallback: app . beginUndoGroup across lines keeps every later line number
   balanced(log, state, "multi-line member");
 });
 
-check("override mode leaves the script's text alone", () => {
-  const { ctx } = load();
-  const code = 'app.beginUndoGroup("x");';
-  assert.ok(vm.runInContext("__rjBuildSource", ctx)(code, null, false).wrapper.indexOf(code) > 0);
+// ---------- Fast path: no rewrite unless the source names the methods ----------
+// Measured on AE 26.5 the rewrite costs ~10 ms per KB of source, paid by every
+// run_jsx before this check.
+
+check("a script that never names the methods is never rewritten", () => {
+  const { ctx, call } = load();
+  vm.runInContext('__rjRewriteUndoText = function () { throw new Error("rewrite ran"); };', ctx);
+  const r = call("run_jsx", {
+    libraries: [{ path: "/lib/a.jsx", text: "function a() { return 1; }\n" }],
+    code: "return a() + 1;",
+  });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result, 2);
+  const named = call("run_jsx", { code: "app.endUndoGroup(); return 1;" });
+  assert.equal(named.ok, false, "a script that names them does go through the rewrite");
+  assert.match(named.error, /rewrite ran/);
 });
 
 // ---------- Dialogs the script tries to show ----------
@@ -384,7 +414,7 @@ check("a reported message is a top-level aeWarnings on the result, and onError i
   vm.runInContext('OPS.warns = function () { app.__warn("Auto-orient needs a 3D layer"); return { done: 1 }; }', ctx);
   const r = call("warns", {});
   assert.equal(r.ok, true);
-  assert.deepEqual(plain(r.result.aeWarnings), ["Auto-orient needs a 3D layer (severity 2)"]);
+  assert.deepEqual(plain(r.result.aeWarnings), ["Auto-orient needs a 3D layer (severity WARNING)"]);
   assert.equal(r.result.done, 1);
   assert.equal(state.onError, theirs, "another script's onError must be put back");
   assert.equal(state.suppressed, 0);
@@ -395,10 +425,21 @@ check("an array or scalar result travels in the marked envelope, its value untou
   vm.runInContext('OPS.warnsA = function () { app.__warn("w"); return [1, 2]; }', ctx);
   vm.runInContext('OPS.warnsN = function () { app.__warn("w"); return 4; }', ctx);
   const a = plain(call("warnsA", {}).result);
-  assert.deepEqual(a, { value: [1, 2], aeWarnings: ["w (severity 2)"], __aemcpWarned: true });
+  assert.deepEqual(a, { value: [1, 2], aeWarnings: ["w (severity WARNING)"], __aemcpWarned: true });
   const n = plain(call("warnsN", {}).result);
   assert.equal(n.value, 4);
   assert.equal(n.__aemcpWarned, true);
+});
+
+check("severity PROBLEM (an error thrown and caught) is not a warning; WARNING and others are", () => {
+  const { ctx, call } = load({ dialogs: true });
+  vm.runInContext(
+    'OPS.mixed = function () { app.__warn("caught", "PROBLEM"); app.__warn("mismatch", "WARNING");' +
+    ' app.__warn("other", "NAKED"); return { done: 1 }; }', ctx);
+  vm.runInContext('OPS.onlyCaught = function () { app.__warn("caught", "PROBLEM"); return { done: 1 }; }', ctx);
+  assert.deepEqual(plain(call("mixed", {}).result.aeWarnings),
+    ["mismatch (severity WARNING)", "other (severity NAKED)"]);
+  assert.equal("aeWarnings" in call("onlyCaught", {}).result, false, "a handled error must not read as a warning");
 });
 
 check("no message, no change: an array result keeps its shape", () => {
