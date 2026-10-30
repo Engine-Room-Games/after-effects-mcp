@@ -156,6 +156,17 @@ The costs, both reported rather than worked around:
   to replace an existing one. It is not a patch, and quietly half-rewriting
   someone's hand-written style guide is worse than refusing.
 
+**Issue #220 meant to move the file I/O to the server, and it is still here
+for one reason: there is no cheap way to ask for the path.** The server needs
+only the `.aep` path, and the one op in an installed bundle that reports it,
+`get_project_summary`, walks every project item on AE's main thread and checks
+each one for being a checkpoint. Paying that on every style read, on a large
+project, to save one small file read on the same thread would make the call
+slower, which is the opposite of what #220 is for. A `_project_path` op that
+returns `app.project.file.fsName` and nothing else can go in the next panel
+release, the same one as #220's stage 3. The server can then read and write the
+guide itself, and keep calling `get_house_style` on panels that lack it.
+
 ### The summary, and why it is not on the panel
 
 `get_house_style` answers with a digest by default (`detail: "summary"`), and
@@ -202,6 +213,93 @@ a summary that looks complete and is not:
 `set_house_style` is unchanged: still the whole file, still `overwrite: true`.
 So `detail: "full"` is not optional before an edit — read the document, merge,
 send it back.
+
+## Filesystem checks on the server
+
+Three ops check the filesystem before they touch the project, and since issue
+#220 (stage 2) the server makes those checks before it forwards the call
+(`files/destinations.ts`):
+
+| Op | Checks | Ported from |
+|---|---|---|
+| `add_to_render_queue` | `outputPath` is absolute, its folder exists, an existing file needs `overwrite` | `render.jsx` |
+| `import_footage` | the file exists | `footage.jsx` |
+| `export_mogrt`, with an explicit `destDir` and `name` | the name resolves into the folder, an existing template needs `overwrite` | `mogrt.jsx` |
+
+Two `export_mogrt` checks stay with the jsx alone: creating a folder that does
+not exist yet, and testing that the folder accepts writes. Both write into the
+user's folder. A server killed mid-probe would leave its test file behind, and
+a file already at the probe's name would be emptied and deleted.
+
+**The aim is for these checks to end up on the server only.** For now the jsx
+checks stay and still run, because the panel does not update itself and the
+bundle hash is half the version gate: editing a jsx file would tell every user
+to reinstall the panel and restart AE. So the server makes the same checks
+first, with the same sentences, and the jsx repeats them for the cost of a stat
+or two. A refusal now comes from the server and its wording can be fixed
+without a restart. `tests/unit/destination-checks.mjs` holds each port to its
+jsx on real folders, and its header lists the `File` behaviour only a live AE
+can confirm. The jsx copies also still guard these ops as `run_batch` steps,
+which go straight to ExtendScript. A server refusal reads
+`AE: <the same sentence>` without the old `(line N)`, which was a line in the
+concatenated bundle.
+
+**No side effects.** A server check only reads: a `stat`, and nothing else. It
+never creates, writes or removes anything, so a refused call leaves nothing on
+disk that the jsx alone would not have left.
+
+**"Not allowed to look" is not "missing".** Only a definite `ENOENT` or
+`ENOTDIR` refuses (`pathState()` in `destinations.ts`). It counts as definite
+only when the path's root (the drive, the UNC share, or `/`) is itself visible.
+Windows reports a mapped drive that the server's logon session cannot see as
+`ENOENT`, not `EACCES`, so a missing or erroring root means the server cannot
+tell. `EACCES`, `EPERM` and
+every other failure to look forward the call, and the jsx decides. The server
+and After Effects are different processes with different access. On macOS,
+privacy access (TCC) to Desktop, Documents, removable and network volumes is
+granted per app, so AE can see a folder the server is not allowed to look into.
+On Windows a mapped drive can be invisible to the server's process while AE
+sees it. `tests/unit/destination-checks.mjs` checks this with a real `EACCES`,
+with simulated `EPERM`, `EIO` and others, and with a simulated root that is
+itself missing.
+
+**A check runs only where Node and ExtendScript's `File` read the path the same
+way.** `File` decodes `%XX` escapes, reads `~` as the home folder, and on
+Windows reads a leading `/c/` as a drive. A path that could mean two things is
+not judged by the server at all: it is forwarded untouched, and the jsx decides
+as it always did. A skipped check is never a refusal.
+
+**No extra round trip.** Every check is a stat on the server, and nothing is
+asked of After Effects first. The one AE question that would help,
+"where is the .aep?", has no cheap answer in an installed bundle (see the house
+style above), so `export_mogrt` without `destDir`, which defaults to the .aep's
+folder, is left entirely to the jsx.
+
+**Refusal order: what changed.** Every sentence is unchanged. What can change is
+which refusal comes *first* when a call has more than one fault, because the
+server's checks now run before checks only After Effects can make. In full:
+
+- **`add_to_render_queue`:** the jsx looked the comp up first. A `compId` that
+  is not a comp *and* a bad `outputPath` now reports the path, then the comp
+  once the path is fixed.
+- **`export_mogrt` with `destDir`:** the jsx refused three things before any
+  destination check: a comp that does not exist, a project never saved, and an
+  empty Essential Graphics panel (#71). Any of those *and* a bad destination
+  now reports the destination first.
+- **`export_mogrt` with `destDir` and no `name`:** no change. The template
+  name is read off the comp, so the server checks nothing and the jsx makes
+  every check in its own order.
+- **`export_mogrt` into a folder that does not exist yet:** the jsx created the
+  folder first and reported "Could not create the destination folder" before
+  checking the name. The server checks the name without creating anything, so
+  a name that escapes the folder *and* a folder that cannot be created now
+  reports the name first.
+- **`import_footage`:** no change. The file-existence check was already first.
+
+**The SVG viewBox check (#33) did not move.** It compares the viewBox against
+the *imported item's* size and removes the item when they disagree, and both of
+those need After Effects. Only the 16 KB read and the regex could leave, and
+the jsx has no way to receive a parsed viewBox without a bundle change.
 
 ## Comp snapshots, and why they live in the server
 

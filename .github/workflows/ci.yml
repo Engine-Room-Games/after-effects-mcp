@@ -347,6 +347,15 @@ jobs:
           node tests/unit/batch-undo.mjs
           node tests/unit/mogrt-preconditions.mjs
 
+      # #220 stage 2: the export/render/import file checks run on the server.
+      # Each port is held to the jsx it came from on real folders (the jsx
+      # copies still run after it), and the server is driven against a stub
+      # bridge to pin the round trips and the comp-first refusal order.
+      - name: File checks on the server match the panel's
+        run: |
+          node tests/unit/destination-checks.mjs
+          node tests/unit/file-ops-server.mjs
+
       # add_essential_property (#177): the panel is read back, never the add's
       # boolean, and a property AE cannot take is refused before anything moves.
       - name: Essential Graphics properties are added honestly
