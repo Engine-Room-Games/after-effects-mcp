@@ -61,13 +61,24 @@ check(
   assessPanel(run(SHIPPED.bundle, OLD), CURRENT_DISK).state,
   "restart-needed"
 );
-// And the other way round: a disk whose client files are current but whose
-// bundle is not is not a current install.
-check(
-  "stale bundle on disk, current client on disk",
-  assessPanel(run(OLD, OLD), disk(OLD, SHIPPED.client)).state,
-  "update-needed"
-);
+// A disk with one half current and the other not is a genuine mix — some
+// files landed and some did not — whichever half it is, with or without the
+// file diff saying so.
+check("stale bundle on disk, current client on disk", assessPanel(run(OLD, OLD), disk(OLD, SHIPPED.client)).state, "partial-install");
+check("current bundle on disk, stale client on disk", assessPanel(run(OLD, OLD), disk(SHIPPED.bundle, OLD)).state, "partial-install");
+
+// The live-test failure (#243): a cleanly installed older panel differs from
+// the shipped one in many files, so the file diff says "incomplete" — but both
+// halves are uniformly older. That is "update your panel", never "you
+// installed with After Effects open".
+{
+  const v = assessPanel(run(OLD, OLD), OLD_DISK, { installComplete: false });
+  check("uniformly older install, file diff non-empty", v.state, "update-needed");
+  assert.match(v.message, /out of date/);
+  assert.doesNotMatch(v.message, /mix of two versions/);
+  const pre243 = assessPanel({ ok: true, bundleHash: OLD }, OLD_DISK, { installComplete: false });
+  check("uniformly older install, pre-#243 panel", pre243.state, "update-needed");
+}
 
 // Updated on disk, AE not restarted. The distinction that matters: telling
 // someone to run setup_panel again here would waste their time.
@@ -131,7 +142,7 @@ passed += 3;
 
 // The same incomplete install, from a panel too old to report a hash.
 check("no hash, install incomplete", assessPanel(run(undefined, undefined), CURRENT_DISK, { installComplete: false }).state, "partial-install");
-check("stale disk, install incomplete", assessPanel(run(OLD, OLD), OLD_DISK, { installComplete: false }).state, "partial-install");
+check("stale disk, install incomplete, one half current", assessPanel(run(OLD, OLD), disk(SHIPPED.bundle, OLD), { installComplete: false }).state, "partial-install");
 
 // A complete install must be unaffected, whether stated explicitly or left out.
 check("explicitly complete", assessPanel(run(OLD, OLD), CURRENT_DISK, { installComplete: true }).state, "restart-needed");

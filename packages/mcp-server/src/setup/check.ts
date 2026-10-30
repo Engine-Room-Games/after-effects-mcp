@@ -19,7 +19,7 @@ import {
   panelSourceDir,
   signedInstallPresent,
 } from "./paths.js";
-import { assessPanel, installedPanelHashes } from "./panelVersion.js";
+import { assessPanel, installedPanelHashes, sourcePanelHashes } from "./panelVersion.js";
 import {
   CSXS_VERSIONS,
   cepLogDir,
@@ -229,6 +229,12 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     const differing = panelInstallDiff(source, installed);
     installComplete = differing.length === 0;
     const shown = differing.slice(0, 4).join(", ");
+    // A cleanly installed older panel differs too — in both halves. Only one
+    // half current is a mix (panelVersion.ts), and only that is worded as one.
+    const shipped = sourcePanelHashes();
+    const onDisk = installedPanelHashes(installed);
+    const olderVersion =
+      !installComplete && !!shipped && onDisk.bundle !== shipped.bundle && onDisk.client !== shipped.client;
     checks.push({
       name: "panelUpToDate",
       ok: installComplete,
@@ -237,7 +243,9 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
         : `${differing.length} file(s) differ from the version shipped with this server: ${shown}${differing.length > 4 ? ", …" : ""}`,
       fix: installComplete
         ? undefined
-        : "Quit After Effects completely, then run setup_panel, then reopen it. Installing while AE is open can leave some files updated and others not, which is what this is — restarting alone will not fix it.",
+        : olderVersion
+          ? "The installed panel is an older version than these tools. Quit After Effects completely, then run setup_panel, then reopen it."
+          : "Quit After Effects completely, then run setup_panel, then reopen it. Installing while AE is open can leave some files updated and others not, which is what this is — restarting alone will not fix it.",
     });
   }
 
@@ -536,7 +544,7 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
   // Closing AE first is part of the remedy, not an afterthought: installing
   // while it holds the panel's files open is what produces this state.
   if (brokenInstall && aeRunning) {
-    steps.push("Quit After Effects completely — installing while it is open is what leaves the panel half-updated.");
+    steps.push("Quit After Effects completely — installing while it is open can leave the panel half-updated.");
   }
   if (needsDebug || needsInstall) {
     steps.push("Run the setup_panel tool — it installs the After Effects panel and enables the Adobe preference that lets AE load it.");

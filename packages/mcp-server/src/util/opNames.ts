@@ -20,6 +20,9 @@ export const INTERNAL_OP_TOOLS: Readonly<Record<string, string>> = Object.freeze
   _render_save: "render_queue",
   _render_mark_done: "render_queue",
   _comp_fingerprint: "snapshot_comp/diff_comp",
+  _motion_keys: "analyze_motion",
+  // Not behind a tool: the poll that keeps subscribed project resources fresh.
+  _live_probe: "live-resources poll",
   _project_path: "get_house_style/set_house_style",
   _screenshot_frame: "screenshot_frame",
   _screenshot_layer: "screenshot_layer",

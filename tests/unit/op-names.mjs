@@ -35,11 +35,14 @@ function check(name, fn) {
 
 const internal = Object.keys(schemas.InternalOpMutation);
 const tools = new Set(Object.keys(schemas.OpSchemas));
+const NOT_A_TOOL = new Set(["_live_probe"]);
 
 check("every internal op has a display name made of real tool names", () => {
   for (const op of internal) {
     const shown = INTERNAL_OP_TOOLS[op];
     assert.ok(shown, `${op} has no display name in util/opNames.ts`);
+    // One internal op is not behind any tool; it is named for what it does.
+    if (NOT_A_TOOL.has(op)) continue;
     for (const t of shown.split("/")) assert.ok(tools.has(t), `${op} is shown as ${t}, which is not a tool`);
   }
   assert.equal(displayOp("get_comp"), "get_comp", "a tool's own name is unchanged");

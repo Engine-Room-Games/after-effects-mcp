@@ -135,6 +135,12 @@ jobs:
       - name: Panel client hash matches between panel and server
         run: node tests/unit/panel-hash.mjs
 
+      # Issue #243, found live: a cleanly installed older panel was called a
+      # "mix of two versions". Uniformly older is update-needed; only one half
+      # current is partial-install.
+      - name: An older panel is told to update, a mixed one to reinstall
+        run: node tests/unit/check-setup-panel.mjs
+
       # Since #243 screenshots, run_jsx, the house style and batch chunks reach
       # After Effects under internal op names; messages must name the tool.
       - name: Wait and timeout messages name the tool, not the internal op

@@ -70,6 +70,18 @@ restart fixes it. Callers pass `installComplete` from `panelInstallDiff()`; it
 defaults to `true` so a caller that has not looked keeps the old behaviour
 rather than quietly asserting the install is sound.
 
+**A differing file is not a mix.** A cleanly installed older panel differs
+from the shipped one in every file that has changed since, so the file diff
+alone called every 0.5.x install partial, and its users were told they had
+installed with After Effects open — never that their panel was out of date
+(found in the #243 live test). `partial-install` now needs a genuine mix: one
+half of the installed panel (`bundle.jsx`, or the client files) is the shipped
+one and the other is not, or both halves are current and a file the hashes
+leave out still differs. An install whose two halves are both older is
+`update-needed`, and `check_setup`'s `panelUpToDate` words it the same way.
+`tests/unit/check-setup-panel.mjs` runs `check_setup` on a real installed
+folder for all three cases.
+
 `unverifiable` is the same principle for the running panel: one that could
 not read its own folder reports `clientHash: null` (a pre-#243 panel sends no
 key at all). Whether it is current cannot be known, and a restart would read

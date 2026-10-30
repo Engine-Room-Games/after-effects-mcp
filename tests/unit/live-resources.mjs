@@ -33,7 +33,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
 process.env.AE_MCP_FRONT_DESK = "off";
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 
 // ---------------------------------------------------------------------------
 // The stub panel: a serial queue, like the evalScript chain.
@@ -81,7 +81,7 @@ function answer(op, args) {
 const bridge = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: reportedHash }));
+    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: reportedHash, clientHash: sourceClientHash() }));
     return;
   }
   let body = "";

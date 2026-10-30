@@ -90,9 +90,13 @@ check("stale client code moves the hash, and the gate says out of date", () => {
   const disk = installedPanelHashes(dir);
   // The bundle is current; only the client code is not. This passed before #243.
   assert.equal(disk.bundle, SHIPPED.bundle);
+  // Installed like that, it is a mix (one half current): reinstall, not restart.
   const verdict = assessPanel(run(disk), disk);
-  assert.equal(verdict.state, "update-needed", "a current bundle beside stale client code is not current");
+  assert.notEqual(verdict.state, "current", "a current bundle beside stale client code is not current");
+  assert.equal(verdict.state, "partial-install");
   assert.match(verdict.message, /setup_panel/);
+  // Running that panel over a uniformly older install: update.
+  assert.equal(assessPanel(run(disk), { bundle: "0".repeat(64), client: "0".repeat(64) }).state, "update-needed");
   // The same running panel once setup_panel has refreshed the disk: restart.
   assert.equal(assessPanel(run(disk), SHIPPED).state, "restart-needed");
 });

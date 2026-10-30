@@ -226,7 +226,21 @@ export function assessPanel(
   // install can hash however it likes, and telling the user to restart for it
   // cannot possibly resolve it. That loop is not theoretical: it is what v0.2.0
   // did, three restarts running.
-  if (opts.installComplete === false) {
+  //
+  // But "some files differ" is not "mixed": a cleanly installed older panel
+  // differs in every file that changed since, and calling that partial told
+  // every 0.5.x user that they had installed with After Effects open, never
+  // that their panel was out of date (live test, #243). Mixed means one half
+  // of the installed panel is the shipped one and the other is not; an install
+  // whose bundle and client files both differ from the shipped panel is
+  // uniformly older, and gets the update message below. The file diff
+  // (`installComplete`) still counts when both halves are current — a file the
+  // hashes leave out did not land.
+  const installedBundleCurrent = !!installed?.bundle && installed.bundle === shipped.bundle;
+  const installedClientCurrent = !!installed?.client && installed.client === shipped.client;
+  const mixed = installed !== null && installedBundleCurrent !== installedClientCurrent;
+  const uniformlyOlder = installed !== null && !installedBundleCurrent && !installedClientCurrent;
+  if (mixed || (opts.installComplete === false && !uniformlyOlder)) {
     return { state: "partial-install", message: PARTIAL_INSTALL_ADVICE };
   }
 
