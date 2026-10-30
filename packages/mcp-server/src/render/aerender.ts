@@ -1469,6 +1469,21 @@ const TAIL_LINES = 12;
 let seq = 0;
 
 /**
+ * A render job's id, which is also the folder its snapshot sits in and so the
+ * marker cancel and the drain cap search the process table by
+ * (`snapshotMarker`). It has to be unique across every MCP server on the
+ * machine, not only within this one: two sessions share the temp folder and
+ * the process table. `r_<ms>_<n>` was not — two servers starting their first
+ * render in the same millisecond got the same id, so one's cancel matched,
+ * and SIGKILLed, the other's aerender (issue #260, seen as test runs killing
+ * each other's fake aerender under parallel load). The pid is unique among
+ * live processes, which is the set that can collide.
+ */
+export function renderJobId(now: number, pid: number, n: number): string {
+  return `r_${now}_${pid}_${n}`;
+}
+
+/**
  * Runs one render job at a time, item by item, one aerender process per item.
  *
  * One at a time on purpose: every aerender is a whole headless After Effects,
@@ -1559,7 +1574,7 @@ export class RenderRunner {
 
   start(plan: RenderPlan, aerender: string): { jobId: string; totalFrames: number } {
     if (this.current) throw new Error(`A render is already running (job ${this.current.jobId}).`);
-    const jobId = `r_${Date.now()}_${++seq}`;
+    const jobId = renderJobId(Date.now(), process.pid, ++seq);
     sweepStaleSnapshots(jobId, this.tmpRoot);
     const outputPaths = plan.items.flatMap((i) => i.outputs.map((o) => o.path).filter((x): x is string => !!x));
     const layout = snapshotProject(plan.projectPath, jobId, this.tmpRoot, outputPaths);

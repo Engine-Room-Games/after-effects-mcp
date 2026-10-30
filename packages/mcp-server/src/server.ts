@@ -10,7 +10,7 @@ import {
   SubscribeRequestSchema,
   UnsubscribeRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolRequest, ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import { schemas } from "@engineroom/shared";
 import { HttpClient } from "./bridge/httpClient.js";
@@ -86,6 +86,7 @@ import {
 } from "./files/destinations.js";
 import { imageContent } from "./util/pngImage.js";
 import { logger } from "./util/logger.js";
+import { RequestProgress } from "./util/requestProgress.js";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
@@ -589,10 +590,26 @@ export function createServer(opts: CreateServerOptions = {}) {
   });
 
   // ---------- tools/call ----------
+  // Every progress notification a call sends goes through its RequestProgress,
+  // and the response waits on `settle()`, so the client has handled the last
+  // notification before it reads the response (issue #261). Settled here, once,
+  // around the whole call, on every return path including a throw.
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
+    const progress = new RequestProgress(extra, (req.params as any)?._meta?.progressToken as string | number | undefined);
+    try {
+      return await callTool(req, extra, progress);
+    } finally {
+      await progress.settle();
+    }
+  });
+
+  const callTool = async (
+    req: CallToolRequest,
+    extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+    progress: RequestProgress
+  ) => {
     const name = req.params.name;
     const rawArgs = req.params.arguments ?? {};
-    const progressToken = (req.params as any)?._meta?.progressToken as string | number | undefined;
 
     if (!Object.hasOwn(OpSchemas, name) && !SERVER_OPS.has(name)) {
       return errorResult(`Unknown tool: ${name}`);
@@ -619,7 +636,7 @@ export function createServer(opts: CreateServerOptions = {}) {
           // This is the one call that blocks for the job, so it is the one
           // call whose progress a client is still correlating while the job
           // runs — see forwardJobProgress for why run_batch cannot be.
-          const forward = progressToken !== undefined ? forwardJobProgress(jobs, a.jobId, progressToken, extra) : null;
+          const unbind = progress.wanted ? forwardJobProgress(jobs, a.jobId, progress) : null;
           try {
             // The request's own signal, so a client that cancels this call
             // releases the wait rather than leaving it parked (issue #159).
@@ -631,11 +648,11 @@ export function createServer(opts: CreateServerOptions = {}) {
             // arguments for await_job" — a schema error, which it is not.
             return fail(name, (e as Error).message);
           } finally {
-            // Unbind, then wait for every notification already started to
-            // reach the transport. The response is written after this handler
-            // returns, so nothing on this token can land behind it — on the
-            // timeout path as much as on the success path.
-            await forward?.settle();
+            // Unbind before answering: the tools/call wrapper's settle() then
+            // waits for every notification already started, so nothing on
+            // this token can land behind the response — on the timeout path
+            // as much as on the success path.
+            unbind?.();
           }
         }
         if (name === "get_job") {
@@ -888,13 +905,9 @@ export function createServer(opts: CreateServerOptions = {}) {
     // desk: as progress, when the client asked for progress — this request is
     // still open, so the notifications are ones it is listening for (#82).
     let progressStep = 0;
-    const onWait = progressToken === undefined
-      ? undefined
-      : (message: string) => {
-          void extra
-            .sendNotification({ method: "notifications/progress", params: { progressToken, progress: ++progressStep, message } })
-            .catch(() => {});
-        };
+    const onWait = progress.wanted
+      ? (message: string) => progress.send({ progress: ++progressStep, message }, `queue-wait progress for ${name}`)
+      : undefined;
     // Ask the person first, for the few tools that throw work away, when — and
     // only when — the client can show a prompt (issue #245; tools/confirm.ts).
     // Only this session's own place in line is held while they decide
@@ -1227,7 +1240,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       // for a quiet period after the last one, and out a batch's extended lease.
       if (lease) live.noteWrite(name);
     }
-  });
+  };
 
   return server;
 }
@@ -1244,37 +1257,16 @@ export function createServer(opts: CreateServerOptions = {}) {
  * for a long batch went out that way: plainly visible on the raw wire, and
  * seen by no real client at all (issue #82).
  *
- * `extra.sendNotification` is the SDK's request-scoped sender, and it is used
- * on purpose over `server.notification`: it tags each message with the request
- * id, so a Streamable HTTP transport delivers it on that request's own stream,
- * and it silently drops anything sent after the request has been cancelled.
- *
- * `settle()` unbinds first and then waits for every send already started. The
- * SDK writes the response after the handler returns, so awaiting this before
- * returning is what puts every notification ahead of the response on the wire
- * — on the timeout path, where the emitter would otherwise outlive the call,
- * as much as on the success path.
+ * Sent through the request's RequestProgress (util/requestProgress.ts), whose
+ * `settle()` the tools/call wrapper awaits before the response is written.
+ * Returns the unbind, which await_job calls before it answers — on the timeout
+ * path, where the emitter would otherwise outlive the call, as much as on the
+ * success path — so no notification can start after that settle.
  */
-function forwardJobProgress(
-  jobs: JobManager,
-  jobId: string,
-  progressToken: string | number,
-  extra: RequestHandlerExtra<ServerRequest, ServerNotification>
-) {
-  const inFlight = new Set<Promise<void>>();
-  const unbind = jobs.bindProgressEmitter(jobId, (_jid, progress, total, message) => {
-    const p = extra
-      .sendNotification({ method: "notifications/progress", params: { progressToken, progress, total, message } })
-      .catch((e) => logger.warn(`progress notification for job ${jobId} was not sent: ${(e as Error).message}`));
-    inFlight.add(p);
-    void p.finally(() => inFlight.delete(p));
-  });
-  return {
-    async settle(): Promise<void> {
-      unbind();
-      await Promise.all(inFlight);
-    },
-  };
+function forwardJobProgress(jobs: JobManager, jobId: string, progress: RequestProgress): () => void {
+  return jobs.bindProgressEmitter(jobId, (_jid, done, total, message) =>
+    progress.send({ progress: done, total, message }, `progress notification for job ${jobId}`)
+  );
 }
 
 /**
