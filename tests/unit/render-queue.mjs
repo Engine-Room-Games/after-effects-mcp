@@ -972,6 +972,57 @@ function alive(pid) {
     assert.deepEqual(cancelledPartials(outputs, before), [mov, f1], "a file the render rewrote in place is partial");
   });
 
+  await check("cancel while a finished item's output is still draining: it is verified and reported rendered, never INCOMPLETE (#217 round 3)", async () => {
+    const jobs = new JobManager();
+    const runner = runnerFor(jobs, { tmpRoot: runTmp, drainCapMs: 1500 });
+    const out = path.join(tmp, "draining.mov");
+    env("stuckengine", out);
+    const { jobId } = runner.start(plan(out), fake);
+    for (let i = 0; i < 200 && !fs.existsSync(process.env.FAKE_GRANDCHILD); i++) await sleep(20);
+    await sleep(500); // aerender has exited 0; its engine still holds the output open
+    const report = await runner.cancel(jobId);
+    const st = await jobs.waitFor(jobId, 15_000);
+    assert.equal(st.status, "completed", st.error);
+    assert.equal(st.result.rendered[0].outputs[0].path, out);
+    assert.ok(!(report.partialFiles ?? []).includes(out), `a finished file was called partial: ${report.note}`);
+    assert.doesNotMatch(report.note, /INCOMPLETE/);
+    assert.equal(report.wasRunning, false);
+  });
+
+  for (const [ok, dur] of [[false, 2 / 30], [true, 4 / 30]]) {
+    await check(`an output beside the project over an earlier file: ${ok ? "replaces it once verified" : "a failed render never replaces it, and says where its file is"} (#217 round 3)`, async () => {
+      const projDir = path.join(tmp, `over-${ok}`);
+      fs.mkdirSync(projDir, { recursive: true });
+      const proj = path.join(projDir, "show.aep");
+      fs.writeFileSync(proj, "aep bytes");
+      const out = path.join(projDir, "beside.mov");
+      fs.writeFileSync(out, "old complete render");
+      process.env.FAKE_REAL_PROJ_DIR = projDir;
+      const jobs = new JobManager();
+      const runner = runnerFor(jobs, { tmpRoot: runTmp });
+      env("relative", out);
+      process.env.FAKE_DUR = String(dur);
+      const { jobId } = runner.start({ ...plan(out), projectPath: proj }, fake);
+      const kept = path.join(path.dirname(snapshotLayout(proj, jobId, runTmp, [out]).snap), "beside.mov");
+      if (ok) {
+        const st = await jobs.waitFor(jobId, 10_000);
+        assert.equal(st.status, "completed", st.error);
+        assert.equal(st.result.rendered[0].outputs[0].path, out);
+        assert.notEqual(fs.readFileSync(out, "utf8"), "old complete render", "the verified render replaced the earlier file");
+        assert.ok(!fs.existsSync(path.join(runTmp, "ae-mcp-render", jobId)), "nothing left in the job folder");
+      } else {
+        let err = "";
+        await jobs.waitFor(jobId, 10_000).catch((e) => (err = e.message));
+        assert.match(err, /more than a frame apart/);
+        assert.equal(fs.readFileSync(out, "utf8"), "old complete render", "a failed render must not replace the earlier file");
+        assert.ok(fs.existsSync(kept), "the failed render's file is kept in the temp folder");
+        assert.ok(err.includes(kept) && /NOT replaced/.test(err), err);
+        assert.ok(err.includes(`Unchanged from before this render, not its output: ${out}`), err);
+      }
+      delete process.env.FAKE_REAL_PROJ_DIR;
+    });
+  }
+
   await check("a stuck engine cannot hold the job open: killed at the cap, then decided", async () => {
     const jobs = new JobManager();
     const runner = runnerFor(jobs, { tmpRoot: runTmp, drainCapMs: 1200 });
@@ -1175,6 +1226,7 @@ function alive(pid) {
     assert.equal(st.status, "cancelled");
     assert.equal(st.result.stopped, true);
     assert.match(st.result.note, /after cancel_job had reported it still running/);
+    assert.match(st.result.note, /INCOMPLETE: exactly the \d+ file\(s\) in `partialFiles`|No partial output was found/, "the follow-up names where the partial is, like a normal cancel");
     try { process.kill(grandchild, "SIGKILL"); } catch {}
   });
 
