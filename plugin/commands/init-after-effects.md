@@ -21,17 +21,19 @@ from them**. Do not run ahead and report four steps at once.
 Call `check_setup`. It is read-only and safe.
 
 **Do not ask them to open After Effects yet.** The panel only loads when AE
-launches, so installing while AE is still closed means it is simply there when
-they open it — no restart to ask for. If AE is already running you have to ask
-for one, which is why this step comes first.
+launches, and **installing it while After Effects is open does not work** — AE
+must be closed while the panel installs. Installed while AE is closed, it is
+simply there when they open it.
 
 - **Everything green** — say so in one line and move on.
 - **Anything red** — explain what `setup_panel` is about to do before calling
   it: it copies a small panel into their Adobe extensions folder and switches on
   the Adobe setting that allows unsigned panels (a released panel is signed and
-  needs it only as a fallback). Both are user-level and reversible. Call it, then:
-  - if `afterEffectsRunning` was false, ask them to **open** After Effects;
-  - if it was true, ask them to **quit and reopen** it.
+  needs it only as a fallback). Both are user-level and reversible.
+  - If After Effects is running (`afterEffectsRunning` passed), ask them to
+    **quit it first** and wait until they say it is closed. Do not install
+    while it is open.
+  - Then call it, and ask them to **open** After Effects.
 
   Then `check_setup` again to confirm.
 

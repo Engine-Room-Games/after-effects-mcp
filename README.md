@@ -188,7 +188,9 @@ The unzipped folder is named `after-effects-mcp-<version>-<machine>`, so use the
 
 > Set up After Effects.
 
-It installs a small panel into After Effects, which is how the tools talk to it. When it's done, open After Effects and you're ready. (Prefer to leave After Effects open? That works too — you'll just be asked to restart it at the end.)
+It installs a small panel into After Effects, which is how the tools talk to it. When it's done, open After Effects and you're ready.
+
+**After Effects must be closed while the panel installs.** If it's open, the installation won't work — quit After Effects first, then install, then reopen it. The same goes for updating the panel later.
 
 You never have to open the panel yourself; it starts whenever After Effects does.
 
