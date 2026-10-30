@@ -601,6 +601,44 @@ await check("mixed versions, older session + new desk: the desk still speaks pro
   await L.close();
 });
 
+await check("off the desk (gone direct), a background read is refused unsent; an agent's read still goes direct", async () => {
+  const port = await freePort();
+  const foreign = http.createServer((_q, r) => { r.statusCode = 404; r.end(); });
+  await new Promise((r) => foreign.listen(port, "127.0.0.1", r));
+  const L = line(port, "L", { electionDeadlineMs: 400 });
+  assert.equal(await L.ready(), "direct");
+  await assert.rejects(L.runOp("_live_probe", {}, { yieldToWrites: true }), (e) => e instanceof BridgeBusyError);
+  assert.deepEqual(L.bridge_.calls, [], "a background read went straight to the panel, past every other session's writes");
+  await L.runOp("list_comps", {});
+  assert.deepEqual(L.bridge_.calls, ["list_comps"]);
+  await L.close();
+  await new Promise((r) => foreign.close(r));
+});
+
+await check("out of handovers, a background read is refused unsent; an agent's read still goes direct", async () => {
+  const port = await freePort();
+  const token = "fake-expiring-desk";
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: process.pid, port, token, startedAt: 1 }));
+  const fake = http.createServer((q, r) => {
+    if (q.url === "/desk/hello") {
+      r.setHeader("content-type", "application/json");
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, features: ["yield-reads"], pid: 4248, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+    }
+    q.resume();
+    // Every call: the desk did not get to it in time. Never forwarded.
+    q.on("end", () => r.end(JSON.stringify({ t: "expired" }) + "\n"));
+  });
+  await new Promise((r) => fake.listen(port, "127.0.0.1", r));
+  const L = line(port, "L");
+  assert.equal(await L.ready(), "follower");
+  await assert.rejects(L.runOp("_live_probe", {}, { yieldToWrites: true }), (e) => e instanceof BridgeBusyError);
+  assert.deepEqual(L.bridge_.calls, [], "a background read went direct after the desk failed to forward it");
+  await L.runOp("list_comps", {});
+  assert.deepEqual(L.bridge_.calls, ["list_comps"]);
+  await L.close();
+  await new Promise((r) => fake.close(r));
+});
+
 await check("a request too large for the desk is its own error, not four handovers", async () => {
   const port = await freePort();
   const token = "fake-desk-413";

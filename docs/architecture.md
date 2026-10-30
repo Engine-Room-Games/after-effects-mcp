@@ -330,10 +330,21 @@ every click in that panel would flip both resources and cost a walk. So:
 - a sticky comp is remembered **with its project**, because item ids are
   small numbers per .aep. The next project often has a different comp under
   the same id. The probe returns the project's path and, when asked for
-  `identity`, its XMP `DocumentID`. The remembered comp is dropped when the
-  path changes (another .aep opened, or a new unsaved one), when two
-  DocumentIDs differ (one unsaved project replaced by another), or when the
-  comp no longer exists. The reason it was dropped is kept until a comp
+  `identity`, its XMP `DocumentID` (`xmpMM:DocumentID` exactly, never
+  `OriginalDocumentID`). The packet is read only when the path cannot decide
+  alone: the project is unsaved, no comp is remembered yet, or the path is not
+  the remembered one (`knownPath`). A saved project the server already knows
+  costs no packet read, which matters because the packet grows with every
+  save.
+
+  The decision, in `sameProject`:
+  - Two known DocumentIDs decide it. The same document is the same project
+    under any path, so a Save As keeps the comp. Different documents are
+    different projects, so one unsaved project replaced by another drops it.
+  - Otherwise the path decides. An unchanged path is the same project. A
+    different saved path is a different project. An unsaved project gaining
+    its first path is its first save, so the comp is kept.
+  - The comp is also dropped when it no longer exists. The reason it was dropped is kept until a comp
   becomes active, so the tick after a drop does not notify a second time. Two
   unsaved projects that both lack a DocumentID can be told apart only by the
   id lookup failing. Whether After Effects writes a DocumentID into an unsaved
@@ -393,6 +404,16 @@ every click in that panel would flip both resources and cost a walk. So:
   rare tick where a walk is due. The test stub runs ops serially, as the panel
   does, and asserts that no write waits behind a poll read in either a burst
   or a paced run of writes.
+
+**Off the desk, a poll read is not sent at all.** When a desk is configured
+but this session is not on it, `SessionLine.send` refuses a yielding read as
+busy, without a word, rather than sending it straight to the panel. That
+covers a session not elected yet, one gone direct, and one whose call ran out
+of handovers. From there, other sessions' writes are invisible, and a direct
+read could land inside another session's batch. An agent's own reads still go
+direct in those modes, as before. With the desk switched off
+(`AE_MCP_FRONT_DESK=off`), there is no shared queue to respect, and polls go
+direct like everything else.
 
 **Another session's renames.** The probe cannot see a rename. This session
 knows its own renaming writes, but not other sessions'. When a tick is refused

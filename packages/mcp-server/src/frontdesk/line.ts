@@ -322,6 +322,11 @@ export class SessionLine {
           await slot.closed;
           continue;
         }
+        // A desk is configured but this session is not on one (not elected
+        // yet, or gone direct): other sessions' writes are invisible from
+        // here, so a background read could land inside one of their batches.
+        // Not sent; the poll skips the tick, without a word.
+        if (body.yieldToWrites) throw new BridgeBusyError(op, undefined, "this session is not on the shared front desk, so other sessions' writes cannot be seen");
         return direct();
       }
       if (mode.kind === "leader") {
@@ -435,6 +440,9 @@ export class SessionLine {
           : `the front desk changed hands ${MAX_HANDOVERS} times before this call could be sent.`
       );
     }
+    // Out of handovers: a read an agent asked for goes direct, as ever; a
+    // background read does not, for the reason above.
+    if (body.yieldToWrites) throw new BridgeBusyError(op, undefined, "the front desk kept changing hands, so other sessions' writes cannot be seen");
     return direct();
   }
 

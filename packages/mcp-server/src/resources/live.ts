@@ -134,7 +134,7 @@ interface Probe {
 }
 
 /** A remembered comp, and which project it was remembered in — an id alone is only unique within one .aep. */
-interface Sticky {
+export interface Sticky {
   id: number;
   path: string | null;
   docId: string | null;
@@ -142,15 +142,22 @@ interface Sticky {
 
 /**
  * Whether a probe describes the project the sticky comp was remembered in.
- * A different path is a different project (another .aep opened, or a new
- * unsaved one). Two DocumentIDs that differ are too — that is what tells one
- * unsaved project from the next. With no DocumentID on either side and both
- * unsaved, the comp lookup by id is the only check left (documented).
+ *
+ * - Two DocumentIDs, when both are known, decide it: the same document is the
+ *   same project whatever its path (a Save As, a first save), and different
+ *   ones are different projects (one unsaved project replaced by another).
+ * - Otherwise the path does: unchanged is the same project; a different saved
+ *   path is a different one. An unsaved project getting its first path is the
+ *   same one — its first save — unless the DocumentIDs said otherwise.
+ * - With no DocumentID on either side and both unsaved, the comp lookup by id
+ *   is the only check left (documented).
  */
-function sameProject(s: Sticky, p: { path: string | null; docId?: string | null }): boolean {
-  if ((p.path ?? null) !== s.path) return false;
-  const now = p.docId ?? null;
-  return !(now !== null && s.docId !== null && now !== s.docId);
+export function sameProject(s: Sticky, p: { path: string | null; docId?: string | null }): boolean {
+  const path = p.path ?? null;
+  const docId = p.docId ?? null;
+  if (docId !== null && s.docId !== null) return docId === s.docId;
+  if (path === s.path) return true;
+  return s.path === null;
 }
 
 interface Summary {
@@ -352,7 +359,10 @@ export class LiveResources {
 
   private async probe(background: boolean): Promise<Probe | null> {
     try {
-      return (await this.opts.probe(this.sticky === null ? { identity: true } : { identity: true, compId: this.sticky.id }, background)) as Probe;
+      // `knownPath` lets the panel skip the XMP packet for a saved project it
+      // already knows; it reads it only when the path cannot decide alone.
+      const args = this.sticky === null ? { identity: true } : { identity: true, compId: this.sticky.id, knownPath: this.sticky.path };
+      return (await this.opts.probe(args, background)) as Probe;
     } catch (e) {
       // A panel older than this server's bundle, behind no version gate: the
       // full reads every panel has still answer.
@@ -376,12 +386,17 @@ export class LiveResources {
   /** The sticky rule, in one place: an active comp replaces the sticky one; nothing else does. */
   private fromProbe(p: Probe): unknown {
     if (p.activeType === "comp" && p.activeItemId !== null && p.activeComp) {
-      this.sticky = { id: p.activeItemId, path: p.path ?? null, docId: p.docId ?? null };
+      // The packet is not re-read for a saved project already known, so a
+      // DocumentID learned earlier is carried over while the path holds.
+      const carried = this.sticky && this.sticky.path === (p.path ?? null) ? this.sticky.docId : null;
+      this.sticky = { id: p.activeItemId, path: p.path ?? null, docId: p.docId ?? carried };
       this.noComp = noActiveComp();
       return { compId: p.activeItemId, comp: p.activeComp };
     }
     if (this.sticky !== null) {
       if (!sameProject(this.sticky, p)) return this.drop(otherProject());
+      // Same document under a new path (a Save As, a first save): follow it.
+      this.sticky = { id: this.sticky.id, path: p.path ?? null, docId: p.docId ?? this.sticky.docId };
       if (p.comp) return { compId: this.sticky.id, comp: p.comp };
       return this.drop(compGone());
     }

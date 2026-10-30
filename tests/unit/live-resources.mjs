@@ -56,6 +56,8 @@ const slow = new Map();
 let holdNextAnswer = null;
 let reportedHash = sourceBundleHash();
 let chain = Promise.resolve();
+/** op -> async hook run in the panel's queue before the op answers (once). */
+const beforeAnswer = new Map();
 
 function answer(op, args) {
   if (op === "get_project_summary") {
@@ -89,6 +91,11 @@ const bridge = http.createServer((req, res) => {
     const entry = { op, arrivedAt: Date.now() };
     seen.push(entry);
     chain = chain.then(async () => {
+      const hook = beforeAnswer.get(op);
+      if (hook) {
+        beforeAnswer.delete(op);
+        await hook();
+      }
       entry.enteredAt = Date.now();
       const result = answer(op, args);
       await new Promise((r) => setTimeout(r, slow.get(op) ?? 2));
@@ -325,7 +332,7 @@ await check("the desk refuses a yielding read, unsent, while another session hol
     { runOp: async (op) => (sent.push(op), { ok: true }), cancel: async () => ({ known: true }), port: 1 },
     { port: 0, token: "t" }
   );
-  const grant = await desk.lock.acquire({ op: "run_batch", sessionId: "other", session: "another session", maxWaitMs: 1000, maxDepth: 4 });
+  const grant = await desk.lock.acquire({ op: "run_batch", sessionId: "other", session: "another session", maxWaitMs: 1000, maxDepth: 4, holdCeilingMs: 60_000 });
   const req = { sessionId: "me", session: "me", kind: "op", op: "_live_probe", args: {}, yieldToWrites: true };
   await assert.rejects(desk.forward(req), (e) => e instanceof BridgeBusyError && /run_batch/.test(e.message));
   assert.deepEqual(sent, [], "a yielding read reached the panel during another session's batch");
@@ -463,7 +470,7 @@ await check("guard: the desk re-checks the lock at the last moment before sendin
   await assert.rejects(
     desk.forward(req, {
       onStart: async () => {
-        await desk.lock.acquire({ op: "run_batch", sessionId: "other", session: "another session", maxWaitMs: 1000, maxDepth: 4 });
+        await desk.lock.acquire({ op: "run_batch", sessionId: "other", session: "another session", maxWaitMs: 1000, maxDepth: 4, holdCeilingMs: 60_000 });
       },
     }),
     (e) => e instanceof BridgeBusyError
@@ -598,6 +605,123 @@ await check("another session's write, seen as a busy tick, earns the summary one
   t.reads.length = 0;
   await live.poll();
   assert.deepEqual(t.reads, ["_live_probe"], "one walk, not one per tick");
+});
+
+await check("sticky: a Save As or a first save is the same document, and keeps the remembered comp", async () => {
+  {
+    const { t, live, read } = stickyRig();
+    await live.poll();
+    t.comps["/a-v2.aep|xmp.did:A"] = t.comps["/a.aep|xmp.did:A"];
+    t.p = { path: "/a-v2.aep", docId: "xmp.did:A", activeItemId: null };
+    await live.poll();
+    const a = await read();
+    assert.equal(a.compId, 2, `Save As dropped the comp: ${JSON.stringify(a)}`);
+    assert.equal(t.asked.at(-1).knownPath, "/a-v2.aep", "the remembered path follows the document");
+  }
+  {
+    const { t, live, read } = stickyRig();
+    t.p = { path: null, docId: null, activeItemId: 2 };
+    t.comps["null|null"] = { 2: { id: 2, name: "Comp 1" } };
+    await live.poll();
+    t.comps["/first.aep|null"] = t.comps["null|null"];
+    t.p = { path: "/first.aep", docId: null, activeItemId: null };
+    await live.poll();
+    const a = await read();
+    assert.equal(a.compId, 2, `a first save dropped the comp: ${JSON.stringify(a)}`);
+    assert.deepEqual(t.notes, [], "a save is not a change");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// _live_probe itself, on the fake After Effects: the XMP packet is read only
+// when the path cannot decide, and DocumentID is xmpMM:DocumentID exactly.
+// ---------------------------------------------------------------------------
+
+const { loadFakeAe } = await import("./lib/fake-ae.mjs");
+
+await check("_live_probe reads the XMP packet only when the path cannot decide", async () => {
+  const ae = loadFakeAe(["comps.jsx", "checkpoint.jsx", "explore.jsx"]);
+  ae.run(`
+    var XMP_READS = 0;
+    var C = FAKE.comp(100, "Main");
+    C.bgColor = [0, 0, 0];
+    app.project.activeItem = C;
+    Object.defineProperty(app.project, "xmpPacket", { get: function () { XMP_READS++;
+      return '<rdf:Description xmpMM:OriginalDocumentID="xmp.did:ORIGINAL" xmpMM:DocumentID="xmp.did:THIS"/>'; } });
+  `);
+  const probe = (args) => {
+    ae.run("XMP_READS = 0");
+    const r = ae.call("_live_probe", args);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    return { ...r.result, reads: ae.json("XMP_READS") };
+  };
+  ae.run(`app.project.file = null`);
+  let r = probe({ identity: true, compId: 100 });
+  assert.equal(r.reads, 1, "an unsaved project has only its DocumentID");
+  assert.equal(r.docId, "xmp.did:THIS", "OriginalDocumentID is another document's");
+  ae.run(`app.project.file = { fsName: "/show.aep" }`);
+  r = probe({ identity: true, compId: 100, knownPath: "/show.aep" });
+  assert.equal(r.reads, 0, "a saved project the server knows read the whole packet");
+  assert.equal(r.docId, null);
+  assert.equal(r.comp.id, 100);
+  r = probe({ identity: true });
+  assert.equal(r.reads, 1, "taking the id: the DocumentID is remembered with it");
+  r = probe({ identity: true, compId: 100, knownPath: "/old.aep" });
+  assert.equal(r.reads, 1, "the path moved: a Save As is told from another project by the DocumentID");
+  r = probe({});
+  assert.equal(r.reads, 0, "no identity asked, none read");
+});
+
+// ---------------------------------------------------------------------------
+// The server's wiring, end to end through a real front desk: every poll read
+// (the probe through the internal-op sender, the walk through the line) is
+// sent yielding, so another session's write lock holds both back.
+// ---------------------------------------------------------------------------
+
+await check("through the desk, another session's write lock holds back the probe and the walk", async () => {
+  const os = await import("node:os");
+  const fs = await import("node:fs");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ae-mcp-live-desk-"));
+  const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  const deskPort = await new Promise((r) => {
+    const s = net.createServer().listen(0, "127.0.0.1", () => {
+      const p = s.address().port;
+      s.close(() => r(p));
+    });
+  });
+  const d = await connect({ frontDesk: { port: deskPort }, liveSweepMs: 60_000 });
+  const fakeBridge = { port: 1, runOp: async () => ({}), cancel: async () => ({ known: true }), switchPort: async () => {}, onPortChange() {} };
+  const other = new SessionLine(fakeBridge, new WriteQueue(), { desk: { port: deskPort }, sessionLabel: () => "another session, pid 2" });
+  try {
+    await sleep(200);
+    assert.equal(await other.ready(), "follower");
+    let lease = null;
+    // The first probe runs; while it is in the panel, another session takes
+    // the lock. The walk that follows it in the same tick must be held back.
+    beforeAnswer.set("_live_probe", async () => {
+      lease = await other.acquire("run_batch");
+    });
+    const from = seen.length;
+    await d.client.subscribeResource({ uri: "ae://project/summary" });
+    await until(() => lease !== null);
+    await sleep(POLL * 8);
+    const held = seen.slice(from);
+    assert.equal(held.filter((s) => s.op === "get_project_summary").length, 0, "the walk went out during another session's batch");
+    assert.equal(held.filter((s) => s.op === "_live_probe").length, 1, "the probe went out during another session's batch");
+    lease.release();
+    await until(() => seen.slice(from).some((s) => s.op === "get_project_summary"));
+    assert.ok(seen.slice(from).some((s) => s.op === "get_project_summary"), "the walk never ran once the lock was free");
+  } finally {
+    await other.close();
+    await d.client.close();
+    await d.server.close();
+    process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = savedProfile;
+  }
 });
 
 // ---------------------------------------------------------------------------

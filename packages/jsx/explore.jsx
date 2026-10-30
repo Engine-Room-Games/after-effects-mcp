@@ -516,15 +516,24 @@ OPS.get_project_summary = noUndo(function (args) {
 // with `identity`: with the path, it is how the server tells that another
 // project — saved or not — is open, and drops the remembered comp. Null when
 // the packet has none; the server then has only the path to go on.
+//
+// The packet is read only when the path cannot answer on its own — the
+// project is unsaved, nothing is remembered yet (`compId` absent: the id is
+// being taken), or the path is not the one remembered (`knownPath`: a Save As
+// or a first save keeps the document). A saved project the server already
+// knows costs no packet read: the packet grows with every save.
 OPS._live_probe = noUndo(function (args) {
   var p = app.project;
   var a = null;
   try { a = p.activeItem; } catch (e) {}
   var docId = null;
-  if (args && args.identity) {
+  var path = p.file ? p.file.fsName : null;
+  if (args && args.identity && (path === null || !args.compId || path !== args.knownPath)) {
     try {
       var x = p.xmpPacket;
-      var m = x ? /DocumentID(?:="|>)([^"<]+)/.exec(x) : null;
+      // xmpMM:DocumentID exactly: OriginalDocumentID and the history's
+      // stEvt entries name other documents.
+      var m = x ? /xmpMM:DocumentID(?:="|>)([^"<]+)/.exec(x) : null;
       if (m) docId = m[1];
     } catch (e3) {}
   }
@@ -535,7 +544,7 @@ OPS._live_probe = noUndo(function (args) {
     if (c && c instanceof CompItem) sticky = __compSummary(c);
   }
   return {
-    path: p.file ? p.file.fsName : null,
+    path: path,
     numItems: p.numItems,
     activeItemId: a ? a.id : null,
     activeType: a ? __itemKind(a) : null,
