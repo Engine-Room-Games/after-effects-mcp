@@ -32,6 +32,16 @@ import { aerenderCandidates, afterEffectsInstallRoots } from "./setup/platform.j
 import { SnapshotStore } from "./snapshots/store.js";
 import type { CompFingerprint } from "./snapshots/store.js";
 import { diffFingerprints } from "./snapshots/diff.js";
+import {
+  COMP_TIMELINE_RESOURCE,
+  COMP_TIMELINE_URI,
+  VIEW_DATA_KEY,
+  clientSupportsApps,
+  diffViewData,
+  readCompTimeline,
+  snapshotViewData,
+  toolUiMeta,
+} from "./apps/compTimeline.js";
 import { descriptions } from "./tools/descriptions.js";
 import { AeError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
 import { resolveRunJsxSource, type ResolvedRunJsxArgs, type RunJsxArgs } from "./tools/runJsxSource.js";
@@ -428,16 +438,23 @@ export function createServer(opts: CreateServerOptions = {}) {
 
   // ---------- tools/list ----------
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    // The MCP Apps view (issue #246) is linked only for a client that declared
+    // the extension; every other client gets exactly the list it always had.
+    const apps = clientSupportsApps(server.getClientCapabilities());
     // A switched-off tool is not listed at all, rather than listed and
     // refusing: a tool the model never sees is one it never plans around.
-    const tools = Object.keys(OpSchemas).filter((name) => !disabled.has(name)).map((name) => ({
-      name,
-      description: descriptions[name] ?? `AE op: ${name}`,
-      inputSchema: toolInputSchema(name) as any,
-      // Derived from OpMutation and the read-only policy table, never hand-kept:
-      // see tools/annotations.ts for the rule (issue #165).
-      annotations: toolAnnotations(name),
-    }));
+    const tools = Object.keys(OpSchemas).filter((name) => !disabled.has(name)).map((name) => {
+      const ui = apps ? toolUiMeta(name) : undefined;
+      return {
+        name,
+        description: descriptions[name] ?? `AE op: ${name}`,
+        inputSchema: toolInputSchema(name) as any,
+        // Derived from OpMutation and the read-only policy table, never hand-kept:
+        // see tools/annotations.ts for the rule (issue #165).
+        annotations: toolAnnotations(name),
+        ...(ui ? { _meta: ui } : {}),
+      };
+    });
     return { tools };
   });
 
@@ -475,16 +492,21 @@ export function createServer(opts: CreateServerOptions = {}) {
 
   // ---------- resources ----------
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-    resources: GUIDES.map((g) => ({
-      uri: `${GUIDE_URI_PREFIX}${g.name}`,
-      name: g.name,
-      description: g.description,
-      mimeType: "text/markdown",
-    })),
+    resources: [
+      ...GUIDES.map((g) => ({
+        uri: `${GUIDE_URI_PREFIX}${g.name}`,
+        name: g.name,
+        description: g.description,
+        mimeType: "text/markdown",
+      })),
+      // Listed only where it can be rendered; see apps/compTimeline.ts.
+      ...(clientSupportsApps(server.getClientCapabilities()) ? [COMP_TIMELINE_RESOURCE] : []),
+    ],
   }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
     const uri = req.params.uri;
+    if (uri === COMP_TIMELINE_URI) return readCompTimeline();
     const guide = uri.startsWith(GUIDE_URI_PREFIX)
       ? getGuide(uri.slice(GUIDE_URI_PREFIX.length))
       : undefined;
@@ -775,7 +797,10 @@ export function createServer(opts: CreateServerOptions = {}) {
       // the Unknown-op backstop — applies to the internal ops these forward.
       const runner: OpRunner = { runOp: (op, a) => line.runOp(op, a, { write: lease !== null, onWait }) };
       const sendInternal = internalVia(() => lease !== null, onWait);
-      if (SNAPSHOT_OPS.has(name)) return await runSnapshotOp(name, args, sendInternal, snapshots);
+      if (SNAPSHOT_OPS.has(name)) {
+        const withView = clientSupportsApps(server.getClientCapabilities());
+        return await runSnapshotOp(name, args, sendInternal, snapshots, withView);
+      }
       // The render runs outside After Effects; only the prepare and the save
       // cross the bridge. The lease is released when this returns, on purpose
       // — see runRender.
@@ -1239,13 +1264,14 @@ async function runSnapshotOp(
   name: string,
   args: unknown,
   send: SendInternal,
-  snapshots: SnapshotStore
+  snapshots: SnapshotStore,
+  withView = false
 ) {
   if (name === "snapshot_comp") {
     const a = args as { compId: number; includeFingerprint?: boolean };
     const fingerprint = (await send("_comp_fingerprint", { compId: a.compId })) as CompFingerprint;
     const snap = snapshots.store(fingerprint);
-    return textResult({
+    return withViewData(withView ? snapshotViewData(fingerprint) : undefined, textResult({
       snapshotId: snap.id,
       compId: snap.compId,
       compName: snap.compName,
@@ -1256,7 +1282,7 @@ async function runSnapshotOp(
         "Held in this MCP server's memory for the length of the session, not written into the After Effects project.",
       covers: SNAPSHOT_COVERS,
       fingerprint: a.includeFingerprint ? fingerprint : undefined,
-    });
+    }));
   }
 
   const d = args as { since: string; compId?: number; includeFingerprint?: boolean };
@@ -1278,12 +1304,23 @@ async function runSnapshotOp(
   // The fresh fingerprint becomes a snapshot of its own, so a verify-as-you-go
   // loop can keep diffing forward without a second call per step.
   const next = snapshots.store(fingerprint);
-  return textResult({
+  return withViewData(withView ? diffViewData(previous.fingerprint, fingerprint, diff) : undefined, textResult({
     ...diff,
     since: d.since,
     snapshotId: next.id,
     fingerprint: d.includeFingerprint ? fingerprint : undefined,
-  });
+  }));
+}
+
+/**
+ * The timeline view's data, on the result's `_meta` — which MCP Apps hosts
+ * hand to the view and keep out of the model's context — so the text content
+ * stays exactly what every other client gets. Absent for a client without the
+ * extension: nothing is added at all.
+ */
+function withViewData<T extends object>(view: Record<string, unknown> | undefined, result: T): T {
+  if (!view) return result;
+  return { ...result, _meta: { [VIEW_DATA_KEY]: view } };
 }
 
 /**
