@@ -284,19 +284,28 @@ The vocabulary is the designer's, not After Effects': a **move** is a run of
 changing keys with no hold between them, so `0 → 108 → 100` is one move with an
 8% overshoot, not two segments. Overshoot is measured against the move's last
 key along the travel from its first, so a bounce (`0 → 110 → 97 → 100`) is one
-overshoot with a bounce rather than two overshoots. A reversal counts as
-overshoot only when it goes at most half the travel past the target and settles
-no slower than it got there (and a wind-up only at a move's first key, by the
-same bound); anything else splits the run into two moves, so `0 → 100 → 50`
-never reads as a 100% overshoot. Keys outside a layer's in/out are ignored and
-counted, markers are passed over, and a separated master Position is not read
-beside its X/Y/Z. Everything heuristic says
+overshoot with a bounce rather than two overshoots. A stretch of keys is one
+move when the approach never goes backwards (an optional wind-up at the first
+key, at most half the travel), the first pass is at most half the travel past
+the final value, and every key after it is closer to that value than the one
+before — diminishing amplitude, not segment duration, because a pop's settle is
+usually longer than its approach. So `0 → 110 → 100` and `0 → 120 → 95 → 102 →
+100` are one move each, and `0 → 100 → 50` or `0 → 100 → 0` are two. A
+reversal with no ease at the key (a floor hit) is counted as an impact, and a
+move straight back to where the last one started as a return. A property keyed
+on nearly every frame (baked or tracked: 20+ keys, median gap 1.5 frames or
+less) is left out and named. A time-reversed layer's keys arrive descending;
+the panel puts them in comp-time order and swaps each key's ease sides. Keys
+outside a layer's in/out are ignored and counted, markers are passed over, and
+a separated master Position is not read beside its X/Y/Z. Everything heuristic says
 what it cannot see: expressions are skipped and counted, motion-path shape and
 per-dimension eases are not read, nested precomps are not followed, and fewer
 than eight moves come back marked as a hint rather than a pattern.
 
 Unmeasured live: that `keyTime` answers comp time for a layer whose
-`startTime` is not zero (a stagger built by sliding layers depends on it), and
+`startTime` is not zero (a stagger built by sliding layers depends on it) and
+descending comp time on a time-reversed layer, with `inPoint` after `outPoint`
+(the fake models both from the scripting reference), and
 how long the read takes on a large comp — `maxKeys` (default 2000) is the
 bound, and hitting it is reported.
 

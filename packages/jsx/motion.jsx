@@ -22,7 +22,9 @@
 // Skipped, and counted so the summary can name them: Time Remap and audio
 // levels (retiming and mixing, not a motion style), any keyed property whose
 // expression is on, and keys outside the layer's in/out range (neither is what
-// plays). Markers are passed over uncounted, and so is the master Position of
+// plays). A time-reversed layer's keys are put in comp-time order (with
+// `reversed: true`) rather than dropped. Markers are passed over uncounted,
+// and so is the master Position of
 // a layer whose dimensions are separated — X/Y/Z carry its keys.
 
 // Markers are not keyframed motion and are passed over without a count.
@@ -134,6 +136,17 @@ function __moWalk(group, names, layer, st) {
     }
     st.read += nk;
     if (!keys.length) continue;
+    // A time-reversed layer (negative stretch) answers its keys descending in
+    // comp time. Read them in comp-time order, where a key's "out" side is the
+    // one that plays first — so the ease sides swap too.
+    var reversed = keys.length > 1 && keys[0][0] > keys[keys.length - 1][0];
+    if (reversed) {
+      keys.reverse();
+      for (var r = 0; r < keys.length; r++) {
+        var kr = keys[r];
+        keys[r] = [kr[0], kr[2], kr[1], kr[5], kr[6], kr[3], kr[4], kr[7]];
+      }
+    }
     var spatial = false;
     try { spatial = !!p.isSpatial; } catch (eS) {}
     st.props.push({
@@ -142,6 +155,7 @@ function __moWalk(group, names, layer, st) {
       path: path.join(" > "),
       matchName: p.matchName,
       spatial: spatial,
+      reversed: reversed,
       keys: keys
     });
   }

@@ -33,6 +33,8 @@ export interface RawProp {
   matchName: string;
   spatial: boolean;
   keys: RawKey[];
+  /** Set by the panel when the keys came descending (a time-reversed layer) and were reordered. */
+  reversed?: boolean;
 }
 
 export interface RawComp {
@@ -62,6 +64,11 @@ const STOP_SPEED = 0.01;
 const OVERSHOOT_MIN = 0.02;
 /** Past this share of the travel, a reversal is a new move, not an overshoot or a wind-up. */
 const MAX_REVERSAL = 0.5;
+/** The most keys one move is looked for across; a longer run is read as several. */
+const MAX_MOVE_KEYS = 40;
+/** A property with at least this many keys, spaced this close, is baked data. */
+const BAKED_MIN_KEYS = 20;
+const BAKED_MAX_GAP_FRAMES = 1.5;
 /** Output caps. Raising one is a decision about what every later request carries. */
 const MAX_PROPERTIES = 8;
 const MAX_EASE_PAIRS = 4;
@@ -194,43 +201,100 @@ function isMove(a: RawKey, b: RawKey): boolean {
 }
 
 /**
- * The first key in run i..j where the travel reverses in a way that is not an
- * overshoot-and-settle or a wind-up, or -1. Overshoot is genuine when it goes
- * at most MAX_REVERSAL past the target and settles no slower than it got
- * there; anticipation when it is the move's first key, at most MAX_REVERSAL
- * back, and no longer than the move that follows.
+ * Can keys i..e be read as ONE move? The vocabulary is a designer's:
+ *
+ *   - an optional wind-up at the first middle key, at most MAX_REVERSAL back;
+ *   - an approach that never goes backwards (waypoints are fine);
+ *   - once past the target, a settle: every later key closer to the final
+ *     value than the one before, and the first pass at most MAX_REVERSAL
+ *     past it. How long the settle takes does not matter — a pop's settle is
+ *     usually longer than its approach.
+ *
+ * So `0 → 110 → 100` and `0 → 120 → 95 → 102 → 100` are one move each, while
+ * `0 → 100 → 50` (a return of half the travel) and `0 → 100 → 0` (back where
+ * it started, no target to overshoot) are two.
  */
-function reversalCut(k: RawKey[], i: number, j: number): number {
-  for (let m = i + 1; m < j; m++) {
-    const t = travelShare(k[i][7], k[m][7], k[j][7]);
-    if (t === null) continue;
-    const before = k[m][0] - k[i][0];
-    const after = k[j][0] - k[m][0];
-    if (t > 1 + OVERSHOOT_MIN && (t - 1 > MAX_REVERSAL || after > before)) return m;
-    if (t < -OVERSHOOT_MIN && (m !== i + 1 || -t > MAX_REVERSAL || before > after)) return m;
+function oneMove(k: RawKey[], i: number, e: number): boolean {
+  let progress = -Infinity;
+  let passed = false;
+  let lastDev = Infinity;
+  for (let m = i + 1; m < e; m++) {
+    const t = travelShare(k[i][7], k[m][7], k[e][7]);
+    if (t === null) return false;
+    if (passed) {
+      const dev = Math.abs(t - 1);
+      if (dev > lastDev + EPS) return false;
+      lastDev = dev;
+      continue;
+    }
+    if (m === i + 1 && t < -OVERSHOOT_MIN) {
+      if (-t > MAX_REVERSAL) return false;
+      progress = t;
+      continue;
+    }
+    if (t > 1 + OVERSHOOT_MIN) {
+      if (t - 1 > MAX_REVERSAL) return false;
+      passed = true;
+      lastDev = t - 1;
+      continue;
+    }
+    if (t < progress - OVERSHOOT_MIN) return false;
+    progress = Math.max(progress, t);
   }
-  return -1;
+  return true;
+}
+
+/** The longest stretch from key i, within run end j, that reads as one move. */
+function moveEnd(k: RawKey[], i: number, j: number): number {
+  for (let e = Math.min(j, i + MAX_MOVE_KEYS); e > i + 1; e--) if (oneMove(k, i, e)) return e;
+  return i + 1;
+}
+
+/** A key the value bounces off: the direction flips and nothing eases into or out of it. */
+function isImpact(a: RawKey, b: RawKey, c: RawKey): boolean {
+  const va = a[7], vb = b[7], vc = c[7];
+  if (!va || !vb || !vc || va.length !== vb.length || vb.length !== vc.length) return false;
+  let dot = 0;
+  for (let d = 0; d < va.length; d++) dot += (vb[d] - va[d]) * (vc[d] - vb[d]);
+  if (dot >= 0) return false;
+  const sharp = (interp: Interp, speed: number | null) => interp === "l" || (interp === "b" && speed !== null && Math.abs(speed) >= STOP_SPEED);
+  return sharp(b[1], b[4]) || sharp(b[2], b[6]);
+}
+
+export interface Reversals {
+  /** Keys the value bounced off with no ease (a floor hit, a sharp turn). */
+  impacts: number;
+  /** Moves straight back to where the previous one started (a pulse, an out-and-back). */
+  returns: number;
+  impactsOn: Map<string, number>;
 }
 
 /** Split one property's keys into moves, segments and holds. */
-function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[], holds: number[]): void {
+function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[], holds: number[], rev: Reversals): void {
   const k = p.keys;
   const label = propertyLabel(p);
   let i = 0;
+  let prevMoveStart = -1;
+  let prevMoveEnd = -1;
   while (i < k.length - 1) {
     if (!isMove(k[i], k[i + 1])) {
       const d = k[i + 1][0] - k[i][0];
       if (d > EPS) holds.push(d);
+      prevMoveStart = -1;
       i++;
       continue;
     }
-    // A run of moving segments, i .. j (keys).
+    // A run of moving segments, i .. j (keys), then the stretch of it that is
+    // one move by oneMove's rules; the rest of the run is read from there.
     let j = i;
     while (j < k.length - 1 && isMove(k[j], k[j + 1])) j++;
-    // A reversal that is not an overshoot-and-settle (or a wind-up) is where
-    // one move ends and the next begins: 0 → 100 → 50 is two moves, not a
-    // 100% overshoot. Cut the run there and look again.
-    for (let cut = reversalCut(k, i, j); cut >= 0; cut = reversalCut(k, i, j)) j = cut;
+    for (let m = i + 1; m < j; m++) {
+      if (isImpact(k[m - 1], k[m], k[m + 1])) {
+        rev.impacts++;
+        rev.impactsOn.set(label, (rev.impactsOn.get(label) ?? 0) + 1);
+      }
+    }
+    j = moveEnd(k, i, j);
     for (let m = i; m < j; m++) {
       const a = k[m];
       const b = k[m + 1];
@@ -243,15 +307,17 @@ function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[
         in: easeSide(b[1], b[3], b[4]),
       });
     }
+    if (prevMoveStart >= 0 && prevMoveEnd === i && sameValue(k[j][7], k[prevMoveStart][7])) rev.returns++;
+    prevMoveStart = i;
+    prevMoveEnd = j;
     const seconds = k[j][0] - k[i][0];
     const move: Move = { label, seconds, frames: seconds * fps, segments: j - i, overshoot: null, anticipation: null };
 
-    // Overshoot: a middle key past where the move ends, measured along the
-    // travel from its first key to its last. The furthest one is the peak;
-    // each later key on the other side of the target is a bounce, so a
-    // 0 → 110 → 97 → 100 settle is one overshoot of 10% with one bounce.
-    // Anticipation: the move's first middle key behind where it started.
-    // reversalCut has already split off anything that is neither.
+    // Overshoot: the middle key furthest past where the move ends, measured
+    // along the travel from its first key to its last; each later crossing of
+    // the target is an oscillation, so 0 → 120 → 95 → 102 → 100 is one
+    // overshoot of 20% with two. Anticipation: a first middle key behind the
+    // start. oneMove has already split off anything that is neither.
     let peak = -1;
     let peakShare = 1 + OVERSHOOT_MIN;
     for (let m = i + 1; m < j; m++) {
@@ -280,6 +346,34 @@ function walkProperty(p: RawProp, fps: number, segments: Segment[], moves: Move[
     moves.push(move);
     i = j;
   }
+}
+
+/**
+ * Keys on (nearly) every frame: baked from an expression, tracked, or
+ * converted audio. That is data, not a designer's timing, and a few hundred
+ * one-frame "moves" would drown every statistic, so such a property is left
+ * out and named.
+ */
+export function isBaked(p: RawProp, fps: number): boolean {
+  if (p.keys.length < BAKED_MIN_KEYS) return false;
+  const gaps: number[] = [];
+  for (let i = 1; i < p.keys.length; i++) gaps.push(Math.abs(p.keys[i][0] - p.keys[i - 1][0]) * fps);
+  gaps.sort((a, b) => a - b);
+  return quantile(gaps, 0.5) <= BAKED_MAX_GAP_FRAMES;
+}
+
+/**
+ * Keys in comp-time order. A time-reversed layer's keys arrive descending
+ * (the panel already reorders them and swaps each key's ease sides, and says
+ * so with `reversed`); anything still out of order is sorted here.
+ */
+function inTimeOrder(p: RawProp): { prop: RawProp; reordered: boolean } {
+  for (let i = 1; i < p.keys.length; i++) {
+    if (p.keys[i][0] < p.keys[i - 1][0]) {
+      return { prop: { ...p, keys: [...p.keys].sort((a, b) => a[0] - b[0]) }, reordered: true };
+    }
+  }
+  return { prop: p, reordered: false };
 }
 
 // ---------------------------------------------------------------- staggers
@@ -363,6 +457,9 @@ export function summarizeMotion(raw: MotionKeys) {
   let expressionDriven = 0;
   let notMotion = 0;
   let outsideLayer = 0;
+  let reordered = 0;
+  const baked: string[] = [];
+  const rev: Reversals = { impacts: 0, returns: 0, impactsOn: new Map() };
   const comps = raw.comps.map((c) => {
     const fps = c.frameRate > 0 ? c.frameRate : 30;
     fpsSet.add(round(fps, 3));
@@ -372,12 +469,20 @@ export function summarizeMotion(raw: MotionKeys) {
     const before = moves.length;
     let keys = 0;
     const layers = new Set<number>();
-    for (const p of c.props) {
-      keys += p.keys.length;
+    const clean: RawProp[] = [];
+    for (const raw of c.props) {
+      keys += raw.keys.length;
+      const { prop: p, reordered: sorted } = inTimeOrder(raw);
+      if (sorted || p.reversed) reordered++;
+      if (isBaked(p, fps)) {
+        baked.push(`${p.layer} ${propertyLabel(p)}`);
+        continue;
+      }
       layers.add(p.layerId);
-      walkProperty(p, fps, segments, moves, holds);
+      clean.push(p);
+      walkProperty(p, fps, segments, moves, holds, rev);
     }
-    staggers.push(...staggersOf(c));
+    staggers.push(...staggersOf({ ...c, props: clean }));
     return { id: c.id, name: c.name, frameRate: c.frameRate, animatedLayers: layers.size, keys, moves: moves.length - before };
   });
 
@@ -425,6 +530,8 @@ export function summarizeMotion(raw: MotionKeys) {
         amountPercent: spread(over.map((m) => m.overshoot!.amount * 100), 1),
         settleSeconds: spread(over.map((m) => m.overshoot!.settleSeconds)),
         withBounces: over.filter((m) => m.overshoot!.bounces > 0).length,
+        /** Crossings of the target after the peak, summed: an elastic settle counts each. */
+        oscillations: over.reduce((n, m) => n + m.overshoot!.bounces, 0),
         mostOn: [...overByProp.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([p]) => p),
       }
     : { moves: 0, share: 0 };
@@ -484,21 +591,28 @@ export function summarizeMotion(raw: MotionKeys) {
       top: staggers.slice(0, MAX_STAGGERS),
     },
     holds: { count: holds.length, seconds: holdSeconds },
+    reversals: {
+      impacts: rev.impacts,
+      impactsOn: [...rev.impactsOn.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([prop]) => prop),
+      returns: rev.returns,
+    },
+    bakedProperties: baked.length,
     byProperty,
     propertiesOmitted: Math.max(0, propList.length - MAX_PROPERTIES),
     suggestedLines: suggestLines({
       moves: moves.length, moveSeconds, moveFrames, fps, kinds, segments: segments.length, common, pairable,
       overshoot: over.length ? overshoot as OvershootSummary : null,
       anticipation: antic.length ? anticipation as AnticipationSummary : null,
-      staggers, holdSeconds, holds: holds.length,
+      staggers, holdSeconds, holds: holds.length, impacts: rev.impacts,
+      impactsOn: [...rev.impactsOn.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null,
     }),
     notes: [] as string[],
   };
 
   if (raw.truncated) {
     result.notes.push(
-      `Stopped at maxKeys (${raw.maxKeys}): ${raw.propsNotRead} keyed propert${raw.propsNotRead === 1 ? "y" : "ies"} ` +
-        `(${raw.keysNotRead} keys) not read. Raise maxKeys or pass fewer comps for the whole picture.`
+      `maxKeys (${raw.maxKeys}) reached: ${raw.propsNotRead} keyed propert${raw.propsNotRead === 1 ? "y" : "ies"} ` +
+        `(${raw.keysNotRead} keys) did not fit and ${raw.propsNotRead === 1 ? "was" : "were"} not read. Raise maxKeys or pass fewer comps for the whole picture.`
     );
   }
   if (moves.length === 0) {
@@ -509,6 +623,17 @@ export function summarizeMotion(raw: MotionKeys) {
   if (expressionDriven) result.notes.push(`${expressionDriven} keyed propert${expressionDriven === 1 ? "y is" : "ies are"} driven by an expression and ${expressionDriven === 1 ? "was" : "were"} skipped.`);
   if (outsideLayer) result.notes.push(`${outsideLayer} key${outsideLayer === 1 ? "" : "s"} outside ${outsideLayer === 1 ? "its" : "their"} layer's in/out range ${outsideLayer === 1 ? "was" : "were"} ignored — never seen in the render.`);
   if (notMotion) result.notes.push(`${notMotion} keyed Time Remap / audio propert${notMotion === 1 ? "y was" : "ies were"} skipped as not motion.`);
+  if (baked.length) {
+    const named = baked.slice(0, 3).join(", ") + (baked.length > 3 ? `, and ${baked.length - 3} more` : "");
+    result.notes.push(
+      `${baked.length} propert${baked.length === 1 ? "y is" : "ies are"} keyed on nearly every frame (baked or tracked) and left out of the statistics: ${named}.`
+    );
+  }
+  if (reordered) {
+    result.notes.push(
+      `${reordered} propert${reordered === 1 ? "y's" : "ies'"} keys ran backwards in comp time (a time-reversed layer) and were read in comp-time order.`
+    );
+  }
   result.notes.push(NOT_COVERED);
   return result;
 }
@@ -532,6 +657,8 @@ interface LineInputs {
   staggers: Stagger[];
   holdSeconds: Spread | null;
   holds: number;
+  impacts: number;
+  impactsOn: string | null;
 }
 
 /**
@@ -574,6 +701,9 @@ export function suggestLines(x: LineInputs): string[] {
     const f = quantile(offs, 0.5);
     const s = x.staggers.find((st) => Math.abs(st.offsetFrames - f) < 0.5) ?? x.staggers[0];
     lines.push(`Stagger: ${round(f, 1)}f (${s.offsetSeconds}s) between layers`);
+  }
+  if (x.impacts) {
+    lines.push(`Bounces: ${x.impacts} sharp reversal${x.impacts === 1 ? "" : "s"} with no ease at contact${x.impactsOn ? ` (mostly ${x.impactsOn})` : ""}`);
   }
   if (x.holds >= 3 && x.holdSeconds) lines.push(`Holds between moves: ~${x.holdSeconds.median}s`);
   return lines;

@@ -127,11 +127,71 @@ await check("a reversal past any plausible overshoot is two moves, not a 100% ov
   assert.ok(!s.suggestedLines.some((l) => /Overshoot/.test(l)), s.suggestedLines.join("\n"));
 });
 
-await check("a small reversal that settles slower than it got there is a new move, not a settle", () => {
-  const p = prop(1, "Opacity", "ADBE Opacity", [key(0, [0]), key(0.2, [110]), key(1.2, [100])]);
+// The fixtures a designer would recognise (second review of #254): the
+// settle of a pop is LONGER than its approach, and that is still one move.
+const f = (n) => n / 30;
+await check("scale pop: 0 → 110 in 6f, settle to 100 over 14f, is one 20f move with a 10% overshoot", () => {
+  const p = prop(1, "Scale", "ADBE Scale", [key(0, [0, 0, 100]), key(f(6), [110, 110, 100]), key(f(20), [100, 100, 100])]);
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.equal(s.moves, 1);
+  assert.equal(s.durations.moveFrames.median, 20);
+  assert.equal(s.overshoot.moves, 1);
+  assert.equal(s.overshoot.amountPercent.median, 10);
+  assert.equal(s.overshoot.settleSeconds.median, 0.467);
+  assert.equal(s.suggestedLines[0], "Typical move: 0.667s (20f at 30fps)");
+});
+
+await check("keyed elastic: 0 → 120 → 95 → 102 → 100 is one move, 20% overshoot, two oscillations", () => {
+  const p = prop(1, "Scale", "ADBE Scale", [
+    key(0, [0, 0]), key(f(6), [120, 120]), key(f(12), [95, 95]), key(f(17), [102, 102]), key(f(22), [100, 100]),
+  ]);
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.equal(s.moves, 1);
+  assert.equal(s.overshoot.moves, 1);
+  assert.equal(s.overshoot.amountPercent.median, 20);
+  assert.equal(s.overshoot.withBounces, 1);
+  assert.equal(s.overshoot.oscillations, 2);
+  assert.equal(s.reversals.impacts, 0, "eased peaks are not impacts");
+});
+
+await check("an amplitude that grows instead of settling is not one move", () => {
+  const p = prop(1, "Rotation", "ADBE Rotate Z", [key(0, [0]), key(f(6), [110]), key(f(12), [80]), key(f(18), [100])]);
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.ok(s.moves >= 2, `${s.moves} moves`);
+});
+
+await check("floor bounce: a sharp reversal at the extreme is reported, not hidden in one move", () => {
+  const p = prop(1, "Position", "ADBE Position", [
+    key(0, [960, 500]), key(f(10), [960, 900], { inI: "l", outI: "l" }), key(f(20), [960, 500]),
+  ]);
   const s = summarizeMotion(raw([comp([p])]));
   assert.equal(s.moves, 2);
-  assert.equal(s.overshoot.moves, 0);
+  assert.equal(s.reversals.impacts, 1);
+  assert.deepEqual(s.reversals.impactsOn, ["Position"]);
+  assert.equal(s.reversals.returns, 1);
+  assert.ok(s.suggestedLines.some((l) => /^Bounces: 1 sharp reversal with no ease at contact \(mostly Position\)/.test(l)), s.suggestedLines.join("\n"));
+});
+
+await check("a baked track on every frame is left out and named; the designer's moves are the statistics", () => {
+  const track = [];
+  for (let i = 0; i < 300; i++) track.push(key(f(i), [i * 3, 500 + (i % 7)], { inI: "l", outI: "l" }));
+  const props = [prop(50, "Position", "ADBE Position", track)];
+  for (let i = 0; i < 10; i++) props.push(popIn(i + 1, f(i * 2)));
+  const s = summarizeMotion(raw([comp(props)]));
+  assert.equal(s.bakedProperties, 1);
+  assert.equal(s.moves, 10);
+  assert.equal(s.eases.segments.linear, 0);
+  assert.ok(s.suggestedLines.includes("No linear motion"), s.suggestedLines.join("\n"));
+  assert.ok(s.notes.some((n) => /1 property is keyed on nearly every frame \(baked or tracked\) and left out of the statistics: L50 Position\./.test(n)), s.notes.join("\n"));
+  assert.equal(s.staggers.top[0].layers, 10, "the track does not join the stagger");
+});
+
+await check("reversed layer: keys arriving descending are read in comp-time order, and said so", () => {
+  const p = prop(1, "Scale", "ADBE Scale", [key(f(20), [100, 100]), key(f(6), [110, 110]), key(0, [0, 0])]);
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.equal(s.moves, 1);
+  assert.equal(s.overshoot.moves, 1);
+  assert.ok(s.notes.some((n) => /ran backwards in comp time/.test(n)), s.notes.join("\n"));
 });
 
 await check("a wind-up bigger than half the travel is a move of its own, not anticipation", () => {
@@ -232,7 +292,7 @@ await check("what was skipped and what was cut short are named", () => {
   const s = summarizeMotion(raw([comp([popIn(1, 0)], { skipped: { notMotion: 1, expressionDriven: 2 } })], {
     truncated: true, keysNotRead: 40, propsNotRead: 3, maxKeys: 10,
   }));
-  assert.ok(s.notes.some((n) => /maxKeys \(10\): 3 keyed properties \(40 keys\) not read/.test(n)), s.notes.join("\n"));
+  assert.ok(s.notes.some((n) => /maxKeys \(10\) reached: 3 keyed properties \(40 keys\) did not fit and were not read/.test(n)), s.notes.join("\n"));
   assert.ok(s.notes.some((n) => /2 keyed properties are driven by an expression/.test(n)));
   assert.ok(s.notes.some((n) => /Time Remap/.test(n)));
   assert.ok(s.notes.some((n) => /Not read: expressions/.test(n)), "says what it cannot see");
@@ -289,6 +349,16 @@ ae.run(`
   e2.outPoint = 1;
   var o2 = e2.property("Transform").property("Opacity");
   o2.setValueAtTime(0, 0); o2.setValueAtTime(0.5, 100); o2.setValueAtTime(3, 0);
+  // A time-reversed layer: its in point is after its out point, and keyTime
+  // answers descending. Both keys are inside the swapped range.
+  var rl = c.addLayer(6, "Reversed", "shape");
+  rl.inPoint = 2; rl.outPoint = 0;
+  var rs = rl.property("Transform").property("Rotation");
+  rs.setValueAtTime(0, 0); rs.setValueAtTime(1, 90);
+  rs.setInterpolationTypeAtKey(1, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER);
+  rs.setTemporalEaseAtKey(1, [new KeyframeEase(0, 20)], [new KeyframeEase(0, 80)]);
+  var layerTime = rs.keyTime;
+  rs.keyTime = function (i) { return 2 - layerTime.call(rs, i); };
   FAKE.comp(200, "Empty");
 `);
 
@@ -315,7 +385,13 @@ await check("_motion_keys reads every keyed property, compactly, with the first 
   const short = pops.props.find((p) => p.layerId === 5);
   assert.deepEqual(short.keys.map((k) => k[0]), [0, 0.5], "the key past the out point is dropped");
   assert.equal(pops.skipped.outsideLayer, 1);
-  assert.equal(r.keysRead, 10);
+  const rev = pops.props.find((p) => p.layerId === 6);
+  assert.ok(rev, "keys inside a reversed layer's swapped in/out range are read");
+  assert.equal(rev.reversed, true);
+  assert.deepEqual(rev.keys.map((k) => k[0]), [1, 2], "comp-time order");
+  assert.deepEqual(rev.keys[1].slice(1, 7), ["b", "b", 80, 0, 20, 0], "the layer-time first key's ease sides swap");
+  assert.equal(byPath["Transform > Scale"].reversed, false);
+  assert.equal(r.keysRead, 12);
   assert.equal(r.truncated, false);
 });
 
@@ -323,7 +399,7 @@ await check("_motion_keys stops at maxKeys and counts what it left", () => {
   const r = ae.call("_motion_keys", { compIds: [100], maxKeys: 4 }).result;
   assert.equal(r.truncated, true);
   assert.ok(r.keysRead <= 4);
-  assert.equal(r.keysRead + r.keysNotRead, 10);
+  assert.equal(r.keysRead + r.keysNotRead, 12);
   assert.ok(r.propsNotRead >= 1);
 });
 
