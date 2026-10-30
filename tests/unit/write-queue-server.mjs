@@ -182,7 +182,7 @@ await check("a timeout says what the whole call cost, not only the op's limit", 
     const reported = Number(m[1]) * 1000;
     assert.ok(Math.abs(reported - took) <= 200, `reported ${reported} ms, took ${took} ms`);
     assert.match(text, /limit is 0\.4s/);
-    assert.match(text, /checking the panel's version/);
+    assert.match(text, /earlier steps of this call\. Of that, \d\.\ds checking the panel's version/);
     assert.doesNotMatch(text, /did not answer within/, "the bare limit is not what the call cost");
     assert.match(text, /may still run and land after this message/);
   } finally {

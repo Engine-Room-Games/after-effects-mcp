@@ -72,10 +72,10 @@ function tokenFileHint(port: number): string {
 }
 
 /**
- * Where a timed-out tool call's time went, measured by the server. `totalMs`
- * runs from the moment the tool was called; `gateMs` is the panel-version check
- * and `queueMs` this session's write queue, both spent before the request was
- * sent.
+ * What a timed-out tool call cost, measured by the server. `totalMs` runs
+ * from the moment the tool was called; `gateMs` (the panel-version check) and
+ * `queueMs` (this session's write queue) are the two earlier steps measured
+ * directly. They need not add up to the rest of `totalMs`.
  */
 export interface TimeoutTiming { totalMs: number; gateMs: number; queueMs: number; }
 
@@ -90,11 +90,18 @@ function elapsedText(ms: number): string {
   return ms < 10_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 1000)}s`;
 }
 
-function beforeSendText(t: TimeoutTiming): string {
+/**
+ * The parts of the earlier time that were measured directly, or "" when none
+ * was long enough to mention. Deliberately not a breakdown that sums: other
+ * earlier steps go unitemised — `render_queue`'s prepare round trip before its
+ * save, a refused attempt and the port search before a re-send — and naming any
+ * of them as one of these would be false.
+ */
+function measuredBeforeText(t: TimeoutTiming): string {
   const parts: string[] = [];
-  if (t.gateMs >= 250) parts.push(`checking the panel's version (${elapsedText(t.gateMs)}, a probe that waits on a busy After Effects too)`);
-  if (t.queueMs >= 250) parts.push(`waiting behind this session's own earlier write (${elapsedText(t.queueMs)})`);
-  return parts.length ? parts.join(" and ") : "work in this server before the request was sent";
+  if (t.gateMs >= 250) parts.push(`${elapsedText(t.gateMs)} checking the panel's version (a probe that waits on a busy After Effects too)`);
+  if (t.queueMs >= 250) parts.push(`${elapsedText(t.queueMs)} waiting behind this session's own earlier write`);
+  return parts.length ? ` Of that, ${parts.join(" and ")}.` : "";
 }
 
 /**
@@ -150,7 +157,7 @@ export class BridgeTimeoutError extends Error {
       t && before >= 500
         ? [
             `The After Effects panel at http://127.0.0.1:${port} did not answer ${what} in time: this tool call gave up ${elapsedText(t.totalMs)} after it was made.`,
-            `The op's own limit is ${secs} and starts when the request is sent; the ${elapsedText(before)} before that went on ${beforeSendText(t)}.`,
+            `The op's own limit is ${secs} and starts only when its request is sent; the other ${elapsedText(before)} went on earlier steps of this call.${measuredBeforeText(t)}`,
           ]
         : [`The After Effects panel at http://127.0.0.1:${port} did not answer within ${secs} for ${what}.`];
     return [

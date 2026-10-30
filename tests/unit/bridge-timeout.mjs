@@ -116,9 +116,20 @@ check("a timeout restated with its timing names the whole span and where it went
   e.withTiming({ totalMs: 5012, gateMs: 2004, queueMs: 0 });
   assert.match(e.message, /gave up 5\.0s after it was made/);
   assert.match(e.message, /limit is 3s/);
-  assert.match(e.message, /2\.0s before that went on checking the panel's version/);
+  assert.match(e.message, /other 2\.0s went on earlier steps of this call/);
+  assert.match(e.message, /Of that, 2\.0s checking the panel's version/);
   assert.doesNotMatch(e.message, /did not answer within/);
   assert.doesNotMatch(e.message, /behind this session's own earlier write/, "no queue wait happened");
+});
+check("time nobody itemised is not pinned on a step that did not take it", () => {
+  // render_queue's save timing out after its prepare round trip, or a re-send
+  // after a refusal and a port search: the earlier time is real but neither
+  // the gate's nor the queue's.
+  const e = new BridgeTimeoutError(7777, 3000, { op: "_render_save" });
+  e.withTiming({ totalMs: 15_000, gateMs: 3, queueMs: 0 });
+  assert.match(e.message, /gave up 15s after it was made/);
+  assert.match(e.message, /other 12s went on earlier steps of this call\.$/m);
+  assert.doesNotMatch(e.message, /panel's version|own earlier write|before the request was sent/);
 });
 check("a timeout that kept to its limit keeps the plain sentence", () => {
   const e = new BridgeTimeoutError(7777, 3000, { op: "set_layer" });
