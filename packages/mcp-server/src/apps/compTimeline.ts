@@ -224,7 +224,7 @@ function fromResult(r){
   if(!r)return;
   var d=r._meta&&r._meta[KEY];
   if(!d&&r.content){for(var i=0;i<r.content.length;i++){var c=r.content[i];if(c&&c.type==="text"){try{var j=JSON.parse(c.text);if(j&&j.fingerprint){d={kind:j.changeCount!==undefined?"diff-text":"snapshot",fingerprint:j.fingerprint};var mk=d.fingerprint.markers;if(mk&&mk.length>${MAX_VIEW_MARKERS}){d.markersOmitted=mk.length-${MAX_VIEW_MARKERS};d.fingerprint.markers=mk.slice(0,${MAX_VIEW_MARKERS});}break;}}catch(e){}}}}
-  if(!d){var a=el("div","empty");a.textContent=r.isError?"The call failed; nothing to draw.":"This result carries no timeline data. Call snapshot_comp with includeFingerprint:true to draw it here.";mount(a);return;}
+  if(!d){var a=el("div","empty");a.textContent=r.isError?"The call failed; nothing to draw.":"This host did not pass the timeline data to the view, so there is nothing to draw.";mount(a);return;}
   data=d;selected=null;render();
 }
 function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;}
@@ -299,11 +299,22 @@ function render(){
   root.appendChild(det);
   mount(root);
 }
-function size(){var h=document.documentElement.scrollHeight,w=document.documentElement.scrollWidth;notify("ui/notifications/size-changed",{width:w,height:h});}
-if(window.ResizeObserver)new ResizeObserver(size).observe(document.body);
+// Size is reported only once the handshake is done, and measured from the
+// content box (#app plus the body's padding), never from a body or document the
+// host's frame has stretched — so the view can shrink as well as grow.
+var ready=false,lastH=-1,lastW=-1;
+function size(){
+  if(!ready)return;
+  var app=document.getElementById("app"),cs=getComputedStyle(document.body),r=app.getBoundingClientRect();
+  var h=Math.ceil(r.height+parseFloat(cs.paddingTop)+parseFloat(cs.paddingBottom)),w=Math.ceil(app.scrollWidth+parseFloat(cs.paddingLeft)+parseFloat(cs.paddingRight));
+  if(h===lastH&&w===lastW)return;lastH=h;lastW=w;
+  notify("ui/notifications/size-changed",{width:w,height:h});
+}
+if(window.ResizeObserver)new ResizeObserver(size).observe(document.getElementById("app"));
+function initialized(){notify("ui/notifications/initialized",{});ready=true;size();}
 request("ui/initialize",{appInfo:{name:"after-effects-comp-timeline",version:"1"},appCapabilities:{},protocolVersion:"2026-01-26"})
-  .then(function(r){theme(r&&r.hostContext);notify("ui/notifications/initialized",{});size();})
-  .catch(function(){notify("ui/notifications/initialized",{});});
+  .then(function(r){theme(r&&r.hostContext);initialized();})
+  .catch(function(){initialized();});
 })();
 </script></body></html>
 `;

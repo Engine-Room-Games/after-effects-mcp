@@ -144,8 +144,6 @@ masks or shape contents, so `changeCount: 0` means none of the recorded fields
 moved — not that the comp is unchanged. For "is this value right", read the
 property.
 
-Where the client renders MCP Apps, these two also draw the person a timeline you never see; never pass `includeFingerprint` to feed it.
-
 **A failed write is a partial write.** Nothing rolls back, on any tool: a
 `run_jsx` that throws on its fourth line has done the first three, and a
 `run_batch` that stops at op 30 has done 29. So find out what landed — on a

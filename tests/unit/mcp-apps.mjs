@@ -234,6 +234,15 @@ check("a diff's changes are bounded by the same cut as the layers, and the rest 
   assert.equal(v.diff.changesOmitted, 1 + 50 + 7, "added + changed past the cut + removed past the cap");
   assert.match(COMP_TIMELINE_HTML, /diff\.changesOmitted/, "the view names what it left out");
 });
+check("the view never asks for includeFingerprint, which the agent is not to pass for it", () => {
+  assert.doesNotMatch(COMP_TIMELINE_HTML, /textContent=[^;]*includeFingerprint/);
+});
+check("size is reported after the handshake and measured so the view can shrink", () => {
+  const script = COMP_TIMELINE_HTML.match(/<script>([\s\S]*)<\/script>/)[1];
+  assert.match(script, /function size\(\)\{\s*if\(!ready\)return;/, "no size report before ui/notifications/initialized");
+  assert.ok(script.indexOf('notify("ui/notifications/initialized"') < script.indexOf("ready=true"), "ready only after initialized");
+  assert.doesNotMatch(script, /scrollHeight/, "a stretched body's scrollHeight never shrinks");
+});
 check("a text-fallback diff is not labelled a snapshot", () => {
   assert.ok(COMP_TIMELINE_HTML.includes('kind:j.changeCount!==undefined?"diff-text":"snapshot"'));
 });
