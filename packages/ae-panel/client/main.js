@@ -163,9 +163,24 @@
   // The wait to report on an /op response, or undefined when there was none.
   function panelWaitOf(meta) {
     if (!meta || meta.waitedMs === undefined) return undefined;
-    // A batch's chunks run as `_continue_job`, a name no agent ever called.
-    var behind = meta.behind === "_continue_job" ? "run_batch" : meta.behind;
-    return { behind: behind, waitedMs: meta.waitedMs };
+    return { behind: publicOpName(meta.behind), waitedMs: meta.waitedMs };
+  }
+
+  // Ops with a leading underscore are the panel's and the server's own steps;
+  // no agent ever called one, so a wait is reported under the tool that caused
+  // it. A batch's chunks run as `_continue_job`, for instance.
+  var INTERNAL_OP_TOOL = {
+    _continue_job: "run_batch",
+    _cancel_job: "cancel_job",
+    _render_prepare: "render_queue",
+    _render_save: "render_queue",
+    _render_mark_done: "render_queue",
+    _comp_fingerprint: "snapshot_comp or diff_comp",
+    _comp_diff: "diff_comp",
+  };
+  function publicOpName(name) {
+    if (typeof name !== "string" || name.charAt(0) !== "_") return name;
+    return INTERNAL_OP_TOOL.hasOwnProperty(name) ? INTERNAL_OP_TOOL[name] : "an internal job step";
   }
 
   // ---------- The bundle's one global (issue #185) ----------

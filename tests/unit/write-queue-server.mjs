@@ -196,6 +196,33 @@ await check("a malformed panelWait is ignored rather than reported", async () =>
   const res = await call("set_layer", { compId: 1, layerId: 1, name: "n" });
   assert.deepEqual(payload(res), { ok: true });
 });
+await check("a read that waited on the panel's mutex reports it too", async () => {
+  // Reads never enter this server's queue, but they share the panel's chain
+  // with every client's writes — so a read can wait behind another client too.
+  seen.length = 0;
+  behaviour.set("get_comp", { ms: 5, result: { id: 1 }, panelWait: { behind: "run_batch", waitedMs: 3000 } });
+  const res = await call("get_comp", { compId: 1 });
+  assert.equal(res.content.length, 1);
+  assert.deepEqual(payload(res), { id: 1, panelBusyWith: "run_batch", panelWaitedMs: 3000 });
+  behaviour.delete("get_comp");
+});
+
+await check("a write that waited in both places reports both, under their own names", async () => {
+  seen.length = 0;
+  behaviour.set("set_transform", { ms: 120, result: { ok: true } });
+  behaviour.set("set_layer", { ms: 5, result: { ok: true }, panelWait: { behind: "run_jsx", waitedMs: 1500 } });
+  const [, second] = await Promise.all([
+    call("set_transform", { compId: 1, layerId: 1, properties: { opacity: 50 } }),
+    call("set_layer", { compId: 1, layerId: 1, name: "n" }),
+  ]);
+  const b = payload(second);
+  assert.equal(b.queuedBehind, "set_transform");
+  assert.ok(b.waitedMs >= 80, `waitedMs was ${b.waitedMs}`);
+  assert.equal(b.panelBusyWith, "run_jsx");
+  assert.equal(b.panelWaitedMs, 1500);
+  assert.equal(b.ok, true);
+  behaviour.delete("set_transform");
+});
 behaviour.delete("set_layer");
 behaviour.delete("run_jsx");
 

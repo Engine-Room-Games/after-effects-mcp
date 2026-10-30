@@ -37,6 +37,8 @@ async function check(name, fn) {
 
 /** op name -> how long the stub ExtendScript takes to answer it. */
 const slow = new Map();
+/** op name -> what the stub ExtendScript answers it with, when not `{stub: true}`. */
+const answers = new Map();
 
 // The same stub CEP host the other panel tests use, with a per-op delay.
 function makeHost(extDir) {
@@ -45,9 +47,12 @@ function makeHost(extDir) {
     getHostEnvironment: () => JSON.stringify({ appName: "AEFT", appVersion: "26.5" }),
     evalScript: (script, cb) => {
       if (script.indexOf("$.evalFile") >= 0) return void setTimeout(() => cb("ok"), 0);
+      const has = (op) => script.indexOf(`\\"op\\":\\"${op}\\"`) >= 0;
       let ms = 0;
-      for (const [op, delay] of slow) if (script.indexOf(`\\"op\\":\\"${op}\\"`) >= 0) ms = delay;
-      setTimeout(() => cb(JSON.stringify({ ok: true, result: { stub: true } })), ms);
+      for (const [op, delay] of slow) if (has(op)) ms = delay;
+      let result = { stub: true };
+      for (const [op, r] of answers) if (has(op)) result = r;
+      setTimeout(() => cb(JSON.stringify({ ok: true, result })), ms);
     },
   };
 }
@@ -176,6 +181,38 @@ await check("an op queued behind another names it and how long it waited", async
 await check("the mutex forgets a finished op: the next call is uncontended again", async () => {
   const res = await post("set_layer");
   assert.equal("panelWait" in res, false, JSON.stringify(res));
+});
+
+await check("a wait behind a batch chunk names run_batch, not _continue_job", async () => {
+  // The panel drives a chunked batch itself, one `_continue_job` per chunk —
+  // a name no agent ever called. Another client's write waiting behind one has
+  // to name the tool that caused it.
+  answers.set("run_batch", { jobId: "j_wait", async: true, total: 600, chunkSize: 25 });
+  answers.set("_continue_job", { done: true, results: [] });
+  slow.set("_continue_job", 300);
+  const batch = await post("run_batch");
+  assert.equal(batch.result.jobId, "j_wait");
+  // The chunk is already on the chain by the time the envelope came back.
+  const res = await post("set_layer");
+  assert.equal(res.panelWait?.behind, "run_batch", JSON.stringify(res));
+  assert.ok(res.panelWait.waitedMs >= 150, `waitedMs was ${res.panelWait.waitedMs}`);
+  slow.clear();
+  answers.clear();
+});
+
+await check("a wait behind any other internal step never leaks an underscore name", async () => {
+  // /cancel runs `_cancel_job` on the same chain; it maps to its tool.
+  slow.set("_cancel_job", 300);
+  const cancel = fetch(`http://127.0.0.1:${PORT}/cancel`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-ae-mcp-token": TOKEN },
+    body: JSON.stringify({ jobId: "j_none" }),
+  });
+  await new Promise((r) => setTimeout(r, 30));
+  const res = await post("set_layer");
+  await cancel;
+  assert.equal(res.panelWait?.behind, "cancel_job", JSON.stringify(res));
+  slow.clear();
 });
 
 panel.close();
