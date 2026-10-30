@@ -11,13 +11,13 @@ session is a tax on every request the user ever makes.
 
 | Read | When |
 |---|---|
-| [`docs/architecture.md`](docs/architecture.md) | The annotated source tree, and the op path in detail: the one op whose input is rewritten, cross-field rules, the special return shapes, write serialization. |
-| [`docs/subsystems.md`](docs/subsystems.md) | Panel version gating, the project scaffold, the house style, comp snapshots, the issue journal. |
+| [`docs/architecture.md`](docs/architecture.md) | The annotated source tree, and the op path in detail: the one op whose input is rewritten, cross-field rules, closed arguments and batch steps, the special return shapes, tool annotations, write serialization, the front desk, the tool switches. |
+| [`docs/subsystems.md`](docs/subsystems.md) | Panel version gating and capabilities, the project scaffold, the house style, filesystem checks on the server, comp snapshots and checkpoints, the issue journal. |
 | [`docs/guidance-system.md`](docs/guidance-system.md) | How agent guidance is written once and generated into every carrier. Read before touching anything under `src/guides/` or `src/prompts/`. |
 | [`docs/fragile-areas-ae.md`](docs/fragile-areas-ae.md) | Measured After Effects and ExtendScript behaviour: undo, shapes, text, audio, mogrt, expressions, `run_jsx`. |
 | [`docs/fragile-areas-bridge.md`](docs/fragile-areas-bridge.md) | The bridge, ports, CEP, the panel, and the screenshot pipeline. |
 | [`docs/fragile-areas-server.md`](docs/fragile-areas-server.md) | Tool schemas and the MCP protocol, the journal's caches, packaging and binaries. |
-| [`docs/verification-recipes.md`](docs/verification-recipes.md) | The 68 recipes run by hand against a live AE 2026. |
+| [`docs/verification-recipes.md`](docs/verification-recipes.md) | The 75 recipes run by hand against a live AE 2026. |
 
 **Nothing in `docs/` is generated** — hand-written, like this file. The generated
 prose is elsewhere and is called out below.
@@ -33,7 +33,7 @@ table is how that one went stale once already.
 
 ## What this project is
 
-An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, footage import, audio cue placement, comp snapshots and diffs, Motion Graphics template export, rendering through the render queue, one-off screenshots and contact sheets, bulk batches, comp checkpoints with revert. 84 tools. macOS and Windows — the only two platforms AE runs on.
+An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, footage import, audio cue placement, comp snapshots and diffs, Motion Graphics template export, rendering through the render queue, one-off screenshots and contact sheets, bulk batches, comp checkpoints with revert, the user's current selection, keyframe retiming and animation copy. 88 tools. macOS and Windows — the only two platforms AE runs on.
 
 It ships five ways, and the ordering below is deliberate — it goes from least to most that the user has to already have installed:
 
@@ -54,18 +54,21 @@ Claude / MCP client
         │ stdio (JSON-RPC)
         ▼
 packages/mcp-server (Node/TS)
+        │ front desk (127.0.0.1:17777, run by the first server): one queue, every session
         │ HTTP POST /op  +  WS /events
         ▼  (127.0.0.1:7777)
 packages/ae-panel (CEP extension, installed into AE)
         │ CSInterface.evalScript
         ▼
-ExtendScript inside AE  (bundle.jsx = concat of packages/jsx/*.jsx)
+ExtendScript inside AE  (bundle.jsx = packages/jsx/*.jsx in one closure; one global, __AEMCP)
         │ AE scripting API
         ▼
 After Effects
 ```
 
-The MCP server is stateless except for an in-memory `JobManager`, the `SnapshotStore` and the write queue. The panel is the *only* thing that talks to AE; it holds a Promise-chain mutex around `evalScript` because ExtendScript is single-threaded and concurrent calls would interleave. That mutex is necessary and not sufficient — see [`docs/architecture.md`](docs/architecture.md).
+The MCP server is stateless except for an in-memory `JobManager`, the `SnapshotStore`, the write queue and — in whichever server runs it — the front desk. The panel is the *only* thing that talks to AE; it holds a Promise-chain mutex around `evalScript` because ExtendScript is single-threaded and concurrent calls would interleave. That mutex is necessary and not sufficient — see [`docs/architecture.md`](docs/architecture.md).
+
+**The server does everything that does not modify After Effects (issue #220).** The panel stalls while AE is busy and does not update itself — a change there costs the user `setup_panel` and an AE restart — while the server sees the same files as the same user. So filesystem preconditions (`files/destinations.ts`), the comp diff (`snapshots/diff.ts`) and house-style I/O (`style/houseStyleFile.ts`) run in Node, and new work that needs only a path or a JSON value goes there too, not into `packages/jsx/` or `client/`.
 
 ## Source layout
 
@@ -74,26 +77,28 @@ One line each. The annotated version — why each file is the way it is — is i
 
 | Path | Purpose |
 |---|---|
-| `packages/shared/src/schemas.ts` | **Source of truth for op contracts.** zod schemas, `OpSchemas`, the `OpMutation` classification table, `crossField()`. |
-| `packages/shared/src/ipc.ts` | HTTP envelope + WS event types. |
-| `packages/jsx/*.jsx` | ExtendScript handlers, attached to the global `OPS` table. ES3-ish. |
-| `packages/jsx/core.jsx` | JSON polyfill, `dispatch()` router, `withUndo()`, the `JOBS` table. |
+| `packages/shared/src/schemas.ts` | **Source of truth for op contracts.** zod schemas, `OpSchemas`, `crossField()`, and the tables: `OpMutation`, `InternalOpMutation`, `ServerOpEffect`, `OpDiskWrite`. |
+| `packages/shared/src/jobs.ts` | Job states; `cancelling` is not terminal, the other three end states are sticky. |
+| `packages/jsx/*.jsx` | ExtendScript handlers, attached to the `OPS` table inside the bundle's closure. ES3-ish. |
+| `packages/jsx/core.jsx` | Private JSON, `dispatch()` router, `withUndo()`, the dialog guard and `aeWarnings`, the `JOBS` table. |
 | `packages/jsx/explore.jsx` | `get_layer_full` — the deep one-shot dump. The whole reason this MCP exists; spend disproportionate care here. |
 | `packages/jsx/snapshot.jsx` | The comp fingerprint and the diff of two of them. Pure, so testable with no AE. |
 | `packages/jsx/checkpoint.jsx` | `checkpoint_comp` / `revert_comp`. Restores *into* the original comp so its id never changes; copy-first, verified against the checkpoint. |
+| `packages/jsx/selection.jsx` | `get_selection` — what the user has selected, capped, with the count of what was left out. |
+| `packages/jsx/retime.jsx` | `retime_keyframes` / `copy_animation` — a key moved with every attribute; write order is load-bearing; read back after. |
 | `packages/jsx/batch.jsx` | `run_batch` — inline under 500 ops, otherwise a chunked job. |
 | `packages/jsx/vision.jsx` | `saveFrameToPng` wrapper, the resolution factor, contact-sheet tiles. |
 | `packages/jsx/footage.jsx` | Import, footage layers, the SVG viewBox check, the shared solid/`usedIn` helpers. |
 | `packages/jsx/audio.jsx` | `place_audio_cues` — plan, import, build, roll back. Statement order is load-bearing. |
 | `packages/jsx/mogrt.jsx` | `export_mogrt` — preconditions first, dialogs suppressed, everything re-fetched afterwards. |
-| `packages/jsx/render.jsx` | The render queue: add/list/remove, and `_render_prepare`/`_render_save` — the halves of `render_queue` that need AE. The render itself is not here. |
+| `packages/jsx/render.jsx` | The render queue: add/list/remove, and `_render_prepare`/`_render_save`/`_render_mark_done` — the halves of `render_queue` that need AE. The render itself is not here. |
 | `…/render/aerender.ts` | `render_queue`'s job: one `aerender` process per item, progress off stdout, outputs verified on disk, cancel kills the tree. |
-| `packages/jsx/raw.jsx` | `run_jsx` — the result serializer, library inlining, failure attribution. |
+| `packages/jsx/raw.jsx` | `run_jsx` — the result serializer, library inlining, failure attribution, the undo-group guard. |
 | `packages/jsx/values.jsx` | `__setValue` — every op's `setValue`; drops AE's false `invalid numeric result` throw only when the value read back landed (#129). |
 | `packages/jsx/helpers.jsx` | The helper scope a `run_jsx` script runs in. Listed by signature in the tool description — change both together. |
-| `packages/jsx/style.jsx` | `get_house_style` / `set_house_style`, read beside the .aep over the bridge. |
+| `packages/jsx/style.jsx` | `_project_path`, and the legacy `get_house_style` / `set_house_style` for a panel without the `project-path` capability. |
 | `packages/ae-panel/CSXS/manifest.xml` | CEP manifest. Auto-start on AE activate, Node enabled. |
-| `packages/ae-panel/client/main.js` | HTTP+WS server, the `evalScript` mutex, the job driver, port binding and the port file. |
+| `packages/ae-panel/client/main.js` | HTTP+WS server, the `evalScript` mutex, the `__AEMCP` check, the job driver, port binding and the port file, `capabilities` on `/health`. |
 | `packages/ae-panel/client/pngcodec.js` | 16→8-bit conversion, empty-frame detection, `inspectPngStructure`. |
 | `packages/ae-panel/client/framereader.js` | Decides when After Effects has *finished* writing a frame. |
 | `packages/ae-panel/client/contactsheet.js` | Tiles several frames into one labelled sheet. |
@@ -102,25 +107,36 @@ One line each. The annotated version — why each file is the way it is — is i
 | `packages/mcp-server/src/server.ts` | Tool registry, return-shape branching, error mapping, `toolInputSchema()`. |
 | `…/tools/descriptions.ts` | All tool descriptions, written for an LLM reading the tool list cold. |
 | `…/tools/runJsxSource.ts` | `scriptPath` and `libraries`. The **server** reads those files, never the panel. |
+| `…/tools/annotations.ts` | MCP read-only/destructive hints, derived from the tables in `schemas.ts` — never hand-kept per tool. |
+| `…/tools/batchSteps.ts` | Each `run_batch` step validated against its tool's strict schema, parsed args forwarded; refuses ops that cannot be a step. |
+| `…/tools/internalOps.ts` | **The one sender of internal `_` ops.** Typed over `InternalOpMutation`; refuses a `"write"` with no write lease held. |
 | `…/tools/policy.ts` | Read-only mode and the `run_jsx` switch: which tools are offered, refused, and noted in the guidance. |
 | `…/tools/whatsNew.ts` | The `since` filter on the whats-new topic: semver compare, splitter, version header. |
 | `…/bridge/{httpClient,wsClient,discovery}.ts` | Bridge plumbing, port candidates, the panel-health test. |
+| `…/bridge/panelGate.ts` | The version-gate verdict and the panel's capabilities, cached and re-checked; `withdraw` on an `Unknown op`. |
 | `…/bridge/writeQueue.ts` | The one-writer-at-a-time mutex, and `extendUntil` for a lease that outlives its call. |
+| `…/frontdesk/line.ts` | `SessionLine` — every server's one way to AE: own queue, then the desk's lock; election, handover, what may be re-sent. |
+| `…/frontdesk/{desk,lock,config,protocol}.ts` | The desk's loopback server, the cross-session lock, the port and `desk-<port>.json`, the wire format that keeps the bridge failures the same classes. |
 | `…/jobs/manager.ts` | In-memory job table, `waitFor(jobId)`, the progress emitters `await_job` binds. |
 | `…/snapshots/store.ts` | In-memory comp fingerprints; `missingMessage()` is why it is a class and not a `Map`. |
+| `…/snapshots/diff.ts` | `diff_comp`'s diff, a port of `snapshot.jsx`'s kept byte-identical by a parity test. Change one, change both. |
+| `…/files/destinations.ts` | Filesystem preconditions for `export_mogrt`, `add_to_render_queue`, `import_footage`, ported from the jsx. Reads only. |
 | `…/issues/journal.ts` | The two issue journals, the error-text matcher, version stamps, `archiveReason`. |
 | `…/issues/failures.ts` | `annotateFailure` — the push half. Never throws, never masks the error. |
 | `…/setup/{check,install,paths}.ts` | `check_setup` / `setup_panel`. Never touches the bridge client. |
 | `…/setup/platform.ts` | **The only place macOS and Windows diverge.** |
+| `…/setup/{panelVersion,panelCapabilities}.ts` | The running-bundle-hash comparison; `capabilities` off `/health`, absent or malformed meaning legacy. |
 | `…/setup/scaffold.ts` | **The one definition of what a project folder is.** Used by `init_project` and the CLI. |
 | `…/cli/init.ts` | `npx … init <dir>`. Holds no templates of its own. |
+| `…/style/houseStyleFile.ts` | `house-style.md` read and written by the server, given the .aep path from `_project_path`. |
 | `…/style/summary.ts` | The house-style digest. Parses a markdown document nobody controls. |
 | `…/guides/*.md` | **Source of truth for agent guidance.** Frontmatter + markdown; `after-effects.md` is the core. |
 | `…/prompts/*.md` | Source of truth for user-invoked flows. |
 | `…/generated/content.ts` | Generated. Never hand-edit — `build-guides.mjs --check` fails the build if you do. |
 | `plugin/` | The Claude Code plugin: `.mcp.json` plus generated `skills/` and `commands/`. |
 | `.claude-plugin/marketplace.json` | Marketplace catalog. |
-| `scripts/bundle-jsx.mjs` | Concatenates `packages/jsx/*.jsx` into the panel bundle. Must stay a pure function of its sources. |
+| `scripts/bundle-jsx.mjs` | Wraps `packages/jsx/*.jsx` in one closure publishing only `__AEMCP`, and refuses a bundle ExtendScript cannot parse. Must stay a pure function of its sources. |
+| `scripts/lib/extendscript-syntax.mjs` | The ES5 parse, ES3 reserved-word and missing-built-in checks the bundle must pass. Node runs what AE refuses. |
 | `scripts/build-guides.mjs` | Generates every copy of the guidance prose. `--check` runs in CI. |
 | `scripts/prepare-package.mjs` | `prepack` — esbuild the server to `bin/`, vendor the panel to `panel/`. |
 | `scripts/install-panel.mjs` | Dev equivalent of `setup_panel`. |
@@ -128,19 +144,21 @@ One line each. The annotated version — why each file is the way it is — is i
 | `scripts/build-binaries.mjs` | `bun build --compile`; every target is a *folder*, not a bare binary. |
 | `scripts/sign-and-notarize.sh` | codesign then notarytool. Local-only; credentials from the environment. |
 | `scripts/lib/setup.mjs` | Lets the dev scripts reuse the compiled setup module instead of a second copy. |
+| `scripts/lib/release-checks.mjs` | Notary verdict must be `Accepted`; every artifact smoke-run and must serve exactly `OpSchemas`' tools. |
+| `tests/live/` | The live AE driver: scripted recipe fixtures against a fresh server from this checkout. Refuses without `--live` and a prefs backup. |
 
 ## Adding an op
 
 Adding a new op = touching six places. In order:
 
 1. **Schema** — `packages/shared/src/schemas.ts`: add zod schema and an entry in `OpSchemas`. If two fields are alternatives ("exactly one of these"), declare it with `crossField()` rather than `.refine()` — a bare refinement is dropped by the converter and `tests/unit/schema-constraints.mjs` fails the build. See "Cross-field rules" in [`docs/architecture.md`](docs/architecture.md).
-2. **Classification** — the `OpMutation` table at the bottom of the same file: `"write"`, `"read"` or `"server"`. `tests/unit/write-queue.mjs` fails the build if you skip it, on purpose — see "Serializing writes" in [`docs/architecture.md`](docs/architecture.md). The classification also decides read-only mode: a `"write"` is hidden there, a `"read"` is offered, and a `"server"` op needs its own entry in `READ_ONLY_SERVER_OPS` (`tools/policy.ts`) — the compiler insists.
-3. **ExtendScript handler** — add to the matching module in `packages/jsx/` as `OPS.your_op = function(args){ ... }`. Use `noUndo(fn)` for read-only ops (skips the undo group wrapper).
-4. **Description** — `packages/mcp-server/src/tools/descriptions.ts`: add an entry keyed by op name. Write it for an LLM agent reading the tool list cold.
-5. **Build** — `npm run build` rebuilds TS and concatenates the .jsx bundle.
-6. **Reload in AE** (optional, dev only) — `curl -X POST -H "x-ae-mcp-token: $(cat ~/.engineroom-ae-mcp/token-7777)" http://127.0.0.1:7777/reload-jsx` re-`$.evalFile`s the bundle without restarting AE. The header is not optional: every route that reaches AE is authenticated (issue #106).
+2. **Classification** — the `OpMutation` table at the bottom of the same file: `"write"`, `"read"` or `"server"`. `tests/unit/write-queue.mjs` fails the build if you skip it, on purpose — see "Serializing writes" in [`docs/architecture.md`](docs/architecture.md). The classification also decides read-only mode and the tool's MCP annotations (`tools/annotations.ts`, derived — never hand-set): a `"write"` is hidden in read-only mode, a `"read"` is offered, and a `"server"` op needs entries in `READ_ONLY_SERVER_OPS` (`tools/policy.ts`) and `ServerOpEffect` — the compiler insists. An op that writes a file on disk with no `overwrite` field goes in `OpDiskWrite`, or it is annotated non-destructive.
+3. **ExtendScript handler** — add to the matching module in `packages/jsx/` as `OPS.your_op = function(args){ ... }`. Use `noUndo(fn)` for read-only ops (skips the undo group wrapper). Every field the schema declares must be read off `args` — `tests/unit/schema-handler-contract.mjs` fails the build on one that is advertised and never read (a server-answered op needs a `SERVER_READERS` entry there). The bundle must pass `extendscript-syntax.mjs` too.
+4. **Description** — `packages/mcp-server/src/tools/descriptions.ts`: add an entry keyed by op name. Write it for an LLM agent reading the tool list cold. `tests/unit/tool-budget.mjs` caps its length and refuses issue numbers in it.
+5. **Build** — `npm run build` rebuilds TS and the .jsx bundle.
+6. **Reload in AE** (optional, dev only) — `curl -X POST -H "x-ae-mcp-token: $(cat ~/.engineroom-ae-mcp/token-7777)" http://127.0.0.1:7777/reload-jsx` re-`$.evalFile`s the bundle without restarting AE. The header is not optional: every route that reaches AE is authenticated (issue #106). It drops every `run_batch` job in flight, since the job table lives in the bundle.
 
-The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring is needed unless the op needs special return packaging (vision = image content, run_batch = async envelope, jobs/* = server-resident) — or, in one case, special *input* packaging: `run_jsx` is rewritten between zod validation and the forward, so `scriptPath` becomes `code` and `libraries` become `{path, text}` before the panel ever sees them (`tools/runJsxSource.ts`).
+The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring is needed unless the op needs special return packaging (vision = image content, run_batch = async envelope, jobs/* = server-resident, snapshots = half server-resident) — or, in one case, special *input* packaging: `run_jsx` is rewritten between zod validation and the forward, so `scriptPath` becomes `code` and `libraries` become `{path, text}` before the panel ever sees them (`tools/runJsxSource.ts`).
 
 Two things step 1 does not cover on its own, both in
 [`docs/architecture.md`](docs/architecture.md): `run_jsx` is the one op whose
@@ -151,12 +169,12 @@ rule reaches the server and never the model.
 
 ## Conventions
 
-- **ExtendScript is ES3-ish.** No `let`/`const`/arrow functions/template literals/`Object.keys`/destructuring in `packages/jsx/*.jsx`. AE 2026 has native JSON but `core.jsx` polyfills defensively.
+- **ExtendScript is ES3-ish.** No `let`/`const`/arrow functions/template literals/`Object.keys`/destructuring in `packages/jsx/*.jsx`, and no ES3 reserved word (`native`, `class`, …) as an identifier. The build refuses a bundle that breaks this (`scripts/lib/extendscript-syntax.mjs`) — the unit tests run the jsx under Node, which accepts all of it, while AE refuses the *whole* bundle for one line. `core.jsx` keeps a private JSON because the engine is shared and another script can replace the global one.
 - **Stable IDs.** `getCompById(id)` uses `app.project.itemByID`; `getLayerById(comp, layerId)` walks `comp.layers` matching `layer.id`. Never use `.index` as a long-lived identifier — it shifts when layers are reordered.
 - **One undo step per request, and never one that spans two requests.** `dispatch()` wraps the handler in `withUndo()`, and `__beginUndoGroup` is the only thing allowed to call `app.beginUndoGroup` — everything groups through it, so `__UNDO_GROUPS` can count what was actually opened. `run_batch` manages its own undo (`__meta.noUndo = true`): one group for an inline batch, one per chunk for a long one. A group that opens in one `evalScript` and closes in another is not merely fragile — AE throws it away. See [`docs/fragile-areas-ae.md`](docs/fragile-areas-ae.md).
 - **MCP server stdout is sacred.** All logs go to stderr via `util/logger.ts`. Touching `console.log` anywhere in mcp-server will corrupt the JSON-RPC stream.
 - **Tool descriptions are written for LLMs.** Tell the agent (a) what the tool does, (b) when to reach for it, (c) what to avoid. Screenshot descriptions especially must say "one-off, do NOT screenshot every frame."
-- **Never report success for work that didn't happen.** An agent can only correct a failure it's told about, so a swallowed error is worse than a thrown one. `add_shape_content` is the reference case: it resolves every key first, and if any is unresolvable it removes the node it created and throws with the offending keys named, rather than leaving a half-built shape behind an `{ok:true}`. Schemas that accept free-form objects must be `.strict()` for the same reason — zod's default is to strip unknown keys silently.
+- **Never report success for work that didn't happen.** An agent can only correct a failure it's told about, so a swallowed error is worse than a thrown one. `add_shape_content` is the reference case: it resolves every key first, and if any is unresolvable it removes the node it created and throws with the offending keys named, rather than leaving a half-built shape behind an `{ok:true}`. For the same reason every op schema is closed at every depth by `StrictOpSchemas`, not by hand — zod's default is to strip unknown keys silently.
 
 ## Rules that are easy to break silently
 
@@ -171,7 +189,12 @@ breaking one produces a plausible success rather than an error.
 - **The panel does not update itself.** Gate on the *running* bundle hash, never the installed one; they diverge for the whole window between `setup_panel` and the next AE launch. → [subsystems](docs/subsystems.md)
 - **Edit `src/guides/*.md` and `src/prompts/*.md`, never the generated outputs.** `plugin/skills/**`, `plugin/commands/**` and `src/generated/content.ts` are owned wholesale and overwritten by the next build. → [guidance](docs/guidance-system.md)
 - **A bounded read must name what it left out.** Absent `include` means everything — except `find_layers`, where the bounded form is the promise. → [server](docs/fragile-areas-server.md)
-- **Four bridge failures, four contradicting remedies.** Timeout, unreachable, write-queue-wait and auth must never share a sentence: one forbids re-sending, one asks for it, one sends the reader to `check_setup`, and one says the panel refused on purpose and will again. The auth one is the token every route but `/health` requires; CORS is not what gates it, and could not be. → [bridge](docs/fragile-areas-bridge.md)
+- **Five bridge failures, five contradicting remedies.** Timeout, unreachable, write-queue-wait, auth and reset must never share a sentence: a timeout forbids re-sending (it reached AE and may still run); a queue wait asks for it (nothing left the server); unreachable sends the reader to `check_setup`; auth says the panel refused on purpose and will again; a reset (`BridgeResetError`) was delivered then dropped — it may have run, so read back before re-sending. The auth one is the token every route but `/health` requires; CORS is not what gates it, and could not be. **The front desk adds no sixth kind:** a follower gets the leader's failure as the same class, a desk lost or stalled mid-write is a `FrontDeskLostError` (a reset), a write whose place was lost or whose forwarding window expired is a `DeskPlaceLostError` and a wait behind another session a `DeskWaitError` (both queue waits). A desk failure must never fall through to `BridgeUnreachableError`, which `runOp` re-sends. The one desk-only answer, a request too large for it, says split the work — not re-send. → [bridge](docs/fragile-areas-bridge.md)
+- **Several servers share one queue: the front desk.** The first server on an After Effects binds `127.0.0.1:17777` (`P+10000` under `AE_MCP_PORT=P`) and serializes every session's writes, holding a chunked `run_batch` end to end; the others forward through it. A write is re-sent only on proof it never reached the panel, and anything that reports how long a session waited is timed at the desk — the panel's clock stops while ExtendScript runs. Tests that spawn servers set `AE_MCP_FRONT_DESK=off` or a temp `HOME`, or they become a real session's desk. → [architecture](docs/architecture.md)
+- **Internal `_` ops go through `internalSender` (`tools/internalOps.ts`), never `bridge.runOp` directly.** They are not tools, so they never pass the tool path's classification or write lease; the sender is typed over `InternalOpMutation` and refuses a `"write"` with no lease held. Sent any other way, an internal write can land between two chunks of another session's batch. → [subsystems](docs/subsystems.md)
+- **Every op runs with AE's dialogs suppressed, and what AE said surfaces as `aeWarnings`.** `dispatch()` brackets the op in `beginSuppressDialogs`/`endSuppressDialogs(false)` and collects `app.onError` (PROBLEM severity dropped as handled). A non-object result is wrapped in a marked envelope the server unwraps; an op managing its own suppression opts out with `__meta.ownDialogs`. Dropping the warnings means a dialog nobody saw becomes a silent success. → [AE](docs/fragile-areas-ae.md)
+- **`run_jsx`'s undo guard covers literal calls only.** `app.beginUndoGroup`/`app.endUndoGroup` written out in the script or a library are rewritten to counting stand-ins and balanced inside the call; replacing the methods on `app` was tried and AE ignores it. Through `eval`/`Function`/`$.evalFile`, an alias of `app` or a computed name, a call reaches AE uncounted; eval-like routes get a CAUTION on the result, nothing more. → [AE](docs/fragile-areas-ae.md)
+- **Panel capabilities come from `/health`, and absent means legacy, not broken.** `bundleHash` names the ExtendScript; `capabilities` names the panel JavaScript. Use a capability only when it is listed, keep the old path for every panel that does not list it, and `withdraw` it on an `Unknown op`. → [subsystems](docs/subsystems.md)
 - **Measure After Effects; do not trust Adobe's documentation.** Undo groups across calls, `CompItem.posterTime`, `$.evalFile`'s scope and `Error.start`/`end` were all documented one way and behave another. → [recipes](docs/verification-recipes.md)
 - **The .jsx bundle must stay a pure function of its sources** — no timestamps, no unsorted directory reads. Its hash is half the version gate. → [subsystems](docs/subsystems.md)
 - **`ws` is always a real directory on disk**, in every packaging path. It can never be inlined. → [server](docs/fragile-areas-server.md)
@@ -180,7 +203,7 @@ breaking one produces a plausible success rather than an error.
 
 ```bash
 npm install                 # workspaces hoist deps to root node_modules
-npm run build               # tsc shared + mcp-server, concatenate jsx bundle
+npm run build               # tsc shared + mcp-server, build + syntax-check the jsx bundle
 npm run build:jsx           # only rebuild bundle.jsx (fast iteration)
 npm run watch:ts            # tsc --watch for mcp-server
 npm run doctor              # sanity checks (debug mode, install, port, AE running)
@@ -205,7 +228,7 @@ Linux is impossible, not merely unimplemented — Adobe has never shipped AE for
 
 All `packages/jsx/*.jsx` is AE's own scripting API and is platform-neutral; never add platform branching there. Host differences are confined to `setup/platform.ts` (PlayerDebugMode via `defaults` vs `reg`, AE process via `pgrep` vs `tasklist`, where `aerender` lives and how a render's process tree is stopped — process group vs `taskkill /T`) and `cepExtensionsDir()` in `setup/paths.ts` (`~/Library/Application Support/...` vs `%APPDATA%\...`).
 
-CI (`.github/workflows/ci.yml`) builds and smoke-tests on macos-latest and windows-latest: server starts, ≥70 tools, every emitted tool schema is valid draft 2020-12 and hides no cross-field constraint, `instructions`/prompts/resources are served and `$ARGUMENTS` substitutes, `check_setup` resolves paths, and both scaffold entry points write files and refuse to clobber. It cannot exercise the CEP install — no AE on a runner — so the Windows install path is the least-proven part of the project. macOS is the daily-driven platform.
+CI (`.github/workflows/ci.yml`) builds and smoke-tests on macos-latest and windows-latest: server starts, serves exactly the tools `OpSchemas` defines, every emitted tool schema is valid draft 2020-12 and hides no cross-field constraint, `instructions`/prompts/resources are served and `$ARGUMENTS` substitutes, `check_setup` resolves paths, and both scaffold entry points write files and refuse to clobber. It cannot exercise the CEP install — no AE on a runner — so the Windows install path is the least-proven part of the project. macOS is the daily-driven platform.
 
 ## Releasing
 
