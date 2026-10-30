@@ -15,12 +15,16 @@ import {
  * The front desk's wire format (issue #223).
  *
  * Every desk answer is newline-delimited JSON on one HTTP response, so the desk
- * can say "you are 2nd in line" while the caller waits, and so the moment it
- * hands a call to After Effects is a line of its own (`start`). That line is
- * the whole handover argument: it is written and flushed *before* the desk
- * posts to the panel, so a caller that lost the desk without seeing it knows
- * the call never reached After Effects and can send it again, and one that saw
- * it knows the call may have run and must not.
+ * can say "you are 2nd in line" while the caller waits, and beat on it while
+ * nothing else happens, so a stalled desk is noticed.
+ *
+ * What a caller may re-send after losing the desk is decided by what it can
+ * *prove* never reached After Effects, never by a line it did not see: a
+ * `start` written by the desk can be lost in transit after the call went to the
+ * panel (a hard kill, on Windows especially). So a write is re-sent only when
+ * the desk positively refused it — the connection refused, a non-200, or `lost`
+ * — and any other loss of a write is "may have run, read back first". Reads are
+ * always re-sent.
  */
 
 /** Who is in front, as a waiting caller is told it. */
@@ -34,21 +38,23 @@ export interface DeskAhead {
 
 export type LockLine =
   /** Still waiting. `position` is 1-based: 1 = next. */
-  | { t: "wait"; position: number; holder: DeskAhead | null; waitedMs: number }
+  | { t: "wait"; position: number; holder: DeskAhead | null; waitedMs: number; graceMs?: number }
   | { t: "granted"; id: string; wait: GrantWait | null }
   | { t: "err"; error: WireError }
   /** The desk is closing; nothing was granted. Take the lock again wherever the desk is now. */
-  | { t: "moved" };
+  | { t: "moved" }
+  | { t: "beat" };
 
 export type OpLine =
-  /** Written and flushed before the desk posts to the panel. */
+  /** Written before the desk posts to the panel: the op timeout's clock starts here. */
   | { t: "start"; ahead: DeskAhead[] }
   /** Still running at After Effects behind these, which other sessions sent first. */
   | { t: "ahead"; ahead: DeskAhead[] }
   | { t: "ok"; result: unknown; panelPort: number }
   | { t: "err"; error: WireError; panelPort: number }
   /** The lease this write claimed is not the one holding the lock. Nothing was sent. */
-  | { t: "lost" };
+  | { t: "lost" }
+  | { t: "beat" };
 
 /** What a grant reports when the call waited behind another session. */
 export interface GrantWait {
@@ -128,6 +134,12 @@ export function ordinal(n: number): string {
 
 /** What a session waiting for the lock is told, in a sentence. */
 export function describeLockWait(op: string, line: Extract<LockLine, { t: "wait" }>): string {
+  if (!line.holder && line.graceMs) {
+    return (
+      `\`${op}\` is waiting up to ${Math.ceil(line.graceMs / 1000)}s for the write queue: the previous front desk went ` +
+      "away while another session's long write held it, and that session gets the first chance to reclaim it."
+    );
+  }
   const secs = Math.round(line.waitedMs / 1000);
   const behind = line.holder
     ? `waiting behind another session's \`${line.holder.op}\` (${line.holder.session}), which has held it for ${Math.round(line.holder.forMs / 1000)}s`

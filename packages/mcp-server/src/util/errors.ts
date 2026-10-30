@@ -650,24 +650,58 @@ export class DeskWaitError extends WriteQueueWaitError {
  * back" would send the reader to check something that never left.
  */
 export class FrontDeskLostError extends BridgeResetError {
-  constructor(port: number, op: string) {
+  constructor(port: number, op: string, how: "exited" | "stalled" = "exited") {
     super(port, op);
     this.name = "FrontDeskLostError";
-    this.message = FrontDeskLostError.text(op);
+    this.message = FrontDeskLostError.text(op, how);
   }
-  static text(op: string): string {
+  static text(op: string, how: "exited" | "stalled" = "exited"): string {
+    const what =
+      how === "stalled"
+        ? "stopped answering in the middle of `" + op + "` — the server process running it is suspended or hung."
+        : "went away in the middle of `" + op + "` — the server process running it exited.";
     return [
-      `The front desk this session shares with other AI sessions on the same After Effects went away in the middle of \`${op}\` — the server process running it exited.`,
+      `The front desk this session shares with other AI sessions on the same After Effects ${what}`,
       "",
-      "The call had already been handed to After Effects, so it may or may not have",
-      "taken effect; no answer came back to say which. Another session's server takes",
-      "the desk over, and the next call goes through it.",
+      "The call had reached the desk, which may already have handed it to After Effects,",
+      "so it may or may not have taken effect; no answer came back to say which. The",
+      "next call goes through whichever server holds the desk then, or straight to",
+      "After Effects if none answers.",
       "",
       "What to do, in order:",
       "1. Do not blindly re-send it. A write could land twice.",
       "2. Read the affected comp or layer back (diff_comp against a snapshot,",
       "   get_layer_full, list_layers) to learn whether this call landed, and only",
       "   send it again if it did not.",
+    ].join("\n");
+  }
+}
+
+/**
+ * A write that never left this server because its place in the shared write
+ * queue was lost (issue #223): the front desk stopped answering before granting
+ * it, or changed hands and the lease could not be re-taken. Nothing reached
+ * After Effects. The write-queue-wait kind — re-sending is safe — so it is one.
+ */
+export class DeskPlaceLostError extends WriteQueueWaitError {
+  constructor(op: string, public why: string) {
+    super(op, 0, "the front desk");
+    this.name = "DeskPlaceLostError";
+    this.message = DeskPlaceLostError.text(op, why);
+  }
+  static text(op: string, why: string): string {
+    return [
+      `\`${op}\` was not sent: ${why}`,
+      "",
+      "Several AI sessions share this After Effects through a front desk run by one of",
+      "their servers, and this call's place in the shared write queue is gone. It never",
+      "reached After Effects, so nothing in the project was changed.",
+      "",
+      "What to do, in order:",
+      "1. Nothing was written, so re-sending this call is safe — unlike a bridge timeout.",
+      "2. If it fails the same way again, tell the user another AI session's server has",
+      "   stopped responding (a suspended terminal, a debugger) and ask them to resume or",
+      "   close it; within seconds this session goes to After Effects directly instead.",
     ].join("\n");
   }
 }

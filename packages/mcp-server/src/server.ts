@@ -735,6 +735,10 @@ export function createServer(opts: CreateServerOptions = {}) {
         // below it — a shorter one here would release the lock mid-batch while
         // a writer that queued at the same moment was still waiting.
         lease?.extendUntil(jobs.waitFor(env.jobId, writes.holdCeilingMs));
+        // A desk lease can be lost while the batch still runs, if the front
+        // desk changes hands and it cannot be re-taken (issue #223): other
+        // sessions' writes may then land between its chunks, and the job says so.
+        lease?.onLost?.((why) => jobs.warn(env.jobId, why));
         // The undo fields travel with the envelope because this is the only
         // message the agent sees before it starts describing the work to the
         // user; the measured count arrives much later, with the job's result.

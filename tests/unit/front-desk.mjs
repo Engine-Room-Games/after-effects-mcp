@@ -209,7 +209,12 @@ await check("every bridge failure crosses the desk as the same kind with the sam
 await check("the two new messages are the kinds they belong to, and say something the others do not", async () => {
   const lost = new errors.FrontDeskLostError(17777, "set_text");
   assert.ok(lost instanceof errors.BridgeResetError, "a desk lost mid-call is a reset: may have run");
-  assert.match(lost.message, /may or may not have\ntaken effect/);
+  assert.match(lost.message.replace(/\n/g, " "), /may or may not have taken effect/);
+  assert.match(new errors.FrontDeskLostError(17777, "set_text", "stalled").message, /stopped answering in the middle of `set_text`/);
+  const place = new errors.DeskPlaceLostError("set_text", "the desk stopped answering.");
+  assert.ok(place instanceof errors.WriteQueueWaitError, "nothing ran: the write-queue-wait kind, safe to re-send");
+  assert.match(place.message, /^`set_text` was not sent: the desk stopped answering\./);
+  assert.match(place.message, /re-sending this call is safe/);
   assert.match(lost.message, /Do not blindly re-send it/);
   assert.doesNotMatch(lost.message, /check_setup/, "the panel never left; check_setup is not the remedy");
   const wait = new errors.DeskWaitError("set_text", 3000, "run_batch", "claude-code, pid 4");
@@ -222,12 +227,206 @@ await check("the two new messages are the kinds they belong to, and say somethin
   assert.match(describeAhead("list_comps", [{ op: "run_jsx", session: "x, pid 2", forMs: 4200 }]), /still running another session's `run_jsx` \(x, pid 2\) ahead of it — 4s so far/);
 });
 
+const home = fs.mkdtempSync(path.join(os.tmpdir(), "ae-mcp-desk-"));
+const deskDir = path.join(home, ".engineroom-ae-mcp");
+
+async function freePort() {
+  const s = net.createServer();
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  const p = s.address().port;
+  await new Promise((r) => s.close(r));
+  return p;
+}
+const deskFile = (port) => path.join(deskDir, `desk-${port}.json`);
+const readDesk = (port) => {
+  try { return JSON.parse(fs.readFileSync(deskFile(port), "utf8")); } catch { return null; }
+};
+
+// ===========================================================================
+// In-process: session lines against a real desk, with a fake panel client
+// ===========================================================================
+
+// The desk file lives under the home directory, read at call time.
+process.env.HOME = home;
+process.env.USERPROFILE = home;
+const { SessionLine } = await import(dist("frontdesk", "line.js"));
+const { WriteQueue } = await import(dist("bridge", "writeQueue.js"));
+const { deskProof } = await import(dist("frontdesk", "desk.js"));
+
+function fakeBridge() {
+  const calls = [];
+  return {
+    calls,
+    port: 1,
+    async runOp(op) { calls.push(op); return { ok: true, op }; },
+    async cancel() { return { known: true }; },
+    async switchPort() {},
+    onPortChange() {},
+  };
+}
+const lines = [];
+function line(port, name, extra = {}) {
+  const bridge = fakeBridge();
+  const l = new SessionLine(bridge, new WriteQueue(), { desk: { port, ...extra }, sessionLabel: () => `${name}, pid 1` });
+  l.bridge_ = bridge;
+  lines.push(l);
+  return l;
+}
+function postDesk(port, token, route, body) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path: route, method: "POST", headers: { "x-ae-mcp-desk-token": token } }, (res) => {
+      let t = "";
+      res.on("data", (c) => (t += c));
+      res.on("end", () => resolve(t.split("\n").filter(Boolean).map((x) => JSON.parse(x)).filter((x) => x.t !== "beat")));
+    });
+    req.on("error", reject);
+    req.end(JSON.stringify(body));
+  });
+}
+
+await check("the desk refuses a write without the lease holding the lock, and sends nothing", async () => {
+  const port = await freePort();
+  const L = line(port, "L");
+  assert.equal(await L.ready(), "leader");
+  const token = readDesk(port).token;
+  for (const body of [
+    { op: "set_text", write: true, sessionId: "x" },
+    { op: "set_text", write: true, leaseId: "not-a-lease", sessionId: "x" },
+  ]) {
+    const out = await postDesk(port, token, "/desk/op", body);
+    assert.deepEqual(out, [{ t: "lost" }]);
+  }
+  assert.deepEqual(L.bridge_.calls, [], "nothing reached the panel");
+  const read = await postDesk(port, token, "/desk/op", { op: "list_comps", sessionId: "x" });
+  assert.equal(read.at(-1).t, "ok", "a read needs no lease");
+  await L.close();
+});
+
+await check("a batch whose lock cannot be re-taken after a handover says so, and its writes are refused", async () => {
+  const port = await freePort();
+  const L1 = line(port, "L1");
+  const L2 = line(port, "L2");
+  assert.equal(await L1.ready(), "leader");
+  assert.equal(await L2.ready(), "follower");
+  const lease = await L2.acquire("run_batch");
+  let finish;
+  lease.extendUntil(new Promise((r) => (finish = r)));
+  const warnings = [];
+  lease.onLost((w) => warnings.push(w));
+  lease.release();
+  assert.equal(readDesk(port).batchHeld, true, "the file says a long lease holds the lock");
+
+  // L1's desk goes away, and something else takes its port before L2 can.
+  const desk = L1["mode"].desk;
+  desk["server"].close();
+  const foreign = http.createServer((_q, r) => { r.statusCode = 404; r.end(); });
+  await new Promise((r) => foreign.listen(port, "127.0.0.1", r));
+  await L1.close();
+  assert.equal(readDesk(port)?.batchHeld, true, "a graceful close leaves the file while a long lease holds the lock");
+
+  await until("the batch to be told", () => warnings.length > 0);
+  assert.match(warnings[0], /lost the shared After Effects write lock when the front desk changed hands/);
+  assert.match(warnings[0], /another AI session's writes may have landed between its steps/);
+  await assert.rejects(L2.runOp("set_text", {}, { write: true }), (e) => {
+    assert.ok(e instanceof errors.DeskPlaceLostError, e.message);
+    assert.match(e.message, /lost its turn in the shared write queue/);
+    return true;
+  });
+  assert.deepEqual(L2.bridge_.calls, [], "the write never left the server");
+  finish();
+  await new Promise((r) => foreign.close(r));
+  fs.rmSync(deskFile(port), { force: true });
+});
+
+await check("a leftover desk file costs a lone session nothing; one left by a running batch is a reported grace", async () => {
+  const quiet = await freePort();
+  fs.mkdirSync(deskDir, { recursive: true });
+  fs.writeFileSync(deskFile(quiet), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 999_999, port: quiet, token: "old", startedAt: 1 }));
+  const L = line(quiet, "L", { graceMs: 600 });
+  assert.equal(await L.ready(), "leader");
+  const t0 = Date.now();
+  (await L.acquire("set_text")).release();
+  assert.ok(Date.now() - t0 < 300, `a leftover file with nothing held made a lone session wait ${Date.now() - t0}ms`);
+  await L.close();
+
+  const busy = await freePort();
+  fs.writeFileSync(deskFile(busy), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 999_999, port: busy, token: "old", startedAt: 1, batchHeld: true }));
+  const M = line(busy, "M", { graceMs: 600 });
+  assert.equal(await M.ready(), "leader");
+  const said = [];
+  const t1 = Date.now();
+  (await M.acquire("set_text", undefined, (m) => said.push(m))).release();
+  assert.ok(Date.now() - t1 >= 400, "a batch was holding the lock: its session gets its grace");
+  assert.ok(said.some((m) => /is waiting up to 1s for the write queue: the previous front desk went away while another session's long write held it/.test(m)), said.join("\n"));
+  await M.close();
+});
+
+await check("a desk that cannot prove it knows the token is never joined, and never crashes the server", async () => {
+  for (const withFile of [false, true]) {
+    const port = await freePort();
+    const fake = http.createServer((_q, r) => {
+      r.setHeader("content-type", "application/json");
+      r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4242, beatMs: 2000 }));
+    });
+    await new Promise((r) => fake.listen(port, "127.0.0.1", r));
+    if (withFile) {
+      fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4242, port, token: "t", startedAt: 1 }));
+    }
+    const L = line(port, "L", { electionDeadlineMs: 600 });
+    assert.equal(await L.ready(), "direct", `withFile=${withFile}`);
+    assert.deepEqual(await L.runOp("list_comps", {}), { ok: true, op: "list_comps" });
+    await L.close();
+    await new Promise((r) => fake.close(r));
+  }
+});
+
+await check("a write the desk may have forwarded is never re-sent: no answer is not proof it never ran", async () => {
+  // A desk that proves itself, grants the lock, and on every op reads the
+  // request and drops the connection — what a hard kill after forwarding,
+  // with the `start` line lost on the way, looks like from here.
+  const port = await freePort();
+  const token = "fake-desk-token";
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4243, port, token, startedAt: 1 }));
+  const ops = [];
+  const fake = http.createServer((q, r) => {
+    if (q.url === "/desk/hello") {
+      r.setHeader("content-type", "application/json");
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4243, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+    }
+    let body = "";
+    q.on("data", (c) => (body += c));
+    q.on("end", () => {
+      if (q.url === "/desk/lock") {
+        r.writeHead(200, { "content-type": "application/x-ndjson" });
+        r.write(JSON.stringify({ t: "granted", id: "lease-1", wait: null }) + "\n");
+        return;
+      }
+      ops.push(JSON.parse(body).op);
+      q.socket.destroy();
+    });
+  });
+  await new Promise((r) => fake.listen(port, "127.0.0.1", r));
+  const L = line(port, "L");
+  assert.equal(await L.ready(), "follower");
+  const lease = await L.acquire("set_text");
+  await assert.rejects(L.runOp("set_text", {}, { write: true }), (e) => {
+    assert.ok(e instanceof errors.FrontDeskLostError, e.message);
+    return true;
+  });
+  lease.release();
+  assert.deepEqual(ops, ["set_text"], "sent to the desk exactly once");
+  assert.deepEqual(L.bridge_.calls, [], "and never sent anywhere else");
+  // A read is safe to send again, and is.
+  assert.deepEqual(await L.runOp("list_comps", {}), { ok: true, op: "list_comps" });
+  assert.ok(ops.filter((o) => o === "list_comps").length >= 2, `the read was re-sent: ${ops}`);
+  await L.close();
+  fake.closeAllConnections?.();
+  await new Promise((r) => fake.close(r));
+});
+
 // ===========================================================================
 // Processes: a fake panel and real servers
 // ===========================================================================
-
-const home = fs.mkdtempSync(path.join(os.tmpdir(), "ae-mcp-desk-"));
-const deskDir = path.join(home, ".engineroom-ae-mcp");
 
 /** Every op the fake panel ran: op, tag, when it entered and left. */
 const seen = [];
@@ -276,14 +475,6 @@ await new Promise((r) => panel.listen(0, "127.0.0.1", r));
 const panelPort = panel.address().port;
 assert.notEqual(panelPort, 7777);
 
-async function freePort() {
-  const s = net.createServer();
-  await new Promise((r) => s.listen(0, "127.0.0.1", r));
-  const p = s.address().port;
-  await new Promise((r) => s.close(r));
-  return p;
-}
-
 const sessions = [];
 /** Start one real server process as an MCP client would, and connect to it. */
 async function startSession(name, deskPort, extraEnv = {}) {
@@ -293,6 +484,8 @@ async function startSession(name, deskPort, extraEnv = {}) {
     USERPROFILE: home,
     AE_MCP_PORT: String(panelPort),
     AE_MCP_FRONT_DESK_PORT: String(deskPort),
+    // Fast heartbeats, so a stalled desk is noticed in a second rather than ten.
+    AE_MCP_FRONT_DESK_BEAT_MS: "200",
     ...extraEnv,
   };
   delete env.AE_MCP_FRONT_DESK;
@@ -316,20 +509,16 @@ async function stop(s) {
   s.alive = false;
   await s.client.close().catch(() => {});
 }
-const deskFile = (port) => path.join(deskDir, `desk-${port}.json`);
-const readDesk = (port) => {
-  try { return JSON.parse(fs.readFileSync(deskFile(port), "utf8")); } catch { return null; }
-};
 const jsx = (tag, ms) => ({ code: `// tag:${tag} ms:${ms}\nreturn 1;` });
-async function call(s, name, args, opts = {}) {
+/** Start a call; `progress` fills while it runs, so a test can wait on what the session is told. */
+function begin(s, name, args) {
   const progress = [];
-  const res = await s.client.callTool(
-    { name, arguments: args },
-    undefined,
-    { timeout: 60_000, onprogress: opts.progress ? (p) => progress.push(p.message) : undefined }
-  );
-  return { res, progress, text: res.content?.[0]?.text ?? "", json: () => JSON.parse(res.content[0].text) };
+  const done = s.client
+    .callTool({ name, arguments: args }, undefined, { timeout: 60_000, onprogress: (p) => progress.push(p.message) })
+    .then((res) => ({ res, progress, text: res.content?.[0]?.text ?? "", json: () => JSON.parse(res.content[0].text) }));
+  return { progress, done };
 }
+const call = (s, name, args) => begin(s, name, args).done;
 const ran = (tag) => seen.filter((e) => e.tag === tag);
 
 try {
@@ -376,10 +565,10 @@ try {
     seen.length = 0;
     const pa = call(A, "run_jsx", jsx("A1", 600));
     await until("A1 at the panel", () => ran("A1").length === 1);
-    const pb = call(B, "run_jsx", jsx("B1", 50), { progress: true });
-    await sleep(150);
-    const pc = call(C, "run_jsx", jsx("C1", 50), { progress: true });
-    const [ra, rb, rc] = await Promise.all([pa, pb, pc]);
+    const hb = begin(B, "run_jsx", jsx("B1", 50));
+    await until("B to be told it is in line", () => hb.progress.length > 0);
+    const hc = begin(C, "run_jsx", jsx("C1", 50));
+    const [ra, rb, rc] = await Promise.all([pa, hb.done, hc.done]);
     for (const r of [ra, rb, rc]) assert.equal(r.res.isError, undefined, r.text);
     assert.deepEqual(seen.map((e) => e.tag), ["A1", "B1", "C1"]);
     for (let i = 1; i < seen.length; i++) {
@@ -403,14 +592,31 @@ try {
     const pa = call(A, "run_jsx", jsx("A2", 500));
     await until("A2 at the panel", () => ran("A2").length === 1);
     const t0 = Date.now();
-    const pb = call(B, "list_comps", {}, { progress: true });
-    const [ra, rb] = await Promise.all([pa, pb]);
+    const [ra, rb] = await Promise.all([pa, call(B, "list_comps", {})]);
     assert.equal(rb.res.isError, undefined, rb.text);
     assert.deepEqual(rb.json(), []);
     assert.equal(ra.res.isError, undefined);
-    // It still waits inside After Effects — the panel runs one thing at a time —
-    // but it is told what it is behind rather than left in silence.
     assert.ok(Date.now() - t0 < 2000);
+    // It still waits inside After Effects — the panel runs one thing at a time —
+    // and is told what it is behind rather than left in silence.
+    assert.ok(
+      rb.progress.some((m) => /`list_comps` has reached After Effects, which is still running another session's `run_jsx` \(desk-test-A, pid \d+\)/.test(m)),
+      rb.progress.join("\n") || "no progress at all"
+    );
+  });
+
+  await check("a read behind another session's running batch is told it is the batch", async () => {
+    batchMs = 1500;
+    const rbatch = await call(A, "run_batch", { ops: [{ op: "list_comps", args: {} }] });
+    assert.equal(rbatch.res.isError, undefined, rbatch.text);
+    const rb = await call(B, "list_comps", {});
+    assert.equal(rb.res.isError, undefined, rb.text);
+    assert.ok(
+      rb.progress.some((m) => /still running another session's `run_batch` \(desk-test-A, pid \d+\)/.test(m)),
+      rb.progress.join("\n") || "no progress at all"
+    );
+    await until("the batch to finish", () => batches.has(rbatch.json().jobId), 5000);
+    batchMs = 700;
   });
 
   await check("a run_batch holds the lock for its whole job, across sessions", async () => {
@@ -435,10 +641,10 @@ try {
     // C's write is at After Effects through A when A dies; B's is still waiting for the lock.
     const pc = call(C, "run_jsx", jsx("C3", 1200));
     await until("C3 at the panel", () => ran("C3").length === 1);
-    const pb = call(B, "run_jsx", jsx("B3", 20));
-    await sleep(200);
+    const hb = begin(B, "run_jsx", jsx("B3", 20));
+    await until("B to be queued behind C3", () => hb.progress.length > 0);
     kill(A);
-    const [rc, rb] = await Promise.all([pc, pb]);
+    const [rc, rb] = await Promise.all([pc, hb.done]);
 
     assert.equal(rc.res.isError, true, "C's write had been handed to After Effects: it must not report success");
     assert.match(rc.text, /went away in the middle of `run_jsx`/);
@@ -485,6 +691,7 @@ try {
     const E = await startSession("desk-test-E", desk2, { AE_MCP_READ_ONLY: "1" });
     const info = await until("E to run the desk", () => (readDesk(desk2)?.pid === E.pid ? readDesk(desk2) : null));
     assert.notEqual(info.token, "stale-token");
+    assert.doesNotMatch(E.log(), /grace/, "a stale file from a desk that held nothing gives no grace");
     const F = await startSession("desk-test-F", desk2);
     await until("F to join", () => /joined the desk/.test(F.log()));
 
@@ -514,8 +721,9 @@ try {
     const rb = await call(I, "run_batch", { ops: [{ op: "list_comps", args: {} }] });
     assert.equal(rb.res.isError, undefined, rb.text);
     const { jobId } = rb.json();
-    const pj = call(J, "run_jsx", jsx("J1", 5));
-    await sleep(300);
+    const hj = begin(J, "run_jsx", jsx("J1", 5));
+    await until("J to be queued behind the batch", () => hj.progress.length > 0);
+    const pj = hj.done;
     kill(H);
     const rj = await pj;
     assert.equal(rj.res.isError, undefined, rj.text);
@@ -526,6 +734,49 @@ try {
     assert.match(I.log(), /re-taking it at the next one/);
     batchMs = 700;
   });
+
+  // ---- a desk that stops answering without dying -------------------------
+  if (process.platform !== "win32") {
+    await check("a stalled desk is noticed, never waited on for ever: each call fails the right way", async () => {
+      const desk4 = await freePort();
+      const K = await startSession("desk-test-K", desk4);
+      await until("K to run the desk", () => readDesk(desk4)?.pid === K.pid);
+      const L = await startSession("desk-test-L", desk4);
+      const M = await startSession("desk-test-M", desk4);
+      await until("L and M to join", () => /joined the desk/.test(L.log()) && /joined the desk/.test(M.log()));
+      seen.length = 0;
+
+      // L's write is at After Effects through K when K freezes: it may have run.
+      const pl = call(L, "run_jsx", jsx("L1", 600));
+      await until("L1 at the panel", () => ran("L1").length === 1);
+      process.kill(K.pid, "SIGSTOP");
+      try {
+        const t0 = Date.now();
+        const rl = await pl;
+        assert.equal(rl.res.isError, true, rl.text);
+        assert.match(rl.text, /stopped answering in the middle of `run_jsx`/);
+        assert.match(rl.text.replace(/\n/g, " "), /may or may not have taken effect/);
+        assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0}ms to notice`);
+
+        // M's write waits for the lock on a frozen desk: nothing was sent.
+        const t1 = Date.now();
+        const rm = await call(M, "run_jsx", jsx("M1", 5));
+        assert.equal(rm.res.isError, true, rm.text);
+        assert.match(rm.text, /^`run_jsx` was not sent: the front desk \(run by pid \d+\) stopped answering/);
+        assert.ok(Date.now() - t1 < 5000, `took ${Date.now() - t1}ms to notice`);
+        assert.equal(ran("M1").length, 0);
+
+        // Both carry on, straight to After Effects, rather than hanging.
+        const again = await call(M, "run_jsx", jsx("M2", 5));
+        assert.equal(again.res.isError, undefined, again.text);
+        const read = await call(L, "list_comps", {});
+        assert.equal(read.res.isError, undefined, read.text);
+        assert.equal(ran("L1").length, 1, "L1 was never re-sent");
+      } finally {
+        process.kill(K.pid, "SIGCONT");
+      }
+    });
+  }
 
   // ---- a foreign process on the desk port ----------------------------------
   await check("something else on the desk port: the server goes direct and still works", async () => {
@@ -540,6 +791,7 @@ try {
     await new Promise((r) => foreign.close(r));
   });
 } finally {
+  for (const l of lines) await l.close().catch(() => {});
   for (const s of sessions) if (s.alive) await stop(s);
   for (const s of sessions) try { process.kill(s.pid, "SIGKILL"); } catch {}
   wss.close();

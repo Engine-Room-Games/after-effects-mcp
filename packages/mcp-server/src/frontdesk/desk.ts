@@ -1,7 +1,15 @@
 import http from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { logger } from "../util/logger.js";
-import { DESK_ID, DESK_PROTOCOL, DESK_TOKEN_HEADER } from "./config.js";
+import {
+  DESK_ID,
+  DESK_NONCE_HEADER,
+  DESK_PROTOCOL,
+  DESK_TOKEN_HEADER,
+  deskBeatMs,
+  removeDeskFile,
+  writeDeskFile,
+} from "./config.js";
 import { DeskClosedError, DeskLock, UPDATE_EVERY_MS, type LockRequest } from "./lock.js";
 import { toWire, type DeskAhead, type LockLine, type OpLine } from "./protocol.js";
 
@@ -34,16 +42,31 @@ export interface ForwardRequest {
   args?: unknown;
   jobId?: string;
   timeoutMs?: number;
+  /** A write: refused unless `leaseId` is the lease holding the lock now. */
+  write?: boolean;
+  leaseId?: string;
 }
 
 export interface ForwardHooks {
-  /**
-   * Called — and awaited — immediately before the call is posted to the panel.
-   * Over HTTP this writes and flushes the `start` line; if it throws, the call
-   * is not sent, which is what makes a lost caller safe to re-send.
-   */
+  /** Called immediately before the call is posted to the panel, with what is ahead of it. */
   onStart?: (ahead: DeskAhead[]) => Promise<void> | void;
   onAhead?: (ahead: DeskAhead[]) => void;
+}
+
+/** The write claimed a lease that is not the one holding the lock. Nothing was sent. */
+export class LeaseNotHeldError extends Error {
+  constructor() {
+    super("This write's lease does not hold the front desk's lock; nothing was sent.");
+    this.name = "LeaseNotHeldError";
+  }
+}
+
+/** The leases that span several panel calls, and so are what a takeover's grace protects. */
+const LONG_HOLD_OPS = new Set(["run_batch", "render_queue"]);
+
+/** The proof a desk gives that it knows the token: HMAC of the follower's nonce. */
+export function deskProof(token: string, nonce: string): string {
+  return createHmac("sha256", token).update(nonce).digest("hex");
 }
 
 interface InFlight {
@@ -59,18 +82,26 @@ const MAX_BODY_BYTES = 256 * 1024 * 1024;
 
 export class FrontDesk {
   readonly lock: DeskLock;
+  readonly beatMs: number;
   private server: http.Server | null = null;
   private inflight: InFlight[] = [];
   private seq = 0;
   /** Open /desk/lock responses, so `close()` can tell each one the desk is moving. */
   private lockStreams = new Set<http.ServerResponse>();
   private closing = false;
+  private published = false;
+  private batchHeld = false;
+  private readonly startedAt = Date.now();
 
   constructor(
     private forwarder: DeskForwarder,
-    readonly opts: { port: number; token: string; graceMs?: number }
+    readonly opts: { port: number; token: string; graceMs?: number; beatMs?: number }
   ) {
-    this.lock = new DeskLock({ graceMs: opts.graceMs });
+    this.beatMs = opts.beatMs ?? deskBeatMs();
+    this.lock = new DeskLock({
+      graceMs: opts.graceMs,
+      onHolderChange: (h) => this.noteHolder(h),
+    });
   }
 
   /** Bind the desk port. Rejects with the bind error — `EADDRINUSE` means another server holds it. */
@@ -103,6 +134,37 @@ export class FrontDesk {
     });
   }
 
+  /** Write the desk file that tells followers the token. Only ever after the bind. */
+  publish(): void {
+    this.published = true;
+    this.writeFile();
+  }
+
+  private writeFile(): void {
+    writeDeskFile({
+      desk: DESK_ID,
+      protocol: DESK_PROTOCOL,
+      pid: process.pid,
+      port: this.opts.port,
+      token: this.opts.token,
+      startedAt: this.startedAt,
+      batchHeld: this.batchHeld,
+    });
+  }
+
+  /**
+   * Keep `batchHeld` in the file true exactly while a long lease holds the lock,
+   * so whoever takes over from this desk — after a crash or a graceful close —
+   * knows whether there is a session to wait for. Written only when it changes:
+   * twice per batch, never per ordinary write.
+   */
+  private noteHolder(h: { op: string } | null): void {
+    const long = !!h && LONG_HOLD_OPS.has(h.op);
+    if (long === this.batchHeld || !this.published || this.closing) return;
+    this.batchHeld = long;
+    try { this.writeFile(); } catch (e) { logger.warn(`front desk: could not update the desk file: ${(e as Error).message}`); }
+  }
+
   status() {
     const now = Date.now();
     return {
@@ -121,17 +183,27 @@ export class FrontDesk {
    *
    * Never queued here: the write lock is taken before a write gets this far,
    * and reads do not take it — a screenshot must never stall a write (see
-   * docs/architecture.md, "Serializing writes"). The panel's own evalScript
-   * chain is a FIFO, so calls forwarded in this order run in this order; the
-   * record is how the desk can say what is running ahead of whom.
+   * docs/architecture.md, "Serializing writes"). A write must name the lease
+   * holding the lock, or nothing is sent. The panel's own evalScript chain is a
+   * FIFO, so calls forwarded in this order run in this order; the record, plus
+   * whatever holds the lock, is how the desk says what is ahead of whom.
    */
   async forward(req: ForwardRequest, hooks: ForwardHooks = {}): Promise<unknown> {
+    if (req.write && (!req.leaseId || !this.lock.isHolder(req.leaseId))) throw new LeaseNotHeldError();
     const entry: InFlight = { seq: ++this.seq, sessionId: req.sessionId, session: req.session, op: req.op, since: Date.now() };
     const ahead = () => {
       const now = Date.now();
-      return this.inflight
+      const out = this.inflight
         .filter((f) => f.seq < entry.seq && f.sessionId !== req.sessionId)
         .map((f) => ({ op: f.op, session: f.session, forMs: now - f.since }));
+      // A batch's chunks are driven inside the panel, not through here, so the
+      // only trace of one running is the lease its session still holds. Named,
+      // so a read waiting in After Effects behind it is told what it is behind.
+      const held = this.lock.held;
+      if (held && held.sessionId !== req.sessionId && !this.inflight.some((f) => f.sessionId === held.sessionId)) {
+        out.unshift({ op: held.op, session: held.session, forMs: now - held.since });
+      }
+      return out;
     };
     const before = ahead();
     await hooks.onStart?.(before);
@@ -162,8 +234,9 @@ export class FrontDesk {
   /**
    * Stop being the desk. The port is released at once, so another server can
    * take over while calls already handed to After Effects finish and answer
-   * here. Waiters and lock holders are told the desk is moving: nothing was
-   * granted to a waiter, and a holder re-takes its lock at the next desk.
+   * here. Waiters and lock holders are told the desk is moving. The desk file is
+   * left in place when a long lease was holding the lock, so the successor knows
+   * to give that session its grace period; otherwise it is removed.
    */
   async close(): Promise<void> {
     if (this.closing) return;
@@ -175,13 +248,15 @@ export class FrontDesk {
     this.lockStreams.clear();
     const server = this.server;
     this.server = null;
-    if (!server) return;
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
-      server.closeIdleConnections?.();
-      // Resolve once the port is released; in-flight answers keep their sockets.
-      setTimeout(resolve, 50).unref?.();
-    });
+    if (server) {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeIdleConnections?.();
+        // Resolve once the port is released; in-flight answers keep their sockets.
+        setTimeout(resolve, 50).unref?.();
+      });
+    }
+    if (this.published && !this.batchHeld) removeDeskFile(this.opts.port, this.opts.token);
   }
 
   // ---------------------------------------------------------------- HTTP
@@ -204,7 +279,17 @@ export class FrontDesk {
     if (!this.authorised(req)) return json(res, 401, { desk: DESK_ID, error: "token" });
     const url = (req.url ?? "").split("?")[0];
     if (req.method === "GET" && url === "/desk/hello") {
-      return json(res, 200, { desk: DESK_ID, protocol: DESK_PROTOCOL, pid: process.pid });
+      // Mutual: the follower proved it has the token by sending it; the desk
+      // proves it has it too, so a process that merely answers 200 with the
+      // right id is never mistaken for the desk.
+      const nonce = req.headers[DESK_NONCE_HEADER];
+      return json(res, 200, {
+        desk: DESK_ID,
+        protocol: DESK_PROTOCOL,
+        pid: process.pid,
+        beatMs: this.beatMs,
+        proof: typeof nonce === "string" ? deskProof(this.opts.token, nonce) : null,
+      });
     }
     if (req.method === "GET" && url === "/desk/status") return json(res, 200, this.status());
     if (req.method !== "POST") return json(res, 405, { error: "POST only" });
@@ -213,13 +298,13 @@ export class FrontDesk {
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body) as Record<string, unknown>; }
     catch { return json(res, 400, { error: "bad json" }); }
-    if (url === "/desk/lock") return this.handleLock(parsed, req, res);
+    if (url === "/desk/lock") return this.handleLock(parsed, res);
     if (url === "/desk/op") return this.handleOp(parsed, res);
     return json(res, 404, { error: "unknown route" });
   }
 
-  private handleLock(b: Record<string, unknown>, req: http.IncomingMessage, res: http.ServerResponse): void {
-    stream(res);
+  private handleLock(b: Record<string, unknown>, res: http.ServerResponse): void {
+    this.stream(res);
     if (this.closing) {
       res.end(line({ t: "moved" }));
       return;
@@ -264,16 +349,7 @@ export class FrontDesk {
   }
 
   private async handleOp(b: Record<string, unknown>, res: http.ServerResponse): Promise<void> {
-    stream(res);
-    const leaseId = typeof b.leaseId === "string" ? b.leaseId : null;
-    // A write claims the lease it was issued under. If that lease is not the
-    // one holding the lock — it died with a previous desk — nothing is sent,
-    // and the caller re-takes the lock first. This is what makes the lock a
-    // guarantee across a handover rather than a courtesy.
-    if (leaseId !== null && !this.lock.isHolder(leaseId)) {
-      res.end(line({ t: "lost" }));
-      return;
-    }
+    this.stream(res);
     let gone = false;
     res.on("close", () => { gone = true; });
     const panelPort = () => this.forwarder.port;
@@ -287,15 +363,14 @@ export class FrontDesk {
           args: b.args,
           jobId: typeof b.jobId === "string" ? b.jobId : undefined,
           timeoutMs: typeof b.timeoutMs === "number" && b.timeoutMs > 0 ? b.timeoutMs : undefined,
+          write: b.write === true,
+          leaseId: typeof b.leaseId === "string" ? b.leaseId : undefined,
         },
         {
-          onStart: async (ahead) => {
+          onStart: (ahead) => {
             // The caller went before anything was sent: send nothing.
             if (gone || res.destroyed) throw new CallerGoneError();
-            await new Promise<void>((resolve, reject) => {
-              res.write(line({ t: "start", ahead }), (err) => (err ? reject(err) : resolve()));
-            });
-            if (gone || res.destroyed) throw new CallerGoneError();
+            res.write(line({ t: "start", ahead }));
           },
           onAhead: (ahead) => { if (!gone) res.write(line({ t: "ahead", ahead })); },
         }
@@ -303,8 +378,26 @@ export class FrontDesk {
       if (!gone) res.end(line({ t: "ok", result, panelPort: panelPort() }));
     } catch (e) {
       if (e instanceof CallerGoneError) return;
+      if (e instanceof LeaseNotHeldError) {
+        if (!gone) res.end(line({ t: "lost" }));
+        return;
+      }
       if (!gone) res.end(line({ t: "err", error: toWire(e), panelPort: panelPort() }));
     }
+  }
+
+  /** Open an NDJSON answer that beats until it ends, so a caller can tell a stalled desk from a busy one. */
+  private stream(res: http.ServerResponse): void {
+    res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store" });
+    // Each line is a message the caller is waiting on; never let Nagle sit on one.
+    res.socket?.setNoDelay(true);
+    res.flushHeaders();
+    const beat = setInterval(() => {
+      if (res.writableEnded || res.destroyed) return clearInterval(beat);
+      res.write(line({ t: "beat" }));
+    }, this.beatMs);
+    beat.unref?.();
+    res.on("close", () => clearInterval(beat));
   }
 }
 
@@ -312,13 +405,6 @@ class CallerGoneError extends Error {}
 
 function line(l: LockLine | OpLine): string {
   return JSON.stringify(l) + "\n";
-}
-
-function stream(res: http.ServerResponse): void {
-  res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store" });
-  // Each line is a message the caller is waiting on; never let Nagle sit on one.
-  res.socket?.setNoDelay(true);
-  res.flushHeaders();
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {

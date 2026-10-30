@@ -77,7 +77,31 @@ export interface DeskFile {
   port: number;
   token: string;
   startedAt: number;
+  /**
+   * True while a lease that spans several panel calls — a `run_batch`'s job, a
+   * `render_queue`'s prepare-and-save — holds the lock. A desk that takes over
+   * from this file grants a grace period only then: there is someone to wait
+   * for. A leftover file from a desk that held nothing costs nobody anything.
+   */
+  batchHeld?: boolean;
 }
+
+/** A follower verifies the desk knows the token before routing anything through it. */
+export const DESK_NONCE_HEADER = "x-ae-mcp-desk-nonce";
+
+/**
+ * How often the desk writes a heartbeat on every open stream. A follower that
+ * hears nothing for five of these takes the desk for stalled — suspended,
+ * stopped in a debugger — since a stalled process keeps the port bound and no
+ * one could otherwise take over. `AE_MCP_FRONT_DESK_BEAT_MS` is for tests.
+ */
+export function deskBeatMs(): number {
+  const raw = Number.parseInt(process.env.AE_MCP_FRONT_DESK_BEAT_MS ?? "", 10);
+  return Number.isFinite(raw) && raw >= 50 ? raw : 2000;
+}
+
+/** Five missed beats. */
+export const STALL_BEATS = 5;
 
 export function deskFilePath(port: number): string {
   return path.join(os.homedir(), ".engineroom-ae-mcp", `desk-${port}.json`);

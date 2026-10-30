@@ -3,10 +3,10 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { HttpClient } from "../bridge/httpClient.js";
 import { opTimeoutMs } from "../bridge/httpClient.js";
 import type { QueueWait, WriteLease, WriteQueue } from "../bridge/writeQueue.js";
-import { BridgeTimeoutError, FrontDeskLostError, WriteQueueCancelledError } from "../util/errors.js";
+import { BridgeTimeoutError, DeskPlaceLostError, FrontDeskLostError, WriteQueueCancelledError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
-import { DESK_ID, DESK_PROTOCOL, DESK_TOKEN_HEADER, readDeskFile, removeDeskFile, writeDeskFile, type FrontDeskOptions } from "./config.js";
-import { FrontDesk, type DeskForwarder } from "./desk.js";
+import { DESK_ID, DESK_NONCE_HEADER, DESK_PROTOCOL, DESK_TOKEN_HEADER, STALL_BEATS, readDeskFile, type FrontDeskOptions } from "./config.js";
+import { FrontDesk, LeaseNotHeldError, deskProof, type DeskForwarder } from "./desk.js";
 import { DeskClosedError } from "./lock.js";
 import { describeAhead, describeLockWait, fromWire, type DeskAhead, type GrantWait, type LockLine, type OpLine } from "./protocol.js";
 
@@ -27,14 +27,16 @@ import { describeAhead, describeLockWait, fromWire, type DeskAhead, type GrantWa
  *   lock. The lease returned behaves exactly like a `WriteQueue` lease.
  * - `runOp` / `cancel` — through the desk, which forwards to the panel.
  *
- * And the one new job: surviving the desk's death. See `send` for the rule.
+ * And the one new job: surviving the desk's death or stall. See `send`.
  */
 
-/** Grace a desk that replaced a dead one gives resumed leases. */
+/** Grace a desk that replaced one holding a long lease gives that lease to come back. */
 const GRACE_MS = 1500;
 /** How long a server tries to join or become the desk before going direct. */
 const ELECTION_DEADLINE_MS = 5000;
-/** How many times one call follows the desk to a new server before going direct. */
+/** How long a session that found the desk stalled goes direct before asking again. */
+const STALLED_RETRY_MS = 10_000;
+/** How many times one call follows the desk to a new server. */
 const MAX_HANDOVERS = 4;
 /** Above the desk's own op timeout, so the desk's timeout — with its message — always lands first. */
 const FOLLOWER_TIMEOUT_SLACK_MS = 10_000;
@@ -50,9 +52,11 @@ export interface SessionLineOptions {
 type Mode =
   | { kind: "off" }
   | { kind: "none" }
-  | { kind: "leader"; desk: FrontDesk; token: string; port: number }
-  | { kind: "follower"; port: number; token: string; pid: number }
+  | { kind: "leader"; desk: FrontDesk; port: number }
+  | { kind: "follower"; port: number; token: string; pid: number; idleMs: number }
   | { kind: "direct"; retryAt: number };
+
+type Follower = Extract<Mode, { kind: "follower" }>;
 
 type Slot =
   | { kind: "local"; id: string; desk: FrontDesk }
@@ -64,7 +68,7 @@ export class SessionLine {
   readonly sessionId = randomUUID();
   private mode: Mode;
   private electing: Promise<Mode> | null = null;
-  /** Ever joined or ran a desk: a desk this server starts later is a takeover, and gets the grace period. */
+  /** Has followed or run a desk before — only so the log can say "taking over". */
   private everJoined = false;
   /** The desk lease this session holds now. At most one: the session's own queue is in front of it. */
   private holding: HeldDesk | null = null;
@@ -102,6 +106,11 @@ export class SessionLine {
   /** What this server is to the desk, for logs and tests. */
   get role(): "off" | "leader" | "follower" | "direct" | "none" {
     return this.mode.kind;
+  }
+
+  /** Settles once the first election has (for tests). */
+  async ready(): Promise<string> {
+    return (await this.ensure()).kind;
   }
 
   // ------------------------------------------------------------ write lock
@@ -149,10 +158,18 @@ export class SessionLine {
         if (!extended) releaseDesk();
         localLease.release();
       },
+      onLost(listener) {
+        held.onLost(listener);
+      },
     };
   }
 
-  /** @internal Take the desk lock: from this process's own desk, from another's, or not at all (direct). */
+  /**
+   * @internal Take the desk lock: from this process's own desk or another's.
+   * Null only when there is no desk to take it from (direct); a desk that
+   * cannot grant it — stalled, or changing hands too often — is an explicit
+   * failure, never a write sent without it.
+   */
   async takeSlot(op: string, signal: AbortSignal | undefined, onWait: OnWait | undefined, resume: boolean): Promise<{ slot: Slot; wait: GrantWait | null } | null> {
     for (let attempt = 0; attempt < MAX_HANDOVERS; attempt++) {
       const mode = await this.ensure();
@@ -179,10 +196,13 @@ export class SessionLine {
       const r = await remoteLock(mode, req, op, signal, onWait);
       if (r.kind === "granted") return { slot: r.slot, wait: r.wait };
       if (r.kind === "error") throw r.error;
+      if (r.kind === "stalled") {
+        this.deskStalled(mode);
+        throw new DeskPlaceLostError(op, stalledWhy(mode, "before this call's turn came"));
+      }
       this.deskLost(mode);
     }
-    logger.warn(`Front desk: could not take the write lock for \`${op}\` after ${MAX_HANDOVERS} handovers; going direct for this call.`);
-    return null;
+    throw new DeskPlaceLostError(op, `the front desk changed hands ${MAX_HANDOVERS} times while this call waited for its turn.`);
   }
 
   // ------------------------------------------------------------ forwarding
@@ -205,17 +225,17 @@ export class SessionLine {
   /**
    * Send one call through the desk, following it if it moves.
    *
-   * The rule that keeps a handover from losing or doubling a write rests on the
-   * desk's `start` line, written and flushed before it posts to the panel:
+   * A write is re-sent only when the desk *positively* did not forward it: the
+   * connection was refused, the desk answered with a refusal status, or it said
+   * `lost` (the lease this write claimed does not hold the lock — re-taken
+   * first, with priority). Any other way of losing a write — the connection
+   * dropped, the desk stalled — is "may have run": `FrontDeskLostError`, a
+   * reset, read back before re-sending. No line the desk wrote is trusted to
+   * have arrived: the desk can post to the panel and die before its bytes
+   * reach this side. Reads are always re-sent; running one twice changes nothing.
    *
-   * - lost **before** `start` — the call never reached After Effects. Sent again,
-   *   to whichever server has the desk now. Nothing is lost, nothing runs twice.
-   * - lost **after** `start` — it may have run. A write is never re-sent: it fails
-   *   with `FrontDeskLostError`, a reset, whose remedy is to read back first. A
-   *   read is sent again — running it twice changes nothing.
-   * - `lost` — the desk says the lease this write claims is not the one holding
-   *   the lock (it died with the previous desk). Nothing was sent; the lease is
-   *   re-taken, with priority, and the call goes again.
+   * A write under a lease this session has lost and could not take back is
+   * refused before it goes anywhere (`DeskPlaceLostError`, nothing ran).
    */
   private async send(
     body: { kind: "op" | "cancel"; op: string; args?: unknown; jobId?: string; timeoutMs: number },
@@ -224,31 +244,56 @@ export class SessionLine {
     direct: () => Promise<unknown>
   ): Promise<unknown> {
     const { op } = body;
-    for (let attempt = 0; attempt <= MAX_HANDOVERS; attempt++) {
-      const mode = await this.ensure();
-      if (mode.kind !== "leader" && mode.kind !== "follower") return direct();
-      if (attempt === MAX_HANDOVERS) {
-        logger.warn(`Front desk: \`${op}\` followed the desk through ${MAX_HANDOVERS} handovers; sending it direct.`);
-        return direct();
+    for (let attempt = 0; attempt < MAX_HANDOVERS; attempt++) {
+      let slot: Slot | null = null;
+      if (write) {
+        // No desk lease at all: it was taken with no desk to take it from, so
+        // this write goes the way the lease did.
+        if (!this.holding) return direct();
+        slot = await this.holding.current();
+        if (!slot) {
+          throw new DeskPlaceLostError(op, "this session lost its turn in the shared write queue when the front desk changed hands, and could not take it back.");
+        }
       }
-      const slot = write && this.holding ? await this.holding.current() : null;
-      if (mode.kind === "leader") {
-        // Promoted while holding a lease on the desk that just died: wait for
-        // that lease to be noticed lost and re-taken here, then go.
+      const mode = await this.ensure();
+      if (mode.kind !== "leader" && mode.kind !== "follower") {
+        // Holding a lease on a desk that is going away: wait until that is
+        // noticed and the lease is re-taken (or given up), then decide again.
         if (slot?.kind === "remote") {
           await slot.closed;
           continue;
         }
-        return mode.desk.forward(
-          { sessionId: this.sessionId, session: this.opts.sessionLabel(), ...body },
-          {
-            onStart: (ahead) => surfaceAhead(op, ahead, onWait),
-            onAhead: (ahead) => surfaceAhead(op, ahead, onWait),
-          }
-        );
+        return direct();
       }
-      const leaseId = slot?.kind === "remote" ? slot.id : undefined;
-      const r = await remoteOp(mode, { ...body, leaseId, sessionId: this.sessionId, session: this.opts.sessionLabel() }, (ahead) => surfaceAhead(op, ahead, onWait));
+      if (mode.kind === "leader") {
+        if (slot?.kind === "remote") {
+          await slot.closed;
+          continue;
+        }
+        try {
+          return await mode.desk.forward(
+            { sessionId: this.sessionId, session: this.opts.sessionLabel(), ...body, write, leaseId: slot?.id },
+            { onStart: (ahead) => surfaceAhead(op, ahead, onWait), onAhead: (ahead) => surfaceAhead(op, ahead, onWait) }
+          );
+        } catch (e) {
+          if (e instanceof LeaseNotHeldError && slot) {
+            this.holding?.invalidate(slot.id);
+            continue;
+          }
+          throw e;
+        }
+      }
+      if (slot?.kind === "local") {
+        // A lease from a desk this server ran and no longer does; it is gone.
+        this.holding?.invalidate(slot.id);
+        continue;
+      }
+      const leaseId = slot?.id;
+      const r = await remoteOp(
+        mode,
+        { ...body, write, leaseId, sessionId: this.sessionId, session: this.opts.sessionLabel() },
+        (ahead) => surfaceAhead(op, ahead, onWait)
+      );
       switch (r.kind) {
         case "ok":
           this.followPanel(r.panelPort);
@@ -259,17 +304,22 @@ export class SessionLine {
         case "lost":
           if (leaseId) this.holding?.invalidate(leaseId);
           continue;
-        case "before-start":
+        case "refused":
           this.deskLost(mode);
           continue;
-        case "after-start":
+        case "dropped":
           this.deskLost(mode);
-          if (write) throw new FrontDeskLostError(mode.port, op);
+          if (write) throw new FrontDeskLostError(mode.port, op, "exited");
+          continue;
+        case "stalled":
+          this.deskStalled(mode);
+          if (write) throw new FrontDeskLostError(mode.port, op, "stalled");
           continue;
         case "timeout":
           throw new BridgeTimeoutError(this.bridge.port, body.timeoutMs, { op });
       }
     }
+    if (write) throw new DeskPlaceLostError(op, `the front desk changed hands ${MAX_HANDOVERS} times before this call could be sent.`);
     return direct();
   }
 
@@ -289,6 +339,20 @@ export class SessionLine {
 
   private deskLost(mode: Mode): void {
     if (this.mode === mode) this.mode = { kind: "none" };
+  }
+
+  /**
+   * A desk that keeps its port bound and answers nothing cannot be replaced —
+   * nobody can bind the port it holds — so this session goes to After Effects
+   * directly for a while, as before the desk existed, and then asks again.
+   */
+  private deskStalled(mode: Follower): void {
+    if (this.mode !== mode) return;
+    logger.warn(
+      `Front desk: the desk on 127.0.0.1:${mode.port} (pid ${mode.pid}) has answered nothing for ${Math.round(mode.idleMs / 1000)}s. ` +
+        `Talking to After Effects directly for ${STALLED_RETRY_MS / 1000}s; other sessions are not serialized against this one meanwhile.`
+    );
+    this.mode = { kind: "direct", retryAt: Date.now() + STALLED_RETRY_MS };
   }
 
   private ensure(): Promise<Mode> {
@@ -314,8 +378,9 @@ export class SessionLine {
    * Bind first: the bind is the election, atomic on both platforms and released
    * by the OS when its holder dies, so two servers can never both win and a
    * dead one never holds it. Losing the bind means a desk exists — or something
-   * else holds the port, which is told apart by asking. Every way this can fail
-   * ends in `direct`, today's behaviour, with a warning, and is tried again later.
+   * else holds the port, which is told apart by asking, and by the desk proving
+   * it knows the token. Every way this can fail ends in `direct`, today's
+   * behaviour, with a warning, and is tried again later.
    */
   private async elect(): Promise<Mode> {
     const cfg = this.opts.desk!;
@@ -327,39 +392,47 @@ export class SessionLine {
     };
     for (;;) {
       if (this.closed) return { kind: "direct", retryAt: Infinity };
-      const takeover = this.everJoined || readDeskFile(port) !== null;
+      // A grace period only when the desk before held a long lease: then a
+      // session is coming back for it. A leftover file from a desk that held
+      // nothing makes nobody wait.
+      const previous = readDeskFile(port);
+      const graceMs = previous?.batchHeld ? (cfg.graceMs ?? GRACE_MS) : 0;
       const token = randomBytes(32).toString("hex");
-      const desk = new FrontDesk(this.forwarder, { port, token, graceMs: takeover ? (cfg.graceMs ?? GRACE_MS) : 0 });
+      const desk = new FrontDesk(this.forwarder, { port, token, graceMs });
       try {
         await desk.listen();
         try {
-          writeDeskFile({ desk: DESK_ID, protocol: DESK_PROTOCOL, pid: process.pid, port, token, startedAt: Date.now() });
+          desk.publish();
         } catch (e) {
           await desk.close();
-          return direct(`bound 127.0.0.1:${port} but could not write ${port}'s desk file (${(e as Error).message}).`, 60_000);
+          return direct(`bound 127.0.0.1:${port} but could not write its desk file (${(e as Error).message}).`, 60_000);
         }
+        const takeover = this.everJoined || previous !== null;
         this.everJoined = true;
-        logger.info(`Front desk: this server runs the desk for every session on this After Effects (127.0.0.1:${port}${takeover ? ", taking over" : ""}).`);
-        return { kind: "leader", desk, token, port };
+        logger.info(
+          `Front desk: this server runs the desk for every session on this After Effects (127.0.0.1:${port}` +
+            `${takeover ? ", taking over" : ""}${graceMs ? `, ${graceMs}ms grace for a long write in progress` : ""}).`
+        );
+        return { kind: "leader", desk, port };
       } catch (e) {
         const code = (e as NodeJS.ErrnoException).code;
         if (code !== "EADDRINUSE") return direct(`could not bind 127.0.0.1:${port} (${(e as Error).message}).`, 60_000);
       }
       const info = readDeskFile(port);
       const hello = await deskHello(port, info?.token ?? null);
-      if (hello.kind === "desk") {
+      if (hello.kind === "desk" && info) {
         if (hello.protocol !== DESK_PROTOCOL) {
           return direct(`the desk on 127.0.0.1:${port} speaks protocol ${hello.protocol} and this server speaks ${DESK_PROTOCOL} — a different version of the server is running it.`, 60_000);
         }
         this.everJoined = true;
         logger.info(`Front desk: joined the desk on 127.0.0.1:${port}, run by pid ${hello.pid}.`);
-        return { kind: "follower", port, token: info!.token, pid: hello.pid };
+        return { kind: "follower", port, token: info.token, pid: hello.pid, idleMs: hello.beatMs * STALL_BEATS };
       }
       if (hello.kind === "foreign") {
         return direct(`port ${port} is held by something that is not a front desk. Set AE_MCP_FRONT_DESK_PORT to a free port in every session to share one.`, 60_000);
       }
-      // A desk we read the file of too early, or one that died between the bind
-      // and the hello: go round again.
+      // A desk whose file is not there yet or is a dead desk's, or one that
+      // died between the bind and the hello: go round again.
       if (Date.now() > deadline) return direct(`no desk on 127.0.0.1:${port} answered within ${Math.round((cfg.electionDeadlineMs ?? ELECTION_DEADLINE_MS) / 1000)}s.`, 10_000);
       await new Promise((r) => setTimeout(r, 60 + Math.random() * 120));
     }
@@ -375,25 +448,37 @@ export class SessionLine {
     this.mode = { kind: "direct", retryAt: Infinity };
     if (m.kind === "leader") {
       await m.desk.close();
-      removeDeskFile(m.port, m.token);
       logger.info(`Front desk: closed; the next server to need it takes it over.`);
     }
   }
+}
+
+function stalledWhy(mode: Follower, when: string): string {
+  return `the front desk (run by pid ${mode.pid}) stopped answering ${when} — it has said nothing for ${Math.round(mode.idleMs / 1000)}s.`;
 }
 
 /**
  * A desk lease that survives the desk. If the desk it was granted on goes away
  * while the session still holds it — most often while its `run_batch` is still
  * running chunks — it is re-taken at the next desk with priority, and every
- * write under it waits for that before it goes.
+ * write under it waits for that before it goes. If it cannot be re-taken, the
+ * lease says so to whoever is listening (the batch's job), and every write
+ * under it is refused.
  */
 class HeldDesk {
   private slot: Slot | null = null;
   private released = false;
   private pending: Promise<void> | null = null;
+  private lostFor: string | null = null;
+  private listeners: ((why: string) => void)[] = [];
 
   constructor(private line: SessionLine, private op: string, first: Slot) {
     this.attach(first);
+  }
+
+  onLost(listener: (why: string) => void): void {
+    if (this.lostFor) listener(this.lostFor);
+    else this.listeners.push(listener);
   }
 
   private attach(slot: Slot): void {
@@ -403,25 +488,35 @@ class HeldDesk {
 
   /** The desk says `id` is not the lease holding the lock. */
   invalidate(id: string): void {
-    if (this.slot?.kind === "remote" && this.slot.id === id) {
-      this.slot.abort();
+    if (this.slot?.id === id) {
+      if (this.slot.kind === "remote") this.slot.abort();
       this.lost();
     }
   }
 
   private lost(): void {
-    if (this.released || this.pending) return;
+    if (this.released || this.pending || this.lostFor) return;
     this.slot = null;
     logger.warn(`Front desk: the desk holding \`${this.op}\`'s write lock went away; re-taking it at the next one.`);
+    const giveUp = (reason: string) => {
+      this.lostFor =
+        `This ${this.op} lost the shared After Effects write lock when the front desk changed hands (${reason}), ` +
+        "so another AI session's writes may have landed between its steps. Read the comp back before relying on its order.";
+      logger.warn(`Front desk: ${this.lostFor}`);
+      for (const l of this.listeners.splice(0)) { try { l(this.lostFor); } catch {} }
+    };
     this.pending = this.line
       .takeSlot(this.op, undefined, undefined, true)
       .then(
         (r) => {
-          if (!r) return;
-          if (this.released) return releaseSlot(r.slot);
+          if (this.released) {
+            if (r) releaseSlot(r.slot);
+            return;
+          }
+          if (!r) return giveUp("no desk answered to take it back from");
           this.attach(r.slot);
         },
-        (e) => logger.warn(`Front desk: could not re-take the write lock for \`${this.op}\`: ${(e as Error).message}`)
+        (e) => { if (!this.released) giveUp((e as Error).message.split("\n")[0]); }
       )
       .finally(() => { this.pending = null; });
   }
@@ -445,8 +540,9 @@ function releaseSlot(slot: Slot): void {
 }
 
 function surfaceLock(op: string, l: Extract<LockLine, { t: "wait" }>, onWait: OnWait | undefined): void {
-  // Only ever about another session: a session is never told it waits behind itself.
-  if (!l.holder) return;
+  // Only ever about another session, or a takeover's grace: a session is never
+  // told it waits behind itself.
+  if (!l.holder && !l.graceMs) return;
   const text = describeLockWait(op, l);
   logger.debug(text);
   try { onWait?.(text); } catch {}
@@ -461,17 +557,42 @@ function surfaceAhead(op: string, ahead: DeskAhead[], onWait: OnWait | undefined
 
 // ------------------------------------------------------------------ wire
 
-type StreamEnd = { kind: "ended" } | { kind: "refused" } | { kind: "broken"; error?: Error } | { kind: "status"; status: number } | { kind: "aborted" };
+type StreamEnd =
+  | { kind: "ended" }
+  /** Nothing reached the desk: the connection was refused. */
+  | { kind: "refused" }
+  /** The desk answered with something other than a stream: refused before reading. */
+  | { kind: "status"; status: number }
+  | { kind: "broken"; error?: Error }
+  /** Nothing — not even a heartbeat — for `idleMs`. */
+  | { kind: "stalled" }
+  | { kind: "aborted" };
 
 /**
  * One NDJSON request to the desk. `closed` settles exactly once, however the
  * exchange ends; `abort` ends it from this side, which for a lock is the release.
  * `node:http` with no agent, so closing it closes the socket and the desk sees it.
+ * The desk beats on every stream, so silence for `idleMs` means it is stalled.
  */
-function deskStream(port: number, token: string, route: string, body: unknown, onLine: (l: unknown) => void): { abort: () => void; closed: Promise<StreamEnd> } {
+function deskStream(
+  port: number,
+  token: string,
+  route: string,
+  body: unknown,
+  idleMs: number,
+  onLine: (l: unknown) => void
+): { abort: () => void; closed: Promise<StreamEnd> } {
   let settle!: (e: StreamEnd) => void;
   let settled = false;
-  const closed = new Promise<StreamEnd>((r) => { settle = (e) => { if (!settled) { settled = true; r(e); } }; });
+  let idle: NodeJS.Timeout | null = null;
+  const closed = new Promise<StreamEnd>((r) => {
+    settle = (e) => {
+      if (settled) return;
+      settled = true;
+      if (idle) clearTimeout(idle);
+      r(e);
+    };
+  });
   const payload = Buffer.from(JSON.stringify(body));
   const req = http.request({
     host: "127.0.0.1",
@@ -481,9 +602,18 @@ function deskStream(port: number, token: string, route: string, body: unknown, o
     agent: false,
     headers: { "content-type": "application/json", "content-length": payload.length, [DESK_TOKEN_HEADER]: token },
   });
+  const heard = () => {
+    if (idle) clearTimeout(idle);
+    idle = setTimeout(() => {
+      settle({ kind: "stalled" });
+      req.destroy();
+    }, idleMs);
+  };
+  heard();
   let responded = false;
   req.on("response", (res) => {
     responded = true;
+    heard();
     if (res.statusCode !== 200) {
       res.resume();
       settle({ kind: "status", status: res.statusCode ?? 0 });
@@ -492,6 +622,7 @@ function deskStream(port: number, token: string, route: string, body: unknown, o
     res.setEncoding("utf8");
     let buf = "";
     res.on("data", (chunk: string) => {
+      heard();
       buf += chunk;
       let i: number;
       while ((i = buf.indexOf("\n")) >= 0) {
@@ -521,10 +652,11 @@ function deskStream(port: number, token: string, route: string, body: unknown, o
 type LockOutcome =
   | { kind: "granted"; slot: Slot; wait: GrantWait | null }
   | { kind: "error"; error: Error }
+  | { kind: "stalled" }
   | { kind: "gone" };
 
 function remoteLock(
-  mode: Extract<Mode, { kind: "follower" }>,
+  mode: Follower,
   req: Record<string, unknown>,
   op: string,
   signal: AbortSignal | undefined,
@@ -539,7 +671,7 @@ function remoteLock(
       signal?.removeEventListener("abort", onAbort);
       resolve(o);
     };
-    const s = deskStream(mode.port, mode.token, "/desk/lock", req, (raw) => {
+    const s = deskStream(mode.port, mode.token, "/desk/lock", req, mode.idleMs, (raw) => {
       const l = raw as LockLine;
       if (l.t === "wait") surfaceLock(op, l, onWait);
       else if (l.t === "granted") finish({ kind: "granted", slot: { kind: "remote", id: l.id, abort: s.abort, closed: s.closed }, wait: l.wait });
@@ -551,7 +683,7 @@ function remoteLock(
       finish({ kind: "error", error: new WriteQueueCancelledError(op) });
     };
     signal?.addEventListener("abort", onAbort, { once: true });
-    s.closed.then(() => finish({ kind: "gone" }));
+    s.closed.then((end) => finish(end.kind === "stalled" ? { kind: "stalled" } : { kind: "gone" }));
   });
 }
 
@@ -559,18 +691,16 @@ type OpOutcome =
   | { kind: "ok"; result: unknown; panelPort: number }
   | { kind: "err"; error: Error; panelPort: number }
   | { kind: "lost" }
-  | { kind: "before-start" }
-  | { kind: "after-start" }
+  /** Provably never forwarded. */
+  | { kind: "refused" }
+  /** Lost after the request may have been delivered. */
+  | { kind: "dropped" }
+  | { kind: "stalled" }
   | { kind: "timeout" };
 
-function remoteOp(
-  mode: Extract<Mode, { kind: "follower" }>,
-  body: { timeoutMs: number } & Record<string, unknown>,
-  onAhead: (ahead: DeskAhead[]) => void
-): Promise<OpOutcome> {
+function remoteOp(mode: Follower, body: { timeoutMs: number } & Record<string, unknown>, onAhead: (ahead: DeskAhead[]) => void): Promise<OpOutcome> {
   return new Promise<OpOutcome>((resolve) => {
     let done = false;
-    let started = false;
     let timer: NodeJS.Timeout | null = null;
     const finish = (o: OpOutcome) => {
       if (done) return;
@@ -578,13 +708,12 @@ function remoteOp(
       if (timer) clearTimeout(timer);
       resolve(o);
     };
-    const s = deskStream(mode.port, mode.token, "/desk/op", body, (raw) => {
+    const s = deskStream(mode.port, mode.token, "/desk/op", body, mode.idleMs, (raw) => {
       const l = raw as OpLine;
       if (l.t === "start") {
-        started = true;
         // The desk applies this session's own timeout to the panel and reports
-        // it; this is only the backstop for a desk that stops answering
-        // without dying. Started here, at `start` — never at enqueue.
+        // it; this is only the backstop for a desk that beats but never
+        // answers. Started at `start` — never at enqueue.
         timer = setTimeout(() => {
           s.abort();
           finish({ kind: "timeout" });
@@ -596,14 +725,28 @@ function remoteOp(
       else if (l.t === "err") finish({ kind: "err", error: fromWire(l.error), panelPort: l.panelPort });
       else if (l.t === "lost") finish({ kind: "lost" });
     });
-    s.closed.then(() => finish(started ? { kind: "after-start" } : { kind: "before-start" }));
+    s.closed.then((end) => {
+      if (end.kind === "refused" || end.kind === "status") finish({ kind: "refused" });
+      else if (end.kind === "stalled") finish({ kind: "stalled" });
+      else finish({ kind: "dropped" });
+    });
   });
 }
 
-type Hello = { kind: "desk"; protocol: number; pid: number } | { kind: "starting" } | { kind: "foreign" } | { kind: "refused" } | { kind: "timeout" };
+type Hello =
+  | { kind: "desk"; protocol: number; pid: number; beatMs: number }
+  | { kind: "starting" }
+  | { kind: "foreign" }
+  | { kind: "refused" }
+  | { kind: "timeout" };
 
-/** Ask whoever holds the desk port what it is. Never throws. */
+/**
+ * Ask whoever holds the desk port what it is. Never throws. A desk must prove it
+ * knows the token — an HMAC of a fresh nonce — before anything is routed to it,
+ * so a process that merely answers with the desk's id is treated as foreign.
+ */
 function deskHello(port: number, token: string | null): Promise<Hello> {
+  const nonce = randomBytes(16).toString("hex");
   return new Promise<Hello>((resolve) => {
     const req = http.get(
       {
@@ -611,7 +754,7 @@ function deskHello(port: number, token: string | null): Promise<Hello> {
         port,
         path: "/desk/hello",
         agent: false,
-        headers: token ? { [DESK_TOKEN_HEADER]: token } : {},
+        headers: token ? { [DESK_TOKEN_HEADER]: token, [DESK_NONCE_HEADER]: nonce } : {},
         timeout: HELLO_TIMEOUT_MS,
       },
       (res) => {
@@ -619,12 +762,14 @@ function deskHello(port: number, token: string | null): Promise<Hello> {
         res.setEncoding("utf8");
         res.on("data", (c: string) => { if (text.length < 4096) text += c; });
         res.on("end", () => {
-          let b: { desk?: string; protocol?: number; pid?: number } | null = null;
+          let b: { desk?: string; protocol?: number; pid?: number; beatMs?: number; proof?: string } | null = null;
           try { b = JSON.parse(text); } catch {}
           if (!b || b.desk !== DESK_ID) return resolve({ kind: "foreign" });
-          if (res.statusCode === 200) return resolve({ kind: "desk", protocol: Number(b.protocol), pid: Number(b.pid) });
           // A desk refusing this token: its file is being written, or is a dead desk's.
-          resolve({ kind: "starting" });
+          if (res.statusCode !== 200 || !token) return resolve({ kind: "starting" });
+          if (b.proof !== deskProof(token, nonce)) return resolve({ kind: "foreign" });
+          const beatMs = Number(b.beatMs);
+          resolve({ kind: "desk", protocol: Number(b.protocol), pid: Number(b.pid), beatMs: Number.isFinite(beatMs) && beatMs > 0 ? beatMs : 2000 });
         });
         res.on("error", () => resolve({ kind: "timeout" }));
       }

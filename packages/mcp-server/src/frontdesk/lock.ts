@@ -78,8 +78,17 @@ export class DeskLock {
   private ticker: NodeJS.Timeout | null = null;
   private closed = false;
 
-  constructor(opts: { graceMs?: number } = {}) {
+  private onHolderChange?: (holder: { op: string } | null) => void;
+
+  constructor(opts: { graceMs?: number; onHolderChange?: (holder: { op: string } | null) => void } = {}) {
     this.graceUntil = Date.now() + (opts.graceMs ?? 0);
+    this.onHolderChange = opts.onHolderChange;
+  }
+
+  private setHolder(h: Holder | null): void {
+    this.holder = h;
+    if (this.closed) return;
+    try { this.onHolderChange?.(h && { op: h.op }); } catch {}
   }
 
   get held(): { op: string; sessionId: string; session: string; since: number } | null {
@@ -170,7 +179,7 @@ export class DeskLock {
   release(id: string): void {
     if (this.holder?.id !== id) return;
     clearTimeout(this.holder.ceiling);
-    this.holder = null;
+    this.setHolder(null);
     this.pump();
     this.announce();
   }
@@ -213,7 +222,7 @@ export class DeskLock {
       this.release(id);
     }, req.holdCeilingMs);
     ceiling.unref?.();
-    this.holder = { id, op: req.op, sessionId: req.sessionId, session: req.session, since: now, ceiling };
+    this.setHolder({ id, op: req.op, sessionId: req.sessionId, session: req.session, since: now, ceiling });
     const wait: GrantWait | null =
       waiter && waiter.behindOther
         ? { queuedBehind: waiter.behindOther.op, queuedBehindSession: waiter.behindOther.session, waitedMs: now - waiter.enqueuedAt }
@@ -257,8 +266,11 @@ export class DeskLock {
       // The holder is reported only when it is another session's: a session is
       // never told it is waiting behind itself.
       const shown = holder && this.holder!.sessionId !== w.req.sessionId ? holder : null;
+      // Held back by a takeover's grace with nothing holding the lock: said so,
+      // rather than leaving the wait unexplained.
+      const graceMs = !this.holder && !w.req.resume && now < this.graceUntil ? this.graceUntil - now : undefined;
       try {
-        w.req.onUpdate({ t: "wait", position: i + 1, holder: shown, waitedMs: now - w.enqueuedAt });
+        w.req.onUpdate({ t: "wait", position: i + 1, holder: shown, waitedMs: now - w.enqueuedAt, graceMs });
       } catch {}
     });
     if (!this.ticker) {

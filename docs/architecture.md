@@ -368,7 +368,9 @@ it runs in — and that record is what "AE is still running session X's
 **What a waiting session is told.** Its position, what is in front, whose, and
 for how long — as `notifications/progress` while it waits, when the client asked
 for progress (the request is still open, so #82 does not apply), and in the
-result as `queuedBehind`/`waitedMs` plus `queuedBehindSession`. A queue timeout
+result as `queuedBehind`/`waitedMs` plus `queuedBehindSession`. A read is
+told too: a batch's chunks run inside the panel, not through the desk, so the
+lease its session still holds is what names it. A queue timeout
 behind another session is a `DeskWaitError`: still a `WriteQueueWaitError`, same
 remedy, but it says `get_job` cannot see the other session's work. None of this
 appears unless the call waited behind **another** session, so a single session's
@@ -377,20 +379,40 @@ behind itself, and the composite lease lets go of the desk before the session's
 own queue so that cannot happen at the seam either.
 
 **Handover.** A follower that loses the desk — refused, reset, `moved` — tries
-the bind itself; one wins and the rest join it. What happens to a call in
-transit hangs on one line: the desk writes and flushes `start` *before* it posts
-to the panel. Lost before `start`, the call never reached After Effects and is
-sent again to the new desk. Lost after it, a write fails with
-`FrontDeskLostError` — a `BridgeResetError` subclass, so the may-have-run remedy
-and `server.ts`'s handling are the reset's — and is never re-sent; a read is.
-A lock is an open connection: it frees itself when its holder's process dies.
-A session whose lease dies with the desk while its batch is still running
-re-takes it at the new desk with `resume`, which is granted ahead of everything,
-and a desk that took over grants nothing else for 1.5 s — long enough for that
-owner to reconnect. A write always names the lease it runs under; a desk that
-does not recognise it answers `lost` without sending anything, and the session
-re-takes the lease first. A graceful exit releases the port first and lets calls
-already at After Effects answer, so a successor can bind while they finish.
+the bind itself; one wins and the rest join it. A write in transit is re-sent
+only on *proof* it was never forwarded: the connection refused, a refusal
+status, or the desk saying `lost`. Everything else — the connection dropped, the
+desk stalled — fails the write with `FrontDeskLostError`, a `BridgeResetError`
+subclass, so the may-have-run remedy and `server.ts`'s handling are the reset's;
+a read is re-sent. The first version re-sent a write that had not yet seen the
+desk's `start` line; review found the hole: a desk can post to the panel and be
+killed before that line's bytes arrive (on Windows a hard kill drops unsent
+socket data), so a missing `start` proves nothing. Queued writes still move
+across a handover safely, because a write waits on its *lock* stream, and the op
+is sent only once the lock is granted. A lock is an open connection: it frees
+itself when its holder's process dies. A session whose lease dies with the desk
+while its batch is still running re-takes it at the new desk with `resume`,
+granted ahead of everything; if the old desk's file says a long lease
+(`run_batch`, `render_queue`) held the lock — `batchHeld`, written only when
+that changes, and left in place by a graceful close for exactly this — the new
+desk grants nothing else for 1.5 s and says so to whoever waits. A leftover file
+from a desk that held nothing makes nobody wait. A lease that cannot be re-taken
+is not dropped quietly: the batch's job gets a `warning` that other sessions'
+writes may have landed between its steps, and every later write under that lease
+is refused unsent (`DeskPlaceLostError`, the write-queue-wait kind). The desk
+enforces it too: a write must name the lease holding the lock, or nothing is
+sent and the answer is `lost`.
+
+**A desk that stalls without dying** — a suspended terminal, a debugger, a
+blocked event loop — keeps the port bound, so nobody can take over. The desk
+beats on every open stream (every 2 s; `AE_MCP_FRONT_DESK_BEAT_MS`), and a
+follower that hears nothing for five beats gives up on it: a lock wait fails as
+`DeskPlaceLostError` (nothing was sent), a write in flight as
+`FrontDeskLostError` (may have run), a read is re-sent, and the session goes to
+After Effects directly for 10 s before asking again. Never an indefinite wait.
+A follower also joins a desk only after the desk proves it knows the token — an
+HMAC of a fresh nonce — so a process that merely answers 200 with the desk's id
+is treated as foreign.
 
 **Decided, not inherited.** Jobs stay with the session that started them —
 `await_job`, `get_job`, `cancel_job` and the event socket are per server as

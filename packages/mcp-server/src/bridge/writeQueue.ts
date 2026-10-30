@@ -52,6 +52,11 @@ export interface WriteLease {
   extendUntil(p: Promise<unknown>): void;
   /** Idempotent. A no-op after the first call. */
   release(): void;
+  /**
+   * Told if the lease stops protecting its work before it is released — only a
+   * front-desk lease can (issue #223). Absent on this queue's own leases.
+   */
+  onLost?(listener: (why: string) => void): void;
 }
 
 const DEFAULT_MAX_WAIT_MS = 600_000;
