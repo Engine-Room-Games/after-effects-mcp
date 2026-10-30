@@ -47,7 +47,7 @@ import { AeError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, 
 import { resolveRunJsxSource, type ResolvedRunJsxArgs, type RunJsxArgs } from "./tools/runJsxSource.js";
 import { runJsxViaServer } from "./tools/runJsxAssembly.js";
 import { toolAnnotations } from "./tools/annotations.js";
-import { mayAsk, CONFIRM_TIMEOUT_MS, buildPrompt, clientCanElicit, confirmWithUser, notRunMessage, preReadFailureMessage, type ConfirmPrompt } from "./tools/confirm.js";
+import { mayAsk, buildPrompt, confirmTimeoutMs, clientCanElicit, confirmWithUser, notRunMessage, preReadFailureMessage, type ConfirmPrompt } from "./tools/confirm.js";
 import {
   disabledOps,
   disabledToolMessage,
@@ -825,8 +825,10 @@ export function createServer(opts: CreateServerOptions = {}) {
     let lease: WriteLease | null = null;
     if (mayAsk(name) && clientCanElicit(server.getClientCapabilities())) {
       let reserved: WriteLease;
+      let reservedAt = 0;
       try {
         reserved = await line.reserve(name, extra?.signal);
+        reservedAt = Date.now();
       } catch (e) {
         return fail(name, (e as Error).message);
       }
@@ -846,16 +848,16 @@ export function createServer(opts: CreateServerOptions = {}) {
         reserved.release();
         return preReadFailure(e);
       }
-      if (prompt) {
+      if (prompt && prompt.ask !== false) {
         const promptStarted = Date.now();
         const outcome = await confirmWithUser(
           name,
           args as Record<string, unknown>,
           prompt,
-          (params) =>
-            server.elicitInput(params, { relatedRequestId: extra.requestId, signal: extra.signal, timeout: CONFIRM_TIMEOUT_MS }),
+          (params, timeout) => server.elicitInput(params, { relatedRequestId: extra.requestId, signal: extra.signal, timeout }),
           extra.signal,
-          (m) => logger.warn(m)
+          (m) => logger.warn(m),
+          confirmTimeoutMs(promptStarted - reservedAt, writes.maxWaitMs)
         );
         // Time spent by a person reading a dialog is not time this call spent
         // on After Effects, and a timeout's "earlier steps" must not count it.

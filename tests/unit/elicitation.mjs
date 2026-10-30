@@ -9,11 +9,13 @@
 // - with it, accept forwards the op (with any choice folded in), and decline /
 //   cancel / the call being cancelled forward nothing and say nothing changed;
 // - the prompt names what it is about (the comp's name, the purge's count);
-// - nothing is asked when there is nothing to ask (a dry run, an empty purge);
-// - no write lease is held while the person decides — another write from the
-//   same session goes through while the prompt is open;
-// - a timeout is a refusal, and a client that advertised elicitation but cannot
-//   show the prompt falls back to today's behaviour.
+// - nothing is asked when there is nothing to ask (a dry run, an empty purge),
+//   but a purge is still re-checked under the lease;
+// - a batch with any of the three among its steps asks once, up front;
+// - this session's later writes wait behind a pending confirmation (order is
+//   kept); reads do not; the prompt gives up before a queued write would;
+// - a timeout is a refusal, and only a client answering "method not found"
+//   falls back to today's behaviour — never on the client's message text.
 //
 //   node tests/unit/elicitation.mjs
 
@@ -51,7 +53,7 @@ const bridge = http.createServer((req, res) => {
     if (op === "get_comp") result = { id: args.compId, name: "Hero Title" };
     if (op === "purge_unused_footage" && args.dryRun) {
       dryRuns++;
-      result = stubPurgeEmpty
+      result = stubPurgeEmpty || (purgeEmptyThenOne && dryRuns === 1)
         ? { solidsOnly: true, scanned: 2, inUse: 2, dryRun: true, wouldRemove: [], wouldRemoveCount: 0 }
         : {
             solidsOnly: true, scanned: 3, inUse: 1, dryRun: true,
@@ -70,6 +72,8 @@ const bridge = http.createServer((req, res) => {
 let stubPurgeEmpty = false;
 /** When set, the second dry run of a call finds one more unused solid than the first. */
 let purgeGrows = false;
+/** When set, the first dry run of a call finds nothing and the second finds two solids. */
+let purgeEmptyThenOne = false;
 let dryRuns = 0;
 const wss = new WebSocketServer({ server: bridge, path: "/events" });
 await new Promise((r) => bridge.listen(0, "127.0.0.1", r));
@@ -78,10 +82,10 @@ assert.notEqual(port, 7777, "must not bind the panel's port");
 process.env.AE_MCP_PORT = String(port);
 
 const { createServer } = await import(dist("server.js"));
-const { confirmWithUser, notRunMessage, cannotElicit, CONFIRMED_OPS } = await import(dist("tools", "confirm.js"));
+const { confirmWithUser, notRunMessage, cannotElicit, confirmTimeoutMs, CONFIRMED_OPS } = await import(dist("tools", "confirm.js"));
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
-const { ElicitRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
+const { ElicitRequestSchema, McpError, ErrorCode } = await import("@modelcontextprotocol/sdk/types.js");
 
 /** A connected pair; `answer(params)` is the person, when the client can ask one. */
 async function connect(capabilities, answer) {
@@ -363,6 +367,59 @@ await check("a timeout after a prompt does not count the person's answering time
   await new Promise((r) => setTimeout(r, 1500)); // let the stub finish the slow delete
 });
 
+await check("purge: nothing unused when checked, something unused under the lease — refused, not purged unasked", async () => {
+  seen.length = 0;
+  prompts.length = 0;
+  dryRuns = 0;
+  purgeEmptyThenOne = true;
+  const res = await asked.client.callTool({ name: "purge_unused_footage", arguments: {} });
+  purgeEmptyThenOne = false;
+  assert.equal(res.isError, true, text(res));
+  assert.match(text(res), /never asked/);
+  assert.equal(prompts.length, 0);
+  assert.ok(!seen.some((s) => s.op === "purge_unused_footage" && !s.args.dryRun), "the real purge was sent");
+});
+
+for (const [label, thrown] of [
+  ["an McpError", () => new McpError(ErrorCode.InternalError, "Client does not support form elicitation.")],
+  ["a plain Error", () => new Error("Client does not support form elicitation.")],
+]) {
+  await check(`a client error (${label}) whose text says "does not support elicitation" is a refusal`, async () => {
+    seen.length = 0;
+    reply = () => { throw thrown(); };
+    const res = await asked.client.callTool({ name: "delete_comp", arguments: { compId: 10 } });
+    reply = { action: "accept", content: {} };
+    assert.equal(res.isError, true, text(res));
+    assert.ok(!ops().includes("delete_comp"), `delete_comp ran unasked: ${ops()}`);
+  });
+}
+
+await check("a client answering method-not-found gets today's behaviour", async () => {
+  seen.length = 0;
+  reply = () => { throw new McpError(ErrorCode.MethodNotFound, "nope"); };
+  const res = await asked.client.callTool({ name: "delete_comp", arguments: { compId: 10 } });
+  reply = { action: "accept", content: {} };
+  assert.equal(res.isError, undefined, text(res));
+  assert.deepEqual(ops(), ["get_comp", "delete_comp"]);
+});
+
+await check("the prompt gives up before a write queued behind it would", async () => {
+  process.env.AE_MCP_WRITE_QUEUE_WAIT_MS = "4000";
+  const slow = await connect({ elicitation: {} }, () => new Promise(() => {})); // a person who never answers
+  delete process.env.AE_MCP_WRITE_QUEUE_WAIT_MS;
+  seen.length = 0;
+  const pending = slow.client.callTool({ name: "delete_comp", arguments: { compId: 10 } });
+  while (!seen.some((s) => s.op === "get_comp")) await new Promise((r) => setTimeout(r, 5));
+  const later = slow.client.callTool({ name: "set_comp", arguments: { compId: 11, name: "x" } });
+  const res = await pending;
+  assert.equal(res.isError, true);
+  assert.match(text(res), /nobody answered the confirmation prompt within 4 seconds/);
+  const other = await later;
+  assert.equal(other.isError, undefined, `the queued write timed out first: ${text(other)}`);
+  assert.deepEqual(ops(), ["get_comp", "set_comp"]);
+  await slow.client.close();
+});
+
 await check("the call cancelled while the prompt is open runs nothing", async () => {
   seen.length = 0;
   let release;
@@ -406,11 +463,33 @@ await check("any other prompt failure refuses", async () => {
   assert.equal(cannotElicit(new Error("Client does not support form elicitation.")), true);
 });
 
+await check("cannotElicit trusts the wire's code, never its text", async () => {
+  assert.equal(cannotElicit(new McpError(ErrorCode.InternalError, "Client does not support form elicitation.")), false);
+  assert.equal(cannotElicit(new McpError(ErrorCode.MethodNotFound, "x")), true);
+  assert.equal(cannotElicit(new Error("Client does not support form elicitation.")), true);
+});
+
+await check("a cancelled call is a refusal even when the error would otherwise fall back", async () => {
+  const ac = new AbortController();
+  ac.abort();
+  const out = await confirmWithUser("delete_comp", { compId: 1 }, prompt, async () => {
+    throw new McpError(ErrorCode.MethodNotFound, "x");
+  }, ac.signal);
+  assert.equal(out.proceed, false);
+  assert.match(out.message, /cancelled while the confirmation prompt was open/);
+});
+
+await check("the prompt limit sits under the queue wait, counted from the reservation", async () => {
+  assert.equal(confirmTimeoutMs(0, 600_000), 300_000);
+  assert.equal(confirmTimeoutMs(10_000, 60_000), 44_000);
+  assert.ok(confirmTimeoutMs(0, 4000) < 4000);
+});
+
 await check("a client that advertised elicitation but cannot show it gets today's behaviour", async () => {
   const logged = [];
   const out = await confirmWithUser(
     "delete_comp", { compId: 1 }, prompt,
-    async () => { throw Object.assign(new Error("Method not found"), { code: -32601 }); },
+    async () => { throw new McpError(ErrorCode.MethodNotFound, "Method not found"); },
     undefined, (m) => logged.push(m)
   );
   assert.equal(out.proceed, true);

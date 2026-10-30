@@ -406,9 +406,13 @@ and an SDK client with and without the capability.
   there would make the tool unusable on that client for good. That is the
   *only* fallback (`cannotElicit`) — any other prompt failure may be a person
   who said no (an accept whose content failed the SDK's schema check, a client
-  signalling dismissal as an error) and is refused.
-- **No answer is never a yes.** Decline, cancel, five minutes without an
-  answer (`CONFIRM_TIMEOUT_MS`; the SDK's 60s default is a timeout for
+  signalling dismissal as an error) and is refused. From the wire only the
+  JSON-RPC code is trusted (`McpError` with `MethodNotFound`); the SDK's own
+  local refusal is recognised as a plain `Error`, which nothing a client sends
+  can become. Matching message text let a client error reading "does not
+  support elicitation" run `delete_comp` unasked.
+- **No answer is never a yes.** Decline, cancel, no answer in time
+  (`confirmTimeoutMs`, below; the SDK's 60s default is a timeout for
   machines), a failed prompt and the tool call being cancelled all return
   `isError` with "was not run … Nothing in the After Effects project was
   changed". Not routed through `fail()`: it is the person's answer, and no
@@ -421,8 +425,11 @@ and an SDK client with and without the capability.
   issued after a `revert_comp` cannot land before it and then be wiped by it —
   while no *other* session on the same After Effects waits on a dialog. The
   cost falls only on this session: its later writes wait for the answer.
-  `CONFIRM_TIMEOUT_MS` sits below the queue's own wait
-  (`AE_MCP_WRITE_QUEUE_WAIT_MS`, 600s) so the prompt gives up before they do.
+  The prompt's limit is derived from this session's queue wait
+  (`AE_MCP_WRITE_QUEUE_WAIT_MS`, 600s by default): at most 5 minutes, and at
+  most 90% of that wait minus the time already spent since the reservation,
+  so the prompt always gives up before a write queued behind it would — a
+  queued write timing out first would blame the queue for a dialog.
   Reads take no lease and are never held. With no front desk, the per-session
   queue *is* the whole lock, and the one held is this process's.
 - **What was approved is what runs.** Another session (or the person in After
@@ -430,7 +437,10 @@ and an SDK client with and without the capability.
   `revert_comp` re-resolve their target when they run, so a stale prompt costs
   a refusal. `purge_unused_footage` removes whatever is unused at the time, not
   a list — so the prompt's `verify` re-reads the dry run under the full lease
-  and refuses, nothing changed, unless it is the same item ids. Done on the
+  and refuses, nothing changed, unless it is the same item ids. That holds
+  when the first dry run found nothing too: nobody is asked (`ask: false`),
+  but the empty set is still re-checked, or whatever became unused meanwhile
+  would be purged unasked. Done on the
   server, not as a new panel argument, because the panel does not update
   itself.
 - **The prompt names its subject.** A pre-read (`get_comp`,
@@ -439,7 +449,7 @@ and an SDK client with and without the capability.
   timeout: the bridge's sentence says the op may still land, true of a write
   and false here, so `preReadFailureMessage` says no change was sent. Nothing
   is asked when there is nothing to ask — a dry run, a purge that would remove
-  nothing, a checkpoint id the list does not know (the tool's own refusal is
+  nothing (still re-checked, above), a checkpoint id the list does not know (the tool's own refusal is
   the better answer).
 - **Why only three.** Every call is one undo step, and a prompt on every
   `delete_layer` trains a person to click through the one on `delete_comp`.

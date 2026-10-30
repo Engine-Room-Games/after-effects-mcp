@@ -13,10 +13,11 @@
  * Everything else is deliberately not asked about. Each call is one undo step,
  * and a prompt on every `delete_layer` trains a person to click through the
  * prompt that matters. Every tool takes ids, never names, so there is no
- * ambiguous target to ask about either. `run_batch` steps are not asked about:
- * a batch is one thing the agent planned, the client's own tool approval
- * covers it, and this is a convenience for the person — not a security
- * boundary, which a step inside a batch would have to make it.
+ * ambiguous target to ask about either. A `run_batch` with any of the three
+ * among its steps, at any depth, asks once for the whole batch before any of
+ * it runs (`confirmedBatchSteps`), so a batch is not a way round the prompt.
+ * `run_jsx` is not asked about: this is a convenience for the person, not a
+ * security boundary, and the client's own tool approval gates raw scripts.
  *
  * Three rules hold it together.
  *
@@ -24,10 +25,11 @@
  *    client's capabilities (the SDK normalises the 2025-06-18 `elicitation: {}`
  *    to that). A client without it gets exactly today's behaviour: no prompt,
  *    no extra argument, no wait. A client that advertised it but answers
- *    "method not found" also gets today's behaviour, logged (`cannotElicit`);
+ *    "method not found" also gets today's behaviour, logged (`cannotElicit`
+ *    trusts the JSON-RPC code from the wire, never the client's text);
  *    every other prompt failure is refused.
  * 2. **No answer is not a yes.** Decline, cancel, no answer within
- *    `CONFIRM_TIMEOUT_MS`, a failed prompt and the tool call itself being
+ *    `confirmTimeoutMs()`, a failed prompt and the tool call itself being
  *    cancelled all return an error that says the tool was not run and nothing
  *    was changed.
  * 3. **This session's order is kept; no other session waits on a person.**
@@ -46,7 +48,9 @@
 
 import { BridgeTimeoutError } from "../util/errors.js";
 import { MAX_BATCH_DEPTH } from "./policy.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { ElicitRequestFormParams, ElicitResult, ClientCapabilities } from "@modelcontextprotocol/sdk/types.js";
+import { queueWaitMs } from "../bridge/writeQueue.js";
 
 /** The tools that ask. Exported for tests and the docs; nothing else reads it. */
 export const CONFIRMED_OPS: ReadonlySet<string> = new Set(["delete_comp", "purge_unused_footage", "revert_comp"]);
@@ -88,13 +92,32 @@ function describeStep(s: BatchStep): string {
 }
 
 /**
- * How long a prompt waits for a person. The SDK's default request timeout is
- * 60s, which is a timeout for machines; a person reading a dialog needs more.
- * Kept under the write queue's own wait (`AE_MCP_WRITE_QUEUE_WAIT_MS`, 600s by
- * default): this session's later writes queue behind a pending confirmation,
- * and the prompt must give up before they do.
+ * The longest a prompt waits for a person. The SDK's default request timeout
+ * is 60s, which is a timeout for machines; a person reading a dialog needs more.
  */
-export const CONFIRM_TIMEOUT_MS = 5 * 60_000;
+export const CONFIRM_TIMEOUT_MAX_MS = 5 * 60_000;
+
+/**
+ * How long this prompt may wait. This session's later writes queue behind a
+ * pending confirmation, and each gives up after the write queue's own wait
+ * (`AE_MCP_WRITE_QUEUE_WAIT_MS`). The earliest of them queued no earlier than
+ * the reservation, so the prompt must give up within 90% of that wait counted
+ * from the reservation — `sinceReservedMs` is the pre-read's share — or a
+ * queued write would time out first with a message blaming the queue for what
+ * was a dialog. Never under a second: a prompt that cannot be read is no prompt.
+ */
+export function confirmTimeoutMs(sinceReservedMs: number, queueWait: number = queueWaitMs()): number {
+  return Math.max(1000, Math.min(CONFIRM_TIMEOUT_MAX_MS, Math.floor(queueWait * 0.9) - sinceReservedMs));
+}
+
+function spanText(ms: number): string {
+  if (ms >= 60_000) {
+    const m = Math.round(ms / 60_000);
+    return `${m} minute${m === 1 ? "" : "s"}`;
+  }
+  const sec = Math.round(ms / 1000);
+  return `${sec} second${sec === 1 ? "" : "s"}`;
+}
 
 /** True when the client can show a form prompt. */
 export function clientCanElicit(caps: ClientCapabilities | undefined): boolean {
@@ -106,6 +129,12 @@ export type ConfirmPrompt = {
   requestedSchema: ElicitRequestFormParams["requestedSchema"];
   /** Fold the person's answers into the args. Absent: the args are unchanged. */
   apply?: (args: Record<string, unknown>, content: Record<string, unknown>) => Record<string, unknown>;
+  /**
+   * False: nothing to ask the person, but `verify` still runs under the lease
+   * (a purge that found nothing unused must not remove what became unused
+   * while it waited). Absent: ask.
+   */
+  ask?: boolean;
   /**
    * Run once the write lease is held, just before the forward: re-read what
    * the person approved and return why it no longer holds, or null. A
@@ -173,26 +202,31 @@ export async function buildPrompt(name: string, args: Record<string, unknown>, r
     } | null;
     const items = Array.isArray(plan?.wouldRemove) ? plan!.wouldRemove! : [];
     const count = typeof plan?.wouldRemoveCount === "number" ? plan.wouldRemoveCount : items.length;
-    if (count === 0) return null;
     const approved = idSet(items);
     const what = plan?.solidsOnly === false ? "footage item" : "solid";
     const where = plan?.folderName !== undefined ? ` from the folder ${quoted(plan.folderName)}` : " from the project";
+    // The purge removes whatever is unused when it runs, not a list. The plan
+    // the person saw (or, when nothing was unused, the empty plan nobody was
+    // asked about) is read again under the lease, and the call refused unless
+    // it is the same items.
+    const verify = async (read: ReadOp): Promise<string | null> => {
+      const now = (await read("purge_unused_footage", { ...args, dryRun: true })) as { wouldRemove?: { id?: unknown }[] } | null;
+      const current = idSet(Array.isArray(now?.wouldRemove) ? now!.wouldRemove! : []);
+      if (current === approved) return null;
+      const n = current === "" ? 0 : current.split(",").length;
+      if (count === 0) {
+        return `nothing was unused when it was checked, but ${n} item${n === 1 ? " became" : "s became"} unused before it could run, and the user was never asked about ${n === 1 ? "it" : "them"}. Call it again to ask them`;
+      }
+      return `what is unused changed after the user confirmed (${count} item${count === 1 ? "" : "s"} approved, ${n} unused now). Ask the user again`;
+    };
+    if (count === 0) return { ask: false, message: "", requestedSchema: NO_FIELDS, verify };
     const shown = items.slice(0, 5).map((i) => quoted(i.name));
     const more = count > shown.length ? ` and ${count - shown.length} more` : "";
     const list = shown.length > 0 ? ` (${shown.join(", ")}${more})` : "";
     return {
       message: `Remove ${count} unused ${what}${count === 1 ? "" : "s"}${where}${list}? No comp uses them. ${UNDO_NOTE}`,
       requestedSchema: NO_FIELDS,
-      // The purge removes whatever is unused when it runs, not a list. The
-      // person approved a list, so the plan is read again under the lease and
-      // the call refused unless it is the same items.
-      verify: async (read) => {
-        const now = (await read("purge_unused_footage", { ...args, dryRun: true })) as { wouldRemove?: { id?: unknown }[] } | null;
-        const current = idSet(Array.isArray(now?.wouldRemove) ? now!.wouldRemove! : []);
-        if (current === approved) return null;
-        const n = current === "" ? 0 : current.split(",").length;
-        return `what is unused changed after the user confirmed (${count} item${count === 1 ? "" : "s"} approved, ${n} unused now). Ask the user again`;
-      },
+      verify,
     };
   }
 
@@ -224,7 +258,7 @@ export async function buildPrompt(name: string, args: Record<string, unknown>, r
   return null;
 }
 
-export type Elicit = (params: ElicitRequestFormParams) => Promise<ElicitResult>;
+export type Elicit = (params: ElicitRequestFormParams, timeoutMs: number) => Promise<ElicitResult>;
 
 export type ConfirmOutcome =
   | { proceed: true; args: Record<string, unknown> }
@@ -253,9 +287,12 @@ function isTimeout(e: unknown): boolean {
  * may be a person who said no, and is refused.
  */
 export function cannotElicit(e: unknown): boolean {
-  if (typeof e !== "object" || e === null) return false;
-  if ((e as { code?: unknown }).code === -32601) return true;
-  return /does not support (form |url )?elicitation/i.test(String((e as { message?: unknown }).message ?? ""));
+  // Anything the client answered arrives as an McpError, and its message is
+  // the client's own text: only the JSON-RPC code is trusted from the wire.
+  if (e instanceof McpError) return e.code === ErrorCode.MethodNotFound;
+  // The SDK's own refusal, thrown before anything is sent, is a plain Error.
+  // A client cannot produce one of those, whatever its message says.
+  return e instanceof Error && /^Client does not support (form |url )?elicitation/i.test(e.message);
 }
 
 /**
@@ -287,17 +324,18 @@ export async function confirmWithUser(
   prompt: ConfirmPrompt,
   elicit: Elicit,
   signal?: AbortSignal,
-  log: (message: string) => void = () => {}
+  log: (message: string) => void = () => {},
+  timeoutMs: number = CONFIRM_TIMEOUT_MAX_MS
 ): Promise<ConfirmOutcome> {
   let answer: ElicitResult;
   try {
-    answer = await elicit({ mode: "form", message: prompt.message, requestedSchema: prompt.requestedSchema });
+    answer = await elicit({ mode: "form", message: prompt.message, requestedSchema: prompt.requestedSchema }, timeoutMs);
   } catch (e) {
     if (signal?.aborted) return { proceed: false, message: notRunMessage(tool, "the call was cancelled while the confirmation prompt was open") };
     if (isTimeout(e)) {
       return {
         proceed: false,
-        message: notRunMessage(tool, `nobody answered the confirmation prompt within ${Math.round(CONFIRM_TIMEOUT_MS / 60_000)} minutes`),
+        message: notRunMessage(tool, `nobody answered the confirmation prompt within ${spanText(timeoutMs)}`),
       };
     }
     if (cannotElicit(e)) {
