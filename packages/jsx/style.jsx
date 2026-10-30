@@ -11,6 +11,12 @@
 // The cost is that the project must have been saved once. `app.project.file` is
 // null until then, and there is no folder to write into. That is reported, never
 // guessed around.
+//
+// Since issue #220 (stage 3) a server talking to a panel that reports the
+// `project-path` capability asks `_project_path` and does the file I/O itself
+// (style/houseStyleFile.ts, same sentences). get_house_style and
+// set_house_style stay for older servers, for panels the server cannot read
+// beside, and for set_house_style as a run_batch step. Change both together.
 
 var HOUSE_STYLE_FILENAME = "house-style.md";
 
@@ -39,6 +45,22 @@ function __unsavedProject() {
       "Ask the user to save the project, then try again."
   };
 }
+
+/**
+ * The .aep's path and whether it has been saved, and nothing else (issue #220,
+ * stage 3). Internal: the server calls it to read and write house-style.md
+ * itself. `get_project_summary` also reports the path, but walks every project
+ * item on AE's main thread to do it. `unsavedChanges` is null where this AE
+ * has no `Project.dirty`.
+ */
+OPS._project_path = noUndo(function () {
+  var f = app.project.file;
+  var dirty = null;
+  try {
+    if (typeof app.project.dirty === "boolean") dirty = app.project.dirty;
+  } catch (e) {}
+  return { projectSaved: !!f, path: f ? f.fsName : null, unsavedChanges: dirty };
+});
 
 OPS.get_house_style = noUndo(function () {
   var file = __houseStyleFile();

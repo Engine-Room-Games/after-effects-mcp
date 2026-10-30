@@ -54,6 +54,8 @@ import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./gen
 import { archiveIssue, listIssues, logIssue, markReported } from "./issues/journal.js";
 import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
+import { houseStyleOnServer } from "./style/houseStyleFile.js";
+import { CAP_PROJECT_PATH } from "./setup/panelCapabilities.js";
 import {
   checkFootageExists,
   checkRenderOutput,
@@ -683,7 +685,16 @@ export function createServer(opts: CreateServerOptions = {}) {
       // A non-object result that After Effects warned about arrives wrapped
       // (core.jsx, dialog guard, issue #225); unwrapped here so the value the
       // agent reads keeps its shape, with the warnings as their own block.
-      const lifted = liftAeWarnings(await bridge.runOp(name, args));
+      // The house style's file I/O is the server's on a panel that can name
+      // the .aep cheaply (issue #220, stage 3); every other panel opens the
+      // file itself, as before. See style/houseStyleFile.ts.
+      const viaServer =
+        (name === "get_house_style" || name === "set_house_style") && panelGate.capabilities().has(CAP_PROJECT_PATH);
+      const lifted = liftAeWarnings(
+        viaServer
+          ? await houseStyleOnServer(name, args, (op, a) => bridge.runOp(op, a))
+          : await bridge.runOp(name, args)
+      );
       const result = lifted.value;
 
       // Async envelope handling for run_batch

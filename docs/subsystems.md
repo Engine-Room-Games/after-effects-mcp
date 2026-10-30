@@ -69,6 +69,23 @@ Three enforcement points, in order of preference:
 predate `bundleHash` entirely, so `undefined` must always mean "too old to say",
 never "matches".
 
+**The hash names the ExtendScript; `capabilities` names the panel code.**
+`bundleHash` says nothing about `client/main.js`, and a bundle can be current
+while the panel code beside it is not. Since issue #220 (stage 3) `/health`
+also lists `capabilities`, the only word on which panel code is answering.
+`setup/panelCapabilities.ts` reads it, and the gate keeps it with its verdict
+and drops it whenever it drops the verdict (invalidate, port change,
+unreachable), so a panel nobody has asked yet counts as legacy. **A missing or
+malformed field means "legacy", never "broken".** It gates nothing: a
+capability only switches the server onto a path that needs it, and every
+panel without one keeps the path it always had. The server still falls back
+on `Unknown op:` for the op behind a capability, since the list is static in
+`main.js` and stands for an op in the bundle installed beside it.
+
+| Capability | What the server does with it |
+|---|---|
+| `project-path` | Asks `_project_path` for the .aep's path and reads/writes `house-style.md` itself. |
+
 **Install before AE is open.** The panel loads at launch and only at launch, so
 installing while AE is closed costs no restart. `check_setup` reports
 `afterEffectsRunning`, and the guides, the `init-after-effects` prompt and
@@ -137,15 +154,34 @@ The house style is deliberately *not* part of the scaffold — see below.
 
 ## The house style
 
-`house-style.md` lives next to the `.aep`, and is read and written over the
-bridge by `packages/jsx/style.jsx`, not by the MCP server.
+`house-style.md` lives next to the `.aep`. Where it is *found* has always
+been the bridge's job: the bridge is the one channel every client has, so
+asking After Effects for the project's path needs no working directory, no
+`roots` and no filesystem tools on the client, and works identically in Claude
+Desktop and in a source checkout. A file found any other way would need a
+project folder, and the clients that need help most are exactly the ones
+without one.
 
-That looks like the wrong layer until you count clients. The bridge is the one
-channel every client has, because the whole product already depends on it.
-Reading the style over it needs no working directory, no `roots`, and no
-filesystem tools on the client — so it works identically in Claude Desktop and
-in a git checkout. A server-side file would need a project folder, and the
-clients that need help most are exactly the ones that do not have one.
+Where it is *opened* depends on the panel (issue #220, stage 3):
+
+- **A panel reporting `project-path`** answers `_project_path` — the .aep's
+  path and saved state, nothing else — and the server reads and writes the
+  file itself (`style/houseStyleFile.ts`). No file I/O on AE's main thread.
+- **Every other panel** (legacy, or one that answers `Unknown op:` after all)
+  gets `get_house_style` / `set_house_style` exactly as before, and
+  `packages/jsx/style.jsx` opens the file.
+- **A folder the server cannot see** goes to the panel's op too. On macOS,
+  privacy access to Desktop, Documents and removable or network volumes is
+  per app, so After Effects can be allowed where the server is not. A guide is
+  "not there" only when the .aep beside it is visible to the server; any other
+  failure to read, or an `EACCES`/`EPERM` at open on a write, is the panel's
+  to try, and nothing was written by then.
+
+The server's copy is a port of `style.jsx` with the same sentences and result
+shapes, and `tests/unit/panel-capabilities.mjs` holds them to each other on a
+real folder, BOM, CRLF and non-ASCII included. The jsx copy stays: older
+servers use it, and `set_house_style` as a `run_batch` step goes straight to
+ExtendScript. Change both together.
 
 The costs, both reported rather than worked around:
 
@@ -156,16 +192,13 @@ The costs, both reported rather than worked around:
   to replace an existing one. It is not a patch, and quietly half-rewriting
   someone's hand-written style guide is worse than refusing.
 
-**Issue #220 meant to move the file I/O to the server, and it is still here
-for one reason: there is no cheap way to ask for the path.** The server needs
-only the `.aep` path, and the one op in an installed bundle that reports it,
-`get_project_summary`, walks every project item on AE's main thread and checks
-each one for being a checkpoint. Paying that on every style read, on a large
-project, to save one small file read on the same thread would make the call
-slower, which is the opposite of what #220 is for. A `_project_path` op that
-returns `app.project.file.fsName` and nothing else can go in the next panel
-release, the same one as #220's stage 3. The server can then read and write the
-guide itself, and keep calling `get_house_style` on panels that lack it.
+**Why `_project_path` and not `get_project_summary`.** Stage 2 of #220 left
+the I/O on the panel because no cheap op reported the path:
+`get_project_summary` does, but walks every project item on AE's main thread
+and checks each one for being a checkpoint. Paying that on every style read,
+on a large project, to save one small file read would have made the call
+slower. `_project_path` reads `app.project.file` and `app.project.dirty` and
+nothing else.
 
 ### The summary, and why it is not on the panel
 
@@ -176,11 +209,9 @@ rule in their own build notes telling sessions *not* to call the tool and to rea
 a hand-maintained 40-line digest instead — so the digest and the source drifted,
 and "one cheap call" was neither (issue #59).
 
-**The reading is still over the bridge; only the summarising moved.** Every
-argument in the section above is about *where the file is opened*, and that has
-not changed — the panel opens it beside the .aep and hands back the whole text.
-Summarising is a separate question, and `style/summary.ts` answers it on the
-server for two reasons:
+**Summarising is a separate question from where the file is opened**, and
+`style/summary.ts` answers it on the server whichever side read the document,
+for two reasons:
 
 - **The panel does not update itself.** A summariser in the .jsx bundle would be
   dark until the user reinstalled the panel and relaunched AE, and until then an

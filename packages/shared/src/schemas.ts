@@ -1805,7 +1805,8 @@ export const OpMutation = {
   render_queue: "write",
   // raw — the script is the caller's and may do anything. Assume the worst.
   run_jsx: "write",
-  // house style — written over the bridge into a file beside the .aep.
+  // house style — a file beside the .aep. The server reads and writes it
+  // itself when the panel reports `project-path`, over the bridge otherwise.
   get_house_style: "read",
   set_house_style: "write",
   // jobs
@@ -1826,6 +1827,28 @@ export const OpMutation = {
 } as const satisfies Record<OpName, "write" | "read" | "server">;
 
 export type OpEffect = (typeof OpMutation)[OpName];
+
+/**
+ * The internal ops the server sends itself, as part of a tool — never tools,
+ * so never in `OpSchemas` (a key there is a tool in the list). Classified the
+ * same way and for the same reason: an op that changes the project must be
+ * known to. Each runs inside the tool that sends it, under that tool's lease
+ * or none, so nothing reads this to queue; `tests/unit/panel-capabilities.mjs`
+ * fails the build when the server sends an `_op` missing here, or this names
+ * one the bundle does not define.
+ */
+export const InternalOpMutation = {
+  // render_queue's halves. Prepare reads; save saves the project; mark-done
+  // unticks rendered items as one named undo step.
+  _render_prepare: "read",
+  _render_save: "write",
+  _render_mark_done: "write",
+  // snapshot_comp / diff_comp gather a fingerprint; the server keeps it.
+  _comp_fingerprint: "read",
+  // The .aep's path, for the house style the server reads and writes itself
+  // (issue #220, stage 3). Sent only to a panel reporting `project-path`.
+  _project_path: "read",
+} as const satisfies Record<`_${string}`, "write" | "read">;
 
 type ServerOpName = { [K in OpName]: (typeof OpMutation)[K] extends "server" ? K : never }[OpName];
 

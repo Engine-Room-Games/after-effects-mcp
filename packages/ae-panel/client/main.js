@@ -218,6 +218,15 @@
     });
   }
 
+  // ---------- What this panel supports ----------
+  // Reported on /health as `capabilities` (issue #220, stage 3). Each name is
+  // something a server may use only when it is listed:
+  //   project-path — `_project_path` answers the .aep's path with no project
+  //                  walk, so the server reads and writes house-style.md itself.
+  // The panel and its bundle.jsx install together, so a name here may stand for
+  // an op in the bundle. The server still falls back on `Unknown op:`.
+  var PANEL_CAPABILITIES = ["project-path"];
+
   // ---------- Load bundle.jsx ----------
   // Hash of the bundle *actually evaluated into ExtendScript*, reported on
   // /health. The server compares it against the bundle it ships to decide
@@ -1140,6 +1149,12 @@
             // pre-#106 panel, which is how the server tells "needs a token"
             // from "too old to want one".
             auth: true,
+            // What this panel can do that a panel without this field cannot
+            // (issue #220, stage 3). bundleHash names the ExtendScript; this is
+            // the only thing that says which panel code answers. The server
+            // reads a missing field as "legacy" and keeps to what every panel
+            // has, so a name is only ever added here, never relied on alone.
+            capabilities: PANEL_CAPABILITIES,
             ts: Date.now()
           }));
           return;

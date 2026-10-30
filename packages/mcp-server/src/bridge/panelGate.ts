@@ -2,6 +2,7 @@ import type { HttpClient } from "./httpClient.js";
 import { BridgeUnreachableError } from "../util/errors.js";
 import { assessPanel, installedBundleHash, type PanelAssessment } from "../setup/panelVersion.js";
 import { installedPanelDir, panelInstallDiff, panelSourceDir } from "../setup/paths.js";
+import { LEGACY_CAPABILITIES, panelCapabilities, type PanelCapabilities } from "../setup/panelCapabilities.js";
 import { logger } from "../util/logger.js";
 
 /** How often a healthy verdict is re-checked. */
@@ -66,10 +67,16 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
   let generation = 0;
   /** The probe in flight, shared by every caller that arrives while it runs. */
   let inflight: Promise<string | null> | null = null;
+  /**
+   * What the panel on the last /health said it supports (#220, stage 3).
+   * Cleared with the verdict, so a panel that has not been asked is legacy.
+   */
+  let capabilities: PanelCapabilities = LEGACY_CAPABILITIES;
 
   const invalidate = () => {
     generation++;
     verdict = null;
+    capabilities = LEGACY_CAPABILITIES;
     nextCheckAt = 0;
     inflight = null;
   };
@@ -83,6 +90,7 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
     try {
       const health = await bridge.health();
       if (gen !== generation) return verdict;
+      capabilities = panelCapabilities(health);
       const assessment = assess(health);
       verdict = assessment.state === "current" || assessment.state === "unknown" ? null : assessment.message;
       nextCheckAt = now() + (verdict !== null ? STALE_RECHECK_MS : HEALTHY_RECHECK_MS);
@@ -119,5 +127,10 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
       return inflight;
     },
     invalidate,
+    /**
+     * What the panel last reported supporting; legacy until a probe has
+     * answered. Call after `check()`, which is what keeps it current.
+     */
+    capabilities: (): PanelCapabilities => capabilities,
   };
 }
