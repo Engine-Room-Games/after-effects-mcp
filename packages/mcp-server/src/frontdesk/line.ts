@@ -647,7 +647,13 @@ function deskStream(
   route: string,
   body: unknown,
   idleMs: number,
-  onLine: (l: unknown) => void
+  onLine: (l: unknown) => void,
+  /**
+   * A stall is never declared before this `monoMs()` time: the call's deadline.
+   * Declaring one earlier would let a desk that wakes inside its deadline
+   * forward a write this side has already reported lost.
+   */
+  notBefore = 0
 ): { abort: () => void; closed: Promise<StreamEnd> } {
   let settle!: (e: StreamEnd) => void;
   let settled = false;
@@ -680,6 +686,15 @@ function deskStream(
       // read. Let the poll phase read them, then decide.
       setImmediate(() => {
         if (heardCount !== at || settled) return;
+        const early = notBefore - monoMs();
+        if (early >= 0) {
+          idle = setTimeout(() => {
+            if (heardCount !== at || settled) return;
+            settle({ kind: "stalled" });
+            req.destroy();
+          }, early + 1);
+          return;
+        }
         settle({ kind: "stalled" });
         req.destroy();
       });
@@ -793,7 +808,7 @@ function remoteOp(mode: Follower, body: { timeoutMs: number } & Record<string, u
     // so a desk that wakes from a stall finds it passed and never forwards what
     // was given up on. Both grow with the body: the desk beats only once it has
     // read it, so a large request must not look like a stall on its way in.
-    const allowance = bodyAllowanceMs(JSON.stringify(body).length);
+    const allowance = bodyAllowanceMs(Buffer.byteLength(JSON.stringify(body)));
     const sent = { ...body, deadline: monoMs() + forwardWindowMs(mode.idleMs) + allowance };
     const s = deskStream(mode.port, mode.token, "/desk/op", sent, mode.idleMs, (raw) => {
       const l = raw as OpLine;
@@ -812,7 +827,7 @@ function remoteOp(mode: Follower, body: { timeoutMs: number } & Record<string, u
       else if (l.t === "err") finish({ kind: "err", error: fromWire(l.error), panelPort: l.panelPort });
       else if (l.t === "lost") finish({ kind: "lost" });
       else if (l.t === "expired") finish({ kind: "expired" });
-    });
+    }, sent.deadline);
     s.closed.then((end) => {
       if (end.kind === "refused") finish({ kind: "refused" });
       // A token refusal means the desk changed hands: look again. Anything else

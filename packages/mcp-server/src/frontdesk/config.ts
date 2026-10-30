@@ -126,6 +126,9 @@ export function deskMaxBodyBytes(): number {
  * requester's stall threshold and the call's deadline grow by this much.
  */
 export function bodyAllowanceMs(bytes: number): number {
+  // Test hook: a large allowance without a large body.
+  const forced = Number.parseInt(process.env.AE_MCP_FRONT_DESK_BODY_ALLOWANCE_MS ?? "", 10);
+  if (Number.isFinite(forced) && forced >= 0) return forced;
   return Math.ceil(bytes / 25_000);
 }
 

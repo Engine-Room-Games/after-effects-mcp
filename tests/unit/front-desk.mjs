@@ -380,6 +380,56 @@ await check("a desk that cannot forward within the window, four times running, s
   await new Promise((r) => fake.close(r));
 });
 
+await check("a stall is never declared before the call's deadline, however large the body's allowance", async () => {
+  // A desk that answers `start` and then goes silent — frozen between `start`
+  // and its last check. The follower must not give up while the desk could
+  // still wake inside the deadline and forward.
+  const port = await freePort();
+  const token = "fake-desk-silent";
+  fs.mkdirSync(deskDir, { recursive: true });
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4246, port, token, startedAt: 1 }));
+  let deadline = null;
+  const fake = http.createServer((q, r) => {
+    if (q.url === "/desk/hello") {
+      r.setHeader("content-type", "application/json");
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4246, beatMs: 200, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+    }
+    let body = "";
+    q.on("data", (c) => (body += c));
+    q.on("end", () => {
+      r.writeHead(200, { "content-type": "application/x-ndjson" });
+      if (q.url === "/desk/lock") {
+        r.write(JSON.stringify({ t: "granted", id: "lease-s", wait: null }) + "\n");
+        const beat = setInterval(() => r.write(JSON.stringify({ t: "beat" }) + "\n"), 200);
+        r.on("close", () => clearInterval(beat));
+        return;
+      }
+      deadline = JSON.parse(body).deadline;
+      r.write(JSON.stringify({ t: "start", ahead: [] }) + "\n"); // then nothing
+    });
+  });
+  await new Promise((r) => fake.listen(port, "127.0.0.1", r));
+  process.env.AE_MCP_FRONT_DESK_BODY_ALLOWANCE_MS = "2000";
+  try {
+    const L = line(port, "L");
+    assert.equal(await L.ready(), "follower");
+    const lease = await L.acquire("set_text");
+    await assert.rejects(L.runOp("set_text", {}, { write: true }), (e) => {
+      assert.ok(e instanceof errors.FrontDeskLostError, e.message);
+      return true;
+    });
+    const declaredAt = monoMs();
+    assert.ok(deadline !== null);
+    assert.ok(declaredAt > deadline, `stall declared ${deadline - declaredAt}ms before the deadline`);
+    lease.release();
+    await L.close();
+  } finally {
+    delete process.env.AE_MCP_FRONT_DESK_BODY_ALLOWANCE_MS;
+    fake.closeAllConnections?.();
+    await new Promise((r) => fake.close(r));
+  }
+});
+
 await check("the desk refuses a write without the lease holding the lock, and sends nothing", async () => {
   const port = await freePort();
   const L = line(port, "L");
