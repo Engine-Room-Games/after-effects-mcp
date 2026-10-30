@@ -47,7 +47,7 @@ import { AeError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, 
 import { resolveRunJsxSource, type ResolvedRunJsxArgs, type RunJsxArgs } from "./tools/runJsxSource.js";
 import { runJsxViaServer } from "./tools/runJsxAssembly.js";
 import { toolAnnotations } from "./tools/annotations.js";
-import { mayAsk, buildPrompt, confirmTimeoutMs, clientCanElicit, confirmWithUser, notRunMessage, preReadFailureMessage, type ConfirmPrompt } from "./tools/confirm.js";
+import { mayAsk, buildPrompt, confirmTimeoutMs, clientCanElicit, confirmWithUser, notRunMessage, preReadFailureMessage, type ConfirmOutcome, type ConfirmPrompt } from "./tools/confirm.js";
 import {
   disabledOps,
   disabledToolMessage,
@@ -166,6 +166,8 @@ export interface CreateServerOptions {
    * test that builds a server in-process never joins a real session's desk.
    */
   frontDesk?: FrontDeskOptions | null;
+  /** Test seam: stands in for tools/confirm.ts `confirmWithUser` (issue #245). */
+  confirmWithUser?: typeof confirmWithUser;
 }
 
 /**
@@ -187,6 +189,7 @@ export function createServer(opts: CreateServerOptions = {}) {
   // Decided once, here: a tool list that changed mid-session would need a
   // list_changed notification, and nothing about these switches is dynamic.
   const policy = opts.policy ?? policyFromEnv();
+  const confirm = opts.confirmWithUser ?? confirmWithUser;
   const disabled = disabledOps(policy);
   logPolicy(policy);
 
@@ -853,21 +856,31 @@ export function createServer(opts: CreateServerOptions = {}) {
         // This session's writes queued behind the prompt stop their queue
         // clocks while a person decides, and are told what they waited for.
         const resumeWaiters = reserved.pauseWaiters?.() ?? (() => {});
-        const outcome = await confirmWithUser(
-          name,
-          args as Record<string, unknown>,
-          prompt,
-          // The SDK's own timeout sits a minute above confirmWithUser's timer,
-          // which is the only one allowed to mean "nobody answered".
-          (params, signal, timeout) => server.elicitInput(params, { relatedRequestId: extra.requestId, signal, timeout: timeout + 60_000 }),
-          extra.signal,
-          (m) => logger.warn(m),
-          confirmTimeoutMs(promptStarted - reservedAt, writes.maxWaitMs)
-        );
-        // Time spent by a person reading a dialog is not time this call spent
-        // on After Effects, and a timeout's "earlier steps" must not count it.
-        promptMs = Date.now() - promptStarted;
-        resumeWaiters();
+        let outcome: ConfirmOutcome;
+        try {
+          outcome = await confirm(
+            name,
+            args as Record<string, unknown>,
+            prompt,
+            // The SDK's own timeout sits a minute above confirmWithUser's timer,
+            // which is the only one allowed to mean "nobody answered".
+            (params, signal, timeout) => server.elicitInput(params, { relatedRequestId: extra.requestId, signal, timeout: timeout + 60_000 }),
+            extra.signal,
+            (m) => logger.warn(m),
+            confirmTimeoutMs(promptStarted - reservedAt, writes.maxWaitMs)
+          );
+        } catch (e) {
+          // Never expected — confirmWithUser answers every failure it knows —
+          // but a throw here must not leak the reservation or the pause, or
+          // every later write in this session would wait for ever.
+          reserved.release();
+          return errorResult(notRunMessage(name, `the confirmation prompt could not be completed (${(e as Error)?.message ?? String(e)})`));
+        } finally {
+          // Time spent by a person reading a dialog is not time this call spent
+          // on After Effects, and a timeout's "earlier steps" must not count it.
+          promptMs = Date.now() - promptStarted;
+          resumeWaiters();
+        }
         if (!outcome.proceed) {
           reserved.release();
           return errorResult(outcome.message);

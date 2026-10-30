@@ -119,6 +119,8 @@ export class WriteQueue {
   private waiting: Waiter[] = [];
   /** The holder waiting on a person, while it does; queue clocks are stopped. */
   private paused: string | null = null;
+  /** Whose pause it is: a resume ends only the pause it started. */
+  private pauseToken: object | null = null;
   /** Public for the front desk, which applies this session's limits to its cross-session wait. */
   readonly maxWaitMs: number;
   private readonly maxDepth: number;
@@ -161,7 +163,7 @@ export class WriteQueue {
       return Promise.resolve(this.makeLease(null));
     }
     if (this.depth >= this.maxDepth) {
-      return Promise.reject(new WriteQueueFullError(op, this.maxDepth, this.holder ?? "another write"));
+      return Promise.reject(new WriteQueueFullError(op, this.maxDepth, this.holder ?? "another write", this.paused ?? undefined));
     }
 
     const behind = this.holder ?? this.waiting.find((w) => !w.done)?.op ?? "another write";
@@ -238,8 +240,8 @@ export class WriteQueue {
       },
       pauseWaiters() {
         if (released) return () => {};
-        queue.pause();
-        return () => queue.resume();
+        const token = queue.pause();
+        return () => { if (token) queue.resume(token); };
       },
     };
 
@@ -268,12 +270,16 @@ export class WriteQueue {
 
   private handOff(): void {
     this.holder = null;
-    this.resume();
+    // The holder is gone, so whatever it paused ends with it.
+    if (this.pauseToken) this.resume(this.pauseToken);
     this.pump();
   }
 
-  private pause(): void {
-    if (this.paused !== null || this.holder === null) return;
+  /** Null when a pause is already running or nothing holds the queue: there is then nothing for this caller to end. */
+  private pause(): object | null {
+    if (this.paused !== null || this.holder === null) return null;
+    const token = {};
+    this.pauseToken = token;
     this.paused = this.holder;
     const now = Date.now();
     for (const w of this.waiting) {
@@ -285,10 +291,12 @@ export class WriteQueue {
         w.remainingMs -= now - w.timerStartedAt;
       }
     }
+    return token;
   }
 
-  private resume(): void {
-    if (this.paused === null) return;
+  private resume(token: object): void {
+    if (this.pauseToken !== token) return;
+    this.pauseToken = null;
     this.paused = null;
     for (const w of this.waiting) if (!w.done && w.timer === null) w.startTimer();
   }

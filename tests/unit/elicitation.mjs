@@ -479,6 +479,24 @@ await check("front desk: a pending prompt in one session does not hold another s
   await b.client.close();
 });
 
+await check("a throw from the confirmation never leaks the reservation or the pause", async () => {
+  const broken = await connect({ elicitation: {} }, () => ({ action: "accept", content: {} }), {
+    confirmWithUser: async () => { throw new Error("boom"); },
+  });
+  seen.length = 0;
+  const res = await broken.client.callTool({ name: "delete_comp", arguments: { compId: 10 } });
+  assert.equal(res.isError, true, text(res));
+  assert.match(text(res), /delete_comp was not run/);
+  assert.match(text(res), /boom/);
+  const next = await Promise.race([
+    broken.client.callTool({ name: "set_comp", arguments: { compId: 11, name: "after" } }),
+    new Promise((_, rej) => setTimeout(() => rej(new Error("the next write waited on a leaked reservation")), 2000)),
+  ]);
+  assert.equal(next.isError, undefined, text(next));
+  assert.deepEqual(ops(), ["get_comp", "set_comp"]);
+  await broken.client.close();
+});
+
 await check("the call cancelled while the prompt is open runs nothing", async () => {
   seen.length = 0;
   let release;
@@ -531,6 +549,33 @@ await check("the queue clock behind a confirmation stops, and the timeout says w
   assert.ok(settled instanceof Error, "the waiter should time out once the clock runs again");
   assert.match(settled.message, /waited for the user to answer a confirmation prompt/);
   a.release();
+});
+
+await check("a stale resume ends only its own pause", async () => {
+  const q = new WriteQueue({ maxWaitMs: 300, maxDepth: 8 });
+  const a = await q.acquire("delete_comp");
+  const resumeA = a.pauseWaiters();
+  const bP = q.acquire("revert_comp");
+  a.release(); // A's pause ends with it; B takes the queue
+  const b = await bP;
+  b.pauseWaiters();
+  let settled = null;
+  const c = q.acquire("set_comp").then(() => (settled = "granted"), (e) => (settled = e));
+  resumeA(); // stale: must not restart C's clock under B's pause
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(settled, null, "A's stale resume ended B's pause");
+  b.release();
+  await c;
+});
+
+await check("a full queue behind a pending confirmation says so", async () => {
+  const q = new WriteQueue({ maxWaitMs: 10_000, maxDepth: 1 });
+  const a = await q.acquire("delete_comp");
+  a.pauseWaiters();
+  const first = q.acquire("set_comp");
+  await assert.rejects(q.acquire("set_layer"), /waits for the user to answer a confirmation prompt/);
+  a.release();
+  (await first).release();
 });
 
 await check("any other prompt failure refuses", async () => {
