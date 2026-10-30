@@ -448,6 +448,12 @@ jobs:
       - name: Tool schemas are valid 2020-12 and hide no constraints
         run: node tests/unit/schema-constraints.mjs
 
+      # Issue #170: the tool list is resident in every session and nothing
+      # errors when it grows. A per-tool prose budget and a ceiling on the
+      # whole list; also that ae_guide's topic description names every topic.
+      - name: Tool list stays inside its token budget
+        run: node tests/unit/tool-budget.mjs
+
       # A field a schema advertises and no handler reads is a call that answers
       # {ok:true} having done nothing (issue #155) — how create_shape_layer's
       # fill/stroke and set_layer's trackMatte.layerId shipped. The second file
