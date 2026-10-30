@@ -640,7 +640,7 @@ export const SetLayer = z.object({
   quality: namedEnum(LAYER_QUALITIES).optional(),
   samplingQuality: namedEnum(SAMPLING_QUALITIES).optional(),
   frameBlendingType: namedEnum(FRAME_BLENDING_TYPES).optional().describe("Needs the comp's switch too (set_comp)."),
-  autoOrient: namedEnum(AUTO_ORIENT_TYPES).optional(),
+  autoOrient: namedEnum(AUTO_ORIENT_TYPES).optional().describe("Toward-camera values need a 3D layer (threeDLayer:true)."),
 });
 export const ParentLayer = z.object({
   compId: z.number(),

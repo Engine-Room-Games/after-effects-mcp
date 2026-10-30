@@ -406,6 +406,24 @@ OPS.set_layer = function (args) {
     throw new Error("set_layer: autoOrient CHARACTERS_TOWARD_CAMERA applies only to a 3D text layer with per-character 3D; layer " + l.id +
       " (\"" + l.name + "\") is a " + __layerKind(l) + ". Nothing was changed.");
   }
+  // Orienting toward the camera is 3D-only, and After Effects answers it on a
+  // 2D layer with a modal warning rather than a throw: the call blocks until
+  // someone clicks OK (measured on AE 2026, PR #216 live pass). So it is
+  // refused here, judged by the 3D switch as it will be once this call's own
+  // threeDLayer — written before autoOrient — has landed. Cameras and lights
+  // are always 3D.
+  if ((args.autoOrient === "CAMERA_OR_POINT_OF_INTEREST" || args.autoOrient === "CHARACTERS_TOWARD_CAMERA") && !camOrLight) {
+    var threeDAfter = args.threeDLayer !== undefined ? !!args.threeDLayer : !!l.threeDLayer;
+    if (!threeDAfter) {
+      throw new Error("set_layer: autoOrient " + args.autoOrient + " needs a 3D layer, and layer " + l.id + " (\"" + l.name + "\") " +
+        (args.threeDLayer === false ? "is made 2D by this call" : "is 2D") +
+        " — set threeDLayer:true first (the same call will do). Nothing was changed.");
+    }
+    if (args.autoOrient === "CHARACTERS_TOWARD_CAMERA" && l.threeDPerChar !== true) {
+      throw new Error("set_layer: autoOrient CHARACTERS_TOWARD_CAMERA needs per-character 3D, which text layer " + l.id + " (\"" + l.name +
+        "\") does not have enabled (Animate > Enable Per-character 3D). Nothing was changed.");
+    }
+  }
   if (args.stretch !== undefined && args.stretch === 0) {
     throw new Error("set_layer: stretch 0 is not a speed After Effects accepts. Nothing was changed.");
   }

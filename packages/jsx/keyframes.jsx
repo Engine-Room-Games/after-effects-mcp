@@ -216,11 +216,13 @@ function __applyTemporalEase(prop, keyIndex, easeIn, easeOut, resolved) {
   var keepOut = easeOut ? null : prop.keyOutInterpolationType(keyIndex);
   var lastMessage = "";
   var skipped = [];
+  var tried = [];
   for (var i = 0; i < candidates.length; i++) {
     var n = candidates[i];
     var inArr = __easeSide(sides["in"], n);
     var outArr = __easeSide(sides["out"], n);
     if (!inArr || !outArr) { skipped.push(n); continue; }
+    tried.push(n);
     try {
       prop.setTemporalEaseAtKey(keyIndex, inArr, outArr);
     } catch (e) {
@@ -230,17 +232,24 @@ function __applyTemporalEase(prop, keyIndex, easeIn, easeOut, resolved) {
     __restoreKeptInterpolation(prop, keyIndex, keepIn, keepOut, label);
     return n;
   }
+  // Only the counts actually sent are "rejected"; a skipped count was never
+  // sent, and naming it in both lists contradicts itself (PR #216 live pass).
   var detail = "";
   if (skipped.length) {
+    // Which side made a count unwritable: the per-dimension list passed, unless
+    // it is uniform (any count carries that) and so the kept side is the cause.
+    var passedList = (easeIn && easeIn.length) ? easeIn : ((easeOut && easeOut.length) ? easeOut : null);
+    var blamePassed = passedList !== null && !__easeUniform(passedList);
     detail = " Not tried at " + skipped.join(", ") + ": " +
-      (asked !== null
+      (blamePassed
         ? "the " + asked + " per-dimension eases passed cannot be written at another count without changing them" +
           " — pass one pair, or one per dimension this property has"
         : "the kept side reads back as " + known + " different per-dimension eases, which cannot be written at another count without changing them") + ".";
   }
   throw new Error(
-    "Could not set the temporal ease on " + label + " at key " + keyIndex + ": After Effects rejected ease " +
-    "arrays of " + candidates.join(", ") + " entries; the ease was not changed." + detail +
+    "Could not set the temporal ease on " + label + " at key " + keyIndex + ": " +
+    (tried.length ? "After Effects rejected ease arrays of " + tried.join(", ") + " entries" : "no entry count could be tried") +
+    "; the ease was not changed." + detail +
     (lastMessage ? " Last error from AE: " + lastMessage : "")
   );
 }

@@ -178,6 +178,45 @@ check("a switch the layer does not have is refused before anything is written", 
   assert.equal(ae.json("SOLID.name"), "Solid");
 });
 
+check("toward-camera auto-orient on a 2D layer is refused before anything is written (AE answers it with a modal)", () => {
+  const ae = scene();
+  // AE raises a blocking warning dialog here instead of throwing; the fake
+  // stands in for that by recording the assignment.
+  ae.run(`var ORIENTED = [];
+    [CARD, SOLID].forEach(function (l) {
+      var v = l.autoOrient;
+      Object.defineProperty(l, "autoOrient", { get: function () { return v; }, set: function (x) {
+        if (x === AutoOrientType.CAMERA_OR_POINT_OF_INTEREST && !l.threeDLayer) ORIENTED.push(l.name);
+        v = x; } });
+    });`);
+  refused(ae.call("set_layer", { compId: 100, layerId: 3, name: "Renamed", motionBlur: true, autoOrient: "CAMERA_OR_POINT_OF_INTEREST" }),
+    /autoOrient CAMERA_OR_POINT_OF_INTEREST needs a 3D layer.*is 2D.*threeDLayer:true.*Nothing was changed/, "camera orient on a 2D solid");
+  refused(ae.call("set_layer", { compId: 100, layerId: 3, threeDLayer: false, autoOrient: "CAMERA_OR_POINT_OF_INTEREST" }),
+    /needs a 3D layer.*is made 2D by this call.*Nothing was changed/, "camera orient while turning 3D off");
+  assert.deepEqual(ae.json("[SOLID.name, SOLID.motionBlur, SOLID.autoOrient, ORIENTED.length]"), ["Solid", false, 4212, 0]);
+
+  // threeDLayer:true in the same call is written first, so it is honoured.
+  const r = ok(ae.call("set_layer", { compId: 100, layerId: 3, threeDLayer: true, autoOrient: "CAMERA_OR_POINT_OF_INTEREST" }), "3D + camera orient");
+  assert.equal(r.switches.autoOrient, "CAMERA_OR_POINT_OF_INTEREST");
+  // An already-3D layer needs nothing else; ALONG_PATH stays fine on 2D.
+  ae.run("CARD.threeDLayer = true;");
+  ok(ae.call("set_layer", { compId: 100, layerId: 2, autoOrient: "CAMERA_OR_POINT_OF_INTEREST" }), "camera orient on a 3D layer");
+  assert.deepEqual(ae.json("[SOLID.threeDLayer, ORIENTED.length]"), [true, 0]);
+});
+
+check("characters-toward-camera needs a 3D text layer with per-character 3D", () => {
+  const ae = scene();
+  ae.run(`var TXT = textLayer(C, 9, "Hi", null);
+    TXT.autoOrient = AutoOrientType.NO_AUTO_ORIENT; TXT.threeDPerChar = false;`);
+  refused(ae.call("set_layer", { compId: 100, layerId: 9, name: "X", autoOrient: "CHARACTERS_TOWARD_CAMERA" }),
+    /needs a 3D layer.*Nothing was changed/, "2D text");
+  refused(ae.call("set_layer", { compId: 100, layerId: 9, name: "X", threeDLayer: true, autoOrient: "CHARACTERS_TOWARD_CAMERA" }),
+    /needs per-character 3D.*Nothing was changed/, "3D text without per-character 3D");
+  assert.deepEqual(ae.json("[TXT.name, TXT.threeDLayer, TXT.autoOrient]"), ["Hi", false, 4212]);
+  ae.run("TXT.threeDLayer = true; TXT.threeDPerChar = true;");
+  ok(ae.call("set_layer", { compId: 100, layerId: 9, autoOrient: "CHARACTERS_TOWARD_CAMERA" }), "per-character 3D text");
+});
+
 check("an enumeration the running AE lacks is refused, nothing changed", () => {
   const ae = scene();
   ae.run("delete AutoOrientType;");
@@ -301,6 +340,15 @@ check("a per-dimension ease of a length the property does not take is refused, n
   refused(ae.call("set_temporal_ease", {
     compId: 100, layerId: 2, propertyPath: SCALE, keyIndex: 1, easeIn: [{ influence: 80, speed: 0 }, { influence: 20, speed: 0 }],
   }), /the ease was not changed.*2 per-dimension eases passed cannot be written at another count/, "wrong length");
+  // A count is either rejected (sent, refused) or not tried (never sent) —
+  // never both, which is what the message used to say.
+  const msg = ae.call("set_temporal_ease", {
+    compId: 100, layerId: 2, propertyPath: SCALE, keyIndex: 1, easeIn: [{ influence: 80, speed: 0 }, { influence: 20, speed: 0 }],
+  }).error;
+  const rejected = (msg.match(/rejected ease arrays of ([\d, ]+) entries/) || [])[1].split(", ").map(Number);
+  const notTried = (msg.match(/Not tried at ([\d, ]+):/) || [])[1].split(", ").map(Number);
+  assert.deepEqual(rejected, [2], msg);
+  assert.ok(notTried.length > 0 && notTried.every((n) => !rejected.includes(n)), msg);
   const after = ok(ae.call("get_keyframes", { compId: 100, layerId: 2, propertyPath: SCALE }), "after");
   assert.deepEqual(after, before);
 });
