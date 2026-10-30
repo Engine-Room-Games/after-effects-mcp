@@ -32,6 +32,8 @@ const DEFAULT_OP_TIMEOUT_MS = 120_000;
 const SLOW_OPS = new Set([
   "run_batch", "run_jsx", "screenshot_frame", "screenshot_layer", "export_mogrt",
   "import_footage", "place_audio_cues", "purge_unused_footage", "_render_prepare", "_render_save",
+  // run_jsx under its internal name (issue #220, stage 6): the same script, the same limit.
+  "_run_jsx",
 ]);
 const SLOW_OP_TIMEOUT_MS = 300_000;
 

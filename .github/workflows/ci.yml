@@ -343,6 +343,7 @@ jobs:
         run: |
           node tests/unit/run-jsx-lines.mjs
           node tests/unit/run-jsx-source.mjs
+          node tests/unit/run-jsx-assembly.mjs
           node tests/unit/run-jsx-args.mjs
           node tests/unit/run-jsx-helpers.mjs
 

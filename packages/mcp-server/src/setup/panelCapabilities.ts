@@ -24,6 +24,13 @@ export const CAP_PROJECT_PATH = "project-path";
  */
 export const CAP_SERVER_IMAGES = "server-images";
 
+/**
+ * `_run_jsx` runs a script the server assembled, and a failure comes back
+ * with the raw line for the server to map (issue #220, stage 6;
+ * tools/runJsxAssembly.ts).
+ */
+export const CAP_SERVER_RUN_JSX = "server-run-jsx";
+
 export interface PanelCapabilities {
   /** True when the panel sent no usable `capabilities` field. */
   legacy: boolean;

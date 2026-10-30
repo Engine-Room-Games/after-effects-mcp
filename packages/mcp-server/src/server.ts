@@ -34,7 +34,8 @@ import type { CompFingerprint } from "./snapshots/store.js";
 import { diffFingerprints } from "./snapshots/diff.js";
 import { descriptions } from "./tools/descriptions.js";
 import { AeError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
-import { resolveRunJsxSource, type RunJsxArgs } from "./tools/runJsxSource.js";
+import { resolveRunJsxSource, type ResolvedRunJsxArgs, type RunJsxArgs } from "./tools/runJsxSource.js";
+import { runJsxViaServer } from "./tools/runJsxAssembly.js";
 import { toolAnnotations } from "./tools/annotations.js";
 import {
   disabledOps,
@@ -59,7 +60,7 @@ import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
 import { houseStyleOnServer } from "./style/houseStyleFile.js";
 import { internalSender, type SendInternal } from "./tools/internalOps.js";
-import { CAP_PROJECT_PATH, CAP_SERVER_IMAGES } from "./setup/panelCapabilities.js";
+import { CAP_PROJECT_PATH, CAP_SERVER_IMAGES, CAP_SERVER_RUN_JSX } from "./setup/panelCapabilities.js";
 import { createSharedFrameCache, panelInstanceId, sharedFrameCacheFile } from "./frames/sharedFrameCache.js";
 import { createFramePipeline, RAW_IMAGE_OPS, type ImageTool, type FramePipeline } from "./frames/pipeline.js";
 import {
@@ -750,6 +751,11 @@ export function createServer(opts: CreateServerOptions = {}) {
       // answers with paths (issue #220, stage 4); every other panel reads the
       // files and sends base64, as before. Either way the result has one shape.
       const imagesOnServer = name in RAW_IMAGE_OPS && panelGate.capabilities().has(CAP_SERVER_IMAGES);
+      // run_jsx's wrapper, inlined libraries and undo rewrite are built here,
+      // and a failure is mapped onto the caller's file here, on a panel that
+      // runs a pre-built script (issue #220, stage 6). Every other panel
+      // assembles and maps in ExtendScript, as before. See runJsxAssembly.ts.
+      const runJsxOnServer = name === "run_jsx" && panelGate.capabilities().has(CAP_SERVER_RUN_JSX);
       const lifted = liftAeWarnings(
         viaServer
           ? await houseStyleOnServer(name, args, sendInternal, (op, a) => runner.runOp(op, a), () =>
@@ -759,7 +765,11 @@ export function createServer(opts: CreateServerOptions = {}) {
             ? await imagesViaServer(frames, name as ImageTool, args, sendInternal, (op, a) => runner.runOp(op, a), () =>
                 panelGate.withdraw(CAP_SERVER_IMAGES)
               )
-            : await runner.runOp(name, args)
+            : runJsxOnServer
+              ? await runJsxViaServer(args as ResolvedRunJsxArgs, sendInternal, (op, a) => runner.runOp(op, a), () =>
+                  panelGate.withdraw(CAP_SERVER_RUN_JSX)
+                )
+              : await runner.runOp(name, args)
       );
       const result = lifted.value;
 
