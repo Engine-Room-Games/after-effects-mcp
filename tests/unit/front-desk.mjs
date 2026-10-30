@@ -216,6 +216,8 @@ await check("the two new messages are the kinds they belong to, and say somethin
   assert.match(place.message, /^`set_text` was not sent: the desk stopped answering\./);
   assert.match(place.message, /re-sending this call is safe/);
   assert.match(lost.message, /Do not blindly re-send it/);
+  assert.match(lost.message, /It may also land LATER/, "a write the desk may still forward must not be called settled by one read-back");
+  assert.doesNotMatch(lost.message, /send it again if it did not/);
   assert.doesNotMatch(lost.message, /check_setup/, "the panel never left; check_setup is not the remedy");
   const wait = new errors.DeskWaitError("set_text", 3000, "run_batch", "claude-code, pid 4");
   assert.doesNotMatch(wait.message, /get_job or await_job for a batch/, "the other session's job is not visible here");
@@ -252,6 +254,33 @@ process.env.USERPROFILE = home;
 const { SessionLine } = await import(dist("frontdesk", "line.js"));
 const { WriteQueue } = await import(dist("bridge", "writeQueue.js"));
 const { deskProof, FrontDesk } = await import(dist("frontdesk", "desk.js"));
+const { monoMs } = await import(dist("frontdesk", "config.js"));
+const { HttpClient } = await import(dist("bridge", "httpClient.js"));
+const { execFileSync } = await import("node:child_process");
+
+/** One NDJSON request to a desk, raw: lines as they arrive, kept open until told. */
+function rawDesk(port, token, route, body) {
+  const lines = [];
+  let ended = false;
+  const req = http.request({ host: "127.0.0.1", port, path: route, method: "POST", agent: false, headers: { "x-ae-mcp-desk-token": token } }, (res) => {
+    let buf = "";
+    res.setEncoding("utf8");
+    res.on("data", (c) => {
+      buf += c;
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const l = JSON.parse(buf.slice(0, i));
+        buf = buf.slice(i + 1);
+        if (l.t !== "beat") lines.push(l);
+      }
+    });
+    res.on("end", () => (ended = true));
+  });
+  req.on("error", () => (ended = true));
+  req.end(JSON.stringify(body));
+  return { lines, ended: () => ended, close: () => req.destroy() };
+}
+
 
 function fakeBridge() {
   const calls = [];
@@ -283,6 +312,73 @@ function postDesk(port, token, route, body) {
     req.end(JSON.stringify(body));
   });
 }
+
+await check("the deadline clock is one clock for every process on the machine", async () => {
+  // Deadlines cross from one server to another; the monotonic clock they are
+  // read on must agree between processes (mach_absolute_time, QueryPerformanceCounter).
+  const code = "process.stdout.write(JSON.stringify([Number(process.hrtime.bigint() / 1000000n), Date.now()]))";
+  const before = [monoMs(), Date.now()];
+  const child = JSON.parse(execFileSync(process.execPath, ["-e", code]));
+  const after = [monoMs(), Date.now()];
+  assert.ok(child[0] >= before[0] && child[0] <= after[0], `child ${child[0]} not within [${before[0]}, ${after[0]}]`);
+});
+
+await check("a re-post after a refusal asks first, and stops if the caller has given up", async () => {
+  const refused = await freePort();
+  let posts = 0;
+  const good = http.createServer((q, r) => {
+    r.setHeader("content-type", "application/json");
+    if (q.url === "/health") return r.end(JSON.stringify({ ok: true, port: 0, bundleHash: "x" }));
+    posts++;
+    q.resume();
+    r.end(JSON.stringify({ ok: true, result: {} }));
+  });
+  await new Promise((r) => good.listen(0, "127.0.0.1", r));
+  const goodPort = good.address().port;
+  const client = new HttpClient(refused, { candidates: () => [refused, goodPort] });
+  await assert.rejects(client.runOp("set_text", {}, undefined, { beforeRetry: () => { throw new Error("given up"); } }), /given up/);
+  assert.equal(posts, 0, "nothing was re-posted");
+  await client.runOp("set_text", {}, undefined, { beforeRetry: () => {} });
+  assert.equal(posts, 1, "a caller that still wants it gets the re-post");
+  await new Promise((r) => good.close(r));
+});
+
+await check("a desk that cannot forward within the window, four times running, says so — not 'changed hands'", async () => {
+  const port = await freePort();
+  const token = "fake-desk-expired";
+  fs.mkdirSync(deskDir, { recursive: true });
+  fs.writeFileSync(deskFile(port), JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4245, port, token, startedAt: 1 }));
+  let ops = 0;
+  const fake = http.createServer((q, r) => {
+    if (q.url === "/desk/hello") {
+      r.setHeader("content-type", "application/json");
+      return r.end(JSON.stringify({ desk: "ae-mcp-front-desk", protocol: 1, pid: 4245, beatMs: 2000, proof: deskProof(token, q.headers["x-ae-mcp-desk-nonce"]) }));
+    }
+    q.resume();
+    q.on("end", () => {
+      r.writeHead(200, { "content-type": "application/x-ndjson" });
+      if (q.url === "/desk/lock") return r.write(JSON.stringify({ t: "granted", id: "lease-x", wait: null }) + "\n");
+      ops++;
+      r.end(JSON.stringify({ t: "expired" }) + "\n");
+    });
+  });
+  await new Promise((r) => fake.listen(port, "127.0.0.1", r));
+  const L = line(port, "L");
+  assert.equal(await L.ready(), "follower");
+  const lease = await L.acquire("set_text");
+  await assert.rejects(L.runOp("set_text", {}, { write: true }), (e) => {
+    assert.ok(e instanceof errors.DeskPlaceLostError, e.message);
+    assert.match(e.message, /did not get to it within its forwarding window, 4 times running/);
+    assert.doesNotMatch(e.message, /changed hands/);
+    return true;
+  });
+  lease.release();
+  assert.equal(ops, 4);
+  assert.deepEqual(L.bridge_.calls, []);
+  await L.close();
+  fake.closeAllConnections?.();
+  await new Promise((r) => fake.close(r));
+});
 
 await check("the desk refuses a write without the lease holding the lock, and sends nothing", async () => {
   const port = await freePort();
@@ -822,6 +918,62 @@ try {
   }
 
   if (process.platform !== "win32") {
+    await check("the deadline alone stops a woken desk: lease held, requester still connected", async () => {
+      // Every other guard passes here — the lock is held, the requester never
+      // hangs up — so only the deadline can refuse the write.
+      const desk7 = await freePort();
+      const K = await startSession("desk-test-K4", desk7);
+      await until("K4 to run the desk", () => readDesk(desk7)?.pid === K.pid);
+      const token = readDesk(desk7).token;
+      seen.length = 0;
+      const lock = rawDesk(desk7, token, "/desk/lock", { op: "run_jsx", sessionId: "raw", session: "raw, pid 0", maxWaitMs: 5000, maxDepth: 8, holdCeilingMs: 60000 });
+      const granted = await until("the lock", () => lock.lines.find((l) => l.t === "granted"));
+      process.kill(K.pid, "SIGSTOP");
+      let op;
+      try {
+        op = rawDesk(desk7, token, "/desk/op", {
+          kind: "op", op: "run_jsx", args: jsx("DL1", 5), write: true, leaseId: granted.id,
+          sessionId: "raw", session: "raw, pid 0", timeoutMs: 10000, deadline: monoMs() + 300,
+        });
+        await sleep(800); // frozen past the deadline, with the request waiting in its socket
+      } finally {
+        process.kill(K.pid, "SIGCONT");
+      }
+      await until("the desk to answer", () => op.ended());
+      assert.deepEqual(op.lines.map((l) => l.t).filter((t) => t !== "start"), ["expired"]);
+      assert.equal(ran("DL1").length, 0, "forwarded past its deadline");
+      assert.equal(lock.ended(), false, "the requester's lease stayed held throughout");
+      lock.close();
+
+      // The same request within its deadline goes through: the deadline is not
+      // refusing things it should not.
+      const lock2 = rawDesk(desk7, token, "/desk/lock", { op: "run_jsx", sessionId: "raw", session: "raw, pid 0", maxWaitMs: 5000, maxDepth: 8, holdCeilingMs: 60000 });
+      const g2 = await until("the lock again", () => lock2.lines.find((l) => l.t === "granted"));
+      const ok = rawDesk(desk7, token, "/desk/op", {
+        kind: "op", op: "run_jsx", args: jsx("DL2", 5), write: true, leaseId: g2.id,
+        sessionId: "raw", session: "raw, pid 0", timeoutMs: 10000, deadline: monoMs() + 2000,
+      });
+      await until("the desk to answer", () => ok.ended());
+      assert.equal(ok.lines.at(-1).t, "ok");
+      assert.equal(ran("DL2").length, 1);
+      lock2.close();
+      await stop(K);
+    });
+
+    await check("a request over the desk's size limit is refused once, by a real desk, with its own message", async () => {
+      const desk8 = await freePort();
+      const K = await startSession("desk-test-K5", desk8, { AE_MCP_FRONT_DESK_MAX_BODY_BYTES: "2000" });
+      await until("K5 to run the desk", () => readDesk(desk8)?.pid === K.pid);
+      const L = line(desk8, "L");
+      assert.equal(await L.ready(), "follower");
+      seen.length = 0;
+      await assert.rejects(L.runOp("run_jsx", { code: `// tag:BIG ms:5\n${"x".repeat(5000)}` }), /was not sent: its request is larger than the front desk accepts/);
+      assert.equal(ran("BIG").length, 0);
+      assert.equal(L.role, "follower", "a refusal of one request is not a lost desk");
+      await L.close();
+      await stop(K);
+    });
+
     await check("a desk that wakes from a stall never forwards a write its requester gave up on", async () => {
       const desk5 = await freePort();
       const K = await startSession("desk-test-K2", desk5);

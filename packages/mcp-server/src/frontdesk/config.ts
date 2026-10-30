@@ -103,6 +103,32 @@ export function deskBeatMs(): number {
 /** Five missed beats. */
 export const STALL_BEATS = 5;
 
+/**
+ * Milliseconds on a monotonic clock shared by every process on the machine —
+ * `uv_hrtime`: mach_absolute_time on macOS, QueryPerformanceCounter on
+ * Windows, both system-wide (checked across processes in
+ * tests/unit/front-desk.mjs). Deadlines cross from one server to another, and
+ * a wall-clock step (NTP, a manual change) must not stretch or shrink them.
+ */
+export function monoMs(): number {
+  return Number(process.hrtime.bigint() / 1_000_000n);
+}
+
+/** The largest request body the desk reads. `AE_MCP_FRONT_DESK_MAX_BODY_BYTES` is for tests. */
+export function deskMaxBodyBytes(): number {
+  const raw = Number.parseInt(process.env.AE_MCP_FRONT_DESK_MAX_BODY_BYTES ?? "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 256 * 1024 * 1024;
+}
+
+/**
+ * Extra time for a request body to cross loopback, at a deliberately slow
+ * 25 MB/s. The desk starts beating only once it has read the body, so both the
+ * requester's stall threshold and the call's deadline grow by this much.
+ */
+export function bodyAllowanceMs(bytes: number): number {
+  return Math.ceil(bytes / 25_000);
+}
+
 export function deskFilePath(port: number): string {
   return path.join(os.homedir(), ".engineroom-ae-mcp", `desk-${port}.json`);
 }

@@ -67,6 +67,12 @@ const LISTENER_SETTLE_MS = 750;
  */
 export interface RunOpOptions {
   timeoutMs?: number;
+  /**
+   * Asked immediately before a re-post after a refusal (the port search below
+   * can take seconds). Throwing stops the re-post: the front desk uses it to
+   * re-check, at the last moment, that the caller still wants the call.
+   */
+  beforeRetry?: () => void;
 }
 
 export interface HttpClientOptions {
@@ -239,6 +245,7 @@ export class HttpClient {
           `\`${op}\` was refused on port ${refusedPort}; the panel is answering on port ${located.found.port}. Switching and re-sending once.`
         );
         await this.switchPort(located.found.port);
+        opts.beforeRetry?.();
         return await this.postOp(op, args, progressToken, opts);
       }
       // Nothing better found. The refusal stands, but the message says what

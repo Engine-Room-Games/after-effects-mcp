@@ -668,11 +668,16 @@ export class FrontDeskLostError extends BridgeResetError {
       "next call goes through whichever server holds the desk then, or straight to",
       "After Effects if none answers.",
       "",
+      "It may also land LATER: a call already on its way to After Effects can still",
+      "arrive after this message — after a read-back that did not find it.",
+      "",
       "What to do, in order:",
       "1. Do not blindly re-send it. A write could land twice.",
       "2. Read the affected comp or layer back (diff_comp against a snapshot,",
-      "   get_layer_full, list_layers) to learn whether this call landed, and only",
-      "   send it again if it did not.",
+      "   get_layer_full, list_layers) to learn whether this call landed.",
+      "3. If it did not and you send it again, read back once more afterwards before",
+      "   assuming there is only one copy — or first wait until another call has gone",
+      "   through, which means the old desk is out of the way, then read back.",
     ].join("\n");
   }
 }

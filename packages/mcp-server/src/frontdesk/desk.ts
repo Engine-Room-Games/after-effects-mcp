@@ -7,6 +7,8 @@ import {
   DESK_PROTOCOL,
   DESK_TOKEN_HEADER,
   deskBeatMs,
+  deskMaxBodyBytes,
+  monoMs,
   removeDeskFile,
   writeDeskFile,
 } from "./config.js";
@@ -28,7 +30,7 @@ import { toWire, type DeskAhead, type LockLine, type OpLine } from "./protocol.j
 
 /** What the desk needs from the session that runs it: its own way to the panel. */
 export interface DeskForwarder {
-  runOp(op: string, args: unknown, opts: { timeoutMs?: number }): Promise<unknown>;
+  runOp(op: string, args: unknown, opts: { timeoutMs?: number; beforeRetry?: () => void }): Promise<unknown>;
   cancel(jobId: string): Promise<{ known: boolean; error?: string }>;
   /** The panel port the forwarder is on now — followers' event sockets follow it. */
   readonly port: number;
@@ -46,10 +48,10 @@ export interface ForwardRequest {
   write?: boolean;
   leaseId?: string;
   /**
-   * Wall-clock time after which the requester has given up on this call, or
+   * `monoMs()` time after which the requester has given up on this call, or
    * may have. Checked immediately before forwarding: a desk that was stalled
    * and wakes up must never forward what its requester already reported as
-   * lost and may have re-sent elsewhere. Same machine, so one clock.
+   * lost and may have re-sent elsewhere. One machine, one monotonic clock.
    */
   deadline?: number;
 }
@@ -95,7 +97,6 @@ interface InFlight {
 }
 
 /** A request body larger than this is refused. A run_batch of 2000 steps is a few MB. */
-const MAX_BODY_BYTES = 256 * 1024 * 1024;
 
 export class FrontDesk {
   readonly lock: DeskLock;
@@ -229,9 +230,16 @@ export class FrontDesk {
     // a stalled desk wakes up and reads the request ahead of it — then check
     // everything again. Measured as a double write on SIGSTOP/SIGCONT before this.
     await new Promise<void>((r) => setImmediate(r));
-    if (req.deadline !== undefined && Date.now() > req.deadline) throw new DeadlinePassedError();
-    if (hooks.stillWanted && !hooks.stillWanted()) throw new CallerGoneError();
-    if (req.write && (!req.leaseId || !this.lock.isHolder(req.leaseId))) throw new LeaseNotHeldError();
+    // Run again before any re-post the forwarder makes after a refusal: its
+    // port search takes seconds, and the caller may have given up meanwhile.
+    // A freeze between this and the bytes reaching the panel cannot be closed
+    // from here; the stalled-desk message says so.
+    const stillGo = () => {
+      if (req.deadline !== undefined && monoMs() > req.deadline) throw new DeadlinePassedError();
+      if (hooks.stillWanted && !hooks.stillWanted()) throw new CallerGoneError();
+      if (req.write && (!req.leaseId || !this.lock.isHolder(req.leaseId))) throw new LeaseNotHeldError();
+    };
+    stillGo();
     entry.since = Date.now();
     this.inflight.push(entry);
     let ticker: NodeJS.Timeout | null = null;
@@ -249,7 +257,7 @@ export class FrontDesk {
     }
     try {
       if (req.kind === "cancel") return await this.forwarder.cancel(req.jobId ?? "");
-      return await this.forwarder.runOp(req.op, req.args, { timeoutMs: req.timeoutMs });
+      return await this.forwarder.runOp(req.op, req.args, { timeoutMs: req.timeoutMs, beforeRetry: stillGo });
     } finally {
       if (ticker) clearInterval(ticker);
       this.inflight = this.inflight.filter((f) => f !== entry);
@@ -455,7 +463,7 @@ function readBody(req: http.IncomingMessage): Promise<string | null> {
     req.on("data", (c: Buffer) => {
       if (over) return;
       size += c.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > deskMaxBodyBytes()) {
         over = true;
         resolve(null);
         return;

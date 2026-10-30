@@ -5,7 +5,7 @@ import { opTimeoutMs } from "../bridge/httpClient.js";
 import type { QueueWait, WriteLease, WriteQueue } from "../bridge/writeQueue.js";
 import { BridgeTimeoutError, DeskPlaceLostError, FrontDeskLostError, WriteQueueCancelledError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
-import { DESK_ID, DESK_NONCE_HEADER, DESK_PROTOCOL, DESK_TOKEN_HEADER, STALL_BEATS, readDeskFile, type FrontDeskOptions } from "./config.js";
+import { DESK_ID, DESK_NONCE_HEADER, DESK_PROTOCOL, DESK_TOKEN_HEADER, STALL_BEATS, bodyAllowanceMs, monoMs, readDeskFile, type FrontDeskOptions } from "./config.js";
 import { DeadlinePassedError, FrontDesk, LeaseNotHeldError, deskProof, type DeskForwarder } from "./desk.js";
 import { DeskClosedError } from "./lock.js";
 import { describeAhead, describeLockWait, fromWire, type DeskAhead, type GrantWait, type LockLine, type OpLine } from "./protocol.js";
@@ -244,6 +244,8 @@ export class SessionLine {
     direct: () => Promise<unknown>
   ): Promise<unknown> {
     const { op } = body;
+    /** Why the last attempt went round again — what the final refusal says. */
+    let again: "handover" | "expired" = "handover";
     for (let attempt = 0; attempt < MAX_HANDOVERS; attempt++) {
       let slot: Slot | null = null;
       if (write) {
@@ -281,7 +283,7 @@ export class SessionLine {
               // The same rule as a follower's: if this process stalls between
               // here and the panel, followers have given up on the desk and gone
               // direct, and what was queued here must not go out on waking.
-              deadline: Date.now() + forwardWindowMs(mode.desk.beatMs * STALL_BEATS),
+              deadline: monoMs() + forwardWindowMs(mode.desk.beatMs * STALL_BEATS),
             },
             { onStart: (ahead) => surfaceAhead(op, ahead, onWait), onAhead: (ahead) => surfaceAhead(op, ahead, onWait) }
           );
@@ -291,7 +293,10 @@ export class SessionLine {
             continue;
           }
           // Never forwarded: safe to go again, with a fresh deadline.
-          if (e instanceof DeadlinePassedError) continue;
+          if (e instanceof DeadlinePassedError) {
+            again = "expired";
+            continue;
+          }
           throw e;
         }
       }
@@ -301,6 +306,7 @@ export class SessionLine {
         continue;
       }
       const leaseId = slot?.id;
+      again = "handover";
       const r = await remoteOp(
         mode,
         {
@@ -309,10 +315,6 @@ export class SessionLine {
           leaseId,
           sessionId: this.sessionId,
           session: this.opts.sessionLabel(),
-          // Strictly before this side can declare the desk stalled (no sooner
-          // than `idleMs` after sending), so a desk that wakes from a stall
-          // finds the deadline passed and never forwards what was given up on.
-          deadline: Date.now() + forwardWindowMs(mode.idleMs),
         },
         (ahead) => surfaceAhead(op, ahead, onWait)
       );
@@ -331,12 +333,13 @@ export class SessionLine {
           continue;
         case "expired":
           // The desk was slow to reach it and said so; it was never forwarded.
+          again = "expired";
           continue;
         case "rejected":
           throw new Error(
             r.status === 413
-              ? `\`${op}\` was not sent: its request is larger than the front desk accepts (256 MB). Nothing reached ` +
-                  "After Effects. Split the work into smaller calls — several run_batch calls, or a script read from scriptPath."
+              ? `\`${op}\` was not sent: its request is larger than the front desk accepts. Nothing reached ` +
+                  "After Effects. Split the work into smaller calls — several smaller run_batch calls rather than one."
               : `\`${op}\` was not sent: the front desk refused it with HTTP ${r.status}, which this server does not ` +
                   "expect — probably a different version of the server is running the desk. Nothing reached After Effects; " +
                   "re-sending is safe, and restarting the other AI session's MCP server would end the mismatch."
@@ -353,7 +356,14 @@ export class SessionLine {
           throw new BridgeTimeoutError(this.bridge.port, body.timeoutMs, { op });
       }
     }
-    if (write) throw new DeskPlaceLostError(op, `the front desk changed hands ${MAX_HANDOVERS} times before this call could be sent.`);
+    if (write) {
+      throw new DeskPlaceLostError(
+        op,
+        again === "expired"
+          ? `the front desk did not get to it within its forwarding window, ${MAX_HANDOVERS} times running — the server running the desk is overloaded or keeps stalling.`
+          : `the front desk changed hands ${MAX_HANDOVERS} times before this call could be sent.`
+      );
+    }
     return direct();
   }
 
@@ -660,7 +670,7 @@ function deskStream(
     headers: { "content-type": "application/json", "content-length": payload.length, [DESK_TOKEN_HEADER]: token },
   });
   let heardCount = 0;
-  const heard = () => {
+  const heard = (extraMs = 0) => {
     heardCount++;
     if (idle) clearTimeout(idle);
     const at = heardCount;
@@ -673,9 +683,10 @@ function deskStream(
         settle({ kind: "stalled" });
         req.destroy();
       });
-    }, idleMs);
+    }, idleMs + extraMs);
   };
-  heard();
+  // Until the desk answers it is still reading the body, and beats only after.
+  heard(bodyAllowanceMs(payload.length));
   let responded = false;
   req.on("response", (res) => {
     responded = true;
@@ -778,7 +789,13 @@ function remoteOp(mode: Follower, body: { timeoutMs: number } & Record<string, u
       if (timer) clearTimeout(timer);
       resolve(o);
     };
-    const s = deskStream(mode.port, mode.token, "/desk/op", body, mode.idleMs, (raw) => {
+    // The deadline sits strictly before this side can call the desk stalled,
+    // so a desk that wakes from a stall finds it passed and never forwards what
+    // was given up on. Both grow with the body: the desk beats only once it has
+    // read it, so a large request must not look like a stall on its way in.
+    const allowance = bodyAllowanceMs(JSON.stringify(body).length);
+    const sent = { ...body, deadline: monoMs() + forwardWindowMs(mode.idleMs) + allowance };
+    const s = deskStream(mode.port, mode.token, "/desk/op", sent, mode.idleMs, (raw) => {
       const l = raw as OpLine;
       if (l.t === "start") {
         // The desk applies this session's own timeout to the panel and reports

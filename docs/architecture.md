@@ -418,7 +418,7 @@ read-back. So every forwarded call carries a deadline — half the stall thresho
 after it was sent, so it always passes before the requester can give up — and
 the desk, after yielding once so pending closes land, refuses unsent (`expired`)
 anything past its deadline, whose requester has gone, or whose lease no longer
-holds the lock. The leader's own session's calls carry the same deadline. A
+holds the lock — and again before any re-post the panel client makes after a refusal, since its port search takes seconds. Deadlines are on `monoMs()`, the system-wide monotonic clock (checked across processes in the test), so a wall-clock step cannot stretch one; both the deadline and the follower's first stall threshold grow with the request body, since the desk beats only after reading it. A freeze between the last check and the bytes reaching the panel cannot be closed from the desk, so `FrontDeskLostError` says the write may still land later, after a read-back. Four `expired` answers in a row fail as their own message, not as a handover. The leader's own session's calls carry the same deadline. A
 follower that was itself blocked reads the beats waiting in its socket before
 it calls the desk stalled (a `setImmediate` re-check), so a long synchronous
 stretch or a sleeping laptop is not a stall. A 413 is its own error — the
