@@ -6,7 +6,8 @@
 //     "legacy", never a guess. The gate keeps it with its verdict and drops it
 //     whenever it drops the verdict.
 //   - `_project_path` (style.jsx) answers the path and the saved state, and is
-//     classified, as is every internal op the server sends.
+//     classified, as is every internal op the server sends; an internal
+//     write is sent only under the write lease.
 //   - The server's house-style I/O agrees with style.jsx on one real folder:
 //     the same results, the same sentences, the same bytes on disk.
 //   - Through tools/call: a legacy panel gets `get_house_style` exactly as
@@ -40,6 +41,9 @@ const { BridgeUnreachableError } = await import(dist("util", "errors.js"));
 const { readHouseStyle, writeHouseStyle } = await import(dist("style", "houseStyleFile.js"));
 const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
 const { InternalOpMutation } = await import(sharedDist("schemas.js"));
+const { internalSender, UnleasedInternalWriteError } = await import(dist("tools", "internalOps.js"));
+const { WriteQueue } = await import(dist("bridge", "writeQueue.js"));
+const { markRendered } = await import(dist("render", "markDone.js"));
 
 let passed = 0;
 async function check(name, fn) {
@@ -91,6 +95,12 @@ await check("the gate reports what the last /health said, and forgets it with th
   await gate.check();
   assert.equal(gate.capabilities().has("project-path"), true);
 
+  gate.withdraw("project-path");
+  assert.equal(gate.capabilities().has("project-path"), false, "withdrawn after an Unknown op");
+  t += 120_000;
+  await gate.check();
+  assert.equal(gate.capabilities().has("project-path"), false, "a routine re-probe does not restore it");
+
   gate.invalidate();
   assert.equal(gate.capabilities().legacy, true, "invalidate forgets it");
   await gate.check();
@@ -116,33 +126,46 @@ const jsxDir = path.join(root, "packages", "jsx");
 const jsxSources = fs.readdirSync(jsxDir).filter((f) => f.endsWith(".jsx")).sort()
   .map((f) => fs.readFileSync(path.join(jsxDir, f), "utf8")).join("\n");
 
-function tsFiles(dir) {
-  const out = [];
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, e.name);
-    if (e.isDirectory()) { if (e.name !== "generated") out.push(...tsFiles(full)); }
-    else if (e.name.endsWith(".ts")) out.push(full);
-  }
-  return out;
-}
-
-await check("every internal op the server sends is classified, and exists in the bundle", () => {
-  const sent = new Set();
-  for (const f of tsFiles(path.join(root, "packages", "mcp-server", "src"))) {
-    for (const m of fs.readFileSync(f, "utf8").matchAll(/runOp\(\s*"(_[a-z_]+)"/g)) sent.add(m[1]);
-  }
-  assert.ok(sent.has("_project_path"), "the server sends _project_path");
-  for (const op of sent) {
-    assert.ok(Object.hasOwn(InternalOpMutation, op), `${op} is sent by the server but not in InternalOpMutation`);
-  }
+await check("every classified internal op has a handler in the bundle; reads are noUndo", () => {
   for (const [op, effect] of Object.entries(InternalOpMutation)) {
-    assert.ok(sent.has(op), `InternalOpMutation names ${op}, which the server never sends`);
     assert.match(jsxSources, new RegExp(`OPS\\.${op}\\s*=`), `${op} has no handler in packages/jsx`);
     if (effect === "read") {
       assert.match(jsxSources, new RegExp(`OPS\\.${op}\\s*=\\s*noUndo\\(`), `${op} is a read and must be noUndo`);
     }
   }
   assert.equal(InternalOpMutation._project_path, "read");
+});
+
+// The one send path (tools/internalOps.ts). Names are typed over
+// InternalOpMutation at compile time; at run time a "write" goes out only
+// while the write lock is held, and an unclassified name never goes out.
+await check("internalSender: every internal write is refused without the lease, and sent with it", async () => {
+  const writes = new WriteQueue();
+  const sent = [];
+  const send = internalSender(async (op) => { sent.push(op); return { results: [] }; }, writes);
+  const writeOps = Object.entries(InternalOpMutation).filter(([, e]) => e === "write").map(([op]) => op);
+  assert.ok(writeOps.includes("_render_save") && writeOps.includes("_render_mark_done"));
+  for (const op of writeOps) {
+    await assert.rejects(send(op, {}), UnleasedInternalWriteError, `${op} without a lease`);
+  }
+  assert.deepEqual(sent, [], "nothing reached the panel");
+  const lease = await writes.acquire("render_queue");
+  for (const op of writeOps) await send(op, {});
+  lease.release();
+  assert.deepEqual(sent, writeOps);
+  sent.length = 0;
+  for (const [op, e] of Object.entries(InternalOpMutation)) if (e === "read") await send(op, {});
+  assert.equal(sent.length, Object.values(InternalOpMutation).filter((e) => e === "read").length, "reads need no lease");
+  await assert.rejects(send("_not_an_op", {}), /not a classified internal op/);
+});
+
+await check("markRendered sends _render_mark_done under its own lease", async () => {
+  const writes = new WriteQueue();
+  let heldAtSend;
+  const send = internalSender(async (op) => { heldAtSend = writes.held; return { results: [] }; }, writes);
+  await markRendered(writes, send, [{ index: 1, compId: 1, outputs: [{ path: "/x.mp4" }] }]);
+  assert.equal(heldAtSend, "render_queue", "the lease is held when the op is sent");
+  assert.equal(writes.held, null, "and released after");
 });
 
 // ---------- style.jsx in a vm, for the jsx side ----------
@@ -361,16 +384,20 @@ await check("capable panel: the server writes, refuses to clobber, and replaces 
 });
 
 await check("capable panel that does not know _project_path: falls back to the panel's op", async () => {
-  delete capable.answers._project_path;
-  capable.answers.get_house_style = panelStyle;
-  const r = await capable.call("get_house_style", { detail: "full" });
+  // Its own session: the withdrawal lasts for the rest of the session.
+  const forgetful = await session({ capabilities: ["project-path"] });
+  forgetful.answers.get_house_style = panelStyle;
+  const r = await forgetful.call("get_house_style", { detail: "full" });
   assert.equal(r.isError, false, r.text);
-  assert.deepEqual(capable.seen, ["_project_path", "get_house_style"]);
+  assert.deepEqual(forgetful.seen, ["_project_path", "get_house_style"]);
   assert.equal(JSON.parse(r.text).content, "# From the panel\n");
+  await forgetful.call("get_house_style", { detail: "full" });
+  assert.deepEqual(forgetful.seen, ["get_house_style"], "the capability is withdrawn: no second _project_path");
 });
 
 await check("capable panel, odd answer: falls back to the panel's op", async () => {
   capable.answers._project_path = { ok: true, result: { path: 7 } };
+  capable.answers.get_house_style = panelStyle;
   const r = await capable.call("get_house_style", { detail: "full" });
   assert.equal(r.isError, false, r.text);
   assert.deepEqual(capable.seen, ["_project_path", "get_house_style"]);

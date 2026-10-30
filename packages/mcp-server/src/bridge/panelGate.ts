@@ -72,11 +72,14 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
    * Cleared with the verdict, so a panel that has not been asked is legacy.
    */
   let capabilities: PanelCapabilities = LEGACY_CAPABILITIES;
+  /** Capabilities the panel turned out not to honour; kept until invalidate. */
+  const withdrawn = new Set<string>();
 
   const invalidate = () => {
     generation++;
     verdict = null;
     capabilities = LEGACY_CAPABILITIES;
+    withdrawn.clear();
     nextCheckAt = 0;
     inflight = null;
   };
@@ -131,6 +134,17 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
      * What the panel last reported supporting; legacy until a probe has
      * answered. Call after `check()`, which is what keeps it current.
      */
-    capabilities: (): PanelCapabilities => capabilities,
+    capabilities: (): PanelCapabilities =>
+      withdrawn.size === 0
+        ? capabilities
+        : { legacy: capabilities.legacy, has: (n) => capabilities.has(n) && !withdrawn.has(n), list: capabilities.list.filter((n) => !withdrawn.has(n)) },
+    /**
+     * Stop using a capability the panel listed but did not honour (it answered
+     * `Unknown op:`), so the fallback's extra round trip is paid once. Lasts
+     * until the verdict is dropped — a restart or a port change.
+     */
+    withdraw: (name: string) => {
+      withdrawn.add(name);
+    },
   };
 }

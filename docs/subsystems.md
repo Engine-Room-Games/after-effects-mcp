@@ -80,7 +80,14 @@ malformed field means "legacy", never "broken".** It gates nothing: a
 capability only switches the server onto a path that needs it, and every
 panel without one keeps the path it always had. The server still falls back
 on `Unknown op:` for the op behind a capability, since the list is static in
-`main.js` and stands for an op in the bundle installed beside it.
+`main.js` and stands for an op in the bundle installed beside it — and then
+withdraws the capability (`panelGate.withdraw`) until the verdict is next
+dropped, so the extra round trip is paid once, not on every call.
+
+Internal ops (`_project_path`, `_render_save`, …) are sent only through
+`internalSender` in `tools/internalOps.ts`. Its op name is typed over
+`InternalOpMutation`, and a `"write"` is refused unless the write lease is
+held — internal ops never pass the tool path that takes one.
 
 | Capability | What the server does with it |
 |---|---|

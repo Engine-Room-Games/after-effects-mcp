@@ -55,6 +55,7 @@ import { archiveIssue, listIssues, logIssue, markReported } from "./issues/journ
 import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
 import { houseStyleOnServer } from "./style/houseStyleFile.js";
+import { internalSender, type SendInternal } from "./tools/internalOps.js";
 import { CAP_PROJECT_PATH } from "./setup/panelCapabilities.js";
 import {
   checkFootageExists,
@@ -177,6 +178,9 @@ export function createServer(opts: CreateServerOptions = {}) {
   // One writer at a time. See bridge/writeQueue.ts for why the panel's own
   // evalScript mutex is not enough.
   const writes = new WriteQueue();
+  // Every internal op goes through this: typed over InternalOpMutation, and a
+  // "write" is refused unless the write lock is held (tools/internalOps.ts).
+  const sendInternal = internalSender((op, a) => bridge.runOp(op, a), writes);
   // render_queue's jobs run in an aerender process this server owns; see
   // render/aerender.ts. When a job ends, its verified items are unticked in the
   // live queue so they do not render twice — once, as one named undo step, and
@@ -184,7 +188,7 @@ export function createServer(opts: CreateServerOptions = {}) {
   const renders = new RenderRunner(jobs, {
     // Bounded wait (#163): the job settles after this answers, so an
     // unbounded queue wait held await_job hostage to an unrelated edit.
-    onRendered: (items) => markRendered(writes, (op, a) => bridge.runOp(op, a), items),
+    onRendered: (items) => markRendered(writes, sendInternal, items),
   });
   const snapshots = new SnapshotStore();
   // Follows the bridge's port rather than copying it: see wsClient.ts.
@@ -661,11 +665,11 @@ export function createServer(opts: CreateServerOptions = {}) {
     try {
       // Inside this try so the panel's own error mapping — timeouts, AeError,
       // the Unknown-op backstop — applies to the internal ops these forward.
-      if (SNAPSHOT_OPS.has(name)) return await runSnapshotOp(name, args, bridge, snapshots);
+      if (SNAPSHOT_OPS.has(name)) return await runSnapshotOp(name, args, sendInternal, snapshots);
       // The render runs outside After Effects; only the prepare and the save
       // cross the bridge. The lease is released when this returns, on purpose
       // — see runRender.
-      if (name === "render_queue") return textResult(await runRender(args as RenderQueueArgs, bridge, renders), wait);
+      if (name === "render_queue") return textResult(await runRender(args as RenderQueueArgs, sendInternal, renders), wait);
 
       // Filesystem checks the server makes itself (issue #220, stage 2), so a
       // refusal costs After Effects nothing. The jsx copies stay in the bundle
@@ -692,7 +696,9 @@ export function createServer(opts: CreateServerOptions = {}) {
         (name === "get_house_style" || name === "set_house_style") && panelGate.capabilities().has(CAP_PROJECT_PATH);
       const lifted = liftAeWarnings(
         viaServer
-          ? await houseStyleOnServer(name, args, (op, a) => bridge.runOp(op, a))
+          ? await houseStyleOnServer(name, args, sendInternal, (op, a) => bridge.runOp(op, a), () =>
+              panelGate.withdraw(CAP_PROJECT_PATH)
+            )
           : await bridge.runOp(name, args)
       );
       const result = lifted.value;
@@ -926,7 +932,7 @@ interface RenderQueueArgs {
 
 async function runRender(
   args: RenderQueueArgs,
-  bridge: HttpClient,
+  send: SendInternal,
   renders: RenderRunner
 ): Promise<Record<string, unknown>> {
   const busy = renders.activeJobId;
@@ -947,7 +953,7 @@ async function runRender(
       throw e;
     }
   };
-  const plan = (await renderStep("prepare", bridge.runOp("_render_prepare", { indices: args.indices, all: args.all }))) as RenderPlan & {
+  const plan = (await renderStep("prepare", send("_render_prepare", { indices: args.indices, all: args.all }))) as RenderPlan & {
     readOnly?: boolean | null;
   };
   // Items the user queued by hand never passed add_to_render_queue's guard.
@@ -973,7 +979,7 @@ async function runRender(
     beforeSave: () => {
       aerender = resolveAerender(aerenderCandidates(plan.appPackage, { installRoots: afterEffectsInstallRoots() }));
     },
-    save: async (force) => (await renderStep("save", bridge.runOp("_render_save", { force }))) as { saved: boolean },
+    save: async (force) => (await renderStep("save", send("_render_save", { force }))) as { saved: boolean },
   });
   const save = { saved };
   const footageWarnings = plan.items.flatMap((i) => (i.footageWarnings ?? []).map((w) => `item ${i.index}: ${w}`));
@@ -1060,12 +1066,12 @@ function withProgressNote(note: string | undefined, jobId: string): string {
 async function runSnapshotOp(
   name: string,
   args: unknown,
-  bridge: HttpClient,
+  send: SendInternal,
   snapshots: SnapshotStore
 ) {
   if (name === "snapshot_comp") {
     const a = args as { compId: number; includeFingerprint?: boolean };
-    const fingerprint = (await bridge.runOp("_comp_fingerprint", { compId: a.compId })) as CompFingerprint;
+    const fingerprint = (await send("_comp_fingerprint", { compId: a.compId })) as CompFingerprint;
     const snap = snapshots.store(fingerprint);
     return textResult({
       snapshotId: snap.id,
@@ -1093,7 +1099,7 @@ async function runSnapshotOp(
   // Only the gathering needs After Effects. The comparison runs here (issue
   // #220): `_comp_fingerprint` is in every panel ever shipped, so this works
   // against old bundles too, and the diff no longer costs AE main-thread time.
-  const fingerprint = (await bridge.runOp("_comp_fingerprint", {
+  const fingerprint = (await send("_comp_fingerprint", {
     compId: previous.compId,
   })) as CompFingerprint;
   const diff = diffFingerprints(previous.fingerprint, fingerprint);

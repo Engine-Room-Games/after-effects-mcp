@@ -1832,10 +1832,11 @@ export type OpEffect = (typeof OpMutation)[OpName];
  * The internal ops the server sends itself, as part of a tool — never tools,
  * so never in `OpSchemas` (a key there is a tool in the list). Classified the
  * same way and for the same reason: an op that changes the project must be
- * known to. Each runs inside the tool that sends it, under that tool's lease
- * or none, so nothing reads this to queue; `tests/unit/panel-capabilities.mjs`
- * fails the build when the server sends an `_op` missing here, or this names
- * one the bundle does not define.
+ * known to. The server sends them only through `internalSender`
+ * (mcp-server `tools/internalOps.ts`): its op name is typed over this table,
+ * and it refuses a `"write"` unless the write lease is held at that moment.
+ * `tests/unit/panel-capabilities.mjs` pins that, and that every op here has a
+ * handler in the bundle.
  */
 export const InternalOpMutation = {
   // render_queue's halves. Prepare reads; save saves the project; mark-done

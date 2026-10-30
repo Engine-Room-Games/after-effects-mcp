@@ -3,6 +3,7 @@ import path from "node:path";
 import { isPlainAbsolute } from "../files/destinations.js";
 import { AeError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
+import type { SendInternal } from "../tools/internalOps.js";
 
 /**
  * `house-style.md`, read and written by the server (issue #220, stage 3).
@@ -118,8 +119,11 @@ export function writeHouseStyle(
 
   try {
     // `wx` when there was nothing: a guide that appeared since the stat is not
-    // overwritten without `overwrite`. Written as given: "\n" stays "\n", as
-    // the jsx's `lineFeed = "Unix"` does — the file is meant to be hand-edited.
+    // overwritten without `overwrite`. Written byte for byte as given, which is
+    // what the jsx's `lineFeed = "Unix"` does for "\n" — every newline lands
+    // as LF, never the bare CR of ExtendScript's macOS default. One known
+    // difference: a "\r" the caller sent is kept here; whether ExtendScript's
+    // Unix lineFeed rewrites one is unmeasured. Agents send "\n".
     fs.writeFileSync(file, content, { encoding: "utf8", flag: existed ? "w" : "wx" });
   } catch (e) {
     const code = errCode(e);
@@ -149,18 +153,24 @@ function asProjectPath(v: unknown): ProjectPath | null {
  * `get_house_style` / `set_house_style` with the file I/O on the server. Call
  * only for a panel reporting `project-path`. Falls back to the panel's own op
  * when the panel turns out not to know `_project_path`, answers it oddly, or
- * the folder is one this process cannot see.
+ * the folder is one this process cannot see. `onUnknownOp` runs when the
+ * panel did not know `_project_path` after all, so the caller can stop asking.
  */
 export async function houseStyleOnServer(
   op: "get_house_style" | "set_house_style",
   args: unknown,
-  runOp: (op: string, args: unknown) => Promise<unknown>
+  send: SendInternal,
+  runOp: (op: string, args: unknown) => Promise<unknown>,
+  onUnknownOp: () => void = () => {}
 ): Promise<unknown> {
   let where: ProjectPath | null;
   try {
-    where = asProjectPath(await runOp("_project_path", {}));
+    where = asProjectPath(await send("_project_path", {}));
   } catch (e) {
-    if (e instanceof AeError && /^Unknown op: _project_path\b/.test(e.message)) return runOp(op, args);
+    if (e instanceof AeError && /^Unknown op: _project_path\b/.test(e.message)) {
+      onUnknownOp();
+      return runOp(op, args);
+    }
     throw e;
   }
   if (!where) {

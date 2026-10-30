@@ -1,5 +1,6 @@
 import type { WriteQueue } from "../bridge/writeQueue.js";
 import type { RenderItemPlan } from "./aerender.js";
+import type { SendInternal } from "../tools/internalOps.js";
 
 /**
  * How long a finished render waits for the write lock before giving up on the
@@ -20,7 +21,7 @@ export type MarkAnswer = { index: number; marked: boolean; reason?: string };
  */
 export async function markRendered(
   writes: WriteQueue,
-  runOp: (op: string, args: unknown) => Promise<unknown>,
+  runOp: SendInternal,
   items: RenderItemPlan[],
   waitMs: number = MARK_DONE_WAIT_MS
 ): Promise<MarkAnswer[]> {
