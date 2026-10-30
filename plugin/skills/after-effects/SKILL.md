@@ -253,7 +253,11 @@ you are about to build on rather than trusting what you last saw.
   After Effects, do not run `setup_panel`. Poll `check_setup` for about a
   minute, and ask the user whether a dialog is hiding behind another window. A
   call that legitimately needs longer gets it from `AE_MCP_OP_TIMEOUT_MS` in the
-  server's environment.
+  server's environment. **The one exception is `render_queue`:** its timeout
+  says no render was started — the error comes from its prepare or save step,
+  before the render — so call `render_queue` again once `check_setup` shows
+  the panel answering. At most the project save lands twice, which changes
+  nothing.
 - **Cannot reach After Effects.** The connection was refused, so nothing
   reached After Effects and nothing changed. The server looks again on its own
   first — 7777, then the port file — and follows a panel that has moved, so a
