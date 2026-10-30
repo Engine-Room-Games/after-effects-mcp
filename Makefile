@@ -58,6 +58,7 @@ artifacts: ## Build the .mcpb and standalone binaries without releasing
 	@node scripts/build-binaries.mjs
 	@echo ""
 	@echo "Unsigned. To sign them:  ./scripts/sign-and-notarize.sh"
+	@echo "The panel inside is signed only with AE_MCP_PANEL_CERT set (e.g. AE_MCP_PANEL_CERT=ephemeral) — see scripts/lib/panel-signing.mjs."
 
 clean: ## Remove build output
 	@rm -rf packages/*/dist packages/mcp-server/bin packages/mcp-server/panel dist-release

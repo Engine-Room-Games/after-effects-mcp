@@ -364,7 +364,7 @@ Start here: **ask your assistant to check the After Effects setup.** It reports 
 | "The After Effects panel is out of date" | The tools were updated but the panel wasn't. Ask it to update the panel, then restart AE. |
 | "…refused this call: the bridge token did not match" | Not a lost connection — the panel answered and turned the request away, and nothing in your project changed. Usually an old panel from a previous After Effects session is still holding on. Quit After Effects completely and reopen it. If it keeps happening, look for a leftover `CEPHtmlEngine` in Activity Monitor or Task Manager and end it. If the message says no token file was found, your client may be running the tools as a different user or in a sandbox; the panel's log (below) shows where it wrote it. Asking for the same thing again, or reinstalling the panel, won't help. |
 | "…updated on disk, but After Effects is still running the previous version" | The update landed; AE just hasn't restarted. Quit and reopen it. Updating again won't help. |
-| Panel never loads, but setup looks correct | On macOS, reboot once. Some builds cache the Adobe setting until a restart. |
+| Panel never loads, but setup looks correct | Ask it to check the setup again — it reads Adobe's own log and says whether the panel's signature was refused. With an unsigned (development) panel on macOS, reboot once: some builds cache the Adobe setting until a restart. |
 | A panel answers, but the setup check reports none installed | An older install is still serving. Remove it from the CEP extensions folder, reinstall, restart AE. |
 | "No project folder to write to" | Your client didn't tell the server where it's working. Say which folder you want. |
 | Style guide can't be saved | The After Effects project has never been saved. Save it, then try again. |
@@ -408,7 +408,7 @@ macOS is the more exercised of the two; [issue reports](https://github.com/Engin
 
 **Limitations.**
 
-- The After Effects panel is unsigned, so loading it requires Adobe's `PlayerDebugMode`, which the setup step enables. This is Adobe's documented path for unsigned extensions. It applies to your whole user account, not just this panel: with it on, Adobe apps load *any* unsigned panel placed in your CEP extensions folder without checking its signature. The Uninstalling section above says how to turn it off.
+- The After Effects panel in each release is signed with a self-signed certificate, so After Effects loads it without Adobe's `PlayerDebugMode`. Setup still turns that setting on, as a fallback in case Adobe's signature check misbehaves on your machine. It applies to your whole user account, not just this panel: with it on, Adobe apps load *any* unsigned panel placed in your CEP extensions folder without checking its signature. The Uninstalling section above says how to turn it off; the signed panel keeps working without it. A panel installed from a git checkout is unsigned and does need it.
 - `saveFrameToPng` is community-known rather than officially documented. It works, but alpha edges can be imperfect on some comps.
 - A long synchronous loop in `run_jsx` will freeze the After Effects UI. Use `run_batch` for bulk work.
 - Not covered: replacing or relinking footage (importing it is covered), and application preferences.

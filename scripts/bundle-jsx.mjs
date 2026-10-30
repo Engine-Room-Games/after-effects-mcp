@@ -148,6 +148,16 @@ if (syncToInstalledPanel && (process.platform === "darwin" || process.platform =
       if (!installedStat.isSymbolicLink()) {
         fs.copyFileSync(outFile, installedBundle);
         console.log(`Synced -> ${installedBundle}`);
+        // A released panel is signed (issue #182), and the signature covers
+        // bundle.jsx: this write voids it. Dev runs with PlayerDebugMode on,
+        // which skips the check, so it still loads — but say so, because
+        // check_setup will now report the signature broken.
+        if (fs.existsSync(path.join(path.dirname(path.dirname(installedBundle)), "META-INF", "signatures.xml"))) {
+          console.warn(
+            "warning: that panel was signed, and this sync voided its signature. It loads only with PlayerDebugMode on " +
+              "(dev needs it anyway); install the dev panel with `npm run install:panel` to stop carrying a broken signature."
+          );
+        }
       }
     } catch {
       // Best-effort: missing install dir or perms — leave the source bundle in place.

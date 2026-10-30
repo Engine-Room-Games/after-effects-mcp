@@ -24,6 +24,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { vendorPanel } from "./lib/panel-signing.mjs";
 import { loadPackagingCopy } from "./lib/setup.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -102,7 +103,9 @@ if (!fs.existsSync(wsSrc)) {
 copy(wsSrc, path.join(staging, "node_modules", "ws"));
 
 // ----------------------------------------------------------------- panel
-copy(panelSrc, path.join(staging, "panel"));
+// Signed when the environment asks for it (a release, issue #182) — then with
+// its own copy of `ws` inside, because the signature covers every file.
+await vendorPanel({ panelSrc, wsSrc, dest: path.join(staging, "panel"), copy });
 
 // -------------------------------------------------------------- manifest
 const { schemas } = await import("@engineroom/shared");
