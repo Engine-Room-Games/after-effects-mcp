@@ -231,6 +231,31 @@ check("turning 3D off under a toward-camera orient never passes through 2D-and-o
   assert.deepEqual(ae.json("[CARD.threeDLayer, TXT.threeDLayer, MODAL]"), [false, false, []]);
 });
 
+check("a threeDLayer:true AE ignores stops the call before a toward-camera orient is written", () => {
+  const ae = scene();
+  // A layer that cannot be 3D (an audio-only layer): the assignment is taken
+  // and nothing changes. Orienting it at the camera afterwards is the modal.
+  ae.run(`var MODAL = 0;
+    Object.defineProperty(SOLID, "threeDLayer", { get: function () { return false; }, set: function () {} });
+    var ao = SOLID.autoOrient;
+    Object.defineProperty(SOLID, "autoOrient", { get: function () { return ao; }, set: function (x) {
+      if (x === AutoOrientType.CAMERA_OR_POINT_OF_INTEREST) MODAL++; ao = x; } });`);
+  refused(ae.call("set_layer", { compId: 100, layerId: 3, name: "Renamed", motionBlur: true, threeDLayer: true, autoOrient: "CAMERA_OR_POINT_OF_INTEREST" }),
+    /could not set threeDLayer: .*reads false afterwards.*Nothing else in this call was written\. Not written: name, motionBlur, autoOrient/,
+    "3D that did not take");
+  assert.deepEqual(ae.json("[SOLID.name, SOLID.motionBlur, SOLID.autoOrient, MODAL]"), ["Solid", false, 4212, 0]);
+});
+
+check("turning 3D off is refused when the orient cannot be told (fail closed)", () => {
+  const ae = scene();
+  ae.run("CARD.threeDLayer = true; delete AutoOrientType;");
+  refused(ae.call("set_layer", { compId: 100, layerId: 2, name: "Flat", threeDLayer: false }),
+    /cannot tell whether layer 2 .*no AutoOrientType.*Nothing was changed/, "missing enum");
+  assert.deepEqual(ae.json("[CARD.name, CARD.threeDLayer]"), ["Card", true]);
+  // A layer already 2D has nothing to fear from threeDLayer:false.
+  ok(ae.call("set_layer", { compId: 100, layerId: 3, threeDLayer: false }), "2D stays 2D");
+});
+
 check("characters-toward-camera needs a 3D text layer with per-character 3D", () => {
   const ae = scene();
   ae.run(`var TXT = textLayer(C, 9, "Hi", null);

@@ -432,8 +432,15 @@ OPS.set_layer = function (args) {
   var orientFirst = args.threeDLayer === false && args.autoOrient !== undefined;
   if (args.threeDLayer === false && args.autoOrient === undefined && !camOrLight) {
     var AO = __layerSwitchEnum("AutoOrientType");
-    var curOrient = null;
-    try { curOrient = l.autoOrient; } catch (eAO) { curOrient = null; }
+    var curOrient = null, orientUnread = false;
+    try { curOrient = l.autoOrient; } catch (eAO) { orientUnread = true; }
+    // Fail closed: an orient that cannot be named could be the modal one, so a
+    // 3D layer is not turned 2D on a guess.
+    if ((!AO || orientUnread) && l.threeDLayer) {
+      throw new Error("set_layer: cannot tell whether layer " + l.id + " (\"" + l.name + "\") is auto-oriented toward the camera " +
+        "(" + (AO ? "its autoOrient cannot be read" : "this After Effects has no AutoOrientType") + "), and threeDLayer:false on such a " +
+        "layer blocks After Effects with a warning dialog. Nothing was changed. Clear its auto-orient by hand first.");
+    }
     var curName = null;
     if (AO && curOrient === AO.CAMERA_OR_POINT_OF_INTEREST) curName = "CAMERA_OR_POINT_OF_INTEREST";
     else if (AO && curOrient === AO.CHARACTERS_TOWARD_CAMERA) curName = "CHARACTERS_TOWARD_CAMERA";
@@ -458,14 +465,22 @@ OPS.set_layer = function (args) {
   // Order: an unlock first and a lock last, so the call's own locked switch
   // never stands between it and its other fields. The matte next: it is the
   // write whose result is read back, so its failure comes as early as it can.
+  //
+  // A toward-camera orient with threeDLayer:true writes the 3D switch first,
+  // read back like the switches: should After Effects ignore it (a layer that
+  // cannot be 3D), the call stops there with nothing else written, rather
+  // than going on to orient a 2D layer — the modal.
+  var towardCam = !camOrLight && (args.autoOrient === "CAMERA_OR_POINT_OF_INTEREST" || args.autoOrient === "CHARACTERS_TOWARD_CAMERA");
+  var threeDFirst = towardCam && args.threeDLayer === true;
   var applied = [];
   var steps = [];
   if (args.locked === false) steps.push(["locked", false]);
+  if (threeDFirst) steps.push(["threeDLayer", true]);
   if (tm) steps.push(["trackMatte", tm]);
   steps.push(
     ["name", args.name], ["enabled", args.enabled], ["shy", args.shy],
     ["solo", args.solo], ["autoOrient", orientFirst ? switchEnums.autoOrient : undefined],
-    ["threeDLayer", args.threeDLayer], ["blendingMode", blend], ["label", args.label],
+    ["threeDLayer", threeDFirst ? undefined : args.threeDLayer], ["blendingMode", blend], ["label", args.label],
     ["inPoint", args.inPoint], ["outPoint", args.outPoint], ["startTime", args.startTime],
     ["stretch", args.stretch], ["preserveTransparency", args.preserveTransparency],
     ["motionBlur", args.motionBlur], ["collapseTransformation", args.collapseTransformation],
@@ -481,6 +496,11 @@ OPS.set_layer = function (args) {
     var field = steps[si][0];
     if (steps[si][1] === undefined) continue;
     try {
+      // Last line before the modal: whatever the checks above assumed, a
+      // toward-camera orient is never written onto a layer that reads 2D.
+      if (field === "autoOrient" && towardCam && !l.threeDLayer) {
+        throw new Error("set_layer: autoOrient " + args.autoOrient + " needs a 3D layer, and this layer reads 2D, so it was not written.");
+      }
       if (field === "trackMatte") out = __setTrackMatte(l, tm, tmType, tmLayer);
       else l[field] = steps[si][1];
       // The switches are read back (issue #181): After Effects can take an
@@ -534,6 +554,8 @@ function __layerSwitchEnum(name) {
 }
 var __LAYER_READBACK = {};
 (function () { for (var i = 0; i < __LAYER_SWITCHES.length; i++) __LAYER_READBACK[__LAYER_SWITCHES[i]] = true; })();
+// The 3D switch too: a toward-camera orient is only safe once it has landed.
+__LAYER_READBACK.threeDLayer = true;
 
 /**
  * Apply a resolved track matte and read it back (issue #149). The 2023+ API is
