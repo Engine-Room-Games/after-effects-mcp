@@ -272,7 +272,7 @@ you are about to build on rather than trusting what you last saw.
 - **Waited behind another op for the write queue and was dropped.** Nothing
   reached After Effects and nothing changed. Something in front is slow — usually
   a long `run_batch`; find it with `get_job` or `await_job` — then re-send once
-  it has finished. That is the one of the five where re-sending is right. When
+  it has finished: nothing ran, so a second copy is impossible. When
   the message says it waited behind *another session*, `get_job` cannot see that
   work: tell the user another session is writing to the same After Effects.
 - **Refused: the bridge token did not match.** The panel is running and
@@ -282,8 +282,14 @@ you are about to build on rather than trusting what you last saw.
   name the cause, and the `ae-setup` topic has the rest.
 - **Dropped the connection mid-call.** Rarer than the others, and unlike any of them: the call
   was delivered and the connection broke before any answer came back — After
-  Effects or its panel went away under it, or the other AI session's server
-  that was passing calls to it. It may or may not have landed. Do
+  Effects or its panel went away under it. It may or may not have landed. Do
   not re-send it blind: confirm the panel with `check_setup`, then read the comp
   or layer back (`diff_comp` against a snapshot, `get_layer_full`) and re-send
   only if the change is not there.
+- **The shared front desk went away mid-call.** The message names the *front
+  desk* — another AI session's server that was passing your calls on — not the
+  panel. The panel never left, so `check_setup` has nothing to tell you. The
+  call may already have reached After Effects, and it **may land later**, even
+  after a read-back that did not find it. Read the comp or layer back before
+  re-sending; if you re-send, read back again afterwards, or first let one more
+  call go through so the old desk is out of the way.

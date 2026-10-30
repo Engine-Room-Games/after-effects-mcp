@@ -61,7 +61,7 @@ read alike and their remedies contradict each other:
   them and nothing drops into the middle of work the user asked for as one
   thing; something in front is taking a very long time, usually a long
   `run_batch`. Re-sending **is** safe here, once the work in
-  front has finished; this is the one of the five where it is. Find out what is
+  front has finished, because nothing ran. Find out what is
   in front with `get_job` or `await_job` — reads are never queued, so `list_`
   and `get_` calls still answer.
 - **Dropped the connection mid-call** — the call was delivered, then the
@@ -69,6 +69,11 @@ read alike and their remedies contradict each other:
   a refusal, it may have changed the project. Do not re-send it blind: confirm the panel with `check_setup`, read
   the comp or layer back (`diff_comp` against a snapshot, `get_layer_full`), and
   re-send only if the change is not there.
+- **The shared front desk went away mid-call** — the message names the front
+  desk, another AI session's server, not the panel; the panel never left, so
+  `check_setup` will not help. The call may already have reached After Effects
+  and **may land later**, even after a read-back that missed it. Read back
+  before re-sending, and again after any re-send.
 
 The message itself tells you which one you have; the queue error says in as many
 words that nothing was written. Never collapse them into "the bridge is playing
