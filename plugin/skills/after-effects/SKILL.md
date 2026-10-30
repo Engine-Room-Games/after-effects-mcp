@@ -73,6 +73,13 @@ bounded form is the one to reach for:
 | One layer, in depth | `get_layer_full({compId, layerId, include: […]})` ⭐ |
 | What did my last change actually do? | `snapshot_comp` → `diff_comp` ⭐ |
 
+**If your client supports resource subscriptions**, `ae://project/summary` and
+`ae://project/active-comp` are the same answers as `get_project_summary` and
+`get_comp` on the active comp, and a subscription tells you when the user adds,
+renames or switches comps — so you need not re-read them to find out. They track
+the project and the comp's settings, not edits inside a layer; for those it is
+still `snapshot_comp` → `diff_comp`.
+
 **Bound every read.** A tool result is re-sent to you on every later request
 for the rest of the session, so an unbounded read is paid for once when you
 make it and again on every request until the session ends. `include: []` on the

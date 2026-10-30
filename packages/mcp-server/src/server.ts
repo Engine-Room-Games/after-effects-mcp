@@ -7,6 +7,8 @@ import {
   ListResourcesRequestSchema,
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
+  SubscribeRequestSchema,
+  UnsubscribeRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
@@ -69,6 +71,7 @@ import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./gen
 import { archiveIssue, listIssues, logIssue, markReported } from "./issues/journal.js";
 import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
+import { LIVE_RESOURCES, LiveResources, isLiveUri, liveErrorText } from "./resources/live.js";
 import { houseStyleOnServer } from "./style/houseStyleFile.js";
 import { runAnalyzeMotion } from "./style/motion.js";
 import { internalSender, type SendInternal } from "./tools/internalOps.js";
@@ -169,6 +172,11 @@ export interface CreateServerOptions {
   frontDesk?: FrontDeskOptions | null;
   /** Test seam: stands in for tools/confirm.ts `confirmWithUser` (issue #245). */
   confirmWithUser?: typeof confirmWithUser;
+  /**
+   * How often a subscribed live resource is refreshed (issue #248), instead of
+   * `AE_MCP_RESOURCE_POLL_MS`. Not clamped, so a test can poll fast.
+   */
+  livePollMs?: number;
 }
 
 /**
@@ -197,7 +205,9 @@ export function createServer(opts: CreateServerOptions = {}) {
   const server = new Server(
     { name: "after-effects-mcp", version: "0.5.2" },
     {
-      capabilities: { tools: {}, logging: {}, prompts: {}, resources: {} },
+      // `subscribe`: the live project resources (issue #248; resources/live.ts).
+      // The guides never change, so subscribing to one is accepted and silent.
+      capabilities: { tools: {}, logging: {}, prompts: {}, resources: { subscribe: true } },
       // Clients that honour this fold it into the system prompt, which is the
       // only way non-Claude clients get the cross-cutting guidance at all —
       // skills and slash commands do not exist outside Claude's own clients.
@@ -275,6 +285,15 @@ export function createServer(opts: CreateServerOptions = {}) {
   // new) panel is answering, and the verdict about the old one is void (#156).
   ws.onReopen(() => panelGate.invalidate());
   ws.start();
+  // Live project resources (issue #248). Polls After Effects only while a
+  // client is subscribed, through the same read path a tool read takes, and
+  // never while this session holds or waits on the write lease.
+  const live = new LiveResources({
+    read: (op, a) => line.runOp(op, a, { write: false }),
+    notify: (uri) => server.sendResourceUpdated({ uri }),
+    writing: () => writes.held !== null || writes.depth > 0,
+    intervalMs: opts.livePollMs,
+  });
   line.start();
   // The event socket and its reconnect timer are what kept an orphaned server
   // alive after its client went (#163). Closing the server releases them, so
@@ -286,6 +305,7 @@ export function createServer(opts: CreateServerOptions = {}) {
     closing = true;
     batches.stopAll("this server is closing (its MCP client disconnected), and a batch is driven by the server that started it.");
     ws.stop();
+    live.stop();
     // Hands the desk on if this server runs it; see frontdesk/line.ts.
     void line.close();
     priorOnClose?.();
@@ -506,17 +526,46 @@ export function createServer(opts: CreateServerOptions = {}) {
       })),
       // Listed only where it can be rendered; see apps/compTimeline.ts.
       ...(clientSupportsApps(server.getClientCapabilities()) ? [COMP_TIMELINE_RESOURCE] : []),
+      // Listing costs nothing: After Effects is asked only on a read or while subscribed.
+      ...LIVE_RESOURCES.map((r) => ({ ...r })),
     ],
   }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
     const uri = req.params.uri;
     if (uri === COMP_TIMELINE_URI) return readCompTimeline();
+    if (isLiveUri(uri)) {
+      // One ordinary read. A failure is thrown with the sentence a tool call
+      // would have answered — an unreachable panel says to call check_setup.
+      let text: string;
+      try {
+        text = await live.read(uri);
+      } catch (e) {
+        throw new Error(liveErrorText(e));
+      }
+      return { contents: [{ uri, mimeType: "application/json", text }] };
+    }
     const guide = uri.startsWith(GUIDE_URI_PREFIX)
       ? getGuide(uri.slice(GUIDE_URI_PREFIX.length))
       : undefined;
     if (!guide) throw new Error(`Unknown resource: ${uri}`);
     return { contents: [{ uri, mimeType: "text/markdown", text: withPolicyNotice(policy, guide.body) }] };
+  });
+
+  const knownUri = (uri: string) =>
+    isLiveUri(uri) || (uri.startsWith(GUIDE_URI_PREFIX) && getGuide(uri.slice(GUIDE_URI_PREFIX.length)) !== undefined);
+
+  server.setRequestHandler(SubscribeRequestSchema, async (req) => {
+    const uri = req.params.uri;
+    if (!knownUri(uri)) throw new Error(`Unknown resource: ${uri}`);
+    // A guide is fixed for the life of the process: accepted, never notified.
+    live.subscribe(uri);
+    return {};
+  });
+
+  server.setRequestHandler(UnsubscribeRequestSchema, async (req) => {
+    live.unsubscribe(req.params.uri);
+    return {};
   });
 
   // ---------- tools/call ----------
@@ -1138,6 +1187,9 @@ export function createServer(opts: CreateServerOptions = {}) {
       // No-op unless a lease was taken, and deferred by `extendUntil` when a
       // long batch is still running behind the envelope we just returned.
       lease?.release();
+      // A write may have changed what a subscriber is watching; a no-op when
+      // nobody is, and the refresh still waits out a batch's extended lease.
+      if (lease) live.nudge();
     }
   });
 

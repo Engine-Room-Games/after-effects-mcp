@@ -110,8 +110,12 @@ jobs:
               const got=await send("prompts/get",{name:"report-ae-issue",arguments:{arguments:"xyzzy"}});
               const text=got.result.messages[0].content.text;
               if(text.includes("$ARGUMENTS")||!text.includes("xyzzy")) fail("prompt arguments were not substituted");
-              const res=(await send("resources/list",{})).result.resources;
-              if(res.length!==guideSources) fail(`${guideSources} files in src/guides but ${res.length} resources served`);
+              const all=(await send("resources/list",{})).result.resources;
+              // The live project resources (issue #248) are listed beside the guides.
+              const res=all.filter((r)=>r.uri.startsWith("ae://guide/"));
+              if(res.length!==guideSources) fail(`${guideSources} files in src/guides but ${res.length} guide resources served`);
+              for(const u of ["ae://project/summary","ae://project/active-comp"]) if(!all.some((r)=>r.uri===u)) fail(`live resource ${u} not listed`);
+              if(!init.result.capabilities.resources.subscribe) fail("resources.subscribe capability missing");
               const read=await send("resources/read",{uri:"ae://guide/after-effects"});
               if(!read.result.contents[0].text.startsWith("# Driving After Effects")) fail("resource body wrong");
               const guide=await send("tools/call",{name:"ae_guide",arguments:{topic:"style-guide"}});
@@ -245,6 +249,10 @@ jobs:
       # the agent gets a bounded summary, never the keys (issue #244).
       - name: A motion style is read off animated comps, bounded
         run: node tests/unit/motion-style.mjs
+      # #248: live project resources — no subscriber, no After Effects traffic;
+      # a change notifies once; a refresh never runs beside a write.
+      - name: Live resources poll only while subscribed, and notify on change
+        run: node tests/unit/live-resources.mjs
 
       # Real image code, written against a 16-bit project nobody here has: a
       # frame that decodes on the far side of the wire is the only thing that
