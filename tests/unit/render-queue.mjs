@@ -885,6 +885,18 @@ function alive(pid) {
     assert.equal(jobs.get(jobId).status, "cancelled");
   });
 
+  await check("cancel: a correctly named output whose move failed is named as a move failure, never as discarded (#217 final)", async () => {
+    const { wrote, report } = await cancelWithLateEngineWrite("movefail", {
+      late: (sd, pd) => {
+        fs.mkdirSync(path.join(pd, "beside.mp4")); // the move onto it fails
+        fs.writeFileSync(path.join(sd, "beside.mp4"), "partial");
+      },
+    });
+    assert.ok(wrote);
+    assert.match(report.note, /could not be moved out of the render's private copy folder/);
+    assert.doesNotMatch(report.note, /discarded with it/, report.note);
+  });
+
   await check("cancel: an unfinished file After Effects wrote under another name is said to be discarded, not 'nothing found' (#217 live)", async () => {
     const { wrote, report } = await cancelWithLateEngineWrite("tmpname", {
       late: (sd) => fs.writeFileSync(path.join(sd, "beside_inprogress.m4v"), Buffer.alloc(4096)),

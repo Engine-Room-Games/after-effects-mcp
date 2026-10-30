@@ -1896,7 +1896,17 @@ export class RenderRunner {
     // What After Effects wrote under a name no output claims (live, 26.5: an
     // in-progress .m4v for an .mp4 output) stays in the job folder and goes
     // with it. Say so — "nothing found" would hide a file thrown away.
-    const discarded = strayFiles(r.layout).filter((f) => !r.kept.has(f));
+    // A file an output does claim, but could not be moved, is not one of
+    // these: relocateProblems names it, with why.
+    const claimed = (f: string) =>
+      r.plan.items.some((it) =>
+        it.outputs.some((o) => {
+          if (!o.path) return false;
+          const re = sequenceMatcher(path.basename(o.path));
+          return re ? re.test(path.basename(f)) : path.basename(f) === path.basename(o.path);
+        })
+      );
+    const discarded = strayFiles(r.layout).filter((f) => !r.kept.has(f) && !claimed(f));
     const mb = discarded.reduce((n, f) => {
       try {
         return n + fs.statSync(f).size;
