@@ -94,6 +94,7 @@ held — internal ops never pass the tool path that takes one.
 | `project-path` | Asks `_project_path` for the .aep's path and reads/writes `house-style.md` itself. |
 | `server-images` | Sends `_screenshot_frame`, `_screenshot_layer` and `_export_mogrt`, which answer with ExtendScript's temp paths, and waits for, normalises, tiles and patches the files itself (`frames/pipeline.ts`). The panel's own processing stays for older servers; see "Screenshots and frame integrity" in [fragile-areas-bridge.md](fragile-areas-bridge.md). |
 | `server-run-jsx` | Builds `run_jsx`'s wrapper itself (libraries inlined, the #221 undo rewrite, the eval/Function/`$.evalFile` scan) and sends `_run_jsx`; a failure comes back with `rawLine`/`wrapperLine`/`libraryIndex` and the server maps it onto the caller's file (`tools/runJsxAssembly.ts`). ExtendScript keeps each library's parse check and the `Error.source`/`start`/`end` reading. `OPS.run_jsx` stays for older servers and for `run_batch` steps; see "`run_jsx` assembled on the server" in [architecture.md](architecture.md). |
+| `server-drives-jobs` | Forwards a long `run_batch` with `__driver: "server"` and, only when the envelope answers `driver: "server"`, sends each `_continue_job` itself (`jobs/batchDriver.ts`). Any other envelope is driven by the panel as before; see "The batch driver" in [architecture.md](architecture.md). |
 
 **Install before AE is open.** The panel loads at launch and only at launch, so
 installing while AE is closed costs no restart. `check_setup` reports

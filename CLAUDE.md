@@ -66,9 +66,9 @@ ExtendScript inside AE  (bundle.jsx = packages/jsx/*.jsx in one closure; one glo
 After Effects
 ```
 
-The MCP server is stateless except for an in-memory `JobManager`, the `SnapshotStore`, the write queue and — in whichever server runs it — the front desk. The panel is the *only* thing that talks to AE; it holds a Promise-chain mutex around `evalScript` because ExtendScript is single-threaded and concurrent calls would interleave. That mutex is necessary and not sufficient — see [`docs/architecture.md`](docs/architecture.md).
+The MCP server is stateless except for an in-memory `JobManager` (with the `BatchDriver` feeding it), the `SnapshotStore`, the write queue, the shared stale-frame file and — in whichever server runs it — the front desk. The panel is the *only* thing that talks to AE; it holds a Promise-chain mutex around `evalScript` because ExtendScript is single-threaded and concurrent calls would interleave. That mutex is necessary and not sufficient — see [`docs/architecture.md`](docs/architecture.md).
 
-**The server does everything that does not modify After Effects (issue #220).** The panel stalls while AE is busy and does not update itself — a change there costs the user `setup_panel` and an AE restart — while the server sees the same files as the same user. So filesystem preconditions (`files/destinations.ts`), the comp diff (`snapshots/diff.ts`) and house-style I/O (`style/houseStyleFile.ts`) run in Node, and new work that needs only a path or a JSON value goes there too, not into `packages/jsx/` or `client/`.
+**The server does everything that does not modify After Effects (issue #220).** The panel stalls while AE is busy and does not update itself — a change there costs the user `setup_panel` and an AE restart — while the server sees the same files as the same user. So filesystem preconditions (`files/destinations.ts`), the comp diff (`snapshots/diff.ts`), house-style I/O (`style/houseStyleFile.ts`), finishing screenshots and `.mogrt` thumbnails (`frames/`), the chunked `run_batch` loop (`jobs/batchDriver.ts`) and `run_jsx` assembly (`tools/runJsxAssembly.ts`) run in Node — each only on a panel listing the capability, with the panel's own copy kept for the rest. New work that needs only a path or a JSON value goes there too, not into `packages/jsx/` or `client/`.
 
 ## Source layout
 
@@ -86,30 +86,27 @@ One line each. The annotated version — why each file is the way it is — is i
 | `packages/jsx/checkpoint.jsx` | `checkpoint_comp` / `revert_comp`. Restores *into* the original comp so its id never changes; copy-first, verified against the checkpoint. |
 | `packages/jsx/selection.jsx` | `get_selection` — what the user has selected, capped, with the count of what was left out. |
 | `packages/jsx/retime.jsx` | `retime_keyframes` / `copy_animation` — a key moved with every attribute; write order is load-bearing; read back after. |
-| `packages/jsx/batch.jsx` | `run_batch` — inline under 500 ops, otherwise a chunked job. |
-| `packages/jsx/vision.jsx` | `saveFrameToPng` wrapper, the resolution factor, contact-sheet tiles. |
+| `packages/jsx/batch.jsx` | `run_batch` — inline under 500 ops, otherwise a chunked job whose cursor lives here: `_continue_job` runs one chunk, `_get_job` reads the cursor, an orphan is retired after 30 minutes. |
+| `packages/jsx/vision.jsx` | `saveFrameToPng` wrapper, the resolution factor, contact-sheet tiles; `_screenshot_*` return the temp paths for the server to finish. |
 | `packages/jsx/footage.jsx` | Import, footage layers, the SVG viewBox check, the shared solid/`usedIn` helpers. |
 | `packages/jsx/audio.jsx` | `place_audio_cues` — plan, import, build, roll back. Statement order is load-bearing. |
-| `packages/jsx/mogrt.jsx` | `export_mogrt` — preconditions first, dialogs suppressed, everything re-fetched afterwards. |
+| `packages/jsx/mogrt.jsx` | `export_mogrt` (and `_export_mogrt`) — preconditions first, dialogs suppressed, everything re-fetched afterwards. |
 | `packages/jsx/render.jsx` | The render queue: add/list/remove, and `_render_prepare`/`_render_save`/`_render_mark_done` — the halves of `render_queue` that need AE. The render itself is not here. |
 | `…/render/aerender.ts` | `render_queue`'s job: one `aerender` process per item, progress off stdout, outputs verified on disk, cancel kills the tree. |
 | `…/render/markDone.ts` | Unticks rendered items as one write; waits only briefly for the lock, and says per item when it could not. |
-| `packages/jsx/raw.jsx` | `run_jsx` — the result serializer, library inlining, failure attribution, the undo-group guard. |
+| `packages/jsx/raw.jsx` | `run_jsx` — assembly, library inlining, failure attribution, the undo-group guard, the result serializer — kept for older servers and `run_batch` steps; `_run_jsx` runs a script the server built and sends back the raw line for it to map. |
 | `packages/jsx/values.jsx` | `__setValue` — every op's `setValue`; drops AE's false `invalid numeric result` throw only when the value read back landed (#129). |
 | `packages/jsx/helpers.jsx` | The helper scope a `run_jsx` script runs in. Listed by signature in the tool description — change both together. |
 | `packages/jsx/style.jsx` | `_project_path`, and the legacy `get_house_style` / `set_house_style` for a panel without the `project-path` capability. |
 | `packages/ae-panel/CSXS/manifest.xml` | CEP manifest. Auto-start on AE activate, Node enabled. |
-| `packages/ae-panel/client/main.js` | HTTP+WS server, the `evalScript` mutex, the `__AEMCP` check, the job driver, port binding and the port file, `capabilities` on `/health`. |
-| `packages/ae-panel/client/pngcodec.js` | 16→8-bit conversion, empty-frame detection, `inspectPngStructure`. |
-| `packages/ae-panel/client/framereader.js` | Decides when After Effects has *finished* writing a frame. |
-| `packages/ae-panel/client/contactsheet.js` | Tiles several frames into one labelled sheet. |
-| `packages/ae-panel/client/framecache.js` | The window of delivered frames that makes a re-served render buffer visible. |
-| `packages/ae-panel/client/mogrt.js` | Zip surgery + resample that replaces `thumb.png` in an exported `.mogrt`. |
+| `packages/ae-panel/client/main.js` | HTTP+WS server, the `evalScript` mutex, the `__AEMCP` check, port binding and the port file, `capabilities` on `/health`. The job driver and image finishing run here only for a server that does not take them over. |
+| `packages/ae-panel/client/{pngcodec,framereader,framecache,contactsheet,mogrt}.js` | **Legacy fallback**: the panel's image code, used only for a server that does not use `server-images`. Byte-identical to `frames/` by `image-parity.mjs` — change both. |
 | `packages/mcp-server/src/server.ts` | Tool registry, return-shape branching, error mapping, `toolInputSchema()`. |
 | `…/util/errors.ts` | Every bridge failure class and its message. The five never share a sentence; tests hold it. |
 | `…/util/argsSafety.ts` | Refuses `__proto__`/`constructor`/`prototype` keys at any depth, for every op. |
 | `…/tools/descriptions.ts` | All tool descriptions, written for an LLM reading the tool list cold. |
 | `…/tools/runJsxSource.ts` | `scriptPath` and `libraries`. The **server** reads those files, never the panel. |
+| `…/tools/runJsxAssembly.ts` | Port of raw.jsx's wrapper, undo rewrite, caution scan and line map, for a `server-run-jsx` panel. Byte-identical by `run-jsx-assembly.mjs`. |
 | `…/tools/annotations.ts` | MCP read-only/destructive hints, derived from the tables in `schemas.ts` — never hand-kept per tool. |
 | `…/tools/batchSteps.ts` | Each `run_batch` step validated against its tool's strict schema, parsed args forwarded; refuses ops that cannot be a step. |
 | `…/tools/internalOps.ts` | **The one sender of internal `_` ops.** Typed over `InternalOpMutation`; refuses a `"write"` with no write lease held. |
@@ -121,6 +118,10 @@ One line each. The annotated version — why each file is the way it is — is i
 | `…/frontdesk/line.ts` | `SessionLine` — every server's one way to AE: own queue, then the desk's lock; election, handover, what may be re-sent. |
 | `…/frontdesk/{desk,lock,config,protocol}.ts` | The desk's loopback server, the cross-session lock, the port and `desk-<port>.json`, the wire format that keeps the bridge failures the same classes. |
 | `…/jobs/manager.ts` | In-memory job table, `waitFor(jobId)`, the progress emitters `await_job` binds. |
+| `…/jobs/batchDriver.ts` | Drives a chunked `run_batch`: one `_continue_job` per chunk under the batch's lease, a lost answer recovered from `_get_job`, never an op run twice, every stop saying how far it got. |
+| `…/frames/pipeline.ts` | Screenshots, contact sheets and `.mogrt` thumbnails finished on the server: the completeness wait, normalising, the stale check, tiling, the zip patch. |
+| `…/frames/{pngCodec,frameReader,frameCache,contactSheet,mogrtThumbnail}.ts` | The server's copies of the panel's image modules. Byte-identical by `image-parity.mjs` — change both. |
+| `…/frames/sharedFrameCache.ts` | The stale-frame window as a file per panel port (`frames-<port>.jsonl`), shared by every server on one AE; lines tagged per AE instance, writes under a lock. |
 | `…/snapshots/store.ts` | In-memory comp fingerprints; `missingMessage()` is why it is a class and not a `Map`. |
 | `…/snapshots/diff.ts` | `diff_comp`'s diff, a port of `snapshot.jsx`'s kept byte-identical by a parity test. Change one, change both. |
 | `…/files/destinations.ts` | Filesystem preconditions for `export_mogrt`, `add_to_render_queue`, `import_footage`, ported from the jsx. Reads only. |
@@ -161,7 +162,7 @@ Adding a new op = touching six places. In order:
 5. **Build** — `npm run build` rebuilds TS and the .jsx bundle.
 6. **Reload in AE** (optional, dev only) — `curl -X POST -H "x-ae-mcp-token: $(cat ~/.engineroom-ae-mcp/token-7777)" http://127.0.0.1:7777/reload-jsx` re-`$.evalFile`s the bundle without restarting AE. The header is not optional: every route that reaches AE is authenticated (issue #106). It drops every `run_batch` job in flight, since the job table lives in the bundle.
 
-The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring is needed unless the op needs special return packaging (vision = image content, run_batch = async envelope, jobs/* = server-resident, snapshots = half server-resident) — or, in one case, special *input* packaging: `run_jsx` is rewritten between zod validation and the forward, so `scriptPath` becomes `code` and `libraries` become `{path, text}` before the panel ever sees them (`tools/runJsxSource.ts`).
+The `server.ts` tool registration loop reads `OpSchemas`, so no MCP-side wiring is needed unless the op needs special return packaging (vision = image content, run_batch = async envelope the server may drive, jobs/* = server-resident, snapshots = half server-resident) — or, in one case, special *input* packaging: `run_jsx` is rewritten on the server between zod validation and the forward, so `scriptPath` becomes `code` and `libraries` become `{path, text}` (`tools/runJsxSource.ts`); on a `server-run-jsx` panel the server then builds the whole wrapper and sends `_run_jsx` with `built` (`tools/runJsxAssembly.ts`).
 
 Two things step 1 does not cover on its own, both in
 [`docs/architecture.md`](docs/architecture.md): `run_jsx` is the one op whose
@@ -197,7 +198,7 @@ breaking one produces a plausible success rather than an error.
 - **Internal `_` ops go through `internalSender` (`tools/internalOps.ts`), never `bridge.runOp` directly.** They are not tools, so they never pass the tool path's classification or write lease; the sender is typed over `InternalOpMutation` and refuses a `"write"` with no lease held. Sent any other way, an internal write can land between two chunks of another session's batch. → [subsystems](docs/subsystems.md)
 - **Every op runs with AE's dialogs suppressed, and what AE said surfaces as `aeWarnings`.** `dispatch()` brackets the op in `beginSuppressDialogs`/`endSuppressDialogs(false)` and collects `app.onError` (PROBLEM severity dropped as handled). A non-object result is wrapped in a marked envelope the server unwraps; an op managing its own suppression opts out with `__meta.ownDialogs`. Dropping the warnings means a dialog nobody saw becomes a silent success. → [AE](docs/fragile-areas-ae.md)
 - **`run_jsx`'s undo guard covers literal calls only.** `app.beginUndoGroup`/`app.endUndoGroup` written out in the script or a library are rewritten to counting stand-ins and balanced inside the call; replacing the methods on `app` was tried and AE ignores it. Through `eval`/`Function`/`$.evalFile`, an alias of `app` or a computed name, a call reaches AE uncounted; eval-like routes get a CAUTION on the result, nothing more. → [AE](docs/fragile-areas-ae.md)
-- **Panel capabilities come from `/health`, and absent means legacy, not broken.** `bundleHash` names the ExtendScript; `capabilities` names the panel JavaScript. Use a capability only when it is listed, keep the old path for every panel that does not list it, and `withdraw` it on an `Unknown op`. → [subsystems](docs/subsystems.md)
+- **Panel capabilities come from `/health`, and absent means legacy, not broken.** `bundleHash` names the ExtendScript; `capabilities` names the panel JavaScript: today `project-path`, `server-images`, `server-run-jsx` and `server-drives-jobs`. Use a capability only when it is listed, keep the old path for every panel that does not list it, and `withdraw` it on an `Unknown op`. `server-drives-jobs` is also confirmed per call — the server asks with `__driver: "server"` and drives only an envelope answering `driver: "server"`, so two drivers can never share a job. → [subsystems](docs/subsystems.md)
 - **Measure After Effects; do not trust Adobe's documentation.** Undo groups across calls, `CompItem.posterTime`, `$.evalFile`'s scope and `Error.start`/`end` were all documented one way and behave another. → [recipes](docs/verification-recipes.md)
 - **The .jsx bundle must stay a pure function of its sources** — no timestamps, no unsorted directory reads. Its hash is half the version gate. → [subsystems](docs/subsystems.md)
 - **`ws` is always a real directory on disk**, in every packaging path. It can never be inlined. → [server](docs/fragile-areas-server.md)
