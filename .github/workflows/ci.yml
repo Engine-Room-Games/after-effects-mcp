@@ -161,6 +161,12 @@ jobs:
       - name: The bridge refuses anyone who is not the MCP server
         run: node tests/unit/bridge-auth.mjs
 
+      # Issue #175: two MCP servers on one panel share its evalScript mutex but
+      # not a write queue, so the second client's wait was silent. The panel
+      # now reports how long a call queued on the mutex and behind what.
+      - name: A wait on the panel's mutex is reported
+        run: node tests/unit/panel-wait.mjs
+
       # Issue #92: the server follows the panel when its cached port is refused,
       # and check_setup names a port disagreement instead of prescribing a restart.
       - name: A stale bridge port is rediscovered, not restarted around

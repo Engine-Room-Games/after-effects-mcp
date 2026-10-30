@@ -316,8 +316,19 @@ caller reads (#43). Those get a second text content block instead. Vision
 results never carry a note at all, since screenshots are reads.
 
 Two limits worth knowing. The queue is per-server-process, so a second MCP
-client pointed at the same panel is not serialized against the first — the panel
-is a shared resource with no lock of its own. And the queue is bounded
+client pointed at the same panel gets a queue of its own and neither sees the
+other's. Measured on 26.5 (issue #175): the panel's `evalScript` mutex still
+serializes the two clients' calls one at a time — client Y's write started 73 ms
+after client X's 6 s write ended, with no interleaving — but Y's wait was
+silent, since its own queue was empty, and with a 3 s op timeout Y was told
+"timed out, do not re-send" and its write landed afterwards anyway. What the
+mutex cannot give is the lease: another client's write can still take a turn
+between two chunks of a long `run_batch` (inferred from the code, not
+measured). The panel now reports how long a call waited on its mutex, which
+surfaces as `panelBusyWith` / `panelWaitedMs` — under their own names, because
+they mean "something on the panel was ahead", not "your own write was". The
+details are under "Two MCP clients, one panel" in
+[fragile-areas-bridge.md](fragile-areas-bridge.md). And the queue is bounded
 (`AE_MCP_WRITE_QUEUE_DEPTH`, default 64; `AE_MCP_WRITE_QUEUE_WAIT_MS`, default
 600s) rather than unbounded, because an agent looping writes at a stuck bridge
 would otherwise grow it without limit.

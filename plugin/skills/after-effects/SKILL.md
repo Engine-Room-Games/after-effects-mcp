@@ -233,11 +233,24 @@ the middle of work the user asked for as one thing. A call that had to wait says
 so with `queuedBehind` and `waitedMs`. Reads are never queued: `list_*`,
 `get_*`, the screenshots and `await_job` answer while a batch runs.
 
+That queue is this session's only. **A second AI client connected to the same
+After Effects has its own**, and neither sees the other's. After Effects still
+runs one call at a time, so two calls never mix — but the other client's
+writes can land between the chunks of a long `run_batch` of yours, and a call
+that waited behind the other client's work used to say nothing at all. With a
+current panel it carries `panelBusyWith` (what After Effects was running) and
+`panelWaitedMs` when the wait was over a second. A `panelBusyWith` naming
+something you did not have in flight — no batch, no screenshot of yours
+running — means someone else is working in this project: check what changed
+before you build on what you last read.
+
 ## Four failures that read alike, with remedies that contradict
 
 - **Did not answer in time.** The call reached After Effects, which is
   single-threaded, so a long script or a modal dialog nobody has clicked blocks
-  every reply. It may still be running: do **not** re-send it, do not restart
+  every reply — and so does another AI client's call on the same After
+  Effects, which this one waits behind. It may still be running, or not yet
+  started, and either way can still land after the error: do **not** re-send it, do not restart
   After Effects, do not run `setup_panel`. Poll `check_setup` for about a
   minute, and ask the user whether a dialog is hiding behind another window. A
   call that legitimately needs longer gets it from `AE_MCP_OP_TIMEOUT_MS` in the

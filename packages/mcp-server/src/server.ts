@@ -14,7 +14,7 @@ import { schemas } from "@engineroom/shared";
 import { HttpClient } from "./bridge/httpClient.js";
 import { WsClient } from "./bridge/wsClient.js";
 import { createPanelGate } from "./bridge/panelGate.js";
-import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge/writeQueue.js";
+import { WriteQueue, mergeWait, waitNote, type QueueWait, type WaitNote, type WriteLease } from "./bridge/writeQueue.js";
 import { JobManager, isTerminal, unknownJobMessage } from "./jobs/manager.js";
 import {
   RenderRunner,
@@ -658,7 +658,11 @@ export function createServer(opts: CreateServerOptions = {}) {
       // does nothing with it — its WS `progress` events carry a jobId and no
       // token — and progress is delivered on `await_job`, never here; see
       // forwardJobProgress.
-      const result = await bridge.runOp(name, args);
+      const { result, panelWait } = await bridge.runOpWithWait(name, args);
+      // This server's queue wait, plus the panel's mutex wait when it was long
+      // enough to matter — the only trace of another MCP client's call ahead of
+      // this one (issue #175). Null when neither happened.
+      const waited = waitNote(wait, panelWait);
 
       // Async envelope handling for run_batch
       if (ASYNC_OPS.has(name) && isAsyncEnvelope(result)) {
@@ -707,7 +711,7 @@ export function createServer(opts: CreateServerOptions = {}) {
             undoGroupName: env.undoGroupName,
             note: withProgressNote(env.note, env.jobId),
           },
-          wait
+          waited
         );
       }
 
@@ -770,10 +774,10 @@ export function createServer(opts: CreateServerOptions = {}) {
       // reinstalled the panel and relaunched AE. See style/summary.ts.
       if (name === "get_house_style") {
         const detail = (args as { detail?: "summary" | "full" }).detail ?? "summary";
-        return textResult(applyHouseStyleDetail(result, detail), wait);
+        return textResult(applyHouseStyleDetail(result, detail), waited);
       }
 
-      return textResult(result, wait);
+      return textResult(result, waited);
     } catch (e) {
       // Checked before BridgeUnreachableError because the remedies are
       // opposites: one says restart After Effects, the other says do not.
@@ -1100,7 +1104,7 @@ async function clientRoots(server: Server): Promise<string[] | undefined> {
  * Vision results never come through here with a wait — screenshots are reads
  * and are never queued — so the image envelope cannot be touched by this.
  */
-function textResult(value: unknown, wait?: QueueWait | null) {
+function textResult(value: unknown, wait?: WaitNote | null) {
   // Compact, not pretty-printed (issue #166). The model reads JSON without the
   // indentation, and every result is re-sent on every later turn of the
   // session, so the whitespace was paid for many times over: 20–40% of a

@@ -329,6 +329,13 @@ output modules anyway.
   success, and the only place the truth is visible is AE's Edit menu. Anything
   spanning calls opens and closes its own group per call. *The tool already
   does:* `run_batch` reports the measured `undoSteps`.
+- **Do not open undo groups of your own inside `run_jsx`.** The tool already
+  wraps the script in one. A nested `beginUndoGroup`/`endUndoGroup`, a `begin`
+  with no `end`, and an `end` with nothing open all run without an error
+  (measured on 26.5) — which says nothing about what they did to the undo
+  history: how many steps they leave has not been measured. Silence is not
+  success here. If the script needs different grouping, pass
+  `undoGroup: false` and open and close your groups inside the one script.
 - **`copyToComp` needs the group closed**, which is the opposite problem — see
   "Layers and comps".
 

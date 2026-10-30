@@ -118,9 +118,33 @@
   var bundlePath = path.join(extDir, "jsx", "bundle.jsx");
 
   // ---------- ExtendScript evalScript: serialized via Promise chain ----------
+  //
+  // `label` and `meta` make a wait on this mutex visible (issue #175). Every MCP
+  // server pointed at this panel shares this one chain, but each server's write
+  // queue knows only its own process — so a second client's write sat here
+  // behind the first client's and nothing anywhere said so (measured on 26.5:
+  // six seconds, no note). `meta`, when passed, receives the op's *first* wait:
+  // what held the chain when the call joined it, and for how long. Only the
+  // first, because an op that evaluates twice (the namespace heal) waited on
+  // its own reload the second time.
   var __evalChain = Promise.resolve();
-  function evalScript(script) {
+  var __evalRunning = null;    // label of the call evaluating right now
+  var __evalLastJoined = null; // label of the most recent call to join
+  var __evalPending = 0;       // calls queued or running
+  function evalScript(script, label, meta) {
+    var joinedAt = Date.now();
+    var behind = __evalPending > 0 ? (__evalRunning || __evalLastJoined) : null;
+    __evalPending++;
+    __evalLastJoined = label || "evalScript";
     var p = __evalChain.then(function () {
+      __evalRunning = label || "evalScript";
+      if (meta && !meta.measured) {
+        meta.measured = true;
+        if (behind) {
+          meta.waitedMs = Date.now() - joinedAt;
+          meta.behind = behind;
+        }
+      }
       return new Promise(function (resolve, reject) {
         cs.evalScript(script, function (raw) {
           if (raw === "EvalScript error.") return reject(new Error("ExtendScript eval failed (syntax or runtime)"));
@@ -129,8 +153,19 @@
       });
     });
     // Keep the chain alive even on rejection so subsequent calls aren't blocked.
-    __evalChain = p.catch(function () { return null; });
+    __evalChain = p.catch(function () { return null; }).then(function () {
+      __evalRunning = null;
+      __evalPending--;
+    });
     return p;
+  }
+
+  // The wait to report on an /op response, or undefined when there was none.
+  function panelWaitOf(meta) {
+    if (!meta || meta.waitedMs === undefined) return undefined;
+    // A batch's chunks run as `_continue_job`, a name no agent ever called.
+    var behind = meta.behind === "_continue_job" ? "run_batch" : meta.behind;
+    return { behind: behind, waitedMs: meta.waitedMs };
   }
 
   // ---------- The bundle's one global (issue #185) ----------
@@ -175,13 +210,15 @@
   }
 
   // Run an op through the dispatch table. Returns parsed JS object.
-  function runOp(op, args) {
+  // `meta` is evalScript's: pass an object to learn how long this op queued
+  // behind another call on the mutex.
+  function runOp(op, args, meta) {
     var payload = JSON.stringify({ op: op, args: args || {} });
-    return evalScript(opScript(payload)).then(function (raw) {
+    return evalScript(opScript(payload), op, meta).then(function (raw) {
       if (raw !== NS_MISSING) return raw;
       // Nothing ran: NS_MISSING is answered instead of the op, so sending it
       // again after the reload cannot run it twice.
-      return healNamespace(op).then(function () { return evalScript(opScript(payload)); });
+      return healNamespace(op).then(function () { return evalScript(opScript(payload), op, meta); });
     }).then(function (raw) {
       if (raw === NS_MISSING) {
         throw new Error("The AE MCP bundle is not loaded in After Effects (__AEMCP missing even after reloading " +
@@ -263,7 +300,7 @@
     // Through the evalScript mutex like every other call: the heal triggers
     // this while ops are queued, and a load must not interleave with one.
     var loadScript = "$.evalFile(" + JSON.stringify(bundlePath) + "); " + NS_READY + " ? 'ok' : 'no-namespace';";
-    return evalScript(loadScript).then(function (raw) {
+    return evalScript(loadScript, "bundle.jsx load").then(function (raw) {
       if (raw === "ok") {
         loadedBundleHash = diskHash;
         $jsx.textContent = "loaded";
@@ -993,11 +1030,11 @@
   }
 
   // ---------- Op handler with vision/job specialization ----------
-  function handleOp(op, args, progressToken) {
+  function handleOp(op, args, progressToken, meta) {
     // Export writes the .mogrt; the thumbnail it wants is a second file that
     // has to be folded into it afterwards.
     if (op === "export_mogrt") {
-      return runOp(op, args).then(function (info) {
+      return runOp(op, args, meta).then(function (info) {
         if (!info || !info.posterPngPath) return info;
         return patchMogrtThumbnail(info).then(function (thumbnail) {
           var out = {};
@@ -1073,7 +1110,7 @@
     // Long batches: returns {jobId, async, total}. We kick off background drive
     // and return the jobId immediately.
     if (op === "run_batch") {
-      return runOp(op, args).then(function (res) {
+      return runOp(op, args, meta).then(function (res) {
         if (res && res.async && res.jobId) {
           driveJob(res.jobId, progressToken, res.chunkSize, res.total).catch(function (e) {
             broadcast({ type: "error", jobId: res.jobId, error: e.message });
@@ -1094,7 +1131,7 @@
         return res; // small batch: inline result already
       });
     }
-    return runOp(op, args);
+    return runOp(op, args, meta);
   }
 
   // ---------- HTTP server ----------
@@ -1164,10 +1201,14 @@
 
           if (url === "/op") {
             bumpReq();
-            handleOp(body.op, body.args, body.progressToken)
+            var opMeta = {};
+            handleOp(body.op, body.args, body.progressToken, opMeta)
               .then(function (result) {
                 res.statusCode = 200; res.setHeader("content-type", "application/json");
-                res.end(JSON.stringify({ ok: true, result: result }));
+                // `panelWait` sits beside `result`, never inside it: the result
+                // is the op's own answer, and a run_jsx one is whatever the
+                // caller's script returned. Absent when the call did not wait.
+                res.end(JSON.stringify({ ok: true, result: result, panelWait: panelWaitOf(opMeta) }));
               })
               .catch(function (err) {
                 log("error", body.op + ": " + err.message);

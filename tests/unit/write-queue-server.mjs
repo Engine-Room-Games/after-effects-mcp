@@ -50,7 +50,7 @@ const bridge = http.createServer((req, res) => {
     await new Promise((r) => setTimeout(r, b.ms));
     entry.leftAt = Date.now();
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, result: b.result }));
+    res.end(JSON.stringify({ ok: true, result: b.result, panelWait: b.panelWait }));
   });
 });
 const wss = new WebSocketServer({ server: bridge, path: "/events" });
@@ -154,6 +154,50 @@ await check("an uncontended write is byte-identical to what it always was", asyn
   assert.equal(res.content.length, 1);
   assert.deepEqual(payload(res), { id: 42, name: "t" });
 });
+
+// Issue #175: two MCP servers on one panel. Each server's queue sees only its
+// own writes, so a write from the second client waited on the panel's
+// evalScript mutex and said nothing (measured on 26.5: six seconds, silent).
+// The panel now reports that wait beside the result; these pin the server half.
+await check("a long wait on the panel's mutex is reported under its own names", async () => {
+  seen.length = 0;
+  behaviour.set("set_layer", {
+    ms: 5,
+    result: { ok: true, which: "set_layer" },
+    panelWait: { behind: "run_jsx", waitedMs: 6371.4 },
+  });
+  const res = await call("set_layer", { compId: 1, layerId: 1, name: "n" });
+  assert.equal(res.content.length, 1);
+  assert.deepEqual(payload(res), { ok: true, which: "set_layer", panelBusyWith: "run_jsx", panelWaitedMs: 6371 });
+  // Not this server's queue: that would tell the agent its own write was ahead.
+  assert.equal("queuedBehind" in payload(res), false);
+});
+
+await check("a short wait on the panel's mutex is not reported", async () => {
+  seen.length = 0;
+  behaviour.set("set_layer", { ms: 5, result: { ok: true }, panelWait: { behind: "get_comp", waitedMs: 40 } });
+  const res = await call("set_layer", { compId: 1, layerId: 1, name: "n" });
+  assert.equal(res.content.length, 1);
+  assert.deepEqual(payload(res), { ok: true });
+});
+
+await check("a panel wait on a run_jsx array arrives as a second block", async () => {
+  seen.length = 0;
+  behaviour.set("run_jsx", { ms: 5, result: [1, 2], panelWait: { behind: "run_batch", waitedMs: 2500 } });
+  const res = await call("run_jsx", { code: "return [1,2]" });
+  assert.equal(res.content.length, 2);
+  assert.deepEqual(payload(res, 0), [1, 2]);
+  assert.deepEqual(payload(res, 1), { panelBusyWith: "run_batch", panelWaitedMs: 2500 });
+});
+
+await check("a malformed panelWait is ignored rather than reported", async () => {
+  seen.length = 0;
+  behaviour.set("set_layer", { ms: 5, result: { ok: true }, panelWait: { behind: 7, waitedMs: "lots" } });
+  const res = await call("set_layer", { compId: 1, layerId: 1, name: "n" });
+  assert.deepEqual(payload(res), { ok: true });
+});
+behaviour.delete("set_layer");
+behaviour.delete("run_jsx");
 
 await check("a long batch holds the queue until the job finishes", async () => {
   // The gap the panel's own evalScript mutex leaves, and the whole reason for
