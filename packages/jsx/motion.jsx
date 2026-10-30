@@ -8,12 +8,14 @@
 //
 // So this answers raw, compact records and nothing else: per keyed property,
 // one array per key — [time, inInterp, outInterp, inInfluence, inSpeed,
-// outInfluence, outSpeed, value]. Interpolation is "l" / "b" / "h". The ease
-// is the FIRST entry of each side's array: a per-dimension ease is rare in
-// hand-made work and the summary says it reads the first. `value` is the key's
-// numeric value as an array (a scalar becomes [v]), or null for a value that
-// is not numbers (a shape path, a text document) — those still count for
-// timing and ease, never for overshoot.
+// outInfluence, outSpeed, value, identity]. Interpolation is "l" / "b" / "h".
+// The ease is the FIRST entry of each side's array: a per-dimension ease is
+// rare in hand-made work and the summary says it reads the first. `value` is
+// the key's numeric value as an array (a scalar becomes [v]), or null for a
+// value that is not numbers (a shape path, a text document) — those still
+// count for timing and ease, never for overshoot, and carry `identity`, a
+// short hash that tells two equal paths or texts apart from two different
+// ones (null for numeric values, or when nothing could be read).
 //
 // Bounded: `maxKeys` caps the keys read across every comp. A property that no
 // longer fits is skipped and counted (`truncated`, `keysNotRead`,
@@ -58,6 +60,49 @@ function __moValue(v) {
     out.push(__moRound(v[i], 4));
   }
   return out;
+}
+
+/** djb2 over a string, as 8 hex digits. ES3: no Math.imul, so kept in range by hand. */
+function __moHash(str) {
+  var h = 5381;
+  for (var i = 0; i < str.length; i++) {
+    h = (h * 33 + str.charCodeAt(i)) % 4294967296;
+  }
+  var hex = h.toString(16);
+  while (hex.length < 8) hex = "0" + hex;
+  return hex;
+}
+
+function __moPoints(list) {
+  var out = [];
+  if (!list) return "";
+  for (var i = 0; i < list.length; i++) {
+    var pt = list[i];
+    out.push(pt && pt.length ? __moRound(pt[0], 3) + "," + __moRound(pt[1], 3) : String(pt));
+  }
+  return out.join(";");
+}
+
+/**
+ * A cheap identity for a value that is not numbers, so two keys holding the
+ * same shape or the same text are recognised as a hold rather than a move:
+ * a hash of a path's vertices, tangents and closed flag, or of a text
+ * document's text, font, size and fill. Null when the value is neither.
+ */
+function __moIdentity(v) {
+  if (!v || typeof v !== "object") return null;
+  try {
+    if (v.vertices) {
+      return "s" + __moHash(__moPoints(v.vertices) + "|" + __moPoints(v.inTangents) + "|" +
+        __moPoints(v.outTangents) + "|" + (v.closed ? "1" : "0"));
+    }
+    if (typeof v.text === "string") {
+      var extra = "";
+      try { extra = "|" + v.font + "|" + v.fontSize + "|" + (v.fillColor ? v.fillColor.join(",") : ""); } catch (eT) {}
+      return "t" + __moHash(v.text + extra);
+    }
+  } catch (e) {}
+  return null;
 }
 
 /** [influence, speed] of the first entry of one side, or [null, null]. */
@@ -128,13 +173,19 @@ function __moWalk(group, names, layer, st) {
       var inE = __moEase(p, k, "in");
       var outE = __moEase(p, k, "out");
       var v = null;
-      try { v = __moValue(p.keyValue(k)); } catch (eV) { v = null; }
+      var id = null;
+      try {
+        var raw = p.keyValue(k);
+        v = __moValue(raw);
+        if (v === null) id = __moIdentity(raw);
+      } catch (eV) { v = null; }
       keys.push([
         __moRound(kt, 5),
         __moInterp(p.keyInInterpolationType(k)),
         __moInterp(p.keyOutInterpolationType(k)),
         inE[0], inE[1], outE[0], outE[1],
-        v
+        v,
+        id
       ]);
     }
     st.read += nk;
@@ -147,7 +198,7 @@ function __moWalk(group, names, layer, st) {
       keys.reverse();
       for (var r = 0; r < keys.length; r++) {
         var kr = keys[r];
-        keys[r] = [kr[0], kr[2], kr[1], kr[5], kr[6], kr[3], kr[4], kr[7]];
+        keys[r] = [kr[0], kr[2], kr[1], kr[5], kr[6], kr[3], kr[4], kr[7], kr[8]];
       }
     }
     var spatial = false;

@@ -169,7 +169,7 @@ await check("floor bounce: a sharp reversal at the extreme is reported, not hidd
   assert.equal(s.reversals.impacts, 1);
   assert.deepEqual(s.reversals.impactsOn, ["Position"]);
   assert.equal(s.reversals.returns, 1);
-  assert.ok(s.suggestedLines.some((l) => /^Bounces \(impact and return\): 1 sharp reversal with no ease at contact \(mostly Position\)/.test(l)), s.suggestedLines.join("\n"));
+  assert.ok(s.suggestedLines.some((l) => /^Bounces \(impact and return\): 1 sharp reversal with no ease at contact \(on Position\)/.test(l)), s.suggestedLines.join("\n"));
 });
 
 await check("a baked track on every frame is left out and named; the designer's moves are the statistics", () => {
@@ -355,6 +355,53 @@ await check("singulars: one step, one elastic move of several", () => {
   assert.ok(s2.suggestedLines.some((l) => /; 1 of 2 elastic \(oscillating before settling\)$/.test(l)), s2.suggestedLines.join("\n"));
 });
 
+// Round-5 review fixtures (#254).
+const pathKey = (t, id, opts) => { const k = key(t, null, opts); k.push(id); return k; };
+
+await check("a path A → B, B copied to hold, B → A is two moves and a hold, not three moves", () => {
+  const p = { ...prop(1, "Path", "ADBE Vector Shape", [
+    pathKey(0, "sA"), pathKey(f(10), "sB"), pathKey(f(38), "sB"), pathKey(f(48), "sA"),
+  ]), path: "Contents > Shape 1 > Path 1 > Path" };
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.equal(s.moves, 2);
+  assert.equal(s.holds.count, 1);
+  assert.equal(s.durations.moveFrames.median, 10, "no fake 28f move");
+  // Without an identity the panel could not compare them, and a key is taken to move.
+  const blind = { ...p, keys: p.keys.map((k) => k.slice(0, 8)) };
+  assert.equal(summarizeMotion(raw([comp([blind])])).moves, 3);
+});
+
+await check("repeated identical Source Text keys are a hold, a changed text is a step", () => {
+  const p = { ...prop(1, "Source Text", "ADBE Text Document", [
+    pathKey(0, "tHello", hold), pathKey(1, "tHello", hold), pathKey(2, "tWorld", hold),
+  ]), path: "Text > Source Text" };
+  const s = summarizeMotion(raw([comp([p])]));
+  assert.equal(s.steps.count, 1);
+  assert.equal(s.holds.count, 1);
+});
+
+await check("a sharp 2-D corner (about 120°) is not a bounce; a turn back along the axis is", () => {
+  const corner = prop(1, "Position", "ADBE Position", [
+    key(0, [0, 0]), key(f(10), [500, 0], linear), key(f(20), [250, 433]),
+  ]);
+  assert.equal(summarizeMotion(raw([comp([corner])])).reversals.impacts, 0);
+  const back = prop(1, "Position", "ADBE Position", [
+    key(0, [0, 0]), key(f(10), [500, 0], linear), key(f(20), [0, 40]),
+  ]);
+  assert.equal(summarizeMotion(raw([comp([back])])).reversals.impacts, 1);
+});
+
+await check("'mostly' only when there is more than one property to choose from", () => {
+  const two = [
+    prop(1, "Position", "ADBE Position", [key(0, [0, 0]), key(f(10), [0, 500], linear), key(f(20), [0, 0])]),
+    prop(1, "Rotation", "ADBE Rotate Z", [key(0, [0]), key(f(10), [90], linear), key(f(20), [0])]),
+  ];
+  const s = summarizeMotion(raw([comp(two)]));
+  assert.ok(s.suggestedLines.some((l) => /^Bounces .*\(mostly (Position|Rotation)\)$/.test(l)), s.suggestedLines.join("\n"));
+  const one = summarizeMotion(raw([comp([popIn(1, 0)])]));
+  assert.ok(one.suggestedLines.some((l) => /^Overshoot on 100% of moves \(on Scale\):/.test(l)), one.suggestedLines.join("\n"));
+});
+
 await check("anticipation is worded as a share of the travel", () => {
   const p = prop(1, "Position", "ADBE Position", [key(0, [100, 500]), key(0.2, [80, 500]), key(0.7, [900, 500])]);
   const s = summarizeMotion(raw([comp([p])]));
@@ -426,7 +473,7 @@ await check("suggestedLines: numbers first, in the house style's own vocabulary"
   assert.equal(lines[0], "Typical move: 0.5s (15f at 30fps); most 0.4–0.5s");
   assert.ok(lines.some((l) => /^Ease: 33% influence both ends, speed 0/.test(l)), lines.join("\n"));
   assert.ok(lines.some((l) => /^Linear on 3% of segments/.test(l)), lines.join("\n"));
-  assert.ok(lines.some((l) => /^Overshoot on 48% of moves \(mostly Scale\): ~8% of the travel past the target, settling over 0\.1s/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /^Overshoot on 48% of moves \(on Scale\): ~8% of the travel past the target, settling over 0\.1s/.test(l)), lines.join("\n"));
   assert.ok(lines.some((l) => /^Stagger: 2f \(0\.067s\) between layers/.test(l)), lines.join("\n"));
   assert.ok(!big.notes.some((n) => /a hint/.test(n)), "21 moves is a pattern");
   for (const l of lines) assert.ok(l.length <= 120, `a line for a 240-character digest: ${l}`);
@@ -490,6 +537,13 @@ ae.run(`
   var blur = b.property("Effects").addProperty("ADBE Gaussian Blur 2").property("Blurriness");
   blur.setValueAtTime(0.1, 20); blur.setValueAtTime(0.6, 0);
   c.addLayer(3, "Still", "shape");
+  // A path keyed A, B, B: the panel sends an identity per key so equal paths read as a hold.
+  var g = c.addLayer(7, "Morph", "shape");
+  var pathProp = new FakeProperty("Path", "ADBE Vector Shape", new Shape(), PropertyValueType.SHAPE);
+  g._root._add(pathProp);
+  var shA = new Shape(); shA.vertices = [[0, 0], [100, 0], [100, 100]]; shA.inTangents = [[0, 0], [0, 0], [0, 0]]; shA.outTangents = [[0, 0], [0, 0], [0, 0]];
+  var shB = new Shape(); shB.vertices = [[0, 0], [200, 0], [200, 200]]; shB.inTangents = [[0, 0], [0, 0], [0, 0]]; shB.outTangents = [[0, 0], [0, 0], [0, 0]];
+  pathProp.setValueAtTime(0, shA); pathProp.setValueAtTime(0.5, shB); pathProp.setValueAtTime(1, shB);
   // Separated dimensions: the master Position is not what plays.
   var d = c.addLayer(4, "Slider", "shape");
   var pos = d.property("Transform").property("Position");
@@ -524,7 +578,7 @@ await check("_motion_keys reads every keyed property, compactly, with the first 
   assert.deepEqual(empty.props, []);
   const byPath = Object.fromEntries(pops.props.filter((p) => p.layerId <= 2).map((p) => [p.path, p]));
   assert.deepEqual(Object.keys(byPath).sort(), ["Effects > Gaussian Blur > Blurriness", "Transform > Opacity", "Transform > Scale"]);
-  assert.deepEqual(byPath["Transform > Scale"].keys[1], [0.3, "b", "b", 33.33, 0, 33.33, 0, [108, 108, 100]]);
+  assert.deepEqual(byPath["Transform > Scale"].keys[1], [0.3, "b", "b", 33.33, 0, 33.33, 0, [108, 108, 100], null]);
   assert.equal(byPath["Transform > Scale"].matchName, "ADBE Scale");
   assert.equal(byPath["Transform > Scale"].layerId, 1);
   assert.equal(byPath["Transform > Opacity"].keys[1][2], "h", "hold out is reported");
@@ -543,7 +597,13 @@ await check("_motion_keys reads every keyed property, compactly, with the first 
   assert.deepEqual(rev.keys[1].slice(1, 7), ["b", "b", 80, 0, 20, 0], "the layer-time first key's ease sides swap");
   assert.deepEqual([rev.inPoint, rev.outPoint], [0, 2], "a reversed layer's in/out arrive low to high");
   assert.equal(byPath["Transform > Scale"].reversed, false);
-  assert.equal(r.keysRead, 12);
+  const morph = pops.props.find((p) => p.layerId === 7);
+  assert.equal(morph.keys[0][7], null, "a path has no numeric value");
+  assert.match(morph.keys[0][8], /^s[0-9a-f]{8}$/);
+  assert.notEqual(morph.keys[0][8], morph.keys[1][8], "different paths, different identities");
+  assert.equal(morph.keys[1][8], morph.keys[2][8], "the same path, the same identity");
+  assert.equal(byPath["Transform > Scale"].keys[0][8], null, "numeric values carry no identity");
+  assert.equal(r.keysRead, 15);
   assert.equal(r.truncated, false);
 });
 
@@ -551,7 +611,7 @@ await check("_motion_keys stops at maxKeys and counts what it left", () => {
   const r = ae.call("_motion_keys", { compIds: [100], maxKeys: 4 }).result;
   assert.equal(r.truncated, true);
   assert.ok(r.keysRead <= 4);
-  assert.equal(r.keysRead + r.keysNotRead, 12);
+  assert.equal(r.keysRead + r.keysNotRead, 15);
   assert.ok(r.propsNotRead >= 1);
 });
 

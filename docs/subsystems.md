@@ -294,7 +294,11 @@ usually longer than its approach. So `0 → 110 → 100` and `0 → 120 → 95 �
 reversal with no ease at the key (a floor hit) is counted as an impact, and a
 move straight back to where the last one started as a return. A run of 20+ keys
 each within 1.5 frames of the last (baked or tracked) is cut out and named;
-the hand keys either side of it on the same property are kept. A hold keyframe into a different value is a step (a blink, a cut, Source
+the hand keys either side of it on the same property are kept. A path or a text document is not numbers, so the panel sends a short hash of
+it (vertices, tangents and closed; text, font, size and fill) and two equal
+keys read as a hold rather than a move or a step. A bounce is a sharp reversal
+that comes back along roughly the axis it arrived on (about 150° or more); a
+sharper-than-90° turn short of that is a corner. A hold keyframe into a different value is a step (a blink, a cut, Source
 Text) — counted with its interval, never a move with eases and never a hold.
 Separated X/Y(/Z) Position keyed at the same times is merged into one move,
 and separated moves on one layer that overlap or meet within 0.1s are one

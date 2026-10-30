@@ -23,8 +23,25 @@
 import type { SendInternal } from "../tools/internalOps.js";
 
 export type Interp = "l" | "b" | "h";
-/** [time, inInterp, outInterp, inInfluence, inSpeed, outInfluence, outSpeed, value] */
-export type RawKey = [number, Interp, Interp, number | null, number | null, number | null, number | null, number[] | null];
+/**
+ * [time, inInterp, outInterp, inInfluence, inSpeed, outInfluence, outSpeed, value, identity?].
+ * `identity` is the panel's hash of a non-numeric value (a path, a text
+ * document), so equal ones can be told apart from different ones.
+ */
+export type RawKey = [
+  number, Interp, Interp, number | null, number | null, number | null, number | null, number[] | null, (string | null)?,
+];
+
+/**
+ * True when the two keys certainly hold different values. Numbers are
+ * compared; a non-numeric value by the panel's identity hash, and taken to
+ * differ when either has none.
+ */
+function valueChanges(a: RawKey, b: RawKey): boolean {
+  if (a[7] !== null && b[7] !== null) return !sameValue(a[7], b[7]);
+  if (a[7] === null && b[7] === null && typeof a[8] === "string" && typeof b[8] === "string") return a[8] !== b[8];
+  return true;
+}
 
 export interface RawProp {
   layerId: number;
@@ -202,9 +219,8 @@ function easeSide(interp: Interp, influence: number | null, speed: number | null
 function isMove(a: RawKey, b: RawKey): boolean {
   if (a[2] === "h") return false;
   if (b[0] - a[0] <= EPS) return false;
-  // A non-numeric value (shape path, text) cannot be compared; a key on it is taken to move.
-  if (a[7] === null || b[7] === null) return true;
-  return !sameValue(a[7], b[7]);
+  // A path or text is compared by the panel's identity hash; without one it is taken to move.
+  return valueChanges(a, b);
 }
 
 /**
@@ -291,13 +307,27 @@ function moveEnd(k: RawKey[], i: number, j: number): number {
   return i + 1;
 }
 
-/** A key the value bounces off: the direction flips and nothing eases into or out of it. */
+/** Cosine of the turn at a key below which the travel comes back along its own axis (about 150°). */
+const BOUNCE_COS = -0.866;
+
+/**
+ * A key the value bounces off: the travel comes back along roughly the axis
+ * it arrived on (a turn of about 150° or more — any reversal of a 1-D value)
+ * and nothing eases into or out of it. A sharper-than-90° turn on a 2-D path
+ * that is not that sharp is a corner, not a bounce.
+ */
 function isImpact(a: RawKey, b: RawKey, c: RawKey): boolean {
   const va = a[7], vb = b[7], vc = c[7];
   if (!va || !vb || !vc || va.length !== vb.length || vb.length !== vc.length) return false;
-  let dot = 0;
-  for (let d = 0; d < va.length; d++) dot += (vb[d] - va[d]) * (vc[d] - vb[d]);
-  if (dot >= 0) return false;
+  let dot = 0, la = 0, lc = 0;
+  for (let d = 0; d < va.length; d++) {
+    const u = vb[d] - va[d];
+    const v = vc[d] - vb[d];
+    dot += u * v;
+    la += u * u;
+    lc += v * v;
+  }
+  if (la < EPS || lc < EPS || dot / Math.sqrt(la * lc) > BOUNCE_COS) return false;
   const sharp = (interp: Interp, speed: number | null) => interp === "l" || (interp === "b" && speed !== null && Math.abs(speed) >= STOP_SPEED);
   return sharp(b[1], b[4]) || sharp(b[2], b[6]);
 }
@@ -325,9 +355,8 @@ interface Walk {
 /** A hold keyframe into a different value: an instantaneous change, not a move and not a hold. */
 function isStep(a: RawKey, b: RawKey): boolean {
   if (a[2] !== "h" || b[0] - a[0] <= EPS) return false;
-  // Text and other non-numeric values are hold-keyed by nature: a key is there because something changed.
-  if (a[7] === null || b[7] === null) return true;
-  return !sameValue(a[7], b[7]);
+  // Text is hold-keyed by nature; repeated identical text keys are a hold, not a step.
+  return valueChanges(a, b);
 }
 
 /** Split one property's keys into moves, segments, holds and steps. */
@@ -816,6 +845,7 @@ export function summarizeMotion(raw: MotionKeys) {
       anticipation: antic.length ? anticipation as AnticipationSummary : null,
       staggers, holdSeconds, holds: holds.length, impacts: rev.impacts, steps: steps.length, stepSeconds: spread(steps),
       impactsOn: [...rev.impactsOn.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null,
+      impactsOnCount: rev.impactsOn.size,
     }),
     notes: [] as string[],
   };
@@ -857,6 +887,12 @@ export function summarizeMotion(raw: MotionKeys) {
 
 // ---------------------------------------------------------------- lines for the house style
 
+/** "(on X)" when one property is named, "(mostly X, Y)" when there are several to choose from. */
+function whereLabel(labels: string[], total: number): string {
+  if (!labels.length) return "";
+  return total <= 1 ? ` (on ${labels[0]})` : ` (mostly ${labels.slice(0, 2).join(", ")})`;
+}
+
 type OvershootSummary = {
   moves: number;
   share: number;
@@ -883,6 +919,8 @@ interface LineInputs {
   holds: number;
   impacts: number;
   impactsOn: string | null;
+  /** How many different properties the impacts were on. */
+  impactsOnCount: number;
   steps: number;
   stepSeconds: Spread | null;
 }
@@ -920,7 +958,7 @@ export function suggestLines(x: LineInputs): string[] {
     if (x.kinds.mixed / x.segments >= 0.1) lines.push(`Eased one end only on ${pct(x.kinds.mixed / x.segments)}% of segments`);
   }
   if (x.overshoot && x.overshoot.amountPercent && x.overshoot.settleSeconds) {
-    const on = x.overshoot.mostOn.length ? ` (mostly ${x.overshoot.mostOn.slice(0, 2).join(", ")})` : "";
+    const on = whereLabel(x.overshoot.mostOn, x.overshoot.mostOn.length);
     const e = x.overshoot.elastic;
     const elastic = !e
       ? ""
@@ -943,7 +981,7 @@ export function suggestLines(x: LineInputs): string[] {
     lines.push(`Stagger: ${round(f, 1)}f (${s.offsetSeconds}s) between layers`);
   }
   if (x.impacts) {
-    lines.push(`Bounces (impact and return): ${x.impacts} sharp reversal${x.impacts === 1 ? "" : "s"} with no ease at contact${x.impactsOn ? ` (mostly ${x.impactsOn})` : ""}`);
+    lines.push(`Bounces (impact and return): ${x.impacts} sharp reversal${x.impacts === 1 ? "" : "s"} with no ease at contact${whereLabel(x.impactsOn ? [x.impactsOn] : [], x.impactsOnCount)}`);
   }
   if (x.holds >= 3 && x.holdSeconds) lines.push(`Holds between moves: ~${x.holdSeconds.median}s`);
   if (stepLine) lines.push(stepLine);
