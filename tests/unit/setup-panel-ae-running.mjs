@@ -452,6 +452,42 @@ await check("check_setup: an unknown process check is not 'not running', and nex
   } finally { restoreEnv(); }
 });
 
+// ------------------------------- through the tool, as the user reads it
+
+await check("the tool's refusal starts with the plain sentence, never 'Invalid arguments'", async () => {
+  const { createServer } = await import(dist("server.js"));
+  const { HttpClient } = await import(dist("bridge", "httpClient.js"));
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  let calledWith = null;
+  const server = createServer({
+    bridge: new HttpClient(1, { candidates: () => [] }),
+    // The real installPanel, with the process check pinned open: the refusal
+    // comes from the same code path a user meets.
+    installPanel: (o) => {
+      calledWith = o;
+      return installPanel({ ...o, prefs: prefs([RUNNING]).calls });
+    },
+  });
+  const client = new Client({ name: "t", version: "0" });
+  const [c, s] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(s), client.connect(c)]);
+  try {
+    const res = await client.callTool({ name: "setup_panel", arguments: {} });
+    assert.equal(res.isError, true);
+    const text = res.content[0].text;
+    assert.ok(text.startsWith(`After Effects is open (found: ${RUNNING.detail}), so setup_panel installed nothing`), text);
+    assert.doesNotMatch(text, /Invalid arguments/);
+    assert.deepEqual(calledWith, { enableDebugMode: undefined, force: undefined, afterEffectsClosed: undefined });
+    // A genuinely bad argument still reads as one.
+    const bad = await client.callTool({ name: "setup_panel", arguments: { aeClosed: true } });
+    assert.match(bad.content[0].text, /^Invalid arguments for setup_panel/);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 restoreEnv();
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`setup-panel-ae-running: ${passed} checks passed`);
