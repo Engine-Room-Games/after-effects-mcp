@@ -60,7 +60,8 @@ import { JournalCache, annotateFailure } from "./issues/failures.js";
 import { applyHouseStyleDetail } from "./style/summary.js";
 import { houseStyleOnServer } from "./style/houseStyleFile.js";
 import { internalSender, type SendInternal } from "./tools/internalOps.js";
-import { CAP_PROJECT_PATH, CAP_SERVER_IMAGES, CAP_SERVER_RUN_JSX } from "./setup/panelCapabilities.js";
+import { CAP_PROJECT_PATH, CAP_SERVER_DRIVES_JOBS, CAP_SERVER_IMAGES, CAP_SERVER_RUN_JSX } from "./setup/panelCapabilities.js";
+import { BatchDriver, foreignJobText, readAeJobRecord } from "./jobs/batchDriver.js";
 import { createSharedFrameCache, panelInstanceId, sharedFrameCacheFile } from "./frames/sharedFrameCache.js";
 import { createFramePipeline, RAW_IMAGE_OPS, type ImageTool, type FramePipeline } from "./frames/pipeline.js";
 import {
@@ -164,6 +165,13 @@ export interface CreateServerOptions {
  */
 const CANCEL_SETTLE_MS = 15_000;
 
+/**
+ * How long `await_job`/`get_job` ask After Effects about a batch id this
+ * process never started before answering without it (issue #220). A busy After
+ * Effects answers nothing until it is done; the plain answer is still true.
+ */
+const FOREIGN_JOB_MS = 3_000;
+
 export function createServer(opts: CreateServerOptions = {}) {
   // Decided once, here: a tool list that changed mid-session would need a
   // list_changed notification, and nothing about these switches is dynamic.
@@ -214,6 +222,22 @@ export function createServer(opts: CreateServerOptions = {}) {
     onRendered: (items) => markRendered(line, internalVia(() => false), items),
   });
   const snapshots = new SnapshotStore();
+  // A chunked run_batch on a panel reporting `server-drives-jobs` is driven
+  // from here, one `_continue_job` per chunk under the batch's own lease
+  // (issue #220, stage 5; jobs/batchDriver.ts). Older panels drive their own
+  // and report over the event socket below.
+  let closing = false;
+  const sendChunkWrite = internalVia(() => true);
+  const batches = new BatchDriver(jobs, {
+    continueJob: (jobId, chunkSize) => {
+      // After close the line no longer holds the desk lease, and a write sent
+      // then would go straight to After Effects, past every other session.
+      if (closing) return Promise.reject(new Error("Internal error: this server is closing; the chunk was not sent."));
+      return sendChunkWrite("_continue_job", { jobId, chunkSize });
+    },
+    getJob: (jobId) => internalVia(() => false)("_get_job", { jobId }),
+    cancel: (jobId) => line.cancel(jobId),
+  });
   // Screenshots, contact sheets and .mogrt thumbnails, finished here on a
   // panel that hands back paths (issue #220, stage 4). The stale-frame window
   // is one per After Effects: a file per panel port, shared with every other
@@ -243,6 +267,9 @@ export function createServer(opts: CreateServerOptions = {}) {
   // which crashes Node 24 on Windows after a fetch.
   const priorOnClose = server.onclose;
   server.onclose = () => {
+    // Before the line lets go of the desk: a chunk must never go out without it.
+    closing = true;
+    batches.stopAll("this server is closing (its MCP client disconnected), and a batch is driven by the server that started it.");
     ws.stop();
     // Hands the desk on if this server runs it; see frontdesk/line.ts.
     void line.close();
@@ -257,6 +284,32 @@ export function createServer(opts: CreateServerOptions = {}) {
   // issues/failures.ts. The cache is per process, like `SnapshotStore`.
   const journalCache = new JournalCache();
   const fail = (tool: string, message: string) => errorResult(annotateFailure(journalCache, tool, message));
+
+  /**
+   * What After Effects says about a batch id this process never registered —
+   * another session's, or one this session's server started before it
+   * restarted, which now stops at a chunk boundary instead of finishing
+   * (issue #220, stage 5). Null when it says nothing usable, in time.
+   */
+  const foreignJob = async (jobId: string): Promise<string | null> => {
+    if (!/^j_\d+_\d+$/.test(jobId)) return null;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const raw = await Promise.race([
+        internalVia(() => false)("_get_job", { jobId }),
+        new Promise<undefined>((r) => {
+          timer = setTimeout(() => r(undefined), FOREIGN_JOB_MS);
+          timer.unref?.();
+        }),
+      ]);
+      const rec = readAeJobRecord(raw);
+      return rec ? foreignJobText(jobId, rec) : null;
+    } catch {
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
 
   /**
    * `cancel_job` for a chunked run_batch (issue #158). `ok:true` is said only
@@ -463,6 +516,10 @@ export function createServer(opts: CreateServerOptions = {}) {
       try {
         if (name === "await_job") {
           const a = AwaitJobSchema.parse(rawArgs);
+          if (!jobs.get(a.jobId)) {
+            const known = await foreignJob(a.jobId);
+            if (known) return fail(name, known);
+          }
           // This is the one call that blocks for the job, so it is the one
           // call whose progress a client is still correlating while the job
           // runs — see forwardJobProgress for why run_batch cannot be.
@@ -490,7 +547,7 @@ export function createServer(opts: CreateServerOptions = {}) {
           const st = jobs.get(a.jobId);
           // A bare `null` read as "no news yet" and invited polling for ever;
           // say what await_job and cancel_job say about the same id (#163).
-          if (!st) return fail(name, unknownJobMessage(a.jobId, "There is no progress to report."));
+          if (!st) return fail(name, (await foreignJob(a.jobId)) ?? unknownJobMessage(a.jobId, "There is no progress to report."));
           return textResult(st);
         }
         if (name === "cancel_job") {
@@ -747,6 +804,12 @@ export function createServer(opts: CreateServerOptions = {}) {
       // file itself, as before. See style/houseStyleFile.ts.
       const viaServer =
         (name === "get_house_style" || name === "set_house_style") && panelGate.capabilities().has(CAP_PROJECT_PATH);
+      // A panel that can leave a chunked batch to the server is asked to, per
+      // call; only an envelope that says it did is driven from here (#220).
+      const forwardArgs =
+        name === "run_batch" && panelGate.capabilities().has(CAP_SERVER_DRIVES_JOBS)
+          ? { ...(args as Record<string, unknown>), __driver: "server" }
+          : args;
       // Screenshots and the .mogrt thumbnail are the server's on a panel that
       // answers with paths (issue #220, stage 4); every other panel reads the
       // files and sends base64, as before. Either way the result has one shape.
@@ -769,7 +832,7 @@ export function createServer(opts: CreateServerOptions = {}) {
               ? await runJsxViaServer(args as ResolvedRunJsxArgs, sendInternal, (op, a) => runner.runOp(op, a), () =>
                   panelGate.withdraw(CAP_SERVER_RUN_JSX)
                 )
-              : await runner.runOp(name, args)
+              : await runner.runOp(name, forwardArgs)
       );
       const result = lifted.value;
 
@@ -806,11 +869,29 @@ export function createServer(opts: CreateServerOptions = {}) {
         // `waitFor`'s own timeout has to sit at the queue's hold ceiling, not
         // below it — a shorter one here would release the lock mid-batch while
         // a writer that queued at the same moment was still waiting.
-        lease?.extendUntil(jobs.waitFor(env.jobId, writes.holdCeilingMs));
+        //
+        // When the panel confirmed it left the driving to this server (#220,
+        // stage 5), the lease is handed to the driver instead and released
+        // when the batch is over in After Effects — no hold ceiling, because
+        // the driver cannot fail to report: it is the one sending the chunks,
+        // and a chunk sent after a ceiling had freed the lock would land
+        // between other writes. The ceiling stays for a panel that drives.
         // A desk lease can be lost while the batch still runs, if the front
         // desk changes hands and it cannot be re-taken (issue #223): other
-        // sessions' writes may then land between its chunks, and the job says so.
-        lease?.onLost?.((why) => jobs.warn(env.jobId, why));
+        // sessions' writes may then land between its chunks, and the job says
+        // so — and on the server-driven path the next chunk is refused unsent,
+        // which stops the batch saying how far it got.
+        if ((result as { driver?: unknown }).driver === "server") {
+          const held = lease;
+          lease = null;
+          held?.onLost?.((why) => jobs.warn(env.jobId, why));
+          void batches
+            .drive({ jobId: env.jobId, total: env.total, chunkSize: env.chunkSize, aeWarnings: (result as { aeWarnings?: unknown }).aeWarnings })
+            .finally(() => held?.release());
+        } else {
+          lease?.extendUntil(jobs.waitFor(env.jobId, writes.holdCeilingMs));
+          lease?.onLost?.((why) => jobs.warn(env.jobId, why));
+        }
         // The undo fields travel with the envelope because this is the only
         // message the agent sees before it starts describing the work to the
         // user; the measured count arrives much later, with the job's result.

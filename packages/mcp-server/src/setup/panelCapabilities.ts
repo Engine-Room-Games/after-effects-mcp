@@ -53,3 +53,14 @@ export function panelCapabilities(health: unknown): PanelCapabilities {
   const set = new Set(list);
   return Object.freeze({ legacy: false, has: (name: string) => set.has(name), list });
 }
+
+/**
+ * The server drives a chunked `run_batch` itself (issue #220, stage 5): the
+ * panel answers the envelope and sends no `_continue_job` of its own, and the
+ * server sends one per chunk. Asked for per call (`__driver: "server"` on the
+ * forwarded args) and confirmed per call (`driver: "server"` on the envelope),
+ * so a panel that did not do it — a stale capability, an older panel behind
+ * the same port — drives its own job as before and is followed over its
+ * event socket. Two drivers on one job is the failure this exists to rule out.
+ */
+export const CAP_SERVER_DRIVES_JOBS = "server-drives-jobs";

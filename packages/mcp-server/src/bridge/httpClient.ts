@@ -28,9 +28,12 @@ const DEFAULT_OP_TIMEOUT_MS = 120_000;
  * before the op existed (issue #83). `_render_prepare` and `_render_save` because
  * the second saves the project, and a large .aep takes as long to save as the
  * project makes it — render_queue cannot report a render it never started.
+ * `_continue_job` because it is one chunk of a run_batch the server drives
+ * (issue #220): 25 ops of the caller's choosing, `run_jsx` steps included, and
+ * a chunk that times out stops the batch.
  */
 const SLOW_OPS = new Set([
-  "run_batch", "run_jsx", "screenshot_frame", "screenshot_layer", "export_mogrt",
+  "run_batch", "_continue_job", "run_jsx", "screenshot_frame", "screenshot_layer", "export_mogrt",
   "import_footage", "place_audio_cues", "purge_unused_footage", "_render_prepare", "_render_save",
   // run_jsx under its internal name (issue #220, stage 6): the same script, the same limit.
   "_run_jsx",

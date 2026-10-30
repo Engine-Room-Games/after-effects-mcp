@@ -1890,6 +1890,13 @@ export type OpEffect = (typeof OpMutation)[OpName];
  * handler in the bundle.
  */
 export const InternalOpMutation = {
+  // A chunked run_batch driven by the server (issue #220, stage 5): one chunk
+  // per call, under the batch's lease; and After Effects' own record of how
+  // far a job got, which is what a lost chunk's answer is recovered from.
+  // Sent only to a panel reporting `server-drives-jobs`, except `_get_job`,
+  // which every panel has and which reports a job this process never started.
+  _continue_job: "write",
+  _get_job: "read",
   // render_queue's halves. Prepare reads; save saves the project; mark-done
   // unticks rendered items as one named undo step.
   _render_prepare: "read",
