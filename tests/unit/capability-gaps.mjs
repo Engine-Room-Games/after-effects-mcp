@@ -545,7 +545,12 @@ check("a gradient fill or stroke is refused with the measured reason, not as an 
   }
   refused(ae.call("add_shape_content", { compId: 100, layerId: 9, content: { type: "blob" } }), /Unknown shape content type: blob/, "blob");
   assert.equal(ae.json(`SH.property("Contents").numProperties`), 0);
-  assert.equal(S.AddShapeContent.safeParse({ compId: 1, layerId: 2, content: { type: "gradientFill" } }).success, false);
+  // Through the normal tool path the schema stops it first, so the reason has to be in its error.
+  const grad = S.AddShapeContent.safeParse({ compId: 1, layerId: 2, content: { type: "gradientFill" } });
+  assert.equal(grad.success, false);
+  assert.match(grad.error.message, /does not offer gradient.*colour stops cannot be set from a script.*ADBE Ramp/);
+  const blob = S.AddShapeContent.safeParse({ compId: 1, layerId: 2, content: { type: "blob" } });
+  assert.doesNotMatch(blob.error.message, /gradient/, "other unknown types keep the ordinary error");
 });
 
 check("set_shape_property refuses a gradient's Colors before writing, and still sets its other properties", () => {

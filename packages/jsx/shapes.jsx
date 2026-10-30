@@ -129,8 +129,8 @@ var __GRADIENT_REFUSAL =
   "Gradient colour stops cannot be set from a script: After Effects exposes 'ADBE Vector Grad Colors' " +
   "with no value (PropertyValueType.NO_VALUE) and refuses an expression on it, so neither setValue nor an " +
   "expression can change them. Nothing was changed. For a scripted gradient use the Gradient Ramp effect " +
-  "(add_effect 'ADBE Ramp', whose colours are ordinary parameters) on the layer, or ask the user to set the " +
-  "stops in the Gradient Editor.";
+  "(add_effect 'ADBE Ramp', whose colours are ordinary parameters) on the layer, or build the gradient with " +
+  "run_jsx and ask the user to set the stops in the Gradient Editor.";
 
 // The Repeater's Transform group (issue #181): friendly key -> candidates,
 // tried in order like __SHAPE_ALIASES.

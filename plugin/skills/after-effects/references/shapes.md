@@ -47,8 +47,9 @@ on it, so a gradient built by script is stuck at white-to-black.
 effect (`add_effect` with `ADBE Ramp`) on the layer — its colours
 (`ADBE Ramp-0002`, `-0004`) and points (`-0001`, `-0003`, in layer space) are
 ordinary parameters, and it keeps the shapes' alpha, so it colours the artwork
-and nothing around it — or build the gradient and ask the user to pick the
-stops in the Gradient Editor.
+and nothing around it. If it has to be a real gradient fill or stroke, the
+only way to build one is `run_jsx` (`addProperty("ADBE Vector Graphic -
+G-Fill")`), and then the user sets the stops by hand in the Gradient Editor.
 
 The tool is **all-or-nothing**: if a key cannot be applied, the whole node is
 removed and the error names the bad keys, so a success result means everything
