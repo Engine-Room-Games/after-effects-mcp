@@ -8,7 +8,7 @@ import type { HttpClient } from "./httpClient.js";
 type WsEvent =
   | { type: "progress"; jobId: string; progress: number; total?: number; message?: string }
   | { type: "complete"; jobId: string; result: unknown }
-  | { type: "error"; jobId: string; error: string; stack?: string }
+  | { type: "error"; jobId: string; error: string; stack?: string; progress?: number; unsureThrough?: number }
   | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string };
 
 /**
@@ -116,7 +116,7 @@ export class WsClient {
         this.jobs.complete(evt.jobId, evt.result);
         break;
       case "error":
-        this.jobs.fail(evt.jobId, evt.error);
+        this.jobs.fail(evt.jobId, evt.error, evt.progress, evt.unsureThrough);
         break;
       case "log":
         logger.debug("[ae]", evt.level, evt.message);
