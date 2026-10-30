@@ -98,8 +98,10 @@ Either install the plugin, which also adds skills and slash commands:
 or add just the server (needs Node 22 or later):
 
 ```bash
-claude mcp add after-effects -- npx -y @engine-room/after-effects-mcp
+claude mcp add --scope user after-effects -- npx -y @engine-room/after-effects-mcp
 ```
+
+`--scope user` makes it available in every folder you open Claude Code in, not only the current one.
 
 </details>
 
@@ -108,7 +110,7 @@ claude mcp add after-effects -- npx -y @engine-room/after-effects-mcp
 
 <br>
 
-Add this to your app's MCP configuration, then restart the app:
+Add this to your app's MCP configuration, then restart the app. In Cursor that's `~/.cursor/mcp.json` (or `.cursor/mcp.json` inside one project); in Windsurf, open its MCP settings and add it there.
 
 ```json
 {
@@ -170,13 +172,13 @@ From [the latest release](https://github.com/Engine-Room-Games/after-effects-mcp
 {
   "mcpServers": {
     "after-effects": {
-      "command": "/Users/you/Applications/after-effects-mcp/after-effects-mcp"
+      "command": "/Users/you/Applications/after-effects-mcp-0.5.2-macos-arm64/after-effects-mcp"
     }
   }
 }
 ```
 
-On Windows the executable is `after-effects-mcp.exe`. Keep the unzipped folder together — the After Effects panel lives next to the executable. The macOS builds are signed and notarized; the Windows build is unsigned, so SmartScreen may warn the first time you run it.
+The unzipped folder is named `after-effects-mcp-<version>-<machine>`, so use the name yours actually has. On Windows the executable is `after-effects-mcp.exe`. Keep the unzipped folder together — the After Effects panel lives next to the executable. The macOS builds are signed and notarized; the Windows build is unsigned, so SmartScreen may warn the first time you run it.
 
 </details>
 
@@ -240,7 +242,16 @@ Two optional switches limit what it can do. Both are off unless you turn them on
 
 **Claude Desktop:** Settings → Extensions → After Effects, then tick *Read-only mode* or *Turn off running scripts (run_jsx)*.
 
-**Everywhere else:** add an `env` block to the configuration from step 1, then restart your app. Use either line on its own; read-only mode already includes the second.
+**Everywhere else:** add the setting to the configuration from step 1, then restart your app. Use either one on its own; read-only mode already includes the second.
+
+| App | How |
+|---|---|
+| Cursor, Windsurf and other `mcpServers` apps | Add `"env": { "AE_MCP_READ_ONLY": "1", "AE_MCP_DISABLE_RUN_JSX": "1" }` next to `"command"` and `"args"`. |
+| VS Code | The same `"env"` block, inside the `after-effects` entry under `"servers"` in `.vscode/mcp.json`. |
+| Codex | Add a section to `~/.codex/config.toml`: <br>`[mcp_servers.after-effects.env]`<br>`AE_MCP_READ_ONLY = "1"` |
+| Claude Code | Re-add the server with the setting: `claude mcp remove after-effects`, then <br>`claude mcp add --scope user --env AE_MCP_READ_ONLY=1 after-effects -- npx -y @engine-room/after-effects-mcp` |
+
+For example, in an `mcpServers` app:
 
 ```json
 {

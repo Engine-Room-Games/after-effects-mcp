@@ -21,11 +21,19 @@ Back to the [README](../README.md).
 | Style guide can't be saved | The After Effects project has never been saved. Save it, then try again. |
 | You need the panel's own log | In After Effects: **Window → Extensions → AE MCP Bridge**. |
 
+About that secret key: every request to the panel must carry it, except one — a
+quick "are you there?" health check, which can't read or change anything in
+your project. So a panel that answers the health check but refuses real work is
+a key problem, not a dead panel.
+
 ## Work that legitimately takes longer
 
 A heavy render or a deliberately long script can pass the time limit honestly.
 Set `AE_MCP_OP_TIMEOUT_MS` in the server's environment to a larger number of
-milliseconds and it applies to every operation:
+milliseconds and it applies to every operation. It goes where the read-only
+switch goes — the README's [How to turn them on](../README.md#safety-and-privacy)
+shows the form for each app (VS Code, Codex, Claude Code and the rest). In an
+`mcpServers` app it looks like this:
 
 ```json
 {
@@ -39,6 +47,9 @@ milliseconds and it applies to every operation:
 }
 ```
 
+In Codex it's `AE_MCP_OP_TIMEOUT_MS = "600000"` under `[mcp_servers.after-effects.env]`;
+in Claude Code, re-add the server with `--env AE_MCP_OP_TIMEOUT_MS=600000`.
+
 ## The issue notebook
 
 These tools have rough edges. When your assistant hits one and works out a way
@@ -46,8 +57,9 @@ around it, it writes the problem and the fix into `.ae-mcp/issues/` in your
 project folder — plain text files you can read, edit or delete. The next time
 the same thing fails, the error itself points at that note. Notes that go quiet
 for a month, or that a newer version has fixed, drop out of the list on their
-own (they are kept, just hidden). The folder keeps itself out of version
-control.
+own (they are kept, just hidden). A note about something the maintainers
+already know or have fixed can be retired outright — ask your assistant to
+archive it. The folder keeps itself out of version control.
 
 ## Reporting a bug
 
