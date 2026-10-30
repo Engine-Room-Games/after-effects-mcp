@@ -350,15 +350,20 @@ function __rqNfc(s) {
  */
 function __rqResolveFolders(p) {
   var s = String(p).replace(/\\/g, "/");
-  var cut = s.lastIndexOf("/");
-  if (cut <= 0) return s;
-  var parts = s.substring(0, cut).split("/");
-  var name = s.substring(cut + 1);
-  var cur = "";
-  for (var i = 0; i < parts.length && i < 64; i++) {
-    if (i === 0) { cur = parts[0]; continue; }
+  // A UNC path keeps its leading double slash: //server/share/… is not /server/share/….
+  var lead = s.substring(0, 2) === "//" ? "//" : "";
+  var body = s.substring(lead.length);
+  var cut = body.lastIndexOf("/");
+  if (cut < 0) return s;
+  var parts = body.substring(0, cut).split("/");
+  var name = body.substring(cut + 1);
+  var cur = lead;
+  // No depth cap: every folder stays in the key, however deep.
+  for (var i = 0; i < parts.length; i++) {
     if (parts[i] === "") continue;
-    cur = cur + "/" + parts[i];
+    if (cur === "//") cur = "//" + parts[i];
+    else if (cur === "" && i === 0) cur = parts[i]; // a drive letter, C:
+    else cur = cur + "/" + parts[i];
     try {
       var f = new Folder(cur);
       if (f.alias) {
@@ -383,9 +388,15 @@ function __rqPathKey(p) {
  * to the file `key` names. Items that will not render (UNQUEUED, DONE) do not
  * count: re-queueing a comp to the file its last render wrote is the ordinary
  * way to render it again.
+ *
+ * Image sequences ([####]) are not checked at all. Two items sharing a pattern
+ * is how a render is split across frame ranges, and which frame numbers each
+ * writes depends on the output module's "Use Comp Frame Number" and the comp's
+ * start frame — not something to guess at. Whether aerender accepts two items
+ * with one pattern is unmeasured (issue #228); movie files are refused.
  */
 function __rqOutputClash(rq, key, skipIndex) {
-  if (!key) return null;
+  if (!key || __rqIsSequencePath(key)) return null;
   for (var i = 1; i <= rq.numItems; i++) {
     if (i === skipIndex) continue;
     var item = rq.item(i);
@@ -589,7 +600,10 @@ OPS._render_prepare = noUndo(function (args) {
         problems.push("index " + idx + " does not exist (the queue has " + rq.numItems + ")");
         continue;
       }
-      picked.push(idx);
+      // indices:[2,2] renders item 2 once, and never clashes with itself.
+      var seen = false;
+      for (var d = 0; d < picked.length; d++) { if (picked[d] === idx) seen = true; }
+      if (!seen) picked.push(idx);
     }
   } else if (args.all === true) {
     for (i = 1; i <= rq.numItems; i++) {

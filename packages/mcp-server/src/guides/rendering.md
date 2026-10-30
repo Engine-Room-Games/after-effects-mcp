@@ -73,7 +73,9 @@ ProRes 4444 with alpha is an **output module template** that already says so.
   refusal names the other item: give one of them another path, or remove it.
   Paths are compared as the same file, so a different case or a symlinked
   folder still counts. An item already rendered (Unqueued) does not count, so
-  queueing a comp again to the file its last render wrote is fine.
+  queueing a comp again to the file its last render wrote is fine. Image
+  sequences (`[####]`) are not checked: splitting one across items by frame
+  range is allowed.
 - **Edits made while it renders are not in the render.** The render reads a
   private copy in the system temp folder taken at its start, so neither your
   later edits nor a save by the user mid-render change it. After Effects stays

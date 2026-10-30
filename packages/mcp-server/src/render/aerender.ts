@@ -1428,9 +1428,16 @@ export function outputPathKey(p: string, platform: NodeJS.Platform = process.pla
 export function duplicateOutputs(plan: RenderPlan, platform: NodeJS.Platform = process.platform): string[] {
   type Writer = { item: number; comp: string | null; output: number; path: string; rendered: boolean };
   const byKey = new Map<string, Writer[]>();
+  const seen = new Set<number>();
   const add = (item: { index: number; compName: string | null; outputs: RenderOutputPlan[] }, rendered: boolean) => {
+    // An item named twice is one item, never a clash with itself.
+    if (seen.has(item.index)) return;
+    seen.add(item.index);
     for (const o of item.outputs) {
-      if (!o.path) continue;
+      // Image sequences are left alone: one pattern across items is how a
+      // render is split by frame range, and which frame numbers each writes
+      // cannot be told from here. Unmeasured whether aerender accepts it.
+      if (!o.path || /\[#+\]/.test(o.path)) continue;
       const key = outputPathKey(o.path, platform);
       const list = byKey.get(key) ?? [];
       list.push({ item: item.index, comp: item.compName, output: o.index, path: o.path, rendered });

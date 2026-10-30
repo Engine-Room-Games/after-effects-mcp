@@ -1600,6 +1600,31 @@ await check("render_queue's plan check: one file written by two QUEUED items is 
   // Two output modules of one item writing one file.
   const twoOms = { ...item(1, "/r/a.mov"), outputs: [{ index: 1, path: "/r/a.mov" }, { index: 2, path: "/r/a.mov" }] };
   assert.equal(duplicateOutputs({ ...base, items: [twoOms] }).length, 1);
+  // One item named twice is one item.
+  assert.deepEqual(duplicateOutputs({ ...base, items: [item(2, "/r/a.mov"), item(2, "/r/a.mov")] }), []);
+  // A shared [####] pattern is how a render is split by frame range: left alone.
+  assert.deepEqual(duplicateOutputs({ ...base, items: [item(1, "/r/s_[####].png"), item(2, "/r/s_[####].png")] }), []);
+});
+await check("_render_prepare renders an index named twice once (#228 review)", () => {
+  const { ctx } = makeAe({ existing: ["QUEUED", "QUEUED"], existingPaths: ["/r/a.mov", "/r/b.mov"] });
+  const plan = ctx.OPS._render_prepare({ indices: [2, 2] });
+  assert.deepEqual(Array.from(plan.items, (i) => i.index), [2]);
+  assert.deepEqual(Array.from(plan.otherQueued, (i) => i.index), [1]);
+});
+await check("add_to_render_queue leaves a shared image-sequence pattern alone (#228 review)", () => {
+  const { ctx, items } = makeAe({ existing: ["QUEUED"], existingPaths: ["/renders/s_[####].png"] });
+  ctx.OPS.add_to_render_queue({ compId: 7, outputPath: "/renders/s_[####].png" });
+  assert.equal(items.length, 2);
+});
+await check("the path key keeps a UNC double slash and every folder however deep (#228 review)", () => {
+  const { ctx } = makeAe();
+  const key = (p) => vm.runInContext(`__rqPathKey(${JSON.stringify(p)})`, ctx);
+  assert.equal(key("\\\\Server\\Share\\out.mov"), "//server/share/out.mov");
+  assert.notEqual(key("//server/share/out.mov"), key("/server/share/out.mov"));
+  assert.equal(key("C:\\R\\Out.mov"), "c:/r/out.mov");
+  const deep = (leaf) => "/" + Array.from({ length: 80 }, (_, i) => `d${i}`).join("/") + `/${leaf}/out.mov`;
+  assert.notEqual(key(deep("x")), key(deep("y")), "folders past 64 levels still count");
+  assert.equal(key(deep("x")), deep("x"));
 });
 await check("remove_render_item refuses an index that now renders another comp", () => {
   const { ctx, items } = makeAe({ existing: ["QUEUED"] });
