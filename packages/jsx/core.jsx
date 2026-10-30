@@ -192,6 +192,96 @@ function __mkError(e) {
   return out;
 }
 
+// ---------- Dialog guard (issue #225) ----------
+// After Effects answers some API misuse with a blocking modal instead of a
+// throw — "Undo group mismatch, will attempt to fix.", the auto-orient warning
+// on a 2D layer, the unsynced-fonts prompt export_mogrt measured. ExtendScript
+// is single-threaded, so while one is up the panel's evalScript never returns,
+// the bridge stalls, and the user is left facing a dialog nobody asked for.
+//
+// So dispatch() runs every op between app.beginSuppressDialogs() and
+// app.endSuppressDialogs(false), inside the same evalScript and outside the
+// undo group — the group's own close is where a mismatch would be raised. What
+// is known, measured on 26.3 for export_mogrt and 26.5 for render_queue's save:
+// suppression stops a blocking dialog, and endSuppressDialogs(false) belongs
+// in a finally. What is NOT yet measured, and must be before this is described
+// as working (see the issue): whether the mismatch and auto-orient modals are
+// among the dialogs it suppresses, and whether app.onError receives what was
+// suppressed. The capture below is therefore best-effort: when app.onError
+// takes a handler, whatever it is handed comes back on the result
+// (`aeSuppressedDialogs`) or on the error text; when it does not, nothing is
+// claimed. An op that manages its own suppression (export_mogrt, whose
+// suppressDialogs:false must still be honoured) opts out with __meta.ownDialogs.
+//
+// __DIALOG_GUARD is the switch: false restores the old behaviour exactly.
+var __DIALOG_GUARD = true;
+var __DIALOGS_SUPPRESSED = false;
+
+function __dialogGuardStart() {
+  if (!__DIALOG_GUARD || __DIALOGS_SUPPRESSED) return null;
+  try {
+    if (typeof app === "undefined" || !app || typeof app.beginSuppressDialogs !== "function" ||
+        typeof app.endSuppressDialogs !== "function") return null;
+  } catch (e0) { return null; }
+  // `installed`: the assignment did not throw, so it is put back afterwards
+  // even if reading it back does not compare equal — a host that wraps the
+  // function must not be left holding ours.
+  var g = { messages: [], installed: false, previousOnError: null };
+  try { app.beginSuppressDialogs(); } catch (e1) { return null; }
+  __DIALOGS_SUPPRESSED = true;
+  try {
+    g.previousOnError = app.onError;
+    app.onError = function (message, severity) {
+      try {
+        var m = String(message);
+        if (typeof severity !== "undefined" && severity !== null) m += " (severity " + String(severity) + ")";
+        g.messages.push(m);
+      } catch (eh) {}
+    };
+    g.installed = true;
+  } catch (e2) {}
+  return g;
+}
+
+function __dialogGuardEnd(g) {
+  if (!g) return;
+  // The engine is shared with every other script in After Effects: whatever
+  // handler was there before goes back, null included.
+  if (g.installed) { try { app.onError = g.previousOnError; } catch (e1) {} }
+  // false: never replay the suppressed messages as a dialog. They are on the
+  // result instead.
+  try { app.endSuppressDialogs(false); } catch (e2) {}
+  __DIALOGS_SUPPRESSED = false;
+}
+
+// Puts what After Effects said under suppression where the agent will read it.
+// The panel forwards `result` on success and `error` on failure, nothing else,
+// so that is where it has to go.
+function __dialogGuardReport(out, g) {
+  if (!g || g.messages.length === 0) return out;
+  var msgs = g.messages;
+  var note = "After Effects raised " + msgs.length + " message(s) during this call that it would have shown " +
+    "as a dialog; they were suppressed so the bridge stayed responsive. Read them — the call may not have " +
+    "done everything it reports.";
+  if (!out.ok) {
+    out.error = String(out.error) + " || After Effects also said (dialog suppressed): " + msgs.join(" | ");
+    return out;
+  }
+  var r = out.result;
+  if (r && typeof r === "object" && !(r instanceof Array)) {
+    r.aeSuppressedDialogs = msgs;
+    r.aeSuppressedDialogsNote = note;
+  } else {
+    out.result = { ok: true, returned: r, aeSuppressedDialogs: msgs, aeSuppressedDialogsNote: note };
+  }
+  return out;
+}
+
+// True while dispatch() holds dialogs suppressed. An op that suppresses for
+// itself checks this first, so suppression is never begun twice — whether
+// After Effects counts nested begin/end pairs is not measured.
+function __dialogsSuppressed() { return __DIALOGS_SUPPRESSED; }
+
 // ---------- Main dispatch ----------
 // Called from panel with a JSON string payload {op, args, requestId}.
 // Returns a plain object {ok, result|error}. Panel JSON.stringifys.
@@ -202,9 +292,20 @@ function dispatch(payloadJson) {
   var op = payload.op;
   var args = payload.args || {};
   if (!OPS.hasOwnProperty(op)) return { ok: false, error: "Unknown op: " + op };
+  var handler = OPS[op];
+  var meta = handler.__meta || {};
+  var dialogs = meta.ownDialogs ? null : __dialogGuardStart();
+  var out;
   try {
-    var handler = OPS[op];
-    var meta = handler.__meta || {};
+    out = __dispatchRun(op, handler, meta, args);
+  } finally {
+    __dialogGuardEnd(dialogs);
+  }
+  return __dialogGuardReport(out, dialogs);
+}
+
+function __dispatchRun(op, handler, meta, args) {
+  try {
     // __meta.noUndo is a boolean for handlers that never want a group, or a
     // predicate over args for ops where the caller decides per call (run_jsx).
     // Keeping the predicate on the handler is what stops one op's opt-out from

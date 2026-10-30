@@ -293,6 +293,7 @@ jobs:
         run: |
           node tests/unit/jsx-ternary.mjs
           node tests/unit/jsx-undo-group.mjs
+          node tests/unit/run-jsx-undo-guard.mjs
           node tests/unit/run-jsx-result.mjs
           node tests/unit/shape-read.mjs
           node tests/unit/parent-transform.mjs

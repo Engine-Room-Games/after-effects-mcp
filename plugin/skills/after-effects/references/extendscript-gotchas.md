@@ -329,6 +329,20 @@ output modules anyway.
   success, and the only place the truth is visible is AE's Edit menu. Anything
   spanning calls opens and closes its own group per call. *The tool already
   does:* `run_batch` reports the measured `undoSteps`.
+- **Do not call `app.beginUndoGroup` / `app.endUndoGroup` in a script.**
+  `run_jsx` already makes the script one undo step. An unbalanced pair broke
+  undo for a whole project on AE 26.5, the damage survived a reopen, and the
+  next stray end crashed After Effects. *The tool already does:* these calls are
+  rerouted through a counter. Inside the open group they do nothing. Under
+  `undoGroup:false` the first one opens a single real group. A stray end is
+  ignored, and a group left open is closed before the call returns. The result
+  then carries `undoGuard`; read its `note`. A spelling the counter cannot
+  follow, such as `app["endUndoGroup"]` or an alias of `app`, is refused before
+  any of the script runs.
+- **`alert`, `confirm` and `prompt` do not show.** A dialog inside a script
+  would block After Effects and the bridge until someone clicked it. They come
+  back on the result as `suppressedDialogs`. `confirm` answers No and `prompt`
+  answers Cancel.
 - **`copyToComp` needs the group closed**, which is the opposite problem — see
   "Layers and comps".
 
