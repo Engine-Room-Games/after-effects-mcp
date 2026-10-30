@@ -731,6 +731,81 @@ export const SetSpatialTangents = z.object({
   outTangent: z.array(z.number()).min(2).max(3),
 });
 
+// ---------- retiming and copying animation (issue #180) ----------
+const PropertyPaths = z
+  .array(PropertyPath)
+  .min(1)
+  .describe("Properties to act on, each a propertyPath like ['Transform','Position']. Omit for every keyframed property on the layer (markers excluded).");
+const RetimeLayer = z.object({
+  layerId: z.number(),
+  propertyPaths: PropertyPaths.optional(),
+});
+export const RetimeKeyframes = z.object({
+  compId: z.number(),
+  layers: z
+    .array(RetimeLayer)
+    .min(1)
+    .describe("Layers to retime, in stagger order: the first gets `offset`, the second `offset + stagger`, and so on. Each layer once."),
+  offset: z.number().optional().meta({ default: 0 }).describe("Seconds to shift the keys by; negative moves them earlier."),
+  scale: z
+    .number()
+    .positive()
+    .optional()
+    .meta({ default: 1 })
+    .describe("Stretch factor about `pivot`: 2 plays the keys at half speed, 0.5 at double. Eases keep their shape."),
+  pivot: z
+    .number()
+    .optional()
+    .describe("Comp time, in seconds, that `scale` stretches about. Omit for each layer's first retimed key, so the animation keeps its start."),
+  reverse: z
+    .boolean()
+    .optional()
+    .meta({ default: false })
+    .describe("Play the keys backwards within each layer's span of retimed keys (first to last), mirroring eases and tangents."),
+  stagger: z.number().optional().meta({ default: 0 }).describe("Seconds added per layer, in the order `layers` lists them."),
+  range: z
+    .object({ start: z.number(), end: z.number() })
+    .optional()
+    .describe("Only retime keys whose time is in [start, end] (comp seconds). Keys outside it stay put, and one moved onto one of them is refused. Omit for every key."),
+  snapToFrames: z
+    .boolean()
+    .optional()
+    .meta({ default: true })
+    .describe("Round each new key time to the comp's frame grid. Two keys that would round onto one frame are refused, never merged."),
+});
+const CopyTarget = z.object({
+  layerId: z.number(),
+  compId: z.number().optional().describe("The target layer's comp. Omit for the source comp."),
+});
+export const CopyAnimation = z.object({
+  compId: z.number(),
+  layerId: z.number().describe("The source layer."),
+  propertyPaths: PropertyPaths.optional().describe(
+    "Properties to copy, each a propertyPath like ['Transform','Scale']. Omit for every keyframed property on the source layer, plus every property with an expression when `expressions` is on (markers excluded)."
+  ),
+  targets: z
+    .array(CopyTarget)
+    .min(1)
+    .describe("Layers to paste onto, in stagger order. Each needs the same property — for an effect, mask or shape group, the same ones in the same order."),
+  offset: z.number().optional().meta({ default: 0 }).describe("Seconds added to every copied key time."),
+  stagger: z.number().optional().meta({ default: 0 }).describe("Seconds added per target, in the order `targets` lists them."),
+  align: z
+    .enum(["comp", "layerStart"])
+    .optional()
+    .meta({ default: "comp" })
+    .describe("'comp': keys land at the same comp times as the source (plus offsets). 'layerStart': shifted by the difference in layer start times, so the animation keeps its place relative to each layer."),
+  expressions: z
+    .boolean()
+    .optional()
+    .meta({ default: true })
+    .describe("Copy expressions too, text and enabled state as they are on the source."),
+  replaceExisting: z
+    .boolean()
+    .optional()
+    .meta({ default: false })
+    .describe("A target property that already has keys (or an expression, when one is being copied) is refused unless this is true; then its keys are removed and replaced."),
+});
+
 // ---------- expressions ----------
 export const GetExpression = z.object({ compId: z.number(), layerId: z.number(), propertyPath: PropertyPath });
 export const SetExpression = z.object({ compId: z.number(), layerId: z.number(), propertyPath: PropertyPath, expression: z.string() });
@@ -1447,6 +1522,8 @@ export const OpSchemas = {
   set_interpolation: SetInterpolation,
   set_temporal_ease: SetTemporalEase,
   set_spatial_tangents: SetSpatialTangents,
+  retime_keyframes: RetimeKeyframes,
+  copy_animation: CopyAnimation,
   // expressions
   get_expression: GetExpression,
   set_expression: SetExpression,
@@ -1591,6 +1668,8 @@ export const OpMutation = {
   set_interpolation: "write",
   set_temporal_ease: "write",
   set_spatial_tangents: "write",
+  retime_keyframes: "write",
+  copy_animation: "write",
   // expressions
   get_expression: "read",
   set_expression: "write",

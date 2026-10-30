@@ -45,6 +45,15 @@ ease — `set_temporal_ease` on the first and last key — with the keys between
 them left linear (`set_interpolation({in: "linear", out: "linear"})`), so
 speed passes through them instead of stopping.
 
+**Move, stretch, reverse or stagger keys with `retime_keyframes`; reuse them
+on another layer with `copy_animation`.** Both carry every key whole — value,
+interpolation, eases, spatial tangents, continuous / auto-bezier / roving — so
+the move keeps its feel. Removing keys and re-adding them by hand, or a `run_jsx`
+loop over `setValueAtTime`, keeps only the values and drops every ease. Keys
+that would land on the same frame are refused, never merged, and a target that
+is already animated is refused unless you pass `replaceExisting`. Neither moves
+an expression's idea of `time` — see "Expressions run on comp time" below.
+
 Expressions are usually a better answer than dense keyframes for anything
 procedural — wiggle, loops, counters, follow-through, time remapping. They stay
 editable by the user afterwards, where a wall of baked keyframes does not.

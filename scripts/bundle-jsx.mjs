@@ -24,6 +24,7 @@ const order = [
   "transforms.jsx",
   "keyframes.jsx",
   "expressions.jsx",
+  "retime.jsx",
   "effects.jsx",
   "text.jsx",
   "shapes.jsx",
