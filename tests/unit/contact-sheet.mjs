@@ -23,13 +23,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const require = createRequire(import.meta.url);
-const client = path.join(root, "packages", "ae-panel", "client");
-const sheetModule = require(path.join(client, "contactsheet.js"));
+const frames = (f) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "frames", f)).href;
+const sheetModule = await import(frames("contactSheet.js"));
+const pngCodec = await import(frames("pngCodec.js"));
 const { composeContactSheet, layoutFor, formatTime, GUTTER } = sheetModule;
 
 let passed = 0;
@@ -387,7 +386,7 @@ check("a tile's partly transparent pixels reach the sheet unconverted", () => {
 });
 
 check("a premultiplied frame through normalizePng and into a sheet is converted once", () => {
-  const { normalizePng, encodePng8 } = require(path.join(client, "pngcodec.js"));
+  const { normalizePng, encodePng8 } = pngCodec;
   const premult = Buffer.alloc(64 * 64 * 4);
   for (let i = 0; i < 64 * 64; i++) premult.set([10, 20, 30, 128], i * 4);
   const norm = normalizePng(encodePng8(64, 64, 6, premult));

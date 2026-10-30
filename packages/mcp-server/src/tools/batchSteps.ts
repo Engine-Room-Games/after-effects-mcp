@@ -30,11 +30,11 @@ export const BATCH_STEP_REFUSALS: Readonly<Record<string, string>> = Object.free
   diff_comp:
     "it compares against a fingerprint the server keeps, which a batch step never reaches — call it on its own, or pass `diff: true` on run_batch",
   screenshot_frame:
-    "the panel turns the rendered frame into an image after After Effects returns; as a step you would get a temporary file path and the PNG would be left behind — take the screenshot as its own call after the batch",
+    "the server turns the rendered frame into an image after After Effects returns; as a step you would get a temporary file path and the PNG would be left behind — take the screenshot as its own call after the batch",
   screenshot_layer:
-    "the panel turns the rendered frame into an image after After Effects returns; as a step you would get a temporary file path and the PNG would be left behind — take the screenshot as its own call after the batch",
+    "the server turns the rendered frame into an image after After Effects returns; as a step you would get a temporary file path and the PNG would be left behind — take the screenshot as its own call after the batch",
   export_mogrt:
-    "the panel finishes the export after After Effects returns (it writes the template's thumbnail); as a step that half would be skipped — call it on its own",
+    "the server finishes the export after After Effects returns (it writes the template's thumbnail); as a step that half would be skipped — call it on its own",
   render_queue:
     "the render runs in a separate aerender process that the server starts, which a batch step never reaches — call it on its own",
   analyze_motion:

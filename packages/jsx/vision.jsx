@@ -1,5 +1,5 @@
 // vision.jsx — saveFrameToPng wrapper, returns the temp file path which the
-// panel then reads and base64-encodes.
+// MCP server then reads and base64-encodes (frames/pipeline.ts).
 
 function __tmpPngPath() {
   var folder = Folder.temp;
@@ -224,12 +224,11 @@ OPS.screenshot_layer = noUndo(function (args) {
   };
 });
 
-// The same two renders under internal names (issue #220, stage 4). The panel
-// post-processes `screenshot_frame` / `screenshot_layer` itself — waits for the
-// PNG, normalises it, base64-encodes it — for MCP servers that predate this
-// one. A server that sees the `server-images` capability sends these instead,
-// which the panel does not intercept, so the paths above come back as they are
-// and the server reads the files itself. One function object each, so the
-// dispatcher's flags cannot drift from the public op's.
+// The same two renders under the internal names the server sends (issue #220,
+// stage 4); the paths above come back as they are and the server reads the
+// files itself. Since #243 the panel no longer post-processes the public names
+// either — they stay as the handler each tool is keyed by (and a direct /op),
+// and are refused as run_batch steps. One function object each, so the
+// dispatcher's flags cannot drift between the two names.
 OPS._screenshot_frame = OPS.screenshot_frame;
 OPS._screenshot_layer = OPS.screenshot_layer;

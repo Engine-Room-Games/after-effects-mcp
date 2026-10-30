@@ -1,4 +1,4 @@
-// The panel's PNG normaliser: 16-bit -> 8-bit conversion, premultiplied ->
+// The server's PNG normaliser (frames/pngCodec.ts; the panel's copy went in #243): 16-bit -> 8-bit conversion, premultiplied ->
 // straight alpha (#130), empty-frame detection, and the content hash the
 // stale-render check compares.
 //
@@ -13,14 +13,11 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import zlib from "node:zlib";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const require = createRequire(import.meta.url);
-const { normalizePng } = require(
-  path.join(root, "packages", "ae-panel", "client", "pngcodec.js"),
-);
+const frames = (f) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "frames", f)).href;
+const { normalizePng } = await import(frames("pngCodec.js"));
 
 let passed = 0;
 function check(name, fn) {

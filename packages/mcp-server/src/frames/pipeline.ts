@@ -3,18 +3,17 @@
  * (issue #220, stage 4).
  *
  * After Effects renders; everything after the render is file work, and it used
- * to happen in the panel (`packages/ae-panel/client/main.js`). A panel that
- * reports the `server-images` capability answers `_screenshot_frame`,
- * `_screenshot_layer` and `_export_mogrt` with the temp paths ExtendScript
- * wrote and nothing else, and this module does what the panel did with them:
+ * to happen in the panel (`packages/ae-panel/client/main.js`). The panel
+ * answers `_screenshot_frame`, `_screenshot_layer` and `_export_mogrt` with
+ * the temp paths ExtendScript wrote and nothing else, and this module does
+ * what the panel used to do with them:
  * waits for each PNG to be finished, normalises it, refuses a re-served render
  * buffer, tiles a contact sheet, and folds a poster frame into a template.
  * Images no longer cross the bridge as base64.
  *
  * Every result has the shape the panel produced, field for field and byte for
- * byte, so `server.ts` packages it the same way whichever side did the work —
- * `tests/unit/image-parity.mjs` runs both on the same renders. The panel keeps
- * its copy for MCP servers that predate this one.
+ * byte; `tests/unit/image-parity.mjs` held the two together until issue #243
+ * deleted the panel's copy, and now pins the server's output on its own.
  *
  * Two things changed shape with the move, both documented in
  * docs/fragile-areas-bridge.md: the stale-frame window is a file shared by

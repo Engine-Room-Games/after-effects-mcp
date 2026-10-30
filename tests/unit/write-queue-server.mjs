@@ -21,7 +21,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const dist = (...p) =>
   pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 
 // ---------------------------------------------------------------------------
 // Stub bridge. Never port 7777 — a real panel may hold that on this machine.
@@ -41,13 +41,23 @@ const bridge = http.createServer(async (req, res) => {
     res.setHeader("content-type", "application/json");
     // Report the hash this server ships so the panel-version gate is a no-op
     // rather than a variable of whatever is installed on the test machine.
-    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash() }));
+    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash() }));
     return;
   }
   let body = "";
   req.on("data", (c) => (body += c));
   req.on("end", async () => {
-    const { op } = JSON.parse(body || "{}");
+    const parsed = JSON.parse(body || "{}");
+    // run_jsx reaches the panel as `_run_jsx`, built by the server (#220, #243).
+    const op = parsed.op === "_run_jsx" ? "run_jsx" : parsed.op;
+    if (op === "_continue_job") {
+      // The server drives every batch (#243); a chunk answers when the check
+      // finishes the job.
+      const result = await chunkAnswer(parsed.args.jobId);
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true, result }));
+      return;
+    }
     const b = behaviour.get(op) ?? { ms: 5, result: { ok: true, op } };
     const entry = { op, enteredAt: Date.now() };
     seen.push(entry);
@@ -58,6 +68,25 @@ const bridge = http.createServer(async (req, res) => {
   });
 });
 const wss = new WebSocketServer({ server: bridge, path: "/events" });
+
+/** jobId -> resolve for the chunk the server is waiting on, or the answer given before it asked. */
+const chunkWaiters = new Map();
+const chunkEarly = new Map();
+function chunkAnswer(jobId) {
+  if (chunkEarly.has(jobId)) {
+    const r = chunkEarly.get(jobId);
+    chunkEarly.delete(jobId);
+    return Promise.resolve(r);
+  }
+  return new Promise((resolve) => chunkWaiters.set(jobId, resolve));
+}
+/** Finish a batch the server is driving: its next chunk reports done. */
+function finishJob(jobId, result) {
+  const answer = { done: true, jobId, ...result };
+  const w = chunkWaiters.get(jobId);
+  if (w) { chunkWaiters.delete(jobId); w(answer); }
+  else chunkEarly.set(jobId, answer);
+}
 await new Promise((r) => bridge.listen(0, "127.0.0.1", r));
 const port = bridge.address().port;
 assert.notEqual(port, 7777, "must not bind the panel's port");
@@ -216,7 +245,7 @@ await check("a render_queue step that times out is reported as render_queue, wit
 
 await check("a long batch holds the queue until the job finishes", async () => {
   // The gap the panel's own evalScript mutex leaves, and the whole reason for
-  // this queue: run_batch answers with a jobId and the panel goes on driving
+  // this queue: run_batch answers with a jobId and the server goes on driving
   // _continue_job in the background. A write let through here would land in the
   // middle of the batch, out of the order the agent issued it in.
   seen.length = 0;
@@ -225,7 +254,7 @@ await check("a long batch holds the queue until the job finishes", async () => {
     result: {
       jobId: "j_test_1", async: true, total: 600,
       chunkSize: 25, undoStepsEstimate: 24, undoGroupName: "AE MCP Batch",
-      note: "about 24 undo steps, NOT one",
+      note: "about 24 undo steps, NOT one", driver: "server",
     },
   });
   behaviour.set("set_layer", { ms: 5, result: { ok: true } });
@@ -249,8 +278,8 @@ await check("a long batch holds the queue until the job finishes", async () => {
   assert.equal(landed, false, "a write reached the bridge while the batch was still running");
   assert.equal(seen.some((s) => s.op === "set_layer"), false);
 
-  // What the panel broadcasts over /events when the batch finishes.
-  for (const ws of wss.clients) ws.send(JSON.stringify({ type: "complete", jobId: "j_test_1", result: { results: [] } }));
+  // The batch's last chunk reports done.
+  finishJob("j_test_1", { results: [] });
 
   const res = await queued;
   assert.equal(payload(res).queuedBehind, "run_batch");
@@ -259,14 +288,14 @@ await check("a long batch holds the queue until the job finishes", async () => {
 
 await check("await_job does not deadlock against the batch holding the lock", async () => {
   seen.length = 0;
-  behaviour.set("run_batch", { ms: 5, result: { jobId: "j_test_2", async: true, total: 600 } });
+  behaviour.set("run_batch", { ms: 5, result: { jobId: "j_test_2", async: true, total: 600, driver: "server" } });
   await call("run_batch", { ops: [{ op: "create_null_layer", args: { compId: 1 } }] });
 
   // await_job is server-resident: it takes no lease, so it can still be
   // answered while the batch's lease is held. If it queued, this would hang.
   const awaited = call("await_job", { jobId: "j_test_2", timeoutMs: 5000 });
   await new Promise((r) => setTimeout(r, 50));
-  for (const ws of wss.clients) ws.send(JSON.stringify({ type: "complete", jobId: "j_test_2", result: { results: [1] } }));
+  finishJob("j_test_2", { results: [1] });
 
   const state = payload(await awaited);
   assert.equal(state.status, "completed");

@@ -11,9 +11,9 @@ import type { SendInternal } from "../tools/internalOps.js";
  * The file sits beside the .aep, and the panel used to open it on AE's main
  * thread (`style.jsx`). The server sees the same files, so all it needs from
  * After Effects is the .aep's path — which `_project_path` answers with no
- * project walk. That op exists only on a panel that reports the `project-path`
- * capability; `server.ts` sends it nowhere else, and falls back to the panel's
- * own `get_house_style` / `set_house_style` on every other panel.
+ * project walk. Since issue #243 every panel the version gate lets through has
+ * it; one that answers `Unknown op: _project_path` anyway is told to update by
+ * the backstop in `server.ts`, not routed to the panel's own op.
  *
  * Ports of `style.jsx`, with the same sentences and the same result shapes;
  * `tests/unit/panel-capabilities.mjs` runs both against one folder. Change one,
@@ -149,29 +149,20 @@ function asProjectPath(v: unknown): ProjectPath | null {
 }
 
 /**
- * `get_house_style` / `set_house_style` with the file I/O on the server. Call
- * only for a panel reporting `project-path`. Falls back to the panel's own op
- * when the panel turns out not to know `_project_path`, answers it oddly, or
- * the folder is one this process cannot see. `onUnknownOp` runs when the
- * panel did not know `_project_path` after all, so the caller can stop asking.
+ * `get_house_style` / `set_house_style` with the file I/O on the server.
+ * Goes to the bundle's own op (`style.jsx`) when `_project_path` answers in a
+ * shape this does not recognise, or the folder is one this process cannot see
+ * — both cases of After Effects knowing better, not of an older panel. An
+ * `Unknown op: _project_path` is thrown as it came: the panel predates this
+ * server, and the caller's backstop says so.
  */
 export async function houseStyleOnServer(
   op: "get_house_style" | "set_house_style",
   args: unknown,
   send: SendInternal,
-  runOp: (op: string, args: unknown) => Promise<unknown>,
-  onUnknownOp: () => void = () => {}
+  runOp: (op: string, args: unknown) => Promise<unknown>
 ): Promise<unknown> {
-  let where: ProjectPath | null;
-  try {
-    where = asProjectPath(await send("_project_path", {}));
-  } catch (e) {
-    if (e instanceof AeError && /^Unknown op: _project_path\b/.test(e.message)) {
-      onUnknownOp();
-      return runOp(op, args);
-    }
-    throw e;
-  }
+  const where = asProjectPath(await send("_project_path", {}));
   if (!where) {
     logger.warn(`_project_path answered in an unexpected shape; ${op} goes to the panel.`);
     return runOp(op, args);

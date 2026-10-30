@@ -24,7 +24,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const dist = (...p) =>
   pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 const { JobManager } = await import(dist("jobs", "manager.js"));
 
 let passed = 0;
@@ -111,12 +111,12 @@ let nextJobId = null;
 const bridge = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash() }));
+    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash() }));
     return;
   }
   let body = "";
   req.on("data", (c) => (body += c));
-  req.on("end", () => {
+  req.on("end", async () => {
     res.setHeader("content-type", "application/json");
     if (req.url === "/cancel") {
       cancelsSeen++;
@@ -125,10 +125,15 @@ const bridge = http.createServer((req, res) => {
       res.end(JSON.stringify(payload));
       return;
     }
-    const { op } = JSON.parse(body || "{}");
+    const { op, args } = JSON.parse(body || "{}");
     if (op === "run_batch") {
-      // The id each check chose, so it can name the job it is cancelling.
-      res.end(JSON.stringify({ ok: true, result: { jobId: nextJobId, async: true, total: 600, chunkSize: 25 } }));
+      // The id each check chose, so it can name the job it is cancelling. A
+      // current panel hands the batch to the server to drive (#243).
+      res.end(JSON.stringify({ ok: true, result: { jobId: nextJobId, async: true, total: 600, chunkSize: 25, driver: "server" } }));
+      return;
+    }
+    if (op === "_continue_job") {
+      res.end(JSON.stringify({ ok: true, result: await nextChunk(args.jobId) }));
       return;
     }
     res.end(JSON.stringify({ ok: true, result: { ok: true, op } }));
@@ -140,8 +145,30 @@ const port = bridge.address().port;
 assert.notEqual(port, 7777, "must not bind the panel's port");
 process.env.AE_MCP_PORT = String(port);
 
+// The server drives every batch (issue #243): it sends `_continue_job` and the
+// stub holds each one until a check says what that chunk answers. `emit`
+// keeps the shape of the events the panel used to broadcast.
+const scripted = new Map();
+const waiting = new Map();
+function nextChunk(jobId) {
+  const q = scripted.get(jobId);
+  if (q && q.length) return Promise.resolve(q.shift());
+  return new Promise((resolve) => {
+    if (!waiting.has(jobId)) waiting.set(jobId, []);
+    waiting.get(jobId).push(resolve);
+  });
+}
 function emit(evt) {
-  for (const ws of wss.clients) ws.send(JSON.stringify(evt));
+  const step =
+    evt.type === "progress"
+      ? { done: false, jobId: evt.jobId, progress: evt.progress, total: evt.total }
+      : { done: true, jobId: evt.jobId, ...evt.result };
+  const w = waiting.get(evt.jobId);
+  if (w && w.length) w.shift()(step);
+  else {
+    if (!scripted.has(evt.jobId)) scripted.set(evt.jobId, []);
+    scripted.get(evt.jobId).push(step);
+  }
 }
 
 const { createServer } = await import(dist("server.js"));
@@ -283,6 +310,9 @@ async function finish(jobId) {
   const aw = await call("await_job", { jobId: "j_lost" });
   assert.equal(aw.isError, true);
   assert.match(text(aw), /no record of batch j_lost/);
+  // Answer the chunk the driver is still waiting on, so it lets go of the
+  // write lease for the next check.
+  emit({ type: "complete", jobId: "j_lost", result: { results: [], errors: [] } });
   passed++;
 }
 

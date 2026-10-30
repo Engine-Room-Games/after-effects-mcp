@@ -1,3 +1,4 @@
+import { displayOp } from "../util/opNames.js";
 import {
   AeError,
   BridgeAuthError,
@@ -144,15 +145,15 @@ export function ordinal(n: number): string {
 export function describeLockWait(op: string, line: Extract<LockLine, { t: "wait" }>): string {
   if (!line.holder && line.graceMs) {
     return (
-      `\`${op}\` is waiting up to ${(line.graceMs / 1000).toFixed(1)}s for the write queue: the previous front desk went ` +
+      `\`${displayOp(op)}\` is waiting up to ${(line.graceMs / 1000).toFixed(1)}s for the write queue: the previous front desk went ` +
       "away while another session's long write held it, and that session gets the first chance to reclaim it."
     );
   }
   const secs = Math.round(line.waitedMs / 1000);
   const behind = line.holder
-    ? `waiting behind another session's \`${line.holder.op}\` (${line.holder.session}), which has held it for ${Math.round(line.holder.forMs / 1000)}s`
+    ? `waiting behind another session's \`${displayOp(line.holder.op)}\` (${line.holder.session}), which has held it for ${Math.round(line.holder.forMs / 1000)}s`
     : "waiting for the session in front";
-  return `\`${op}\` is ${ordinal(line.position)} in line for the After Effects write queue, ${behind}; ${secs}s so far.`;
+  return `\`${displayOp(op)}\` is ${ordinal(line.position)} in line for the After Effects write queue, ${behind}; ${secs}s so far.`;
 }
 
 /** What a session whose call reached After Effects behind others is told. */
@@ -160,7 +161,7 @@ export function describeAhead(op: string, ahead: DeskAhead[]): string {
   const first = ahead[0];
   const more = ahead.length > 1 ? ` and ${ahead.length - 1} more` : "";
   return (
-    `\`${op}\` has reached After Effects, which is still running another session's \`${first.op}\` ` +
+    `\`${displayOp(op)}\` has reached After Effects, which is still running another session's \`${displayOp(first.op)}\` ` +
     `(${first.session})${more} ahead of it — ${Math.round(first.forMs / 1000)}s so far.`
   );
 }

@@ -924,8 +924,9 @@ function __rjIsNullEnvelope(out) {
 // The body below is OPS.run_jsx's with the assembly and the mapping taken
 // out, and must stay that way: a change to one is a change to both, and
 // tests/unit/run-jsx-assembly.mjs runs the two side by side. OPS.run_jsx
-// stays for older servers, for run_batch steps (which batch.jsx dispatches
-// straight to it) and for direct /op posts.
+// stays for run_batch steps (which batch.jsx dispatches straight to it), for
+// the one call the server cannot build (runJsxViaServer), and for direct /op
+// posts.
 
 // A library that does not parse, reported as __rjCheckLibraryParses reports
 // it, with the line detail left to the server: `libraryIndex` says which.

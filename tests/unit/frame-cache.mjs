@@ -1,4 +1,4 @@
-// The panel's stale-render detector.
+// The server's stale-render detector (frames/frameCache.ts; the panel's copy went in #243).
 //
 // After Effects sometimes answers a screenshot request with a buffer rendered
 // for an earlier one and reports success (issue #29). Content identity is the
@@ -11,14 +11,11 @@
 
 import assert from "node:assert/strict";
 import path from "node:path";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const require = createRequire(import.meta.url);
-const { createFrameCache } = require(
-  path.join(root, "packages", "ae-panel", "client", "framecache.js"),
-);
+const frames = (f) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", "frames", f)).href;
+const { createFrameCache } = await import(frames("frameCache.js"));
 
 let passed = 0;
 function check(name, fn) {

@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -20,7 +19,7 @@ import {
   panelSourceDir,
   signedInstallPresent,
 } from "./paths.js";
-import { assessPanel } from "./panelVersion.js";
+import { assessPanel, installedPanelHashes, sourcePanelHashes } from "./panelVersion.js";
 import {
   CSXS_VERSIONS,
   cepLogDir,
@@ -71,14 +70,6 @@ export interface CheckSetupOptions {
   candidates?: number[];
 }
 
-function sha256(file: string): string | null {
-  try {
-    return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-  } catch {
-    return null;
-  }
-}
-
 export interface BridgeProbe {
   /** The first candidate that answered as the panel, or null. */
   answering: ProbeResult | null;
@@ -89,6 +80,9 @@ export interface BridgeProbe {
   /** Everything asked, in the order asked. */
   probed: ProbeResult[];
 }
+
+/** check_setup's detail for an "unverifiable" running panel; nextSteps keys on it. */
+export const UNVERIFIABLE_DETAIL = "the running panel could not read its own files to report its version";
 
 /**
  * Where is the panel, and does that agree with where ops are going?
@@ -235,6 +229,12 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     const differing = panelInstallDiff(source, installed);
     installComplete = differing.length === 0;
     const shown = differing.slice(0, 4).join(", ");
+    // A cleanly installed older panel differs too — in both halves. Only one
+    // half current is a mix (panelVersion.ts), and only that is worded as one.
+    const shipped = sourcePanelHashes();
+    const onDisk = installedPanelHashes(installed);
+    const olderVersion =
+      !installComplete && !!shipped && onDisk.bundle !== shipped.bundle && onDisk.client !== shipped.client;
     checks.push({
       name: "panelUpToDate",
       ok: installComplete,
@@ -243,7 +243,9 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
         : `${differing.length} file(s) differ from the version shipped with this server: ${shown}${differing.length > 4 ? ", …" : ""}`,
       fix: installComplete
         ? undefined
-        : "Quit After Effects completely, then run setup_panel, then reopen it. Installing while AE is open can leave some files updated and others not, which is what this is — restarting alone will not fix it.",
+        : olderVersion
+          ? "The installed panel is an older version than these tools. Quit After Effects completely, then run setup_panel, then reopen it."
+          : "Quit After Effects completely, then run setup_panel, then reopen it. Installing while AE is open can leave some files updated and others not, which is what this is — restarting alone will not fix it.",
     });
   }
 
@@ -365,7 +367,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
   // restarts. This is the check that notices that window, and it is the one that
   // predicts whether calls will actually work.
   if (bridge.answering && source) {
-    const assessment = assessPanel(bridge.answering.health?.bundleHash, sha256(path.join(installed, "jsx", "bundle.jsx")), {
+    const assessment = assessPanel(bridge.answering.health, installedPanelHashes(installed), {
       installComplete,
     });
     const ok = assessment.state === "current";
@@ -376,10 +378,12 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
         ? "After Effects is running the panel that ships with these tools"
         : assessment.state === "partial-install"
           ? "the installed panel files are a mix of versions — a restart cannot resolve this"
+          : assessment.state === "unverifiable"
+            ? UNVERIFIABLE_DETAIL
           : assessment.state === "restart-needed"
             ? "After Effects is still running the previous panel — the update needs a restart to take effect"
             : assessment.state === "unknown"
-              ? "the running panel is too old to report its version"
+              ? "these tools cannot find the panel they ship, so the running panel's version cannot be checked"
               : "After Effects is running a panel older than these tools",
       fix: ok ? undefined : assessment.message,
     });
@@ -527,7 +531,12 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
 
   // A half-updated install or a missing dependency is not fixed by restarting;
   // both are fixed by reinstalling, and reinstalling only works with AE closed.
-  const brokenInstall = by("panelUpToDate")?.ok === false || by("panelDependencies")?.ok === false;
+  // An unverifiable running panel (it could not hash its own folder) is the
+  // same: a restart re-reads the same folder, so the remedy is a reinstall.
+  const brokenInstall =
+    by("panelUpToDate")?.ok === false ||
+    by("panelDependencies")?.ok === false ||
+    by("panelRunningCurrent")?.detail === UNVERIFIABLE_DETAIL;
   const needsInstall = by("panelInstalled")?.ok === false || brokenInstall;
   const needsDebug = by("cepDebugMode")?.ok === false;
   const aeRunning = by("afterEffectsRunning")?.ok === true;
@@ -535,7 +544,7 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
   // Closing AE first is part of the remedy, not an afterthought: installing
   // while it holds the panel's files open is what produces this state.
   if (brokenInstall && aeRunning) {
-    steps.push("Quit After Effects completely — installing while it is open is what leaves the panel half-updated.");
+    steps.push("Quit After Effects completely — installing while it is open can leave the panel half-updated.");
   }
   if (needsDebug || needsInstall) {
     steps.push("Run the setup_panel tool — it installs the After Effects panel and enables the Adobe preference that lets AE load it.");

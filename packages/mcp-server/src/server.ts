@@ -20,6 +20,7 @@ import { WriteQueue, mergeWait, type QueueWait, type WriteLease } from "./bridge
 import { SessionLine } from "./frontdesk/line.js";
 import type { FrontDeskOptions } from "./frontdesk/config.js";
 import { JobManager, isTerminal, unknownJobMessage } from "./jobs/manager.js";
+import { FollowedJobs } from "./jobs/followedJobs.js";
 import {
   RenderRunner,
   saveAndCheckFootage,
@@ -64,7 +65,7 @@ import { findUnsafeArgKeys, unsafeArgsMessage } from "./util/argsSafety.js";
 import { checkSetup } from "./setup/check.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
-import { unknownOpMessage } from "./setup/panelVersion.js";
+import { panelDrivenBatchMessage, unknownOpMessage } from "./setup/panelVersion.js";
 import { packageVersion } from "./setup/paths.js";
 import { renderWhatsNew } from "./tools/whatsNew.js";
 import { GUIDES, PROMPTS, SERVER_INSTRUCTIONS, getGuide, getPrompt } from "./generated/content.js";
@@ -75,10 +76,9 @@ import { LIVE_RESOURCES, LiveResources, isLiveUri, liveErrorText } from "./resou
 import { houseStyleOnServer } from "./style/houseStyleFile.js";
 import { runAnalyzeMotion } from "./style/motion.js";
 import { internalSender, type SendInternal } from "./tools/internalOps.js";
-import { CAP_PROJECT_PATH, CAP_SERVER_DRIVES_JOBS, CAP_SERVER_IMAGES, CAP_SERVER_RUN_JSX } from "./setup/panelCapabilities.js";
 import { BatchDriver, foreignJobText, readAeJobRecord } from "./jobs/batchDriver.js";
 import { createSharedFrameCache, panelInstanceId, sharedFrameCacheFile } from "./frames/sharedFrameCache.js";
-import { createFramePipeline, RAW_IMAGE_OPS, type ImageTool, type FramePipeline } from "./frames/pipeline.js";
+import { createFramePipeline, RAW_IMAGE_OPS, type ImageTool } from "./frames/pipeline.js";
 import {
   checkFootageExists,
   checkRenderOutput,
@@ -251,10 +251,9 @@ export function createServer(opts: CreateServerOptions = {}) {
     onRendered: (items) => markRendered(line, internalVia(() => false), items),
   });
   const snapshots = new SnapshotStore();
-  // A chunked run_batch on a panel reporting `server-drives-jobs` is driven
-  // from here, one `_continue_job` per chunk under the batch's own lease
-  // (issue #220, stage 5; jobs/batchDriver.ts). Older panels drive their own
-  // and report over the event socket below.
+  // Every chunked run_batch is driven from here, one `_continue_job` per
+  // chunk under the batch's own lease (issue #220, stage 5;
+  // jobs/batchDriver.ts). The panel no longer drives any (issue #243).
   let closing = false;
   const sendChunkWrite = internalVia(() => true);
   const batches = new BatchDriver(jobs, {
@@ -288,6 +287,16 @@ export function createServer(opts: CreateServerOptions = {}) {
   // the event socket dropping and reopening is the signal that a (possibly
   // new) panel is answering, and the verdict about the old one is void (#156).
   ws.onReopen(() => panelGate.invalidate());
+  // Only for a batch an old panel drives itself (issue #243): followed over
+  // the event socket, and ended as lost once its end can no longer arrive.
+  const followed = new FollowedJobs(jobs, {
+    instance: () => {
+      const port = (bridge as { port?: unknown }).port;
+      return typeof port === "number" && port > 0 ? panelInstanceId(panelToken(port)) : null;
+    },
+  });
+  ws.onClose(() => followed.socketClosed());
+  ws.onReopen(() => followed.socketReopened());
   ws.start();
   // Live project resources (issue #248; resources/live.ts). Polls After
   // Effects only while a client is subscribed, one constant-time read a tick,
@@ -313,6 +322,7 @@ export function createServer(opts: CreateServerOptions = {}) {
   server.onclose = () => {
     // Before the line lets go of the desk: a chunk must never go out without it.
     closing = true;
+    followed.stopAll();
     batches.stopAll("this server is closing (its MCP client disconnected), and a batch is driven by the server that started it.");
     ws.stop();
     live.stop();
@@ -1018,40 +1028,29 @@ export function createServer(opts: CreateServerOptions = {}) {
       // A non-object result that After Effects warned about arrives wrapped
       // (core.jsx, dialog guard, issue #225); unwrapped here so the value the
       // agent reads keeps its shape, with the warnings as their own block.
-      // The house style's file I/O is the server's on a panel that can name
-      // the .aep cheaply (issue #220, stage 3); every other panel opens the
-      // file itself, as before. See style/houseStyleFile.ts.
-      const viaServer =
-        (name === "get_house_style" || name === "set_house_style") && panelGate.capabilities().has(CAP_PROJECT_PATH);
-      // A panel that can leave a chunked batch to the server is asked to, per
-      // call; only an envelope that says it did is driven from here (#220).
-      const forwardArgs =
-        name === "run_batch" && panelGate.capabilities().has(CAP_SERVER_DRIVES_JOBS)
-          ? { ...(args as Record<string, unknown>), __driver: "server" }
-          : args;
-      // Screenshots and the .mogrt thumbnail are the server's on a panel that
-      // answers with paths (issue #220, stage 4); every other panel reads the
-      // files and sends base64, as before. Either way the result has one shape.
-      const imagesOnServer = name in RAW_IMAGE_OPS && panelGate.capabilities().has(CAP_SERVER_IMAGES);
-      // run_jsx's wrapper, inlined libraries and undo rewrite are built here,
-      // and a failure is mapped onto the caller's file here, on a panel that
-      // runs a pre-built script (issue #220, stage 6). Every other panel
-      // assembles and maps in ExtendScript, as before. See runJsxAssembly.ts.
-      const runJsxOnServer = name === "run_jsx" && panelGate.capabilities().has(CAP_SERVER_RUN_JSX);
+      // Four tools are finished on the server (issue #220), and since #243
+      // that is the only path for each: the panel code that used to do the
+      // same work is gone, and the version gate above refuses any panel that
+      // predates these paths before a call gets here. A panel that still
+      // answers `Unknown op:` for one of the raw ops falls to the backstop
+      // below and is told to update.
+      //   - the house style's file I/O (style/houseStyleFile.ts);
+      //   - screenshots and the .mogrt thumbnail (frames/pipeline.ts);
+      //   - run_jsx's wrapper, inlined libraries, undo rewrite and failure
+      //     mapping (tools/runJsxAssembly.ts);
+      //   - a chunked run_batch, which the panel hands back for this server to
+      //     drive (`__driver: "server"`; jobs/batchDriver.ts).
       const lifted = liftAeWarnings(
-        viaServer
-          ? await houseStyleOnServer(name, args, sendInternal, (op, a) => runner.runOp(op, a), () =>
-              panelGate.withdraw(CAP_PROJECT_PATH)
-            )
-          : imagesOnServer
-            ? await imagesViaServer(frames, name as ImageTool, args, sendInternal, (op, a) => runner.runOp(op, a), () =>
-                panelGate.withdraw(CAP_SERVER_IMAGES)
-              )
-            : runJsxOnServer
-              ? await runJsxViaServer(args as ResolvedRunJsxArgs, sendInternal, (op, a) => runner.runOp(op, a), () =>
-                  panelGate.withdraw(CAP_SERVER_RUN_JSX)
+        name === "get_house_style" || name === "set_house_style"
+          ? await houseStyleOnServer(name, args, sendInternal, (op, a) => runner.runOp(op, a))
+          : name in RAW_IMAGE_OPS
+            ? await frames.run(name as ImageTool, args, (op, a) => sendInternal(op, a))
+            : name === "run_jsx"
+              ? await runJsxViaServer(args as ResolvedRunJsxArgs, sendInternal, (op, a) => runner.runOp(op, a))
+              : await runner.runOp(
+                  name,
+                  name === "run_batch" ? { ...(args as Record<string, unknown>), __driver: "server" } : args
                 )
-              : await runner.runOp(name, forwardArgs)
       );
       const result = lifted.value;
 
@@ -1062,6 +1061,36 @@ export function createServer(opts: CreateServerOptions = {}) {
           chunkSize?: number; undoStepsEstimate?: number;
           undoGroupName?: string; note?: string;
         };
+        // Every current panel hands a chunked batch back for this server to
+        // drive. One that did not is driving it itself — a panel older than
+        // #220 behind a gate that could not tell. Such a panel reports the
+        // job's progress and end over /events, which WsClient still feeds into
+        // JobManager, so the job is registered and await_job is the agent's
+        // completion signal: After Effects answering between chunks is not
+        // one. The lease is held until the job ends (to the ceiling), so no
+        // write of ours lands between its chunks. The call itself is still an
+        // error — the panel is out of date — and says to update only after
+        // await_job reports the batch finished.
+        if ((result as { driver?: unknown }).driver !== "server") {
+          panelGate.invalidate();
+          jobs.register(env.jobId, env.total);
+          followed.follow(env.jobId);
+          const followedEnd = jobs.waitFor(env.jobId, writes.holdCeilingMs);
+          // The lock is let go at the ceiling even if the batch is still
+          // running; that is recorded on the job, not only logged.
+          followedEnd.catch(() => {
+            const st = jobs.get(env.jobId);
+            if (st && !isTerminal(st.status)) {
+              jobs.warn(
+                env.jobId,
+                `The write lock was released after ${Math.round(writes.holdCeilingMs / 1000)}s while this batch may still be running: other writes can now land between its chunks.`
+              );
+            }
+          });
+          lease?.extendUntil(followedEnd);
+          lease?.onLost?.((why) => jobs.warn(env.jobId, why));
+          return errorResult(panelDrivenBatchMessage(env.jobId));
+        }
         jobs.register(env.jobId, env.total);
         // No progress emitter is bound to this request, and that absence is
         // the fix for issue #82. This handler returns the envelope a few lines
@@ -1072,7 +1101,7 @@ export function createServer(opts: CreateServerOptions = {}) {
         // that blocks for the job, `await_job`; the note says so.
         //
         // This is the gap the panel's own mutex leaves, and the reason this
-        // queue exists at all. `run_batch` handed back a jobId and the panel now
+        // queue exists at all. `run_batch` handed back a jobId and this server
         // drives `_continue_job` chunk by chunk; each chunk is its own turn on
         // the panel's evalScript chain, so releasing the lock here would let the
         // next write land *between* two chunks. That is still wrong even now
@@ -1085,31 +1114,22 @@ export function createServer(opts: CreateServerOptions = {}) {
         // `await_job` is server-resident and never takes this lock, so an agent
         // waiting on the job it queued behind cannot deadlock against it.
         //
-        // `waitFor`'s own timeout has to sit at the queue's hold ceiling, not
-        // below it — a shorter one here would release the lock mid-batch while
-        // a writer that queued at the same moment was still waiting.
-        //
-        // When the panel confirmed it left the driving to this server (#220,
-        // stage 5), the lease is handed to the driver instead and released
-        // when the batch is over in After Effects — no hold ceiling, because
-        // the driver cannot fail to report: it is the one sending the chunks,
-        // and a chunk sent after a ceiling had freed the lock would land
-        // between other writes. The ceiling stays for a panel that drives.
+        // The lease is handed to the driver and released when the batch is
+        // over in After Effects — no hold ceiling, because the driver cannot
+        // fail to report: it is the one sending the chunks, and a chunk sent
+        // after a ceiling had freed the lock would land between other writes.
         // A desk lease can be lost while the batch still runs, if the front
         // desk changes hands and it cannot be re-taken (issue #223): other
         // sessions' writes may then land between its chunks, and the job says
-        // so — and on the server-driven path the next chunk is refused unsent,
-        // which stops the batch saying how far it got.
-        if ((result as { driver?: unknown }).driver === "server") {
+        // so — and the next chunk is refused unsent, which stops the batch
+        // saying how far it got.
+        {
           const held = lease;
           lease = null;
           held?.onLost?.((why) => jobs.warn(env.jobId, why));
           void batches
             .drive({ jobId: env.jobId, total: env.total, chunkSize: env.chunkSize, aeWarnings: (result as { aeWarnings?: unknown }).aeWarnings })
             .finally(() => held?.release());
-        } else {
-          lease?.extendUntil(jobs.waitFor(env.jobId, writes.holdCeilingMs));
-          lease?.onLost?.((why) => jobs.warn(env.jobId, why));
         }
         // The undo fields travel with the envelope because this is the only
         // message the agent sees before it starts describing the work to the
@@ -1717,32 +1737,6 @@ export function toolInputSchema(opName: string): Record<string, unknown> {
     },
   });
   return withCrossFieldConstraints(schema, toDraft2020(jsonSchema), opName);
-}
-
-/**
- * An image tool through the raw op, finished on the server. A panel that
- * listed `server-images` and then did not know the op (`Unknown op:`) has the
- * capability withdrawn and the call re-sent under the public name — which is
- * safe, since nothing ran: an unknown op is refused before any handler.
- */
-async function imagesViaServer(
-  frames: FramePipeline,
-  tool: ImageTool,
-  args: unknown,
-  send: SendInternal,
-  runOp: (op: string, args: unknown) => Promise<unknown>,
-  onUnknownOp: () => void
-): Promise<unknown> {
-  const raw = RAW_IMAGE_OPS[tool];
-  try {
-    return await frames.run(tool, args, (op, a) => send(op, a));
-  } catch (e) {
-    if (e instanceof AeError && new RegExp(`^Unknown op: ${raw}\\b`).test(e.message)) {
-      onUnknownOp();
-      return runOp(tool, args);
-    }
-    throw e;
-  }
 }
 
 function isAsyncEnvelope(v: unknown): boolean {

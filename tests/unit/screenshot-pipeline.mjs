@@ -1,4 +1,4 @@
-// The screenshot pipeline end to end, through the real panel.
+// The screenshot pipeline end to end, through the server's frame pipeline.
 //
 // `tests/unit/frame-integrity.mjs` proves that a half-written PNG is recognised
 // as unfinished, and `tests/unit/contact-sheet.mjs` proves the tiling. What
@@ -14,13 +14,15 @@
 //   * while a genuinely re-served buffer must still be caught, because the fix
 //     for one bug must not disable the detector for the other.
 //
-// So this boots the real `client/main.js` against a stub CEP host — the same
-// harness idea as panel-boot.mjs — and drives real `/op` requests whose renders
-// this file decides the bytes of.
+// So this drives the server's real pipeline (frames/pipeline.ts) with a stub
+// for the panel's raw `_screenshot_frame` op, whose renders this file decides
+// the bytes of. Until issue #243 it booted the panel's `client/main.js`, which
+// did this work itself; that copy is gone, and the panel now forwards the raw
+// op to ExtendScript untouched (panel-boot.mjs pins the forwarding).
 //
 // Most of the corrupt cases here use a file with a wrong PNG signature rather
 // than a truncated one. Both are FRAME_INCOMPLETE and take identical paths
-// through the panel; the signature case is refused immediately, where a
+// through the pipeline; the signature case is refused immediately, where a
 // truncated one has to be given the stall window first. One truncated case is
 // still run end to end, because it is the shape the bug was reported in.
 //
@@ -30,18 +32,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import vm from "node:vm";
 import zlib from "node:zlib";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const nodeRequire = createRequire(import.meta.url);
-const panelSrc = path.join(root, "packages", "ae-panel");
+const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
+const { createFramePipeline } = await import(dist("frames", "pipeline.js"));
 // Used only to build and read back the #130 fixtures below; what is under test
-// there is the panel's wiring, not the codec, which png-codec.mjs checks against
-// an independent implementation.
-const { decodePng8, encodePng8 } = nodeRequire(path.join(panelSrc, "client", "pngcodec.js"));
+// there is the pipeline's wiring, not the codec, which png-codec.mjs checks
+// against an independent implementation.
+const { decodePng8, encodePng8 } = await import(dist("frames", "pngCodec.js"));
 
 let passed = 0;
 async function check(name, fn) {
@@ -136,7 +136,7 @@ function writeFrame(time) {
 const COMP = { id: 7, width: TILE_W * 4, height: TILE_H * 4 };
 
 function dispatchStub(op, args) {
-  if (op !== "screenshot_frame") throw new Error(`Unknown op: ${op}`);
+  if (op !== "_screenshot_frame") throw new Error(`Unknown op: ${op}`);
   if (args.times && args.times.length) {
     const ds = args.downsample || 4;
     return {
@@ -161,149 +161,16 @@ function dispatchStub(op, args) {
   };
 }
 
-function parsePayload(script) {
-  const open = script.indexOf("__AEMCP.call(") + "__AEMCP.call(".length;
-  const close = script.lastIndexOf(") : '");
-  return JSON.parse(JSON.parse(script.slice(open, close)));
-}
+const frames = createFramePipeline({ warn: () => {} });
 
-function makeHost(extDir) {
-  return {
-    getSystemPath: () => extDir,
-    getHostEnvironment: () => JSON.stringify({ appName: "AEFT", appVersion: "26.3" }),
-    evalScript: (script, cb) => {
-      if (script.indexOf("$.evalFile") >= 0) return void setTimeout(() => cb("ok"), 0);
-      let body;
-      try {
-        const p = parsePayload(script);
-        body = JSON.stringify({ ok: true, result: dispatchStub(p.op, p.args) });
-      } catch (e) {
-        body = JSON.stringify({ ok: false, error: e.message });
-      }
-      setTimeout(() => cb(body), 0);
-    },
-  };
-}
-
-function makeDom() {
-  const nodes = {};
-  const mk = () => ({
-    textContent: "",
-    className: "",
-    childNodes: [],
-    insertBefore(n) { this.childNodes.unshift(n); },
-    removeChild(n) { this.childNodes = this.childNodes.filter((c) => c !== n); },
-    get firstChild() { return this.childNodes[0] ?? null; },
-    get lastChild() { return this.childNodes[this.childNodes.length - 1] ?? null; },
-  });
-  for (const id of ["status", "port", "ae", "jsx", "reqs", "log"]) nodes[id] = mk();
-  return { nodes, document: { getElementById: (id) => nodes[id] ?? null, createElement: () => mk() } };
-}
-
-function installLayout() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ae-shot-panel-"));
-  fs.mkdirSync(path.join(dir, "client"), { recursive: true });
-  fs.mkdirSync(path.join(dir, "jsx"), { recursive: true });
-  for (const f of fs.readdirSync(path.join(panelSrc, "client"))) {
-    fs.copyFileSync(path.join(panelSrc, "client", f), path.join(dir, "client", f));
-  }
-  fs.copyFileSync(path.join(panelSrc, "jsx", "bundle.jsx"), path.join(dir, "jsx", "bundle.jsx"));
-  fs.copyFileSync(path.join(panelSrc, "package.json"), path.join(dir, "package.json"));
-  return dir;
-}
-
-function bootPanel(extDir) {
-  const source = fs.readFileSync(path.join(extDir, "client", "main.js"), "utf8");
-  const csSource = fs.readFileSync(path.join(extDir, "client", "csinterface.js"), "utf8");
-  const host = makeHost(extDir);
-  const dom = makeDom();
-  // The panel writes a port file into the user's home and binds a real socket.
-  // Neither may escape: a stray port file would point a live MCP server at a
-  // port that stops existing with this test.
-  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "ae-shot-home-"));
-  // Bind an ephemeral port, never 7777. On the machine this is developed on a
-  // real After Effects panel holds 7777, and since #92 a panel that finds one
-  // of its own kind there waits for it to exit rather than walking — which a
-  // test panel would do for ever. Same arrangement as panel-boot.mjs.
-  const configDir = path.join(fakeHome, ".engineroom-ae-mcp");
-  fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ port: 0 }));
-  const realOs = nodeRequire("node:os");
-  const realHttp = nodeRequire("node:http");
-  const servers = [];
-  const sandbox = {
-    console,
-    Promise, Date, Math, JSON, Error, Buffer, String, Number, Array, Object, RegExp,
-    setTimeout, clearTimeout, setInterval, clearInterval,
-    __dirname: extDir,
-    __filename: path.join(extDir, "main.js"),
-    document: dom.document,
-    window: { __adobe_cep__: host },
-    require: (id) => {
-      if (id === "os") return { ...realOs, homedir: () => fakeHome };
-      if (id === "http") {
-        return {
-          ...realHttp,
-          createServer: (...a) => {
-            const s = realHttp.createServer(...a);
-            servers.push(s);
-            return s;
-          },
-        };
-      }
-      if (["path", "fs", "crypto", "zlib", "net", "url", "stream", "events", "util", "buffer"].includes(id)) {
-        return nodeRequire(`node:${id}`);
-      }
-      return nodeRequire(id);
-    },
-  };
-  sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
-  vm.runInContext(csSource, sandbox, { filename: "csinterface.js" });
-  vm.runInContext(source, sandbox, { filename: "main.js" });
-  const close = () => {
-    for (const s of servers) { try { s.close(); s.closeAllConnections?.(); } catch {} }
-    fs.rmSync(fakeHome, { recursive: true, force: true });
-  };
-  return { dom, close, configDir };
-}
-
-function settled(dom, timeoutMs = 8000) {
-  const deadline = Date.now() + timeoutMs;
-  return new Promise((resolve, reject) => {
-    (function poll() {
-      const s = dom.nodes.status.textContent;
-      if (s === "ready" || s === "failed" || s.indexOf("cannot start") === 0) return resolve(s);
-      if (Date.now() > deadline) return reject(new Error(`panel never settled; stuck at "${s}"`));
-      setTimeout(poll, 25);
-    })();
-  });
-}
-
-const dir = installLayout();
-const panel = bootPanel(dir);
-const status = await settled(panel.dom);
-assert.equal(
-  status,
-  "ready",
-  `panel did not boot: ${status}\n${panel.dom.nodes.log.childNodes.map((n) => n.textContent).join("\n")}`,
-);
-const PORT = Number(panel.dom.nodes.port.textContent);
-assert.ok(PORT > 0, "no port announced");
-
-// The bridge authenticates every call (issue #106), so this test reads the
-// token off disk exactly as the MCP server does. Reading it here rather than
-// taking it from the panel's own scope is the point: if the file is not where
-// the server looks for it, these tests fail the way a user would.
-const TOKEN = fs.readFileSync(path.join(panel.configDir, `token-${PORT}`), "utf8").trim();
-
+/** One screenshot_frame call, answered the way the bridge answers `/op`. */
 async function op(args, expect = "ok") {
-  const res = await fetch(`http://127.0.0.1:${PORT}/op`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-ae-mcp-token": TOKEN },
-    body: JSON.stringify({ op: "screenshot_frame", args }),
-  });
-  const body = await res.json();
+  let body;
+  try {
+    body = { ok: true, result: await frames.run("screenshot_frame", args, async (rawOp, a) => dispatchStub(rawOp, a)) };
+  } catch (e) {
+    body = { ok: false, error: e.message, code: e.code };
+  }
   if (expect === "ok") assert.ok(body.ok, `expected success, got: ${body.error}`);
   if (expect === "err") assert.equal(body.ok, false, `expected a refusal, got a result`);
   return body;
@@ -402,7 +269,7 @@ await check("times[] returns one image with one cell per requested time, in orde
 
 await check("one bad tile is a marked block and does not invalidate the sheet", async () => {
   plan.rendered = [];
-  // ExtendScript renders all three first, then the panel retries only the one
+  // ExtendScript renders all three first, then the pipeline retries only the one
   // that failed to read — and that retry fails too.
   plan.queue = [png(70), GARBAGE, png(80), GARBAGE];
   const body = await op({ compId: COMP.id, times: [0, 1, 2] });
@@ -441,7 +308,7 @@ await check("a sheet where nothing rendered is refused rather than sent as colou
 });
 
 // ---------------------------------------------------------------------------
-// #130: After Effects writes premultiplied colour; what leaves the panel is
+// #130: After Effects writes premultiplied colour; what leaves the pipeline is
 // straight alpha, converted exactly once on both the single-frame and the
 // contact-sheet path.
 // ---------------------------------------------------------------------------
@@ -479,8 +346,6 @@ await check("every temp frame was cleaned up, whatever the verdict", () => {
   assert.deepEqual(left, [], `temp frames left behind: ${left.join(", ")}`);
 });
 
-panel.close();
-fs.rmSync(dir, { recursive: true, force: true });
 fs.rmSync(renderDir, { recursive: true, force: true });
 console.log(`screenshot-pipeline: ${passed} checks passed`);
 process.exit(0);

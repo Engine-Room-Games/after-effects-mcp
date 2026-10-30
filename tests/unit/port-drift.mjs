@@ -28,7 +28,7 @@ import { WebSocketServer } from "ws";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 const { HttpClient } = await import(dist("bridge", "httpClient.js"));
 const { BridgeTimeoutError, BridgeUnreachableError } = await import(dist("util", "errors.js"));
 const { isPanelHealth, probePanel, locatePanel, portCandidates, DEFAULT_PORT, diagnosticPortCandidates } = await import(dist("bridge", "discovery.js"));
@@ -59,7 +59,7 @@ async function stubPanel({ healthShape = "panel", opBehaviour = null } = {}) {
       healthHits++;
       res.setHeader("content-type", "application/json");
       if (healthShape === "panel") {
-        res.end(JSON.stringify({ ok: true, port: server.address().port, bundleLoaded: true, bundleHash: sourceBundleHash() }));
+        res.end(JSON.stringify({ ok: true, port: server.address().port, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash() }));
       } else if (healthShape === "other") {
         res.end(JSON.stringify({ hello: true }));
       } else if (healthShape === "hang") {

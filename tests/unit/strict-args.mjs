@@ -24,7 +24,7 @@ const S = await import(sharedDist("schemas.js"));
 const { OpSchemas, StrictOpSchemas, STRICT_UNHANDLED, OpMutation, crossFieldRulesIn } = S;
 const { prepareBatchSteps, batchStepRefusal, BATCH_STEP_REFUSALS } = await import(dist("tools", "batchSteps.js"));
 const { MAX_BATCH_DEPTH } = await import(dist("tools", "policy.js"));
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 
 let passed = 0;
 async function check(name, fn) {
@@ -174,7 +174,8 @@ await check("internal, server-resident and half-outside-AE ops are refused by na
     assert.equal(problems[0].problem, BATCH_STEP_REFUSALS[op]);
   }
   // And the ordinary ExtendScript-only tools are not refused.
-  for (const op of ["set_layer", "run_jsx", "run_batch", "add_to_render_queue", "checkpoint_comp"]) {
+  // set_house_style included: as a step it runs style.jsx, which stays (#243).
+  for (const op of ["set_layer", "run_jsx", "run_batch", "add_to_render_queue", "checkpoint_comp", "set_house_style"]) {
     assert.equal(batchStepRefusal(op), undefined, op);
   }
 });
@@ -215,7 +216,7 @@ const seen = [];
 const bridge = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash() }));
+    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash() }));
     return;
   }
   let body = "";

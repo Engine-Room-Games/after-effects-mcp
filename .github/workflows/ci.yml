@@ -129,6 +129,23 @@ jobs:
       - name: Panel version mismatches are diagnosed correctly
         run: node tests/unit/panel-version.mjs
 
+      # Issue #243: the gate compared bundle.jsx only, so a current bundle
+      # beside stale client code passed. The panel and the server compute the
+      # client hash separately and must agree; a signed install must match.
+      - name: Panel client hash matches between panel and server
+        run: node tests/unit/panel-hash.mjs
+
+      # Issue #243, found live: a cleanly installed older panel was called a
+      # "mix of two versions". Uniformly older is update-needed; only one half
+      # current is partial-install.
+      - name: An older panel is told to update, a mixed one to reinstall
+        run: node tests/unit/check-setup-panel.mjs
+
+      # Since #243 screenshots, run_jsx, the house style and batch chunks reach
+      # After Effects under internal op names; messages must name the tool.
+      - name: Wait and timeout messages name the tool, not the internal op
+        run: node tests/unit/op-names.mjs
+
       # Issue #156: a stale verdict was cached forever, and AE restarts on the
       # same port, so "restart After Effects" outlived the restart.
       - name: A stale panel verdict is re-checked after a restart
@@ -485,6 +502,11 @@ jobs:
       # desk killed with a chunk at the panel, the batch's own server killed.
       - name: The server drives a long batch, and stops it truthfully
         run: node tests/unit/batch-driver.mjs
+
+      # Issue #243: a batch an old panel drives itself is followed over
+      # /events, and ends as lost once its end can no longer arrive.
+      - name: A batch an old panel drives is followed, and never waited on for ever
+        run: node tests/unit/followed-jobs.mjs
 
       # Read-only mode and the run_jsx switch (#135): no write is listed or
       # callable in read-only mode, every server op has a deliberate decision,

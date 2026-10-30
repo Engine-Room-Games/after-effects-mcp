@@ -8,8 +8,8 @@ import type { ResolvedRunJsxArgs, RunJsxLibrary } from "./runJsxSource.js";
  * the inlined libraries, the #221 undo-guard rewrite with its fast path, the
  * eval/Function/$.evalFile caution scan, and the line map of #46 — so that a
  * fix to any of it ships with the server instead of costing a `setup_panel`
- * and an After Effects restart. It runs only against a panel that lists
- * `server-run-jsx`; every other panel, and every `run_batch` step, still
+ * and an After Effects restart. Every `run_jsx` tool call goes through it
+ * (issue #243 removed the per-panel choice); a `run_batch` step still
  * assembles in ExtendScript exactly as before.
  *
  * **The output has to be byte-identical to raw.jsx's**, and
@@ -435,22 +435,19 @@ export function mapRunJsxFailure(
 export const RUN_JSX_BUILT_OP = "_run_jsx";
 
 /**
- * `run_jsx` on a panel that lists `server-run-jsx`: build here, run there,
- * map the failure here.
+ * `run_jsx`: build here, run there, map the failure here.
  *
- * Falls back to the panel's own `run_jsx`, with the args it has always been
- * sent, in two cases, and in both nothing has run:
- *   - the call cannot be built here (see `buildRunJsxSource`);
- *   - the panel answers `Unknown op: _run_jsx` — refused by `dispatch()`
- *     before any handler, so it carries no source mapping. A script's own
- *     error always does, which is what keeps a failure *inside* the script
- *     from ever being read as this and run a second time.
+ * Goes to the bundle's own `run_jsx` (raw.jsx), with the args it has always
+ * been sent, only when the call cannot be built here (see
+ * `buildRunJsxSource`) — nothing has run by then. An `Unknown op: _run_jsx`
+ * is thrown as it came (issue #243): the panel predates this server, and the
+ * caller's backstop tells the user to update it rather than retrying under
+ * another name.
  */
 export async function runJsxViaServer(
   args: ResolvedRunJsxArgs,
   send: (op: typeof RUN_JSX_BUILT_OP, args: unknown) => Promise<unknown>,
-  runOp: (op: string, args: unknown) => Promise<unknown>,
-  onUnknownOp: () => void
+  runOp: (op: string, args: unknown) => Promise<unknown>
 ): Promise<unknown> {
   const built = buildRunJsxSource(args.code, args.libraries);
   if (!built) return runOp("run_jsx", args);
@@ -470,10 +467,6 @@ export async function runJsxViaServer(
   try {
     return await send(RUN_JSX_BUILT_OP, payload);
   } catch (e) {
-    if (e instanceof AeError && !e.source && new RegExp(`^Unknown op: ${RUN_JSX_BUILT_OP}\\b`).test(e.message)) {
-      onUnknownOp();
-      return runOp("run_jsx", args);
-    }
     if (e instanceof AeError && needsServerMapping(e.source)) {
       e.source = mapRunJsxFailure(e.source, code, scriptPath, built);
     }

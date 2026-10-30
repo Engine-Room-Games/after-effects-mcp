@@ -21,7 +21,7 @@ const sharedDist = (...p) => pathToFileURL(path.join(root, "packages", "shared",
 const { OpSchemas, OpMutation, ServerOpEffect, OpDiskWrite } = await import(sharedDist("schemas.js"));
 const { toolAnnotations, DESTRUCTIVE_VERBS, IDEMPOTENT_VERBS, overwritesDisk } = await import(dist("tools", "annotations.js"));
 const { z } = await import("zod");
-const { sourceBundleHash } = await import(dist("setup", "panelVersion.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 
 let passed = 0;
 async function check(name, fn) {
@@ -49,7 +49,7 @@ const SAMPLE = {
 const bridge = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash() }));
+    res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash() }));
     return;
   }
   let body = "";
@@ -57,10 +57,13 @@ const bridge = http.createServer((req, res) => {
   req.on("end", () => {
     const { op } = JSON.parse(body || "{}");
     res.setHeader("content-type", "application/json");
+    // A current panel hands a chunked batch to the server to drive (#243).
     const result =
       op === "run_batch"
-        ? { jobId: "job-1", async: true, total: 900, chunkSize: 200, undoStepsEstimate: 5, undoGroupName: "AE MCP: batch" }
-        : SAMPLE;
+        ? { jobId: "job-1", async: true, total: 900, chunkSize: 200, undoStepsEstimate: 5, undoGroupName: "AE MCP: batch", driver: "server" }
+        : op === "_continue_job"
+          ? { done: true, jobId: "job-1", results: [], errors: [], total: 900, undoSteps: 5, undoGroupName: "AE MCP: batch" }
+          : SAMPLE;
     res.end(JSON.stringify({ ok: true, result }));
   });
 });

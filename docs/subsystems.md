@@ -17,33 +17,94 @@ The panel does not update itself, and it ships inside every distribution — so
 case. Before this existed it surfaced as `Unknown op: get_house_style`, which
 tells an agent nothing and usually got retried.
 
-**Two hashes, and they are not interchangeable:**
+**A panel is two hashes, and both have to match** (issue #243):
+
+| Half | What it names | Running (on `/health`) | Shipped / installed |
+|---|---|---|---|
+| `bundleHash` | `jsx/bundle.jsx` — the ExtendScript the panel `$.evalFile`d | taken when the bundle is loaded, so it follows `/reload-jsx` | `sha256` of the file |
+| `clientHash` | every other file of the panel — `client/*.js`, `index.html`, the manifest, `boot.jsx` | taken once at panel launch, over the panel's own folder | `setup/panelHash.ts` over the folder |
+
+Until #243 the gate compared the bundle only, so a panel whose bundle was
+current and whose `main.js` was not passed — and once the server dropped its
+fallback paths, such a panel would have reached a call it could not answer.
+`clientHash` is computed by `client/panelhash.js` in the panel and by its port
+`setup/panelHash.ts` in the server; they must agree byte for byte, and
+`tests/unit/panel-hash.mjs` holds them together on the real panel and on
+fixtures. **Change both together.** Left out of it, deliberately: `bundle.jsx`
+(its own half), `node_modules/` and file-browser litter (`.DS_Store`,
+`Thumbs.db`, `desktop.ini`) at any depth, the signature
+files a self-signed install adds (`META-INF/`, `mimetype` — see below), the
+root `package.json` (a version stamp nothing reads at runtime), and the two
+version attributes of `CSXS/manifest.xml`. The last two are what keep a
+release that changes nothing in the panel from telling every user to
+reinstall it and restart After Effects; any *other* manifest change is a
+different panel.
+
+**Two copies, and they are not interchangeable:**
 
 | | What it is | Where from |
 |---|---|---|
-| installed | the bundle in the CEP extension folder — what AE loads *next* launch | `sha256` on disk |
-| running | the bundle the panel actually `$.evalFile`d — what answers *now* | `bundleHash` on `/health` |
+| installed | the panel in the CEP extension folder — what AE loads *next* launch | hashed on disk |
+| running | the panel AE actually loaded — what answers *now* | `bundleHash` + `clientHash` on `/health` |
 
 They diverge for the entire window between `setup_panel` and restarting AE,
-which is exactly when calls break. **Only the running hash is worth gating on.**
-`setup/panelVersion.ts` maps the pair onto five states, and the distinction that
-matters most to a user is `restart-needed` — telling someone to run
+which is exactly when calls break. **Only the running hashes are worth gating
+on.** `setup/panelVersion.ts` maps them onto six states, and the distinction
+that matters most to a user is `restart-needed` — telling someone to run
 `setup_panel` again there wastes their time, so the message says so explicitly.
 
-**Both hashes must identify the code, not the build.** `bundle-jsx.mjs` used to
+**Every hash must identify the code, not the build.** `bundle-jsx.mjs` used to
 stamp `// Generated <ISO timestamp>` into the header, which put a moving value
 inside the thing being compared: two builds of an unchanged tree disagreed, and
 an upgrade touching no ExtendScript still told the user to quit AE and relaunch.
 Nothing in `packages/jsx/` may reach the bundle unless a source changed, so keep
 the concatenation a pure function of the sources — no timestamps, no ids, and no
 unsorted directory reads. `tests/unit/bundle-determinism.mjs` builds twice and
-compares the bytes, and also checks the hash still moves when a source does.
+compares the bytes, and also checks the hash still moves when a source does. The
+client hash is the same kind of function: sorted `/`-separated paths, file
+contents, nothing else.
 
-The fifth state, `partial-install`, is checked *before* any of the others,
-because all of them reason from `bundle.jsx` alone and a current bundle says
-nothing about the client files beside it. Callers pass `installComplete` from
-`panelInstallDiff()`; it defaults to `true` so a caller that has not looked
-keeps the old behaviour rather than quietly asserting the install is sound.
+`partial-install` is checked *before* any state that could recommend a
+restart, because a half-written install can hash however it likes and no
+restart fixes it. Callers pass `installComplete` from `panelInstallDiff()`; it
+defaults to `true` so a caller that has not looked keeps the old behaviour
+rather than quietly asserting the install is sound.
+
+**A differing file is not a mix.** A cleanly installed older panel differs
+from the shipped one in every file that has changed since, so the file diff
+alone called every 0.5.x install partial, and its users were told they had
+installed with After Effects open — never that their panel was out of date
+(found in the #243 live test). `partial-install` now needs a genuine mix: one
+half of the installed panel (`bundle.jsx`, or the client files) is the shipped
+one and the other is not, or both halves are current and a file the hashes
+leave out still differs. An install whose two halves are both older is
+`update-needed`, and `check_setup`'s `panelUpToDate` words it the same way.
+`tests/unit/check-setup-panel.mjs` runs `check_setup` on a real installed
+folder for all three cases.
+
+`unverifiable` is the same principle for the running panel: one that could
+not read its own folder reports `clientHash: null` (a pre-#243 panel sends no
+key at all). Whether it is current cannot be known, and a restart would read
+the same folder again, so the advice is never "restart" — it is `check_setup`,
+then quit, `setup_panel` and reopen.
+
+**A panel that reports no hash is out of date, and the gate enforces it.** Old
+panels predate `bundleHash`, and every panel before #243 predates `clientHash`;
+either absence is certain evidence the panel is older than the server. Until
+#243 that was an advisory "unknown" let through to the `Unknown op:` backstop.
+With the server's fallback paths gone, a stale panel let through can fail in
+ways that do not say "update" — so it is refused like any other stale panel.
+
+**With no shipped panel to compare, the capabilities decide.** Every
+distribution carries the panel, so `sourcePanelHashes()` being null is a
+packaging fault, and the gate used to pass everything then. Now it falls back
+on `capabilities` (below): a running panel that lists all of
+`REQUIRED_PANEL_CAPABILITIES` is "unknown", let through and logged; one that
+lists fewer is `update-needed`, with the missing names and a line saying to
+reinstall the tools if `setup_panel` has nothing to install. Blocking every
+call there would strand a working panel behind a packaging fault it cannot fix;
+passing every call would send a stale one down a path it does not have. The
+capability list is the one thing that answers "can it do what I will ask".
 
 Three enforcement points, in order of preference:
 
@@ -57,44 +118,42 @@ Three enforcement points, in order of preference:
    Effects for the rest of the session after they had. An unreachable `/health`
    drops the verdict (that is `runOp`'s error to report); a timeout keeps it (a
    busy AE is still the old panel). `tests/unit/panel-gate.mjs` pins all of it.
-2. **The `Unknown op:` backstop** — for panels too old to report a hash at all.
-   This is never a false positive: `server.ts` validates tool names against
-   `OpSchemas` before forwarding, so any op the panel rejects is one this server
-   defines.
+2. **The `Unknown op:` backstop** — for whatever gets past the gate (a timeout
+   that kept no verdict, a panel replaced between probes). This is never a
+   false positive: `server.ts` validates tool names against `OpSchemas` before
+   forwarding, so any op the panel rejects is one this server defines. It now
+   covers the internal ops too: an `Unknown op: _project_path` (or `_run_jsx`,
+   `_screenshot_frame`, …) is answered with the update message and never
+   retried under the public name.
 3. **`check_setup`'s `panelRunningCurrent`** — the truthful version of
    `panelUpToDate`, which compares files and therefore goes green the instant
    `setup_panel` runs, while AE carries on running the old code.
 
-`tests/unit/panel-version.mjs` covers the decision table; CI runs it. Old panels
-predate `bundleHash` entirely, so `undefined` must always mean "too old to say",
-never "matches".
+`tests/unit/panel-version.mjs` covers the decision table and
+`tests/unit/panel-hash.mjs` the client half; CI runs both. `undefined` must
+always mean "too old to say", never "matches".
 
-**The hash names the ExtendScript; `capabilities` names the panel code.**
-`bundleHash` says nothing about `client/main.js`, and a bundle can be current
-while the panel code beside it is not. Since issue #220 (stage 3) `/health`
-also lists `capabilities`, the only word on which panel code is answering.
-`setup/panelCapabilities.ts` reads it, and the gate keeps it with its verdict
-and drops it whenever it drops the verdict (invalidate, port change,
-unreachable), so a panel nobody has asked yet counts as legacy. **A missing or
-malformed field means "legacy", never "broken".** It gates nothing: a
-capability only switches the server onto a path that needs it, and every
-panel without one keeps the path it always had. The server still falls back
-on `Unknown op:` for the op behind a capability, since the list is static in
-`main.js` and stands for an op in the bundle installed beside it — and then
-withdraws the capability (`panelGate.withdraw`) until the verdict is next
-dropped, so the extra round trip is paid once, not on every call.
+**`capabilities` lists what the server relies on; it no longer chooses a
+path.** Since issue #220 `/health` lists `capabilities`. Through #220 each one
+switched the server between its own implementation and the panel's older one,
+and a panel without the field was "legacy" and kept the old path. Issue #243
+removed the old paths from both sides — the panel's image, file, batch-driving
+and `run_jsx` code, and the server's branches that chose it — so there is one
+path per tool, and the gate is what keeps a panel that cannot take it from
+being sent down it. The list matters only when there are no hashes to compare
+(above). A missing or malformed field lists nothing.
 
 Internal ops (`_project_path`, `_render_save`, …) are sent only through
 `internalSender` in `tools/internalOps.ts`. Its op name is typed over
 `InternalOpMutation`, and a `"write"` is refused unless the write lease is
 held — internal ops never pass the tool path that takes one.
 
-| Capability | What the server does with it |
+| Capability | The one path the server takes |
 |---|---|
 | `project-path` | Asks `_project_path` for the .aep's path and reads/writes `house-style.md` itself. |
-| `server-images` | Sends `_screenshot_frame`, `_screenshot_layer` and `_export_mogrt`, which answer with ExtendScript's temp paths, and waits for, normalises, tiles and patches the files itself (`frames/pipeline.ts`). The panel's own processing stays for older servers; see "Screenshots and frame integrity" in [fragile-areas-bridge.md](fragile-areas-bridge.md). |
-| `server-run-jsx` | Builds `run_jsx`'s wrapper itself (libraries inlined, the #221 undo rewrite, the eval/Function/`$.evalFile` scan) and sends `_run_jsx`; a failure comes back with `rawLine`/`wrapperLine`/`libraryIndex` and the server maps it onto the caller's file (`tools/runJsxAssembly.ts`). ExtendScript keeps each library's parse check and the `Error.source`/`start`/`end` reading. `OPS.run_jsx` stays for older servers and for `run_batch` steps; see "`run_jsx` assembled on the server" in [architecture.md](architecture.md). |
-| `server-drives-jobs` | Forwards a long `run_batch` with `__driver: "server"` and, only when the envelope answers `driver: "server"`, sends each `_continue_job` itself (`jobs/batchDriver.ts`). Any other envelope is driven by the panel as before; see "The batch driver" in [architecture.md](architecture.md). |
+| `server-images` | Sends `_screenshot_frame`, `_screenshot_layer` and `_export_mogrt`, which answer with ExtendScript's temp paths, and waits for, normalises, tiles and patches the files itself (`frames/pipeline.ts`); see "Screenshots and frame integrity" in [fragile-areas-bridge.md](fragile-areas-bridge.md). |
+| `server-run-jsx` | Builds `run_jsx`'s wrapper itself (libraries inlined, the #221 undo rewrite, the eval/Function/`$.evalFile` scan) and sends `_run_jsx`; a failure comes back with `rawLine`/`wrapperLine`/`libraryIndex` and the server maps it onto the caller's file (`tools/runJsxAssembly.ts`). ExtendScript keeps each library's parse check and the `Error.source`/`start`/`end` reading. `OPS.run_jsx` stays for `run_batch` steps and for the one call the server cannot build; see "`run_jsx` assembled on the server" in [architecture.md](architecture.md). |
+| `server-drives-jobs` | Forwards a long `run_batch` with `__driver: "server"`; the panel answers `driver: "server"` and the server sends each `_continue_job` itself (`jobs/batchDriver.ts`). An envelope without it can only come from a panel older than #220 driving its own batch, and is reported as that — but the job is still registered and followed over `/events` (which that panel reports on), so the message can say: do not re-send, wait on `await_job`, then update. See "The batch driver" in [architecture.md](architecture.md). |
 
 **Install before AE is open.** The panel loads at launch and only at launch, so
 installing while AE is closed costs no restart. `check_setup` reports
@@ -117,7 +176,12 @@ too — the port is the one input to this gate that used to be a constant.
 `installComplete` stays true; a diff that counted extras would report every
 signed install as `partial-install` and send the user to reinstall, which
 strips the signature that made the panel load. `tests/unit/panel-install.mjs`
-pins it.
+pins it. The client hash (issue #243) leaves the same two out, on both sides —
+the panel hashing itself and the server hashing what it ships and what is
+installed — so a signed panel reports the shipped `clientHash` and is
+`current`; `tests/unit/panel-hash.mjs` pins that. Anything a future signing
+step adds to the folder has to be left out of both copies of the hash, or
+every signed install will be told to update.
 
 ## The project scaffold
 
@@ -172,29 +236,30 @@ Desktop and in a source checkout. A file found any other way would need a
 project folder, and the clients that need help most are exactly the ones
 without one.
 
-Where it is *opened* depends on the panel (issue #220, stage 3):
+Where it is *opened* (issue #220, stage 3; one path since #243):
 
-- **A panel reporting `project-path`** answers `_project_path` — the .aep's
+- **The server opens it.** The panel answers `_project_path` — the .aep's
   path and saved state, nothing else — and the server reads and writes the
-  file itself (`style/houseStyleFile.ts`). No file I/O on AE's main thread.
-- **Every other panel** (legacy, or one that answers `Unknown op:` after all)
-  gets `get_house_style` / `set_house_style` exactly as before, and
-  `packages/jsx/style.jsx` opens the file.
-- **A folder the server cannot see** goes to the panel's op too. On macOS,
-  privacy access to Desktop, Documents and removable or network volumes is
-  per app, so After Effects can be allowed where the server is not. A guide is
-  "not there" only when the .aep beside it is visible to the server; any other
-  failure to read, or an `EACCES`/`EPERM` at open on a write, is the panel's
-  to try, and nothing was written by then.
+  file itself (`style/houseStyleFile.ts`). No file I/O on AE's main thread. A
+  panel that answers `Unknown op: _project_path` is older than the server and
+  is told to update; it is no longer sent `get_house_style` instead.
+- **A folder the server cannot see** goes to the bundle's own op
+  (`packages/jsx/style.jsx`), as does a `_project_path` answer in a shape the
+  server does not recognise. On macOS, privacy access to Desktop, Documents
+  and removable or network volumes is per app, so After Effects can be
+  allowed where the server is not. A guide is "not there" only when the .aep
+  beside it is visible to the server; any other failure to read, or an
+  `EACCES`/`EPERM` at open on a write, is ExtendScript's to try, and nothing
+  was written by then.
 
 The server's copy is a port of `style.jsx` with the same sentences and result
 shapes, and `tests/unit/panel-capabilities.mjs` holds them to each other on a
 real folder, BOM, CRLF and non-ASCII included. Both write every line ending
 as LF: measured on AE 26.5, `style.jsx` (`lineFeed = "Unix"`) turns a
 caller's `\r\n` and bare `\r` into `\n`, so the server normalises the same
-way before writing. The jsx copy stays: older
-servers use it, and `set_house_style` as a `run_batch` step goes straight to
-ExtendScript. Change both together.
+way before writing. The jsx copy stays: the server falls back on it for a
+folder it cannot see, and `set_house_style` as a `run_batch` step goes
+straight to ExtendScript. Change both together.
 
 The costs, both reported rather than worked around:
 

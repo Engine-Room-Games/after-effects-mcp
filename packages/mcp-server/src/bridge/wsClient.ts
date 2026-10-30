@@ -4,7 +4,7 @@ import { authHeaders } from "./discovery.js";
 import type { JobManager } from "../jobs/manager.js";
 import type { HttpClient } from "./httpClient.js";
 
-/** What the panel broadcasts on /events (`broadcast` in packages/ae-panel/client/main.js). */
+/** What a panel driving its own batches broadcast on /events, before issue #243. */
 type WsEvent =
   | { type: "progress"; jobId: string; progress: number; total?: number; message?: string }
   | { type: "complete"; jobId: string; result: unknown }
@@ -12,12 +12,19 @@ type WsEvent =
   | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string };
 
 /**
- * The /events socket a long `run_batch` reports progress and completion on.
+ * The /events socket a long `run_batch` reported progress and completion on
+ * while the panel drove batches itself. Since issue #243 this server drives
+ * every batch (jobs/batchDriver.ts) and a current panel sends no job events.
+ * They are still handled, for a panel older than #220 that drives its own
+ * batch past the gate: the server registers that job and follows it here, so
+ * await_job can report when it ends. The socket's reopening is also how a
+ * restarted After Effects is noticed (`onReopen`, which drops the panel gate's
+ * verdict).
  *
  * It follows the HTTP client's port rather than keeping a copy of its own: a
  * copy taken at startup is exactly the stale value issue #92 is about, and a
- * socket left reconnecting to a port nobody listens on would lose every
- * completion event — which is what releases the write lease a batch holds.
+ * socket left reconnecting to a port nobody listens on would never see the
+ * reopen that a restarted panel is recognised by.
  */
 export class WsClient {
   private ws?: WebSocket;
@@ -25,6 +32,7 @@ export class WsClient {
   private stopped = false;
   private opened = false;
   private reopenListeners: (() => void)[] = [];
+  private closeListeners: (() => void)[] = [];
 
   constructor(private bridge: HttpClient, private jobs: JobManager) {
     // Awaited by `switchPort`, bounded there, so a retried op does not go out
@@ -38,6 +46,16 @@ export class WsClient {
    */
   onReopen(listener: () => void): void {
     this.reopenListeners.push(listener);
+  }
+
+  /**
+   * Called whenever the socket closes without being stopped or replaced —
+   * After Effects quitting, restarting or no longer answering. A failed
+   * reconnect attempt counts too. Used to stop following a batch an old panel
+   * drives (jobs/followedJobs.ts) once its end can no longer arrive.
+   */
+  onClose(listener: () => void): void {
+    this.closeListeners.push(listener);
   }
 
   start(): void {
@@ -99,6 +117,9 @@ export class WsClient {
         // A socket replaced by `reconnect` must not schedule a second connect
         // to the old port on top of the new one.
         if (this.stopped || this.ws !== ws) return;
+        for (const l of this.closeListeners) {
+          try { l(); } catch (e) { logger.warn(`ws close listener failed: ${(e as Error).message}`); }
+        }
         this.reconnectTimer = setTimeout(() => this.connect(), 1500);
       });
       ws.on("error", () => {
