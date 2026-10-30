@@ -102,14 +102,19 @@ export interface AfterEffectsProcess {
  * The After Effects application's own process on macOS: the main binary of an
  * `Adobe After Effects <ver>.app` bundle, `…/Contents/MacOS/After Effects`.
  * A nested bundle (`…app/Contents/aerendercore.app/…`), a helper under
- * Frameworks (CEPHtmlEngine) and the `aerender` beside the .app all fail it.
+ * Frameworks (CEPHtmlEngine), any other executable in Contents/MacOS, and
+ * the `aerender` beside the .app all fail it.
  */
-// Not anchored at the end: AE opened with a project carries its path as an argument.
-const AE_APP_BINARY = /\/Adobe After Effects[^/]*\.app\/Contents\/MacOS\/([^/]+)/;
+//
+// Only the executable named exactly "After Effects": the same MacOS folder also
+// holds dynamiclinkmanager (spawned by aerender with AE quit) and
+// crashpad_handler (lingers after AE quits), and neither loads the panel —
+// measured live on 26.5. The name may be followed only by launch arguments
+// (" -psn_…", or a project path when AE was opened with one).
+const AE_APP_BINARY = /\/Adobe After Effects[^/]*\.app\/Contents\/MacOS\/After Effects(?=$|\s+[-/~"'])/;
 
 export function isAfterEffectsAppCommand(commandLine: string): boolean {
-  const m = AE_APP_BINARY.exec(commandLine.trim());
-  return !!m && !/aerender/i.test(m[1]);
+  return AE_APP_BINARY.test(commandLine.trim());
 }
 
 /** `pgrep -lf` output ("<pid> <command line>" per line) → the answer. */

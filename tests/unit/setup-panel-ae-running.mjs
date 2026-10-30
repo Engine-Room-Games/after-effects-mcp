@@ -369,14 +369,31 @@ const AERENDERCORE =
 const CEP =
   "/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/Frameworks/CEPHtmlEngine.framework/Versions/A/Helpers/CEPHtmlEngine.app/Contents/MacOS/CEPHtmlEngine";
 
-await check("macOS: the After Effects app counts; aerender, aerendercore and CEP helpers do not", async () => {
+const DYNAMICLINK = "/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/MacOS/dynamiclinkmanager";
+const CRASHPAD =
+  "/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/MacOS/crashpad_handler --database=/Users/me/Library/Application Support/Adobe/After Effects/26.5/Crashpad --annotation=prod=AfterEffects";
+
+await check("macOS: only the After Effects main binary counts — not aerender, aerendercore, dynamiclinkmanager, crashpad_handler or CEP", async () => {
   assert.equal(isAfterEffectsAppCommand(AE_APP), true);
   assert.equal(isAfterEffectsAppCommand(`${AE_APP} -psn_0_12345`), true, "launch arguments do not hide it");
   assert.equal(isAfterEffectsAppCommand(`${AE_APP} /Users/me/Projects/spot.aep`), true, "nor does a project path");
-  assert.equal(isAfterEffectsAppCommand("/Applications/Adobe After Effects (Beta)/Adobe After Effects (Beta).app/Contents/MacOS/After Effects (Beta)"), true);
-  for (const other of [AERENDER, AERENDERCORE, CEP, "grep Adobe After Effects", "/Applications/Adobe After Effects 2026/aerender"]) {
+  assert.equal(isAfterEffectsAppCommand("/Applications/Adobe After Effects (Beta)/Adobe After Effects (Beta).app/Contents/MacOS/After Effects"), true);
+  assert.equal(isAfterEffectsAppCommand("/Applications/Adobe After Effects 2025/Adobe After Effects 2025.app/Contents/MacOS/After Effects"), true);
+  for (const other of [
+    AERENDER,
+    AERENDERCORE,
+    CEP,
+    DYNAMICLINK,
+    CRASHPAD,
+    "grep Adobe After Effects",
+    "/Applications/Adobe After Effects 2026/aerender",
+    "/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/MacOS/After Effects Helper",
+  ]) {
     assert.equal(isAfterEffectsAppCommand(other), false, other);
   }
+  // Measured live (#262 review): AE quit, aerender rendering → dynamiclinkmanager and crashpad_handler only.
+  assert.equal(afterEffectsFromPgrep(`7927 ${DYNAMICLINK}\n7930 ${CRASHPAD}\n7900 ${AERENDER}\n7901 ${AERENDERCORE}\n`).state, "not-running");
+  assert.equal(afterEffectsFromPgrep(`7927 ${DYNAMICLINK}\n7930 ${CRASHPAD}\n777 ${AE_APP}\n`).state, "running");
   // pgrep -lf lines are "<pid> <command line>".
   assert.equal(afterEffectsFromPgrep(`4242 ${AERENDER}\n4243 ${AERENDERCORE}\n`).state, "not-running", "a render alone is not After Effects open");
   assert.match(afterEffectsFromPgrep(`4242 ${AERENDER}\n`).detail, /not counted/);
