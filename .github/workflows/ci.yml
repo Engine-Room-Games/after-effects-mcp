@@ -356,6 +356,7 @@ jobs:
         run: |
           node tests/unit/comp-snapshot.mjs
           node tests/unit/comp-diff-server.mjs
+          node tests/unit/mcp-apps.mjs
           node tests/unit/duplicate-comp.mjs
           node tests/unit/comp-checkpoint.mjs
           node tests/unit/audio-cues.mjs
