@@ -42,18 +42,21 @@ const bridge = http.createServer((req, res) => {
   }
   let body = "";
   req.on("data", (c) => (body += c));
-  req.on("end", () => {
+  req.on("end", async () => {
     const { op, args } = JSON.parse(body || "{}");
     seen.push({ op, args });
+    if (op === "get_comp" && args.compId === 666) await new Promise((r) => setTimeout(r, 1000));
     let result = { ok: true, op };
     if (op === "get_comp") result = { id: args.compId, name: "Hero Title" };
     if (op === "purge_unused_footage" && args.dryRun) {
+      dryRuns++;
       result = stubPurgeEmpty
         ? { solidsOnly: true, scanned: 2, inUse: 2, dryRun: true, wouldRemove: [], wouldRemoveCount: 0 }
         : {
             solidsOnly: true, scanned: 3, inUse: 1, dryRun: true,
-            wouldRemove: [{ id: 7, name: "Black Solid 1", kind: "solid" }, { id: 8, name: "Red Solid 2", kind: "solid" }],
-            wouldRemoveCount: 2,
+            wouldRemove: [{ id: 7, name: "Black Solid 1", kind: "solid" }, { id: 8, name: "Red Solid 2", kind: "solid" }]
+              .concat(dryRuns > 1 && purgeGrows ? [{ id: 9, name: "Blue Solid 3", kind: "solid" }] : []),
+            wouldRemoveCount: dryRuns > 1 && purgeGrows ? 3 : 2,
           };
     }
     if (op === "list_checkpoints") {
@@ -64,6 +67,9 @@ const bridge = http.createServer((req, res) => {
   });
 });
 let stubPurgeEmpty = false;
+/** When set, the second dry run of a call finds one more unused solid than the first. */
+let purgeGrows = false;
+let dryRuns = 0;
 const wss = new WebSocketServer({ server: bridge, path: "/events" });
 await new Promise((r) => bridge.listen(0, "127.0.0.1", r));
 const port = bridge.address().port;
@@ -71,7 +77,7 @@ assert.notEqual(port, 7777, "must not bind the panel's port");
 process.env.AE_MCP_PORT = String(port);
 
 const { createServer } = await import(dist("server.js"));
-const { confirmWithUser, notRunMessage, CONFIRMED_OPS } = await import(dist("tools", "confirm.js"));
+const { confirmWithUser, notRunMessage, cannotElicit, CONFIRMED_OPS } = await import(dist("tools", "confirm.js"));
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { ElicitRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
@@ -208,25 +214,87 @@ await check("other tools never ask", async () => {
   assert.deepEqual([...CONFIRMED_OPS].sort(), ["delete_comp", "purge_unused_footage", "revert_comp"]);
 });
 
-await check("no write lease is held while the person decides", async () => {
+await check("a later write from the same session waits behind a pending confirmation", async () => {
   seen.length = 0;
   reply = { action: "accept", content: {} };
   let release;
   hold = new Promise((r) => (release = r));
   const pending = asked.client.callTool({ name: "delete_comp", arguments: { compId: 10 } });
-  // Wait until the prompt is open.
   while (!seen.some((s) => s.op === "get_comp")) await new Promise((r) => setTimeout(r, 5));
-  await new Promise((r) => setTimeout(r, 20));
-  const other = await Promise.race([
-    asked.client.callTool({ name: "set_comp", arguments: { compId: 11, name: "x" } }),
-    new Promise((_, rej) => setTimeout(() => rej(new Error("set_comp waited behind an open prompt")), 2000)),
-  ]);
-  assert.equal(other.isError, undefined, text(other));
+  let laterDone = false;
+  const later = asked.client.callTool({ name: "set_comp", arguments: { compId: 11, name: "x" } }).then((r) => { laterDone = true; return r; });
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(laterDone, false, "a write issued after the confirmed call ran while the prompt was open");
+  assert.ok(!ops().includes("set_comp"));
   release();
   hold = null;
-  const res = await pending;
+  const [res, other] = await Promise.all([pending, later]);
   assert.equal(res.isError, undefined, text(res));
-  assert.deepEqual(ops(), ["get_comp", "set_comp", "delete_comp"]);
+  assert.equal(other.isError, undefined, text(other));
+  assert.deepEqual(ops(), ["get_comp", "delete_comp", "set_comp"], "the agent's order was not kept");
+});
+
+await check("reads are not held by a pending confirmation", async () => {
+  seen.length = 0;
+  let release;
+  hold = new Promise((r) => (release = r));
+  const pending = asked.client.callTool({ name: "delete_comp", arguments: { compId: 10 } });
+  while (!seen.some((s) => s.op === "get_comp")) await new Promise((r) => setTimeout(r, 5));
+  const read = await Promise.race([
+    asked.client.callTool({ name: "list_comps", arguments: {} }),
+    new Promise((_, rej) => setTimeout(() => rej(new Error("a read waited behind an open prompt")), 2000)),
+  ]);
+  assert.equal(read.isError, undefined, text(read));
+  release();
+  hold = null;
+  await pending;
+});
+
+await check("purge: refused, nothing removed, when the unused set changed after the user approved it", async () => {
+  seen.length = 0;
+  dryRuns = 0;
+  purgeGrows = true;
+  reply = { action: "accept", content: {} };
+  const res = await asked.client.callTool({ name: "purge_unused_footage", arguments: {} });
+  purgeGrows = false;
+  assert.equal(res.isError, true, text(res));
+  assert.match(text(res), /changed after the user confirmed/);
+  assert.match(text(res), /Nothing in the After Effects project was changed/);
+  assert.ok(!seen.some((s) => s.op === "purge_unused_footage" && !s.args.dryRun), "the real purge was sent");
+});
+
+await check("purge: the same set at write time is purged", async () => {
+  seen.length = 0;
+  dryRuns = 0;
+  reply = { action: "accept", content: {} };
+  const res = await asked.client.callTool({ name: "purge_unused_footage", arguments: {} });
+  assert.equal(res.isError, undefined, text(res));
+  assert.deepEqual(seen.map((s) => [s.op, !!s.args.dryRun]), [
+    ["purge_unused_footage", true], ["purge_unused_footage", true], ["purge_unused_footage", false],
+  ]);
+});
+
+await check("an answer that fails the prompt's schema is a refusal, not a run without the choice", async () => {
+  seen.length = 0;
+  reply = { action: "accept", content: { saveCurrent: "yes" } };
+  const res = await asked.client.callTool({ name: "revert_comp", arguments: { checkpointId: 50 } });
+  assert.equal(res.isError, true, text(res));
+  assert.match(text(res), /was not run/);
+  assert.ok(!ops().includes("revert_comp"), `revert_comp reached the bridge: ${ops()}`);
+});
+
+await check("a pre-read that times out says no write was sent, not that one may still land", async () => {
+  seen.length = 0;
+  prompts.length = 0;
+  process.env.AE_MCP_OP_TIMEOUT_MS = "200";
+  const res = await asked.client.callTool({ name: "delete_comp", arguments: { compId: 666 } });
+  delete process.env.AE_MCP_OP_TIMEOUT_MS;
+  assert.equal(res.isError, true);
+  assert.match(text(res), /delete_comp was not run/);
+  assert.match(text(res), /Nothing that changes the project was sent/);
+  assert.doesNotMatch(text(res), /may still/i);
+  assert.equal(prompts.length, 0);
+  await new Promise((r) => setTimeout(r, 1000)); // let the stub finish the slow read
 });
 
 await check("the call cancelled while the prompt is open runs nothing", async () => {
@@ -257,6 +325,19 @@ await check("no answer in time is a refusal, never a yes", async () => {
   assert.equal(out.proceed, false);
   assert.match(out.message, /nobody answered/);
   assert.match(out.message, /Nothing in the After Effects project was changed/);
+});
+
+await check("any other prompt failure refuses", async () => {
+  for (const err of [
+    Object.assign(new Error("Elicitation response content does not match requested schema"), { code: -32602 }),
+    Object.assign(new Error("User dismissed"), { code: -1 }),
+    new Error("transport closed"),
+  ]) {
+    const out = await confirmWithUser("delete_comp", { compId: 1 }, prompt, async () => { throw err; });
+    assert.equal(out.proceed, false, err.message);
+    assert.match(out.message, /was not run/);
+  }
+  assert.equal(cannotElicit(new Error("Client does not support form elicitation.")), true);
 });
 
 await check("a client that advertised elicitation but cannot show it gets today's behaviour", async () => {

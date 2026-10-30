@@ -47,7 +47,7 @@ import { AeError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, 
 import { resolveRunJsxSource, type ResolvedRunJsxArgs, type RunJsxArgs } from "./tools/runJsxSource.js";
 import { runJsxViaServer } from "./tools/runJsxAssembly.js";
 import { toolAnnotations } from "./tools/annotations.js";
-import { CONFIRMED_OPS, CONFIRM_TIMEOUT_MS, buildPrompt, clientCanElicit, confirmWithUser, type ConfirmPrompt } from "./tools/confirm.js";
+import { CONFIRMED_OPS, CONFIRM_TIMEOUT_MS, buildPrompt, clientCanElicit, confirmWithUser, notRunMessage, preReadFailureMessage, type ConfirmPrompt } from "./tools/confirm.js";
 import {
   disabledOps,
   disabledToolMessage,
@@ -816,15 +816,33 @@ export function createServer(opts: CreateServerOptions = {}) {
         };
     // Ask the person first, for the few tools that throw work away, when — and
     // only when — the client can show a prompt (issue #245; tools/confirm.ts).
-    // Before the lease, on purpose: a person reading a dialog must not hold
-    // every other write, in this session or (through the front desk) any
-    // other. The pre-read is a read and takes no lease either.
+    // Only this session's own place in line is held while they decide
+    // (`reserve`): its later writes queue behind the confirmation, so they
+    // cannot land before it, and no other session waits on a dialog. The
+    // front desk's lock is taken after the answer (`withDesk`).
+    let lease: WriteLease | null = null;
     if (CONFIRMED_OPS.has(name) && clientCanElicit(server.getClientCapabilities())) {
+      let reserved: WriteLease;
+      try {
+        reserved = await line.reserve(name, extra?.signal);
+      } catch (e) {
+        return fail(name, (e as Error).message);
+      }
+      let readOp = "";
+      const preRead = (op: string, a: Record<string, unknown>, write: boolean) => {
+        readOp = op;
+        return line.runOp(op, a, { write, onWait });
+      };
+      // A pre-read that fails is answered like the forward would be, except a
+      // timeout: its sentence says the op may still land, and none was sent.
+      const preReadFailure = (e: unknown) =>
+        e instanceof BridgeTimeoutError ? errorResult(preReadFailureMessage(name, readOp, e)) : bridgeFailure(e, 0);
       let prompt: ConfirmPrompt | null;
       try {
-        prompt = await buildPrompt(name, args as Record<string, unknown>, (op, a) => line.runOp(op, a, { write: false, onWait }));
+        prompt = await buildPrompt(name, args as Record<string, unknown>, (op, a) => preRead(op, a, false));
       } catch (e) {
-        return bridgeFailure(e, 0);
+        reserved.release();
+        return preReadFailure(e);
       }
       if (prompt) {
         const outcome = await confirmWithUser(
@@ -836,13 +854,36 @@ export function createServer(opts: CreateServerOptions = {}) {
           extra.signal,
           (m) => logger.warn(m)
         );
-        if (!outcome.proceed) return errorResult(outcome.message);
+        if (!outcome.proceed) {
+          reserved.release();
+          return errorResult(outcome.message);
+        }
         args = outcome.args;
+      }
+      try {
+        lease = await line.withDesk(name, reserved, extra?.signal, onWait);
+      } catch (e) {
+        // withDesk has released the reservation.
+        return fail(name, (e as Error).message);
+      }
+      // What the person approved, re-read under the full lease: no other MCP
+      // write can land between this read and the forward.
+      if (prompt?.verify) {
+        let why: string | null;
+        try {
+          why = await prompt.verify((op, a) => preRead(op, a, true));
+        } catch (e) {
+          lease.release();
+          return preReadFailure(e);
+        }
+        if (why) {
+          lease.release();
+          return errorResult(notRunMessage(name, why));
+        }
       }
     }
 
-    let lease: WriteLease | null = null;
-    if (isWriteOp(name)) {
+    if (lease === null && isWriteOp(name)) {
       try {
         lease = await line.acquire(name, extra?.signal, onWait);
       } catch (e) {

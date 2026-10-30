@@ -395,37 +395,52 @@ would otherwise grow it without limit.
 `delete_comp`, `purge_unused_footage` and `revert_comp` ask the person before
 they run — through MCP elicitation, and only when the client's capabilities
 carry `elicitation.form` (the SDK normalises a bare `elicitation: {}` to that).
-Everything is in `tools/confirm.ts`; `server.ts` calls it after the panel gate
-and **before** the write lease. `tests/unit/elicitation.mjs` holds every rule
-below against the real server and an SDK client with and without the
-capability.
+Everything is in `tools/confirm.ts`; `server.ts` calls it after the panel gate.
+`tests/unit/elicitation.mjs` holds every rule below against the real server
+and an SDK client with and without the capability.
 
 - **A client without the capability is unchanged, byte for byte.** No prompt,
-  no pre-read, no extra argument, no wait. A client that advertised it and then
-  fails to show the prompt (anything but a timeout) also gets today's
-  behaviour, logged to stderr: refusing there would make the tool unusable on
-  that client for good, and running is what every other client gets.
-- **No answer is never a yes.** Decline, cancel, ten minutes without an answer
-  (`CONFIRM_TIMEOUT_MS`; the SDK's 60s default is a timeout for machines) and
-  the tool call being cancelled all return `isError` with "was not run …
-  Nothing in the After Effects project was changed". Not routed through
-  `fail()`: it is the person's answer, and no journal entry applies to it.
-- **No lease while a person decides — the choice, and its price.** Holding the
-  lease would stall every write in this session and, through the front desk,
-  every other session on the same After Effects for as long as a dialog sits
-  unread; writers queued behind it would hit `AE_MCP_WRITE_QUEUE_WAIT_MS` and
-  fail for a bridge that was fine. So the lease is taken after the answer. The
-  price is that the project can change between the answer and the write, and
-  that a write the same agent issued *concurrently* can run first. The three
-  ops re-check what they need when they run — a comp that is gone is refused,
-  a purge reports what it actually removed — so a stale prompt costs a
-  refusal, never a wrong success.
+  no pre-read, no extra argument, no wait, the plain `acquire`. A client that
+  advertised it but answers "method not found" (or the SDK refuses for want of
+  the capability) also gets today's behaviour, logged to stderr: refusing
+  there would make the tool unusable on that client for good. That is the
+  *only* fallback (`cannotElicit`) — any other prompt failure may be a person
+  who said no (an accept whose content failed the SDK's schema check, a client
+  signalling dismissal as an error) and is refused.
+- **No answer is never a yes.** Decline, cancel, five minutes without an
+  answer (`CONFIRM_TIMEOUT_MS`; the SDK's 60s default is a timeout for
+  machines), a failed prompt and the tool call being cancelled all return
+  `isError` with "was not run … Nothing in the After Effects project was
+  changed". Not routed through `fail()`: it is the person's answer, and no
+  journal entry applies to it.
+- **The lease is taken in two halves, and that is the choice.** Before the
+  prompt the call takes only this session's own place in line
+  (`SessionLine.reserve` — the per-session `WriteQueue`); after the answer it
+  takes the front desk's lock on top (`withDesk`); `acquire` is now just those
+  two in a row. So the order the agent issued writes in is kept — a write
+  issued after a `revert_comp` cannot land before it and then be wiped by it —
+  while no *other* session on the same After Effects waits on a dialog. The
+  cost falls only on this session: its later writes wait for the answer.
+  `CONFIRM_TIMEOUT_MS` sits below the queue's own wait
+  (`AE_MCP_WRITE_QUEUE_WAIT_MS`, 600s) so the prompt gives up before they do.
+  Reads take no lease and are never held. With no front desk, the per-session
+  queue *is* the whole lock, and the one held is this process's.
+- **What was approved is what runs.** Another session (or the person in After
+  Effects) can still change the project during the prompt. `delete_comp` and
+  `revert_comp` re-resolve their target when they run, so a stale prompt costs
+  a refusal. `purge_unused_footage` removes whatever is unused at the time, not
+  a list — so the prompt's `verify` re-reads the dry run under the full lease
+  and refuses, nothing changed, unless it is the same item ids. Done on the
+  server, not as a new panel argument, because the panel does not update
+  itself.
 - **The prompt names its subject.** A pre-read (`get_comp`,
-  `list_checkpoints`, a `dryRun` purge) is a read: no lease, no undo step. A
-  pre-read that fails is answered like the forward would be (`bridgeFailure`);
-  nothing has changed. Nothing is asked when there is nothing to ask — a dry
-  run, a purge that would remove nothing, a checkpoint id the list does not
-  know (the tool's own refusal is the better answer).
+  `list_checkpoints`, a `dryRun` purge) is a read: no undo step. A pre-read
+  that fails is answered like the forward would be (`bridgeFailure`), except a
+  timeout: the bridge's sentence says the op may still land, true of a write
+  and false here, so `preReadFailureMessage` says no change was sent. Nothing
+  is asked when there is nothing to ask — a dry run, a purge that would remove
+  nothing, a checkpoint id the list does not know (the tool's own refusal is
+  the better answer).
 - **Why only three.** Every call is one undo step, and a prompt on every
   `delete_layer` trains a person to click through the one on `delete_comp`.
   Tools take ids, so there is no ambiguous target to ask about. `run_batch`

@@ -168,8 +168,9 @@ put the question to the person before anything changes — `revert_comp` also
 offers to save the current state first. A declined, dismissed or unanswered
 prompt comes back as an error saying the tool **was not run** and nothing was
 changed: that is the user's answer, not a failure to work around. Tell them it
-was not done and do not call it again unless they ask. On other clients nothing
-is asked and the calls run as before.
+was not done and do not call it again unless they ask. Writes you issue while
+the prompt is open wait behind it, so they still land in the order you issued
+them. On other clients nothing is asked and the calls run as before.
 
 ## Screenshots are a diagnostic, not a feedback loop
 

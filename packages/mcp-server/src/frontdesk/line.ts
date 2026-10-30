@@ -118,7 +118,23 @@ export class SessionLine {
   // ------------------------------------------------------------ write lock
 
   async acquire(op: string, signal?: AbortSignal, onWait?: OnWait): Promise<WriteLease> {
-    const localLease = await this.local.acquire(op, signal);
+    return this.withDesk(op, await this.reserve(op, signal), signal, onWait);
+  }
+
+  /**
+   * Take this session's own place in line and nothing more: later writes from
+   * this session queue behind it, and no other session is held. For a write
+   * that waits on a person before it runs (a confirmation, issue #245) — its
+   * place in this session's order is kept while it waits, without stalling
+   * every other session on the same After Effects behind a dialog. Hand the
+   * result to `withDesk` once the write is ready to go.
+   */
+  reserve(op: string, signal?: AbortSignal): Promise<WriteLease> {
+    return this.local.acquire(op, signal);
+  }
+
+  /** The second half of `acquire`: the front desk's lock, on top of a reserved place. Releases it on failure. */
+  async withDesk(op: string, localLease: WriteLease, signal?: AbortSignal, onWait?: OnWait): Promise<WriteLease> {
     if (this.mode.kind === "off") return localLease;
     let taken: { slot: Slot; wait: GrantWait | null } | null;
     try {
