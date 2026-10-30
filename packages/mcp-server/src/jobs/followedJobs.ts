@@ -132,8 +132,8 @@ export class FollowedJobs {
     const message =
       `Lost track of batch ${jobId}: ${why}. The last progress the panel reported was ${s.progress}${of} ops; it may ` +
       `have run further, and part of it may have been applied. Do NOT send the batch again — read the comp back and ` +
-      `send only what is missing. The panel can now be updated: run setup_panel, then ask the user to quit and ` +
-      `reopen After Effects.`;
+      `send only what is missing. The panel can now be updated: ask the user to quit After Effects completely, ` +
+      `then run setup_panel, then ask them to reopen After Effects.`;
     if (this.jobs.fail(jobId, message)) logger.warn(message);
     this.drop(jobId);
   }

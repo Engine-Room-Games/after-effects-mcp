@@ -91,7 +91,8 @@ assert.match(restart.message, /will not help/i, "must say re-running setup_panel
 const update = assessPanel(run(OLD, OLD), OLD_DISK);
 check("panel predates the server", update.state, "update-needed");
 assert.match(update.message, /setup_panel/);
-assert.match(update.message, /quit and reopen/i);
+// Issue #262: quit first, then setup_panel, then reopen — setup_panel refuses while AE is open.
+assert.match(update.message, /quit After Effects completely.*run setup_panel.*reopen After Effects/s);
 
 // A panel too old to report one hash or both. Every panel since #243 reports
 // both, so this is certain, and since #243 it is enforced: "unknown" would let

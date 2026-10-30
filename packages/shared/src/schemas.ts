@@ -1486,6 +1486,8 @@ export const SetupPanel = z.object({
     .describe("Also set Adobe's PlayerDebugMode (AE needs it to load this unsigned panel) and CEP's LogLevel where unset, so CEP logs why a panel fails to load. Default true."),
   force: z.boolean().optional().meta({ default: false })
     .describe("Replace an existing symlinked (development) install with a copy. Default false."),
+  afterEffectsClosed: z.boolean().optional().meta({ default: false })
+    .describe("Only after setup_panel reports it could not tell whether After Effects is open, and the user has confirmed it is completely quit. Ignored when After Effects is detected running — it always refuses then. Default false."),
 }).strict();
 
 /**

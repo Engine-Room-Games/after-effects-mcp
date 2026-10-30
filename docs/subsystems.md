@@ -48,7 +48,13 @@ different panel.
 | running | the panel AE actually loaded — what answers *now* | `bundleHash` + `clientHash` on `/health` |
 
 They diverge for the entire window between `setup_panel` and restarting AE,
-which is exactly when calls break. **Only the running hashes are worth gating
+which is exactly when calls break. Since issue #262 `setup_panel` refuses while
+After Effects is running — installing into an open AE is how `partial-install`
+happens — so that window is normally just "installed, AE not yet reopened"; it
+still exists for an install made by an older server, by hand, or by AE being
+launched mid-install. Every message that sends the user to `setup_panel` says
+quit → `setup_panel` → reopen, in that order; `restart-needed` alone says only
+"quit and reopen", because the files are already current. **Only the running hashes are worth gating
 on.** `setup/panelVersion.ts` maps them onto six states, and the distinction
 that matters most to a user is `restart-needed` — telling someone to run
 `setup_panel` again there wastes their time, so the message says so explicitly.

@@ -35,7 +35,7 @@ import {
   cepLogLevelCommand,
   cepLogPaths,
   debugModeLocation,
-  isAfterEffectsRunning,
+  afterEffectsProcess,
   isDebugModeOn,
 } from "./platform.js";
 
@@ -80,8 +80,11 @@ export interface CheckSetupOptions {
   source?: string | null;
   /** Tests only: the PlayerDebugMode reading, instead of asking Adobe's preferences. */
   debugMode?: { on: boolean; detail: string };
-  /** Tests only: whether After Effects is running, instead of asking the OS. */
-  afterEffectsRunning?: boolean;
+  /**
+   * Tests only: whether After Effects is running, instead of asking the OS.
+   * "unknown" is the process check failing to run (issue #262).
+   */
+  afterEffectsRunning?: boolean | "unknown";
 }
 
 export interface BridgeProbe {
@@ -242,7 +245,7 @@ export function debugModeCheck(
     detail: debugMode.detail,
     fix: debugMode.on
       ? undefined
-      : `Run the setup_panel tool. After Effects only loads unsigned panels when ${debugModeLocation()} is set.`,
+      : `Quit After Effects completely if it is open, then run the setup_panel tool, then reopen After Effects. It only loads unsigned panels when ${debugModeLocation()} is set.`,
   };
 }
 
@@ -343,7 +346,9 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
               : " (self-signed: META-INF present)"
         }`
       : `not present at ${installed}`,
-    fix: isInstalled ? undefined : "Run the setup_panel tool to install it.",
+    fix: isInstalled
+      ? undefined
+      : "Quit After Effects completely if it is open, then run the setup_panel tool to install it, then reopen After Effects.",
   });
 
   if (isInstalled && isSignedPanel(installed)) {
@@ -397,12 +402,27 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     });
   }
 
-  const running = opts.afterEffectsRunning ?? (await isAfterEffectsRunning());
+  // The same helper setup_panel asks (issue #262), so the two never disagree
+  // about whether After Effects is open. A check that could not run is its own
+  // answer — "unknown", in `evidence` — never quietly "not running": setup_panel
+  // refuses on it, and nextSteps has to say so.
+  const ae =
+    opts.afterEffectsRunning === undefined
+      ? await afterEffectsProcess()
+      : opts.afterEffectsRunning === "unknown"
+        ? { state: "unknown" as const, detail: "the process check could not run" }
+        : { state: opts.afterEffectsRunning ? ("running" as const) : ("not-running" as const), detail: "" };
+  const running = ae.state === "running";
   checks.push({
     name: "afterEffectsRunning",
     ok: running,
-    detail: running ? "running" : "not running",
-    fix: running ? undefined : "Launch After Effects. The panel starts automatically with it.",
+    detail: running ? "running" : ae.state === "unknown" ? `could not tell (${ae.detail})` : "not running",
+    fix: running
+      ? undefined
+      : ae.state === "unknown"
+        ? "These tools could not check whether After Effects is running. If setup_panel is needed, ask the user to confirm After Effects is completely quit, then run it with afterEffectsClosed:true."
+        : "Launch After Effects. The panel starts automatically with it.",
+    ...(ae.state === "unknown" ? { evidence: "unknown" } : {}),
   });
 
   // The socket is the authority. The port file is asked, and so is the port
@@ -528,7 +548,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
       name: "panelIdentity",
       ok: false,
       detail: `a panel is answering on port ${bridge.answering.port}, but not the one at ${installed}`,
-      fix: `An older install is serving the bridge. Look in ${cepExtensionsDir()} for a differently named folder, remove it, then run setup_panel and restart After Effects.`,
+      fix: `An older install is serving the bridge. Quit After Effects completely, then look in ${cepExtensionsDir()} for a differently named folder and remove it, then run setup_panel, then reopen After Effects.`,
     });
   }
 
@@ -714,32 +734,55 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
     signatureBroken;
   const needsInstall = by("panelInstalled")?.ok === false || brokenInstall;
   const needsDebug = by("cepDebugMode")?.ok === false;
-  const aeRunning = by("afterEffectsRunning")?.ok === true;
+  // A process check that could not run (issue #262) is not "closed": setup_panel
+  // refuses on it. A panel answering on the bridge settles it — AE is open.
+  const aeCheckUnknown = by("afterEffectsRunning")?.evidence === "unknown";
+  const aeRunning = by("afterEffectsRunning")?.ok === true || (aeCheckUnknown && by("bridgeReachable")?.ok === true);
+  const aeUnknown = aeCheckUnknown && !aeRunning;
 
   // Closing AE first is part of the remedy, not an afterthought: installing
-  // while it holds the panel's files open is what produces this state.
-  if (brokenInstall && aeRunning) {
+  // while it holds the panel's files open is what produces a half-updated
+  // install, and setup_panel refuses while it is open (issue #262). So any
+  // step that runs setup_panel is preceded by "quit" and followed by "reopen",
+  // in that order, never "setup_panel, then restart".
+  const identityBroken = by("panelIdentity")?.ok === false;
+  const willInstall = signatureBroken || needsDebug || needsInstall;
+  if (willInstall && aeRunning) {
     steps.push(
-      signatureBroken && by("panelUpToDate")?.ok !== false && by("panelDependencies")?.ok !== false
-        ? "Quit After Effects completely — the panel's files have to be replaced while it is closed."
-        : "Quit After Effects completely — installing while it is open can leave the panel half-updated."
+      brokenInstall
+        ? signatureBroken && by("panelUpToDate")?.ok !== false && by("panelDependencies")?.ok !== false
+          ? "Quit After Effects completely — the panel's files have to be replaced while it is closed."
+          : "Quit After Effects completely — installing while it is open can leave the panel half-updated."
+        : "Quit After Effects completely — setup_panel installs only while it is closed, because After Effects holds the panel's files."
     );
   }
-  if (signatureBroken) {
-    steps.push("Run the setup_panel tool with force:true — the installed files no longer match the panel's signature, and a forced install puts back exactly what these tools ship.");
-  } else if (needsDebug || needsInstall) {
-    steps.push("Run the setup_panel tool — it installs the After Effects panel and enables the Adobe preference that lets AE load it.");
+  if (willInstall && aeUnknown) {
+    steps.push(
+      "Ask the user to make sure After Effects is completely quit, and to confirm it — these tools could not check whether it is running, and setup_panel installs only while it is closed."
+    );
   }
-  const identity = by("panelIdentity");
-  if (identity && identity.ok === false) {
-    steps.push(identity.fix!);
+  if (identityBroken) {
+    steps.push(
+      `Look in ${cepExtensionsDir()} for a differently named AE MCP panel folder and remove it — an older install is serving the bridge.`
+    );
+  }
+  // With the check unknown, setup_panel needs the user's word that AE is quit.
+  const confirmArg = aeUnknown ? ", with afterEffectsClosed:true once the user has confirmed After Effects is quit" : "";
+  if (signatureBroken) {
+    steps.push(`Run the setup_panel tool with force:true${confirmArg} — the installed files no longer match the panel's signature, and a forced install puts back exactly what these tools ship.`);
+  } else if (willInstall) {
+    steps.push(`Run the setup_panel tool${confirmArg} — it installs the After Effects panel and enables the Adobe preference that lets AE load it.`);
   }
   if (!aeRunning) {
     // Installing before AE is open is the cheaper order: the panel is simply
     // there when it launches, with no restart to ask for.
     steps.push(needsInstall ? "Open After Effects — the panel loads with it." : "Open After Effects.");
-  } else if (needsInstall || by("panelRunningCurrent")?.ok === false) {
-    steps.push(brokenInstall ? "Reopen After Effects." : "Quit and reopen After Effects so it picks up the panel.");
+  } else if (willInstall) {
+    steps.push("Reopen After Effects — the panel loads with it.");
+  } else if (by("panelRunningCurrent")?.ok === false) {
+    // Restart-needed: the files on disk are already current, only the running
+    // copy is old. No setup_panel — it would change nothing.
+    steps.push("Quit and reopen After Effects so it picks up the panel.");
   }
   if (needsDebug && !signatureBroken) {
     steps.push(

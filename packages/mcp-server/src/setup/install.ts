@@ -11,11 +11,11 @@ import {
 } from "./paths.js";
 import { describeSignatureProblems, isSignedPanel, signatureIntact, signatureProblems } from "./panelSignature.js";
 import {
+  afterEffectsProcess,
   CEP_LOG_LEVEL,
   debugModeLocation,
   enableDebugMode,
   ensureCepLogging,
-  isAfterEffectsRunning,
   isDebugModeOn,
 } from "./platform.js";
 
@@ -23,6 +23,18 @@ export interface InstallResult {
   ok: boolean;
   panelPath: string;
   actions: string[];
+  /**
+   * Whether this call changed anything After Effects loads — the panel's files
+   * or the debug preference an unsigned panel needs (issue #163).
+   */
+  changed: boolean;
+  /**
+   * Since #262 setup_panel installs only with After Effects closed, so the next
+   * step after an install is to open it, and this is false. It is true only
+   * when After Effects was found running once the install had finished — it
+   * was opened mid-install, may have loaded a half-written panel, and needs
+   * quitting, setup_panel again, and reopening.
+   */
   restartAfterEffects: boolean;
   rebootRecommended: boolean;
   notes: string[];
@@ -50,14 +62,52 @@ export const SIGNED_INSTALL_OVERWRITTEN_NOTE =
   "This fresh copy is NOT signed, so it loads only through PlayerDebugMode. " +
   "On a machine where CEP refuses unsigned panels despite PlayerDebugMode — the issue #91 case, seen on Windows — " +
   "After Effects will not load it until it is signed again: repeat the ZXPSignCmd steps from check_setup's " +
-  "panelSignature nextSteps on the newly installed folder, then restart After Effects.";
+  "panelSignature nextSteps on the newly installed folder before opening After Effects.";
 
-/** The Adobe preference calls installPanel makes; replaceable in tests. */
+/** The Adobe preference and process calls installPanel makes; replaceable in tests. */
 export interface PreferenceCalls {
   isDebugModeOn: typeof isDebugModeOn;
   enableDebugMode: typeof enableDebugMode;
   ensureCepLogging: typeof ensureCepLogging;
-  isAfterEffectsRunning: typeof isAfterEffectsRunning;
+  afterEffectsProcess: typeof afterEffectsProcess;
+}
+
+/**
+ * setup_panel refused before changing anything (issue #262). Thrown, not
+ * returned: nothing was installed, and an `ok` field the reader has to notice
+ * is how a refusal gets relayed as a success.
+ */
+export class SetupPanelRefusedError extends Error {
+  constructor(public reason: "after-effects-running" | "after-effects-unknown", message: string) {
+    super(message);
+    this.name = "SetupPanelRefusedError";
+  }
+}
+
+/** The refusal when After Effects is found running. `found` is what the process check matched. */
+export function afterEffectsRunningRefusal(found: string): string {
+  return (
+    `After Effects is open (found: ${found}), so setup_panel installed nothing — nothing has been changed. ` +
+    "The panel cannot be installed while After Effects is open: it holds the panel's files, and the install comes " +
+    "out half-updated. Ask the user to quit After Effects completely, then run setup_panel again, then reopen After Effects."
+  );
+}
+
+/**
+ * The refusal when the process check itself failed. Refusing, rather than
+ * installing on the assumption that AE is closed, because the cost is lopsided:
+ * a wrong "it is closed" produces exactly the half-updated install #262 is
+ * about, silently, while a refusal costs the user one confirmation. And the
+ * confirmation is a way through, so a machine where the check can never run
+ * (a locked-down Windows where `tasklist` is refused) is not stuck for good.
+ */
+export function afterEffectsUnknownRefusal(why: string): string {
+  return (
+    `setup_panel could not tell whether After Effects is open (${why}), so it installed nothing — nothing has been ` +
+    "changed. Installing while After Effects is open leaves the panel half-updated, so it does not install blind. " +
+    "Ask the user to make sure After Effects is completely quit. Once they confirm it is, run setup_panel again " +
+    "with afterEffectsClosed:true, then have them reopen After Effects."
+  );
 }
 
 /** Added to the action when PlayerDebugMode is turned on for a signed panel, which does not need it. */
@@ -83,11 +133,18 @@ export const DEBUG_MODE_FALLBACK_NOTE =
  * never writes the real ones.
  */
 export async function installPanel(
-  opts: { enableDebugMode?: boolean; force?: boolean; source?: string; prefs?: Partial<PreferenceCalls> } = {}
+  opts: {
+    enableDebugMode?: boolean;
+    force?: boolean;
+    /** The user confirmed AE is closed. Honoured only when the process check could not run — never over a running AE. */
+    afterEffectsClosed?: boolean;
+    source?: string;
+    prefs?: Partial<PreferenceCalls>;
+  } = {}
 ): Promise<InstallResult> {
   const actions: string[] = [];
   const notes: string[] = [];
-  const prefs: PreferenceCalls = { isDebugModeOn, enableDebugMode, ensureCepLogging, isAfterEffectsRunning, ...opts.prefs };
+  const prefs: PreferenceCalls = { isDebugModeOn, enableDebugMode, ensureCepLogging, afterEffectsProcess, ...opts.prefs };
 
   if (!isSupportedPlatform()) {
     throw new Error(
@@ -128,6 +185,23 @@ export async function installPanel(
     );
   }
 
+  // Issue #262: installing while After Effects is open does not work — it holds
+  // the extension's files, which is how half-updated installs happen. Asked
+  // here, after the read-only checks above and before the first write of any
+  // kind (panel files or Adobe preferences), so a refusal changes nothing.
+  const ae = await prefs.afterEffectsProcess();
+  if (ae.state === "running") {
+    throw new SetupPanelRefusedError("after-effects-running", afterEffectsRunningRefusal(ae.detail));
+  }
+  if (ae.state === "unknown") {
+    if (!opts.afterEffectsClosed) {
+      throw new SetupPanelRefusedError("after-effects-unknown", afterEffectsUnknownRefusal(ae.detail));
+    }
+    notes.push(
+      `Could not check whether After Effects is open (${ae.detail}); installed on the user's word that it is closed.`
+    );
+  }
+
   const target = installedPanelDir();
 
   // A symlinked install is somebody's live dev setup; replacing it with a copy
@@ -139,6 +213,7 @@ export async function installPanel(
       ok: true,
       panelPath: target,
       actions: [],
+      changed: false,
       restartAfterEffects: false,
       rebootRecommended: false,
       notes: [
@@ -207,8 +282,8 @@ export async function installPanel(
         throw new Error(
           `The installed panel at ${target} no longer matches its signature` +
             (problems ? `: ${describeSignatureProblems(problems)}` : "") +
-            ". After Effects would refuse to load it. Quit After Effects, run setup_panel again with force:true, " +
-            "and if this repeats please report it."
+            ". After Effects would refuse to load it. Keep After Effects closed, run setup_panel again with force:true, " +
+            "then open After Effects; if this repeats please report it."
         );
       }
     }
@@ -259,34 +334,35 @@ export async function installPanel(
   }
 
   if (wasSigned) notes.push(SIGNED_INSTALL_OVERWRITTEN_NOTE);
-  // A restart loads what changed on disk or in Adobe's preferences. When
-  // neither did, this call gives no reason for one — but the disk is not what
-  // After Effects is running, so an EARLIER install may still be waiting for
-  // its restart; check_setup compares against the running panel and says so.
-  //
-  // And only a running After Effects can be restarted: when it is closed the
-  // panel simply loads the next time it opens, so the answer is "open it",
-  // never "restart it" (live test of #182).
+  // After Effects was closed when the install began (checked above), so the
+  // next step is to open it — never "restart it" (live test of #182). Asked
+  // again now only to catch AE being launched mid-install: it may then have
+  // loaded a half-written panel, and the remedy is the full sequence.
   const changed = !unchanged || debugModeEnabledNow;
-  const aeRunning = await prefs.isAfterEffectsRunning();
-  const restartAfterEffects = changed && aeRunning;
-  if (changed && !aeRunning) {
-    notes.push("After Effects is not running, so nothing needs restarting: the panel loads the next time it is opened.");
-  } else if (!changed) {
+  const after = changed && ae.state === "not-running" ? await prefs.afterEffectsProcess() : null;
+  const restartAfterEffects = after?.state === "running";
+  if (restartAfterEffects) {
     notes.push(
-      "Nothing this call does needs After Effects restarted: the installed panel was already this version. " +
-        "If check_setup still reports the running panel as out of date, an earlier install has not been loaded " +
-        "yet, and quitting and reopening After Effects is what loads it."
+      `After Effects was opened while setup_panel was installing (found: ${after!.detail}), so it may have loaded a ` +
+        "half-written panel. Ask the user to quit After Effects completely, then run setup_panel again, then reopen After Effects."
+    );
+  } else if (changed) {
+    notes.push("Next: open After Effects — the panel loads when it starts. Nothing needs restarting.");
+  } else {
+    notes.push(
+      "Nothing this call does changes what After Effects loads: the installed panel was already this version. " +
+        "Open After Effects — the panel loads when it starts."
     );
   }
   if (rebootRecommended) {
-    notes.push("PlayerDebugMode was just turned on. Quit and reopen After Effects; if the panel still does not connect, restart the Mac once — on some macOS builds the preference only applies after a reboot.");
+    notes.push("PlayerDebugMode was just turned on. Open After Effects; if the panel does not connect, quit it and restart the Mac once — on some macOS builds the preference only applies after a reboot.");
   }
 
   return {
     ok: true,
     panelPath: target,
     actions,
+    changed,
     restartAfterEffects,
     rebootRecommended,
     notes,

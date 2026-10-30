@@ -48,6 +48,8 @@ function assertLost(st, why) {
   assert.match(st.error, /may have been applied/);
   assert.match(st.error, /Do NOT send the batch again/);
   assert.match(st.error, /setup_panel/);
+  // Issue #262: quit first — setup_panel refuses while After Effects is open.
+  assert.match(st.error, /quit After Effects completely, then run setup_panel, then ask them to reopen After Effects\./);
 }
 
 await check("a closed socket that does not come back loses the job", async () => {

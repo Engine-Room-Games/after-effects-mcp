@@ -70,18 +70,99 @@ export async function enableDebugMode(): Promise<number[]> {
   return enabled;
 }
 
-export async function isAfterEffectsRunning(): Promise<boolean> {
+/**
+ * Whether After Effects is running, as one of three answers. "unknown" is when
+ * the question itself could not be asked — the command missing, refused, or
+ * failing in some way other than "nothing matched". setup_panel refuses on
+ * "running" and on "unknown" (issue #262), so the two must never be folded
+ * into "not-running" the way a bare boolean does.
+ *
+ *   macOS:   `pgrep -lf "Adobe After Effects"` — exit 0 with the matches,
+ *            exit 1 when nothing matches; any other outcome is a failure. The
+ *            matches are then narrowed to the application itself (see
+ *            `afterEffectsFromPgrep`): the pattern alone also matches
+ *            `aerender`, its helpers and CEPHtmlEngine, none of which is the
+ *            After Effects that loads the panel.
+ *   Windows: `tasklist /FI "IMAGENAME eq AfterFX.exe" /NH` — narrowed to rows
+ *            whose image name is exactly AfterFX.exe (`afterEffectsFromTasklist`),
+ *            so aerender.exe never counts. A plain non-zero exit with no match is
+ *            read as "nothing matched", as this check always has; a command
+ *            that could not run at all is a failure.
+ *
+ * A render running in `aerender` (render_queue, a render farm) is therefore
+ * "not-running": aerender does not load the CEP panel, so it holds none of
+ * the files setup_panel replaces. `detail` names what was found.
+ */
+export interface AfterEffectsProcess {
+  state: "running" | "not-running" | "unknown";
+  detail: string;
+}
+
+/**
+ * The After Effects application's own process on macOS: the main binary of an
+ * `Adobe After Effects <ver>.app` bundle, `…/Contents/MacOS/After Effects`.
+ * A nested bundle (`…app/Contents/aerendercore.app/…`), a helper under
+ * Frameworks (CEPHtmlEngine), any other executable in Contents/MacOS, and
+ * the `aerender` beside the .app all fail it.
+ */
+//
+// Only the executable named exactly "After Effects": the same MacOS folder also
+// holds dynamiclinkmanager (spawned by aerender with AE quit) and
+// crashpad_handler (lingers after AE quits), and neither loads the panel —
+// measured live on 26.5. The name may be followed only by launch arguments
+// (" -psn_…", or a project path when AE was opened with one).
+const AE_APP_BINARY = /\/Adobe After Effects[^/]*\.app\/Contents\/MacOS\/After Effects(?=$|\s+[-/~"'])/;
+
+export function isAfterEffectsAppCommand(commandLine: string): boolean {
+  return AE_APP_BINARY.test(commandLine.trim());
+}
+
+/** `pgrep -lf` output ("<pid> <command line>" per line) → the answer. */
+export function afterEffectsFromPgrep(stdout: string): AfterEffectsProcess {
+  const lines = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  const app = lines.find((l) => isAfterEffectsAppCommand(l.replace(/^\d+\s+/, "")));
+  const clip = (s: string) => (s.length > 160 ? `${s.slice(0, 160)}…` : s);
+  if (app) return { state: "running", detail: clip(app) };
+  return {
+    state: "not-running",
+    detail: lines.length
+      ? `no After Effects application process (not counted: ${lines.length} other process${lines.length > 1 ? "es" : ""} such as ${clip(lines[0])})`
+      : "no After Effects process",
+  };
+}
+
+/** `tasklist /NH` output → the answer. Only a row whose image name is exactly AfterFX.exe counts. */
+export function afterEffectsFromTasklist(stdout: string): AfterEffectsProcess {
+  const line = stdout.split(/\r?\n/).find((l) => /^afterfx\.exe$/i.test(l.trim().split(/\s+/)[0] ?? ""));
+  return line
+    ? { state: "running", detail: line.trim().replace(/\s+/g, " ") }
+    : { state: "not-running", detail: "no AfterFX.exe process" };
+}
+
+export async function afterEffectsProcess(): Promise<AfterEffectsProcess> {
+  const win = process.platform === "win32";
   try {
-    if (process.platform === "win32") {
+    if (win) {
       const { stdout } = await exec("tasklist", ["/FI", "IMAGENAME eq AfterFX.exe", "/NH"]);
-      return /AfterFX\.exe/i.test(stdout);
+      return afterEffectsFromTasklist(stdout);
     }
-    const { stdout } = await exec("pgrep", ["-f", "Adobe After Effects"]);
-    return stdout.trim().length > 0;
-  } catch {
-    // pgrep exits non-zero when nothing matches; tasklist can too.
-    return false;
+    const { stdout } = await exec("pgrep", ["-lf", "Adobe After Effects"]);
+    return afterEffectsFromPgrep(stdout);
+  } catch (e) {
+    const err = e as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: string };
+    // pgrep's "nothing matched" is exit status 1: an answer, not a failure.
+    if (!win && err.code === 1) return { state: "not-running", detail: "no After Effects process" };
+    if (win && err.code === 1 && afterEffectsFromTasklist(String(err.stdout ?? "")).state === "not-running") {
+      return { state: "not-running", detail: "no AfterFX.exe process" };
+    }
+    const why = (typeof err.stderr === "string" && err.stderr.trim()) || err.message || String(e);
+    return { state: "unknown", detail: `${win ? "tasklist" : "pgrep"} failed: ${why.split("\n")[0].trim()}` };
   }
+}
+
+/** A yes/no view, where "unknown" reads as not running. check_setup uses `afterEffectsProcess` itself. */
+export async function isAfterEffectsRunning(): Promise<boolean> {
+  return (await afterEffectsProcess()).state === "running";
 }
 
 /**

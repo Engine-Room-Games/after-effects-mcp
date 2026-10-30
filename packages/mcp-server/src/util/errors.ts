@@ -10,8 +10,8 @@ export class BridgeUnreachableError extends Error {
       cause ? `Underlying error: ${cause.message}` : "",
       "",
       "Call the check_setup tool to find out why, then relay its nextSteps to the user.",
-      "In most cases the fix is either running setup_panel (installs the panel) or",
-      "simply opening After Effects.",
+      "In most cases the fix is either installing the panel (quit After Effects, run",
+      "setup_panel, then reopen it) or simply opening After Effects.",
     ].filter(Boolean).join("\n");
   }
 }

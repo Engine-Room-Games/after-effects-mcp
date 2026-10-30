@@ -171,6 +171,8 @@ export interface CreateServerOptions {
    * test that builds a server in-process never joins a real session's desk.
    */
   frontDesk?: FrontDeskOptions | null;
+  /** Test seam: stands in for setup/install.ts `installPanel`, so no test touches a real extensions folder. */
+  installPanel?: typeof installPanel;
   /** Test seam: stands in for tools/confirm.ts `confirmWithUser` (issue #245). */
   confirmWithUser?: typeof confirmWithUser;
   /**
@@ -688,7 +690,21 @@ export function createServer(opts: CreateServerOptions = {}) {
         }
         if (name === "setup_panel") {
           const a = schemas.StrictOpSchemas.setup_panel.parse(rawArgs);
-          const installed = await installPanel({ enableDebugMode: a.enableDebugMode, force: a.force });
+          // Throws, changing nothing, while After Effects is open (issue #262).
+          // Caught here rather than by the argument-validation catch below: the
+          // arguments were fine, and "Invalid arguments for setup_panel: …" in
+          // front of a refusal reads as a bad call. Every install failure is
+          // already a complete sentence for the user, so it goes out as it is.
+          let installed: Awaited<ReturnType<typeof installPanel>>;
+          try {
+            installed = await (opts.installPanel ?? installPanel)({
+              enableDebugMode: a.enableDebugMode,
+              force: a.force,
+              afterEffectsClosed: a.afterEffectsClosed,
+            });
+          } catch (e) {
+            return fail(name, (e as Error)?.message ?? String(e));
+          }
           // The panel on disk just changed; whatever was cached about the
           // running one is now the wrong half of the comparison.
           panelGate.invalidate();
