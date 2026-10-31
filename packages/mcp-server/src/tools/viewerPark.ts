@@ -65,12 +65,16 @@ export interface UnparkAnswer {
   note?: string;
   /**
    * With `unparked: false`: this call's park was ended by another call before
-   * its unpark — another call's park took it over, a dry-run park undid it, or
-   * a recover did (#277). Only possible with sessions not serialized by the
-   * front desk.
+   * its unpark (#277) — another call's park took it over ("park") or forgot it
+   * ("dropped"), a dry-run park, a recover or a token-less unpark undid it.
+   * `reopened` then says whether that call actually reopened the comp, and
+   * `why` why not. Only possible with sessions not serialized by the front desk.
    */
-  takenBy?: "park" | "dry-run" | "recover";
+  takenBy?: TakenBy;
+  why?: string;
 }
+
+export type TakenBy = "park" | "dropped" | "dry-run" | "recover" | "unpark";
 
 /** What the agent is told: on every answer with `quietViewer: true`, and on any answer where something did not go as planned. */
 export interface ViewerReport {
@@ -96,7 +100,7 @@ export interface ViewerReport {
   /** Something the script wrote landed in the parking comp. */
   caution?: string;
   /** Another call ended this call's park before its unpark (#277); `note` says what became of the viewer. */
-  takenBy?: "park" | "dry-run" | "recover";
+  takenBy?: TakenBy;
   note?: string;
 }
 
@@ -199,7 +203,7 @@ export async function notParkedForActiveItem(send: SendInternal, op = "run_jsx")
   } catch (e) {
     if (e instanceof UnleasedInternalWriteError) throw e;
     // After Effects is stuck: the script is not sent into it (as for a park).
-    if (e instanceof BridgeTimeoutError) throw new ScriptNotSentError(op);
+    if (e instanceof BridgeTimeoutError) throw new ScriptNotSentError(op, undefined, "dry-run");
     return null;
   }
   if (!dry) return null;
@@ -236,20 +240,32 @@ export async function notParkedForActiveItem(send: SendInternal, op = "run_jsx")
   };
 }
 
-/** What became of a park another call ended before this call's unpark (#277). */
-function takenOverNote(by: UnparkAnswer["takenBy"], what: string): string {
-  const between = "between this call's park and its unpark — another AI session's calls can land there only when the " +
-    "front desk is not serializing sessions (AE_MCP_FRONT_DESK=off)";
-  if (by === "park") {
+/**
+ * What became of a park another call ended before this call's unpark (#277):
+ * what that call did, as After Effects recorded it — a reopen is claimed only
+ * when it happened.
+ */
+function takenOverNote(u: UnparkAnswer, what: string): string {
+  const between = "between this call's park and its unpark (another AI session's calls can land there only when the " +
+    "front desk is not serializing sessions: AE_MCP_FRONT_DESK=off)";
+  const why = u.why ? ` (${u.why})` : "";
+  if (u.takenBy === "park") {
     return `another call parked the viewer ${between}, and took ${what} over: that call reopens it when its own script ` +
       "is done, so nothing needs doing here";
   }
-  if (by === "dry-run") {
-    return `another call (a script that reads activeItem) reopened ${what} in the viewer ${between}, so some of this ` +
-      "call's script ran with the comp in view, re-evaluated after every change; the viewer already shows it";
+  if (u.takenBy === "dropped") {
+    return `another call's park forgot this call's park ${between}, without reopening ${what}${why}; the viewer shows ` +
+      "whatever it showed then — if that is AE MCP's parking comp, open the comp from the Project panel";
   }
-  return `another call (check_setup, or another session's write) reopened ${what} in the viewer ${between}, so some of ` +
-    "this call's script ran with the comp in view, re-evaluated after every change; the viewer already shows it";
+  const who = u.takenBy === "dry-run" ? "another call (a dry-run park, before a script that reads activeItem)"
+    : u.takenBy === "recover" ? "another call (check_setup, or another session's write)"
+    : "another call's unpark, sent without knowing its own park (that park's answer was lost),";
+  if (u.reopened === true) {
+    return `${who} ended this call's park ${between} and reopened ${what} in the viewer, so this call's script may have ` +
+      "run with the comp in view, re-evaluated after every change; the viewer already shows it";
+  }
+  return `${who} ended this call's park ${between} without reopening ${what}${why}; ` +
+    "if the viewer shows AE MCP's parking comp, open the comp from the Project panel";
 }
 
 /**
@@ -331,11 +347,15 @@ export async function withParkedViewer<T>(
       } else if (u?.takenBy) {
         // Not lost: another session's call ended this park, and said how (#277).
         r.takenBy = u.takenBy;
-        r.note = joinNotes(r.note, takenOverNote(u.takenBy, compLabel(r.compId, r.compName)));
+        if (u.reopened !== true && u.takenBy !== "park") r.restored = false;
+        r.note = joinNotes(r.note, takenOverNote(u, compLabel(r.compId, r.compName)));
       } else {
         r.restored = false;
-        // No other call ended it (that would be `takenBy`): the bundle was reloaded, which forgets every park.
-        r.note = joinNotes(r.note, `After Effects no longer had the park on record (its script was reloaded since), so ` +
+        // No call on record ended it (that would be `takenBy`). A reload of the
+        // bundle forgets every park, but so does a record pushed out by many
+        // later ones: said as the likely cause, not as fact.
+        r.note = joinNotes(r.note, `After Effects no longer had the park on record and no call is recorded as ending it ` +
+          `(most likely its script was reloaded since), so ` +
           `${compLabel(r.compId, r.compName)} was not reopened — if the viewer shows AE MCP's parking comp, open it from the Project panel`);
       }
       return;
