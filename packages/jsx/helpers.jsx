@@ -18,6 +18,16 @@
 // These are listed by signature in the run_jsx tool description. If you change
 // one, change that too — it is the only place a caller ever sees them.
 
+// viewerComp() — the comp the user has in the viewer, or null. While run_jsx
+// has the viewer parked (viewer.jsx, issue #266) app.project.activeItem is the
+// parking comp; this is the comp it replaced. Otherwise it asks the viewer.
+function viewerComp() {
+  var from = __parkedFrom();
+  if (from) return from;
+  var v = __parkViewerComp();
+  return (v && !__parkIsParkingComp(v)) ? v : null;
+}
+
 // getCompById by a shorter name, because that is the name agents guess.
 function compById(id) {
   return getCompById(id);

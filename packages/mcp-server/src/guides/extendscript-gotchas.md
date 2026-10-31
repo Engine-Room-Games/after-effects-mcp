@@ -31,6 +31,31 @@ the task needs a script rather than looking for another way to run one.
   where a scene build stays well inside the limit (reported from a
   fourteen-scene, thousand-layer build). Split a big build by scene, not by op;
   the same op repeated hundreds of times is `run_batch`, which chunks itself.
+- **Use `viewerComp()` for the user's comp, never `app.project.activeItem`.**
+  Every change a script makes — to any comp — makes After Effects re-run the
+  expressions of the comp in the viewer, once per change, on its main thread:
+  with a heavy comp in view, a script making 20 changes took 74 s (AE 26.5).
+  So when the comp in view has expressions of its own, the server first opens
+  an empty 16×16 comp in the viewer ("AE MCP viewer parking (safe to
+  delete)"), runs your script, then reopens the user's comp. While parked,
+  `app.project.activeItem` is that empty comp — so a script whose source
+  (libraries included) mentions `activeItem` is **not** parked, and the answer
+  says it could have been. Switch it to `viewerComp()` and the next run is.
+  The parking comp is made once (one undo step, the first time) and reused;
+  after that parking adds no undo step, so
+  Cmd-Z after your run undoes your script. `list_comps`, `get_project_summary`
+  and `find_layers` leave it out; `app.project.items` does not — skip it if
+  you loop over items. If anything lands in it anyway, the answer carries a
+  CAUTION naming it: tell the user. If your script opens a comp in the viewer
+  itself (`openInViewer()`, `OPS.set_active_comp`), that comp stays, and the
+  answer says which comp is in view. `quietViewer: false` leaves the viewer
+  alone. The answer says nothing about any of this unless you passed
+  `quietViewer: true` or something did not go as planned — then a second
+  block carries `quietViewer: {parked, compId, reopened, viewerComp?, caution?,
+  note?}`; tell the user if the note says the comp could not be put back. A `run_batch` with `run_jsx`
+  steps is parked the same way (per chunk when it is long). A comp left open in
+  another viewer tab can still be re-evaluated for some changes (Rotation,
+  measured).
 - **Source size** — the script plus every library it names — is capped at 1 MB
   per call, because libraries are inlined into the call, so every byte travels
   every time.

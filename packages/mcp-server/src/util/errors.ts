@@ -227,15 +227,17 @@ export class BridgeTimeoutError extends Error {
             "   call either — that would queue a second copy of the same work.",
           ]),
       "2. Call check_setup, and keep polling it for about a minute. The bridge normally",
-      "   comes back by itself once the script finishes.",
+      "   comes back by itself once the script finishes. While nothing has answered since,",
+      "   check_setup names this call under `busyWith` — a long script can hold After",
+      "   Effects for minutes, and that is the sign to keep waiting rather than diagnose.",
       "3. Ask the user to look at After Effects. A modal dialog — an unsaved-project",
       "   prompt, a missing-font warning — blocks it in the same way and may be hidden",
       "   behind another window. Only they can click it.",
       "4. On macOS, if they have switched to another desktop (Space), ask them to switch",
       "   back to the one After Effects is on. Calls have been reported to stall until",
       "   they return, then complete normally.",
-      "5. Only if check_setup still reports the bridge down after a minute should you",
-      "   treat this as a real disconnection and follow its nextSteps.",
+      "5. Only if check_setup still reports the bridge down after a minute, with no",
+      "   `busyWith`, should you treat this as a real disconnection and follow its nextSteps.",
       opts.adjustable === false
         ? ""
         : `\nIf this work legitimately takes longer than ${secs}, the limit is settable: start the\nserver with AE_MCP_OP_TIMEOUT_MS set to a larger number of milliseconds.`,
@@ -729,6 +731,36 @@ export class DeskPlaceLostError extends WriteQueueWaitError {
       "2. If it fails the same way again, tell the user another AI session's server has",
       "   stopped responding (a suspended terminal, a debugger) and ask them to resume or",
       "   close it; within seconds this session goes to After Effects directly instead.",
+    ].join("\n");
+  }
+}
+
+/**
+ * A script that never left this server because the viewer park sent ahead of
+ * it got no answer in time (issue #266). After Effects is busy — the park
+ * reached it and may still land — but the script itself was never sent, so
+ * this is the write-queue-wait kind: re-sending is safe once After Effects
+ * answers. Never the timeout's wording, whose remedy (do not re-send) is the
+ * opposite of this one.
+ */
+export class ScriptNotSentError extends WriteQueueWaitError {
+  constructor(op: string, what?: string) {
+    super(op, 0, "the viewer park");
+    this.name = "ScriptNotSentError";
+    this.message = ScriptNotSentError.text(op, what);
+  }
+  static text(op: string, what?: string): string {
+    return [
+      `${what ?? "`" + displayOp(op) + "`"} was not sent: After Effects did not answer the viewer park that goes ahead of the script, so it is busy.`,
+      "",
+      "The script never reached After Effects; nothing of it ran and nothing in the project was changed by it.",
+      "After Effects is very probably still on earlier work — a long script, a render, or a dialog nobody has clicked.",
+      "",
+      "What to do, in order:",
+      "1. Poll check_setup until After Effects answers again (it names what it is busy with).",
+      "2. Then send this same call again: it was never run, so sending it again is safe.",
+      "3. If the viewer shows an empty comp named \"AE MCP viewer parking (safe to delete)\" meanwhile, that is the park landing late;",
+      "   the next run_jsx or check_setup puts the user's comp back.",
     ].join("\n");
   }
 }

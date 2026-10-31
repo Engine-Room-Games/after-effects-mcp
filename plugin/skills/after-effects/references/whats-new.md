@@ -61,6 +61,41 @@ only quitting and reopening After Effects will.
   supersedes: run setup_panel, then restart After Effects
   supersedes: run setup_panel, then ask them to quit and reopen After Effects
 
+- **Breaking: in `run_jsx`, use `viewerComp()` for the user's comp — while
+  the viewer is parked, `app.project.activeItem` is AE MCP's parking comp.**
+  Every change a script makes re-runs the expressions of the comp in the
+  viewer, once per change (a 20-change script took 74 s with a heavy comp in
+  view, AE 26.5). So when the comp in view has expressions, the server opens
+  an empty comp ("AE MCP viewer parking (safe to delete)") in the viewer
+  before the script and reopens the user's comp after it. A script that
+  mentions `activeItem` is not parked, and the answer says it could have been.
+  The comp is made once and reused: creating it is one undo step of its own,
+  the first time only, and after that a park adds none. It is left out of
+  `list_comps`, `get_project_summary` (counted in `aeMcpItemsHidden`) and
+  `find_layers` — but not out of `app.project.items`. Anything that lands in
+  it is reported as a CAUTION. A comp the script opens in the viewer itself
+  stays there, and the answer says which. `quietViewer: false` turns it off;
+  with `quietViewer: true`, or when something did not go as planned, the
+  answer carries a `quietViewer` block. `run_batch` with `run_jsx` steps parks
+  too. If a call was cut off between the park and the put-back, the next
+  `run_jsx`, this session's next write, or `check_setup` reopens the user's
+  comp. Two things it cannot help: keyboard focus moves to the viewer — on
+  every parked run, and on any default run while the viewer is not the panel
+  in focus, parked or not, since finding the comp in view means focusing the
+  viewer — and a heavy comp left open in another viewer tab can still be
+  re-evaluated for some changes. If After Effects does not answer the park,
+  the script is not sent at all, and the error says re-sending is safe once
+  `check_setup` shows After Effects answering (issue #266).
+  supersedes: app.project.activeItem is the comp the user has open
+  supersedes: use app.project.activeItem to get the active comp
+- **`check_setup` says what a busy After Effects is busy with.** When the
+  bridge accepts and does not answer, and this server has a call open — or one
+  that timed out with no answer since — the report carries `busyWith: {op,
+  state, calledAgoMs}` and the `bridgeReachable` detail names the call.
+  `state` is `sent` or `timedOut` (After Effects is very probably running it)
+  or `queued` (not sent yet: another session's call is what is running). Keep
+  waiting while it is there; do not re-send that call (issue #266).
+
 ## 0.5.2
 
 Four fixes, all reported from outside the project. Two change what a result

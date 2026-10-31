@@ -482,8 +482,12 @@ function __itemKind(it) {
 OPS.get_project_summary = noUndo(function (args) {
   var p = app.project;
   var items = [];
+  // AE MCP's own empty viewer-parking comp (viewer.jsx, issue #266) is left
+  // out of the list and counted, never silently.
+  var hidden = 0;
   for (var i = 1; i <= p.numItems; i++) {
     var it = p.item(i);
+    if ((typeof __parkIsInternalItem === "function" && __parkIsInternalItem(it))) { hidden += 1; continue; }
     var entry = {
       id: it.id,
       name: it.name,
@@ -492,12 +496,19 @@ OPS.get_project_summary = noUndo(function (args) {
     if (__cpIsCheckpoint(it)) entry.checkpoint = true;
     items.push(entry);
   }
-  return {
+  var active = (typeof __userActiveItem === "function") ? __userActiveItem() : p.activeItem;
+  var out = {
     path: p.file ? p.file.fsName : null,
     numItems: p.numItems,
-    activeItemId: p.activeItem ? p.activeItem.id : null,
+    activeItemId: active ? active.id : null,
     items: items,
   };
+  if (hidden > 0) {
+    out.aeMcpItemsHidden = hidden;
+    out.aeMcpItemsNote = "numItems counts " + hidden + " item(s) AE MCP keeps for itself (its empty " +
+      "viewer-parking comp), left out of items";
+  }
+  return out;
 });
 
 // The live resources' every-tick read (issue #248). Constant time — no walk
@@ -525,7 +536,8 @@ OPS.get_project_summary = noUndo(function (args) {
 OPS._live_probe = noUndo(function (args) {
   var p = app.project;
   var a = null;
-  try { a = p.activeItem; } catch (e) {}
+  // The viewer-parking comp answers as the comp it replaced (viewer.jsx).
+  try { a = (typeof __userActiveItem === "function") ? __userActiveItem() : p.activeItem; } catch (e) {}
   var docId = null;
   var path = p.file ? p.file.fsName : null;
   if (args && args.identity && (path === null || !args.compId || path !== args.knownPath)) {
@@ -577,6 +589,8 @@ OPS.find_layers = noUndo(function (args) {
       var it = app.project.item(i);
       if (!(it instanceof CompItem)) continue;
       if (__cpIsCheckpoint(it)) { skipped += 1; continue; }
+      // AE MCP's viewer-parking comp has no layers; skipped all the same.
+      if ((typeof __parkIsInternalItem === "function" && __parkIsInternalItem(it))) continue;
       comps.push(it);
     }
   }

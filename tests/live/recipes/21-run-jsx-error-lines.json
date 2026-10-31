@@ -28,7 +28,7 @@
     {
       "call": "run_jsx",
       "args": {
-        "code": "var comp = app.project.activeItem;\ncomp.layers.addNull();\ncomp.layers.addNull();\ncomp.property(\"Nope\").setValue(1);"
+        "code": "var comp = viewerComp();\ncomp.layers.addNull();\ncomp.layers.addNull();\ncomp.property(\"Nope\").setValue(1);"
       },
       "expectError": "at line 4\\b"
     },
@@ -47,7 +47,7 @@
     {
       "call": "run_jsx",
       "args": {
-        "code": "var comp = app.project.activeItem;\ncomp.property(\"Nope\").setValue(1);\ncomp.layers.addNull();"
+        "code": "var comp = viewerComp();\ncomp.property(\"Nope\").setValue(1);\ncomp.layers.addNull();"
       },
       "expectError": "at line 2\\b"
     },
