@@ -63,6 +63,7 @@ import {
 import { batchProblemsMessage, prepareBatchSteps } from "./tools/batchSteps.js";
 import { findUnsafeArgKeys, unsafeArgsMessage } from "./util/argsSafety.js";
 import { checkSetup } from "./setup/check.js";
+import { CallsInFlight } from "./bridge/callsInFlight.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
 import { panelDrivenBatchMessage, unknownOpMessage } from "./setup/panelVersion.js";
@@ -238,12 +239,18 @@ export function createServer(opts: CreateServerOptions = {}) {
     desk: opts.frontDesk ?? null,
     sessionLabel: () => `${server.getClientVersion()?.name ?? "an MCP client"}, pid ${process.pid}`,
   });
+  // Every call to After Effects is recorded while it is open, and a timed-out
+  // one until the panel next answers, so check_setup can say which call a busy
+  // After Effects is very probably still running (issue #266).
+  const calls = new CallsInFlight();
+  const toAe = (op: string, a: unknown, o?: Parameters<SessionLine["runOp"]>[2]) =>
+    calls.track(op, (sent) => line.runOp(op, a, { ...o, onSent: sent }), { background: o?.yieldToWrites === true });
   // Every internal op goes through one of these: typed over InternalOpMutation,
   // and a "write" is refused unless the write lock is held (tools/internalOps.ts).
   // Sent as a write when the op is one or this call holds the lease, as the
   // tool path sends its own op.
   const internalVia = (heldByCall: () => boolean, onWait?: (message: string) => void): SendInternal =>
-    internalSender((op, a, write, o) => line.runOp(op, a, { write: write || heldByCall(), onWait, ...o }), line);
+    internalSender((op, a, write, o) => toAe(op, a, { write: write || heldByCall(), onWait, ...o }), line);
   // render_queue's jobs run in an aerender process this server owns; see
   // render/aerender.ts. When a job ends, its verified items are unticked in the
   // live queue so they do not render twice — once, as one named undo step, and
@@ -306,7 +313,7 @@ export function createServer(opts: CreateServerOptions = {}) {
   // through the panel version gate and the tool path's read — and every poll
   // read yields to writes: this session's, and any session's at the desk.
   const live = new LiveResources({
-    read: (op, a, background) => line.runOp(op, a, { write: false, yieldToWrites: background }),
+    read: (op, a, background) => toAe(op, a, { write: false, yieldToWrites: background }),
     // An internal op, so through the sender every internal op takes.
     probe: (a, background) => internalVia(() => false)("_live_probe", a, { yieldToWrites: background }),
     notify: (uri) => server.sendResourceUpdated({ uri }),
@@ -684,7 +691,12 @@ export function createServer(opts: CreateServerOptions = {}) {
         // keeps ops away from: a wrong AE_MCP_PORT must not hide the panel
         // answering on 7777, or the report sends the user to restart After
         // Effects for a panel that is fine (recipe 43). probeBridge dedups.
-        const setupOpts = () => ({ opPort: bridge.port, candidates: [...bridge.candidates(), ...diagnosticPortCandidates()] });
+        const setupOpts = () => ({
+          opPort: bridge.port,
+          candidates: [...bridge.candidates(), ...diagnosticPortCandidates()],
+          busyWith: () => calls.busyWith(),
+          onPanelAnswered: () => calls.answered(),
+        });
         if (name === "check_setup") {
           return textResult(await checkSetup(setupOpts()));
         }
@@ -937,7 +949,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       let readOp = "";
       const preRead = (op: string, a: Record<string, unknown>, write: boolean) => {
         readOp = op;
-        return line.runOp(op, a, { write, onWait });
+        return toAe(op, a, { write, onWait });
       };
       // A pre-read that fails is answered like the forward would be, except a
       // timeout: its sentence says the op may still land, and none was sent.
@@ -1024,7 +1036,7 @@ export function createServer(opts: CreateServerOptions = {}) {
     try {
       // Inside this try so the panel's own error mapping — timeouts, AeError,
       // the Unknown-op backstop — applies to the internal ops these forward.
-      const runner: OpRunner = { runOp: (op, a) => line.runOp(op, a, { write: lease !== null, onWait }) };
+      const runner: OpRunner = { runOp: (op, a) => toAe(op, a, { write: lease !== null, onWait }) };
       const sendInternal = internalVia(() => lease !== null, onWait);
       if (SNAPSHOT_OPS.has(name)) {
         const withView = clientSupportsApps(server.getClientCapabilities());

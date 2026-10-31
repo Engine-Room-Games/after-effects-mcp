@@ -1289,6 +1289,8 @@ export const RunJsx = crossField(
       .describe("Absolute paths to .jsx files the server inlines ahead of the script, in its scope. Re-evaluated every call: declarations only. Put shared helpers here instead of pasting them."),
     undoGroup: z.boolean().optional().meta({ default: true })
       .describe("Wrap the script in one undo step. false only for what AE refuses inside one (copyToComp on a parented or expression-linked layer); changes then land as AE's own undo steps."),
+    quietViewer: z.boolean().optional().meta({ default: true })
+      .describe("Turn After Effects' viewer rendering off while the script runs, and back to what it was after (default). true also reports it on the answer; false leaves rendering on."),
     diff: diffParam,
     diffCompId: diffCompIdParam,
   }),

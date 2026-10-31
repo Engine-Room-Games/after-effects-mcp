@@ -31,6 +31,24 @@ the task needs a script rather than looking for another way to run one.
   where a scene build stays well inside the limit (reported from a
   fourteen-scene, thousand-layer build). Split a big build by scene, not by op;
   the same op repeated hundreds of times is `run_batch`, which chunks itself.
+- **The viewer does not redraw while your script runs.** After Effects
+  re-renders the comp in the active viewer after each scripted change to it or
+  to any precomp it uses, before the next statement runs. With a 4K, 3D,
+  motion-blurred comp in view, adding one layer took 695 ms against 79 ms with
+  an empty comp in view (AE 26.5) — enough to carry a rebuild script past the
+  300 s limit. So `run_jsx` switches viewer rendering off
+  (`app.disableRendering`) for the script and back to what it was afterwards,
+  also when the script throws; a user who already had it off keeps it off.
+  It is an application setting, not part of the project: no comp is added and
+  `app.project.activeItem` is still the user's comp. `quietViewer: false`
+  leaves rendering on. A frame the script renders itself (`OPS.screenshot_frame`,
+  `OPS.screenshot_layer`) turns rendering back on for the rest of that script,
+  so put frames at the end. Do not set `app.disableRendering` yourself; if you
+  do, it is put back when the script ends. The answer says nothing about it
+  unless you passed `quietViewer: true` or rendering could not be put back —
+  then it carries `quietViewer: {renderingOff, alreadyOff, restored, note}`,
+  and a CAUTION in `note` means the user's viewer will not redraw: tell them.
+  Every `run_jsx` step of a `run_batch` does the same, each for its own step.
 - **Source size** — the script plus every library it names — is capped at 1 MB
   per call, because libraries are inlined into the call, so every byte travels
   every time.

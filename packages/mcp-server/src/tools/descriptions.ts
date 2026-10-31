@@ -117,7 +117,8 @@ export const descriptions: Record<string, string> = {
     "`singleUndo:true` forces one undo step up to 2000 ops, freezing AE with no progress until done; over 2000 is refused. " +
     "Each step's `args` are checked as that tool's own; a batch with any bad step is refused whole before anything runs. Not allowed as steps: screenshot_frame, screenshot_layer, snapshot_comp, diff_comp, analyze_motion, export_mogrt, render_queue, get_house_style and the server-side tools (ae_guide, await_job, log_issue, …). " +
     "transactional:true (default) stops at the first error; nothing rolls back either way — read the state back rather than re-running. " +
-    "`diff:true` appends a structural diff of what the batch did, also to an error — the cheapest way to find where a half-applied batch stopped.",
+    "`diff:true` appends a structural diff of what the batch did, also to an error — the cheapest way to find where a half-applied batch stopped. " +
+    "Each run_jsx step turns viewer rendering off for its own step only (see run_jsx `quietViewer`); other steps run with rendering as it is.",
 
   // ---------- explore ----------
   get_project_summary: "Project state: path, item count, active item, flat item list with type (comp | footage | solid | folder | unknown — same vocabulary as a layer's sourceType).",
@@ -138,6 +139,7 @@ export const descriptions: Record<string, string> = {
     "No explicit `return` (a bare final expression does NOT return) answers `{ok:true, returned:null, undoGroup, note}`: it ran to completion and did **not** fail — do not re-run it; nothing rolls back, so a mutating script would apply twice. " +
     "A failure names the line of YOUR script (or says it cannot); everything before it already ran — read the state back, never re-run to see if it fails again. " +
     "AE refuses copyToComp for a layer with a parent or a linked expression inside an undo group: wrap just that part in `withoutUndoGroup(function(){ … })`, or pass undoGroup:false. Keep loops short — ExtendScript freezes the user's UI. " +
+    "Viewer rendering is off while the script runs (`quietViewer`, default) — AE otherwise re-renders the viewed comp after every change — and back to what it was after, also on a throw; the answer says so only if it could not be restored. A frame the script renders (OPS.screenshot_frame) turns it back on for the rest of the script. quietViewer:false leaves it on. " +
     "`diff:true` appends what the script changed (the answer is then `{ok, returned, diff}`), also to an error. Read ae_guide topic 'extendscript-gotchas' before writing anything substantial.",
 
   // ---------- footage ----------

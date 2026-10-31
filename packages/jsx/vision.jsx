@@ -81,16 +81,25 @@ function __factorFor(factor) {
   return (factor > 1) ? Math.round(factor) : 1;
 }
 
-function __saveFrameAt(comp, time, file, factor) {
+// Inside a run_jsx that switched viewer rendering off (issue #274), the frame
+// goes through raw.jsx's __rjFrameRender, which decides whether rendering comes
+// back on for it. Everywhere else it is a plain call. The typeof is for the unit
+// tests that load this file without raw.jsx; in the bundle it is always there.
+function __renderFrame(comp, time, file, why) {
+  if (typeof __rjFrameRender !== "function") return comp.saveFrameToPng(time, file);
+  return __rjFrameRender(why || "a frame render", function () { return comp.saveFrameToPng(time, file); });
+}
+
+function __saveFrameAt(comp, time, file, factor, why) {
   var f = __factorFor(factor);
   var previous = comp.resolutionFactor;
   if (__factorIs(previous, f)) {
-    comp.saveFrameToPng(time, file);
+    __renderFrame(comp, time, file, why);
     return;
   }
   try {
     comp.resolutionFactor = [f, f];
-    comp.saveFrameToPng(time, file);
+    __renderFrame(comp, time, file, why);
   } finally {
     // Restore unconditionally — a failed render must never leave the user
     // looking at a half-resolution comp. This covers factor 1 too: the render
@@ -146,7 +155,7 @@ function __contactSheetFrames(comp, args) {
       var entry = { time: times[i], downsample: ds };
       try {
         var p = __tmpPngPath();
-        __saveFrameAt(comp, times[i], new File(p), ds);
+        __saveFrameAt(comp, times[i], new File(p), ds, "screenshot_frame");
         entry.path = p;
       } catch (e) {
         // One time that will not render must not cost the other five.
@@ -173,7 +182,7 @@ OPS.screenshot_frame = noUndo(function (args) {
   var f = new File(path);
   // saveFrameToPng is async-ish; the panel polls the file's existence/size.
   __screenshotGroup(!__factorIs(c.resolutionFactor, __factorFor(ds)), function () {
-    __saveFrameAt(c, t, f, ds);
+    __saveFrameAt(c, t, f, ds, "screenshot_frame");
   });
   return {
     path: path,
@@ -209,7 +218,7 @@ OPS.screenshot_layer = noUndo(function (args) {
         changed[k].layer.solo = changed[k].want;
         applied = k + 1;
       }
-      __saveFrameAt(c, t, f, ds);
+      __saveFrameAt(c, t, f, ds, "screenshot_layer");
     } finally {
       for (var j = applied - 1; j >= 0; j--) {
         try { changed[j].layer.solo = changed[j].was; } catch (e) {}

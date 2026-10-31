@@ -61,6 +61,27 @@ only quitting and reopening After Effects will.
   supersedes: run setup_panel, then restart After Effects
   supersedes: run setup_panel, then ask them to quit and reopen After Effects
 
+- **`run_jsx` turns After Effects' viewer rendering off while the script
+  runs, and back to what it was afterwards.** After Effects re-renders the
+  comp in the viewer after every change to it or its precomps; with a heavy
+  comp in view a rebuild script slowed from seconds to past the 300 s limit.
+  Each `run_jsx` (and each `run_jsx` step of a `run_batch`) now switches
+  rendering off for its own run, puts it back on every exit, a throw included,
+  and leaves it off if the user already had it off. It is an application
+  setting, not part of the project: no comp is added and
+  `app.project.activeItem` is still the user's comp. The answer says nothing about it unless rendering could not be
+  put back (a CAUTION to pass on to the user) or you passed `quietViewer:
+  true`; `quietViewer: false` leaves rendering on. A frame the script renders
+  itself (`OPS.screenshot_frame`) turns rendering back on for the rest of that
+  script (issues #266, #274).
+- **`check_setup` says what a busy After Effects is busy with.** When the
+  bridge accepts and does not answer, and this server has a call open — or one
+  that timed out with no answer since — the report carries `busyWith: {op,
+  state, calledAgoMs}` and the `bridgeReachable` detail names the call.
+  `state` is `sent` or `timedOut` (After Effects is very probably running it)
+  or `queued` (not sent yet: another session's call is what is running). Keep
+  waiting while it is there; do not re-send that call (issue #266).
+
 ## 0.5.2
 
 Four fixes, all reported from outside the project. Two change what a result

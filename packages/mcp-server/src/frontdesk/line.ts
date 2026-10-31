@@ -255,18 +255,32 @@ export class SessionLine {
    * #248): refused unsent, as `BridgeBusyError`, while this session holds or
    * waits on its write lease, and — through the desk — while any session holds
    * the shared write lock. Never set on a read an agent asked for.
+   *
+   * `onSent` is told when the call leaves for the panel — posted by this
+   * process, or `start` from the desk — and never for a call still waiting its
+   * turn (issue #266: check_setup tells "running" from "queued" by it). For
+   * reporting only: a lost `start` line must never decide a re-send.
    */
-  runOp(op: string, args: unknown, o: { write?: boolean; onWait?: OnWait; yieldToWrites?: boolean } = {}): Promise<unknown> {
+  runOp(
+    op: string,
+    args: unknown,
+    o: { write?: boolean; onWait?: OnWait; yieldToWrites?: boolean; onSent?: () => void } = {}
+  ): Promise<unknown> {
     const yieldToWrites = o.yieldToWrites === true && o.write !== true;
     if (yieldToWrites && (this.local.held !== null || this.local.depth > 0)) {
       return Promise.reject(new BridgeBusyError(op, this.local.held ?? undefined));
     }
-    if (this.mode.kind === "off") return this.bridge.runOp(op, args);
+    const direct = () => {
+      o.onSent?.();
+      return this.bridge.runOp(op, args);
+    };
+    if (this.mode.kind === "off") return direct();
     return this.send(
       { kind: "op", op, args, timeoutMs: opTimeoutMs(op), ...(yieldToWrites ? { yieldToWrites: true } : {}) },
       o.write === true,
       o.onWait,
-      () => this.bridge.runOp(op, args)
+      direct,
+      o.onSent
     );
   }
 
@@ -299,7 +313,8 @@ export class SessionLine {
     body: { kind: "op" | "cancel"; op: string; args?: unknown; jobId?: string; timeoutMs: number; yieldToWrites?: boolean },
     write: boolean,
     onWait: OnWait | undefined,
-    direct: () => Promise<unknown>
+    direct: () => Promise<unknown>,
+    onSent?: () => void
   ): Promise<unknown> {
     const { op } = body;
     /** Why the last attempt went round again — what the final refusal says. */
@@ -348,7 +363,13 @@ export class SessionLine {
               // direct, and what was queued here must not go out on waking.
               deadline: monoMs() + forwardWindowMs(mode.desk.beatMs * STALL_BEATS),
             },
-            { onStart: (ahead) => surfaceAhead(op, ahead, onWait), onAhead: (ahead) => surfaceAhead(op, ahead, onWait) }
+            {
+              onStart: (ahead) => {
+                onSent?.();
+                surfaceAhead(op, ahead, onWait);
+              },
+              onAhead: (ahead) => surfaceAhead(op, ahead, onWait),
+            }
           );
         } catch (e) {
           if (e instanceof LeaseNotHeldError && slot) {
@@ -393,7 +414,8 @@ export class SessionLine {
           sessionId: this.sessionId,
           session: this.opts.sessionLabel(),
         },
-        (ahead) => surfaceAhead(op, ahead, onWait)
+        (ahead) => surfaceAhead(op, ahead, onWait),
+        onSent
       );
       switch (r.kind) {
         case "ok":
@@ -884,7 +906,12 @@ type OpOutcome =
   | { kind: "stalled" }
   | { kind: "timeout" };
 
-function remoteOp(mode: Follower, body: { timeoutMs: number } & Record<string, unknown>, onAhead: (ahead: DeskAhead[]) => void): Promise<OpOutcome> {
+function remoteOp(
+  mode: Follower,
+  body: { timeoutMs: number } & Record<string, unknown>,
+  onAhead: (ahead: DeskAhead[]) => void,
+  onStart?: () => void
+): Promise<OpOutcome> {
   return new Promise<OpOutcome>((resolve) => {
     let done = false;
     let timer: NodeJS.Timeout | null = null;
@@ -911,6 +938,7 @@ function remoteOp(mode: Follower, body: { timeoutMs: number } & Record<string, u
           finish({ kind: "timeout" });
         }, body.timeoutMs + FOLLOWER_TIMEOUT_SLACK_MS);
         timer.unref?.();
+        onStart?.();
         onAhead(l.ahead);
       } else if (l.t === "ahead") onAhead(l.ahead);
       else if (l.t === "ok") finish({ kind: "ok", result: l.result, panelPort: l.panelPort });

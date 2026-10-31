@@ -381,7 +381,7 @@ OPS.export_mogrt = noUndo(function (args) {
       );
     }
     var posterPath = __tmpPngPath();
-    __saveFrameAt(comp, t, new File(posterPath), 1);
+    __saveFrameAt(comp, t, new File(posterPath), 1, "export_mogrt");
     result.posterPngPath = posterPath;
     result.posterTime = t;
   }
