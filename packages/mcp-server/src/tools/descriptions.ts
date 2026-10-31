@@ -9,7 +9,7 @@
  */
 export const descriptions: Record<string, string> = {
   // ---------- comps ----------
-  list_comps: "All comps: id, name, dims, duration, fps, layer count. `include: []` returns just the id+name map — usually all orientation needs.",
+  list_comps: "All comps: id, name, dims, duration, fps, layer count. `include: []` returns just the id+name map — usually all orientation needs. AE MCP's own viewer-parking comp is not listed.",
   get_comp: "Single comp summary by id (no layers).",
   get_comp_tree: "Comp + nested layer tree, recursing pre-comps to `depth`.",
   create_comp: "Create a new comp. Returns id.",
@@ -117,10 +117,11 @@ export const descriptions: Record<string, string> = {
     "`singleUndo:true` forces one undo step up to 2000 ops, freezing AE with no progress until done; over 2000 is refused. " +
     "Each step's `args` are checked as that tool's own; a batch with any bad step is refused whole before anything runs. Not allowed as steps: screenshot_frame, screenshot_layer, snapshot_comp, diff_comp, analyze_motion, export_mogrt, render_queue, get_house_style and the server-side tools (ae_guide, await_job, log_issue, …). " +
     "transactional:true (default) stops at the first error; nothing rolls back either way — read the state back rather than re-running. " +
-    "`diff:true` appends a structural diff of what the batch did, also to an error — the cheapest way to find where a half-applied batch stopped.",
+    "`diff:true` appends a structural diff of what the batch did, also to an error — the cheapest way to find where a half-applied batch stopped. " +
+    "A batch with run_jsx steps parks the viewer like run_jsx does (per chunk when long; see run_jsx `quietViewer`).",
 
   // ---------- explore ----------
-  get_project_summary: "Project state: path, item count, active item, flat item list with type (comp | footage | solid | folder | unknown — same vocabulary as a layer's sourceType).",
+  get_project_summary: "Project state: path, item count, active item, flat item list with type (comp | footage | solid | folder | unknown — same vocabulary as a layer's sourceType). AE MCP's viewer-parking comp and its folder are left out of the list and counted in `aeMcpItemsHidden`.",
   get_selection:
     "What the user has selected right now in the comp they are looking at: `{comp:{id,name}, source, time, frame, selectedLayers:[{id,index,name}], selectedProperties:[{layerId, layerName, propertyPath, name, matchName, kind, selectedKeyTimes?}], note?}`. " +
     "Use it when the user says \"this layer\", \"these keyframes\" or \"here\" (the playhead) instead of asking them to name it. A `kind:\"property\"` propertyPath goes straight into the propertyPath tools; a `kind:\"group\"` cannot be keyframed — read its children with get_layer_full. `time` is comp seconds, the keyframe clock; `frame` is as the timeline shows it. " +
@@ -132,12 +133,13 @@ export const descriptions: Record<string, string> = {
   // ---------- raw ----------
   run_jsx:
     "Escape hatch: arbitrary ExtendScript in one undo group. Pass exactly one of `code` or `scriptPath` (absolute; the server reads it, so prefer it for anything long). `libraries` (absolute .jsx paths) are inlined ahead in the same scope and re-evaluated every call — keep them to declarations. " +
-    "In scope: `app`, the full `OPS` table (every tool, e.g. `OPS.set_transform({compId, layerId, position:[0,0]})`), and these helpers — `compById(id)`, `getCompById(id)`, `layerById(compOrId, layerId)`, `getLayerById(comp, layerId)`, `walkProperty(layer, [\"Transform\",\"Position\"])`, `addKeys(prop, [[t, v], …])` → key indices, `ease(prop, keyIndex, easeIn, easeOut)` which sizes the KeyframeEase array itself (a bare number is influence; omit easeOut for the same both sides), `shape(comp, {name, position})` which lands the layer at [0,0] rather than the comp centre, `setValueChecked(prop, value)` — use it instead of `prop.setValue(value)` in a comp not open in a viewer, where AE can throw a false 'invalid numeric result'; it rethrows only if the write really failed — and `withoutUndoGroup(fn)`. " +
+    "In scope: `app`, the full `OPS` table (every tool, e.g. `OPS.set_transform({compId, layerId, position:[0,0]})`), and these helpers — `viewerComp()` (the user's comp in the viewer), `compById(id)`, `getCompById(id)`, `layerById(compOrId, layerId)`, `getLayerById(comp, layerId)`, `walkProperty(layer, [\"Transform\",\"Position\"])`, `addKeys(prop, [[t, v], …])` → key indices, `ease(prop, keyIndex, easeIn, easeOut)` which sizes the KeyframeEase array itself (a bare number is influence; omit easeOut for the same both sides), `shape(comp, {name, position})` which lands the layer at [0,0] rather than the comp centre, `setValueChecked(prop, value)` — use it instead of `prop.setValue(value)` in a comp not open in a viewer, where AE can throw a false 'invalid numeric result'; it rethrows only if the write really failed — and `withoutUndoGroup(fn)`. " +
     "`app.executeCommand()` menu commands silently no-op here; use the API equivalents (`CompItem.duplicate()`, `layer.duplicate()`). " +
     "`return X` sends a value back whole; anything not JSON becomes a marker string in place, never dropped: `\"[function]\"`, `\"[undefined]\"`, `\"[circular]\"`, `\"[max depth]\"`, `\"[NaN]\"`, and live AE objects as `\"[CompItem \\\"Main\\\" #12]\"` — a handle for a read tool. " +
     "No explicit `return` (a bare final expression does NOT return) answers `{ok:true, returned:null, undoGroup, note}`: it ran to completion and did **not** fail — do not re-run it; nothing rolls back, so a mutating script would apply twice. " +
     "A failure names the line of YOUR script (or says it cannot); everything before it already ran — read the state back, never re-run to see if it fails again. " +
     "AE refuses copyToComp for a layer with a parent or a linked expression inside an undo group: wrap just that part in `withoutUndoGroup(function(){ … })`, or pass undoGroup:false. Keep loops short — ExtendScript freezes the user's UI. " +
+    "**The viewer is parked by default** (`quietViewer`; AE re-runs the viewed comp's expressions after every change), so **`app.project.activeItem` is AE MCP's parking comp while the script runs: use `viewerComp()`**. A comp the script opens in the viewer stays there. quietViewer:false leaves the viewer alone. " +
     "`diff:true` appends what the script changed (the answer is then `{ok, returned, diff}`), also to an error. Read ae_guide topic 'extendscript-gotchas' before writing anything substantial.",
 
   // ---------- footage ----------

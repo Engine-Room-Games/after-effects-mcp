@@ -281,7 +281,10 @@ you are about to build on rather than trusting what you last saw.
   started, and either way can still land after the error (measured): do **not**
   re-send it, do not restart
   After Effects, do not run `setup_panel`. Poll `check_setup` for about a
-  minute, and ask the user whether a dialog is hiding behind another window. A
+  minute, and ask the user whether a dialog is hiding behind another window.
+  While After Effects has answered nothing since, `check_setup` names the call
+  under `busyWith` — keep waiting while it does; a long `run_jsx` can hold After
+  Effects for minutes. A
   call that legitimately needs longer gets it from `AE_MCP_OP_TIMEOUT_MS` in the
   server's environment. **The one exception is `render_queue`:** its timeout
   says no render was started — the error comes from its prepare or save step,

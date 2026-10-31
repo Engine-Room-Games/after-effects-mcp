@@ -28,7 +28,7 @@
     {
       "call": "run_jsx",
       "args": {
-        "code": "var c = app.project.activeItem; c.layers.addNull(); c.layers.addNull(); c.layers.addNull(); return c.numLayers;",
+        "code": "var c = viewerComp(); c.layers.addNull(); c.layers.addNull(); c.layers.addNull(); return c.numLayers;",
         "diff": true,
         "diffCompId": "${comp.id}"
       },
@@ -46,7 +46,7 @@
     {
       "call": "run_jsx",
       "args": {
-        "code": "var c = app.project.activeItem;\nc.layers.addNull();\nnope.boom();",
+        "code": "var c = viewerComp();\nc.layers.addNull();\nnope.boom();",
         "diff": true,
         "diffCompId": "${comp.id}"
       },

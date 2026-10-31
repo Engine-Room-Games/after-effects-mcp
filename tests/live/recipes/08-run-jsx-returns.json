@@ -28,7 +28,7 @@
     {
       "call": "run_jsx",
       "args": {
-        "code": "return app.project.activeItem.name;"
+        "code": "return viewerComp().name;"
       },
       "expect": [
         {

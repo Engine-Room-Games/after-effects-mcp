@@ -103,7 +103,9 @@ const SERVER_READERS = {
   render_queue: { fns: ["runRender"], files: ["render/aerender.ts"] },
   // The one op whose input is rewritten: scriptPath -> code, libraries ->
   // {path, text}, before OPS.run_jsx reads the rest.
-  run_jsx: { fns: ["resolveRunJsxSource"], files: ["tools/runJsxSource.ts"], ops: ["run_jsx"] },
+  // `quietViewer` is the server's too: it decides whether the viewer is
+  // parked around the script (issue #266; tools/viewerPark.ts).
+  run_jsx: { fns: ["resolveRunJsxSource", "runJsxWantsPark"], files: ["tools/runJsxSource.ts", "tools/viewerPark.ts"], ops: ["run_jsx"] },
   // `detail` is applied by the server's summariser, not the panel (the panel
   // does not update itself — see style/summary.ts).
   get_house_style: { branch: true, files: ["style/summary.ts"], ops: ["get_house_style"] },

@@ -49,6 +49,16 @@ import { descriptions } from "./tools/descriptions.js";
 import { AeError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, aeErrorText, invalidArgsText } from "./util/errors.js";
 import { resolveRunJsxSource, type ResolvedRunJsxArgs, type RunJsxArgs } from "./tools/runJsxSource.js";
 import { runJsxViaServer } from "./tools/runJsxAssembly.js";
+import {
+  ViewerParkState,
+  batchParkMode,
+  recoverParkedViewer,
+  runJsxWantsPark,
+  viewerReportMatters,
+  withParkedViewer,
+  type ViewerReport,
+  type WithViewerNote,
+} from "./tools/viewerPark.js";
 import { toolAnnotations } from "./tools/annotations.js";
 import { mayAsk, buildPrompt, confirmTimeoutMs, clientCanElicit, confirmWithUser, notRunMessage, preReadFailureMessage, type ConfirmOutcome, type ConfirmPrompt } from "./tools/confirm.js";
 import {
@@ -63,6 +73,7 @@ import {
 import { batchProblemsMessage, prepareBatchSteps } from "./tools/batchSteps.js";
 import { findUnsafeArgKeys, unsafeArgsMessage } from "./util/argsSafety.js";
 import { checkSetup } from "./setup/check.js";
+import { CallsInFlight } from "./bridge/callsInFlight.js";
 import { installPanel } from "./setup/install.js";
 import { ClientKind, detectClient, scaffold } from "./setup/scaffold.js";
 import { panelDrivenBatchMessage, unknownOpMessage } from "./setup/panelVersion.js";
@@ -238,12 +249,34 @@ export function createServer(opts: CreateServerOptions = {}) {
     desk: opts.frontDesk ?? null,
     sessionLabel: () => `${server.getClientVersion()?.name ?? "an MCP client"}, pid ${process.pid}`,
   });
+  // Every call to After Effects is recorded while it is open, and a timed-out
+  // one until the panel next answers, so check_setup can say which call a busy
+  // After Effects is very probably still running (issue #266).
+  const calls = new CallsInFlight();
+  const toAe = (op: string, a: unknown, o?: Parameters<SessionLine["runOp"]>[2]) =>
+    calls.track(op, (sent) => line.runOp(op, a, { ...o, onSent: sent }), { background: o?.yieldToWrites === true });
   // Every internal op goes through one of these: typed over InternalOpMutation,
   // and a "write" is refused unless the write lock is held (tools/internalOps.ts).
   // Sent as a write when the op is one or this call holds the lease, as the
   // tool path sends its own op.
   const internalVia = (heldByCall: () => boolean, onWait?: (message: string) => void): SendInternal =>
-    internalSender((op, a, write, o) => line.runOp(op, a, { write: write || heldByCall(), onWait, ...o }), line);
+    internalSender((op, a, write, o) => toAe(op, a, { write: write || heldByCall(), onWait, ...o }), line);
+  // check_setup's half of putting back a viewer an interrupted run_jsx left
+  // parked (issue #266): an internal write, so under the write lock — taken
+  // only if it comes within a moment, since check_setup must never wait behind
+  // another session's batch. Any failure is silence: check_setup reports the
+  // setup, and this is a courtesy on top of it.
+  const recoverViewerForCheck = async (): Promise<string | null> => {
+    let held: WriteLease | null = null;
+    try {
+      held = await line.acquire("check_setup", AbortSignal.timeout(2_000));
+      return await recoverParkedViewer(internalVia(() => true), viewerState);
+    } catch {
+      return null;
+    } finally {
+      held?.release();
+    }
+  };
   // render_queue's jobs run in an aerender process this server owns; see
   // render/aerender.ts. When a job ends, its verified items are unticked in the
   // live queue so they do not render twice — once, as one named undo step, and
@@ -259,12 +292,31 @@ export function createServer(opts: CreateServerOptions = {}) {
   // jobs/batchDriver.ts). The panel no longer drives any (issue #243).
   let closing = false;
   const sendChunkWrite = internalVia(() => true);
+  // Whether a call of this session may have left the viewer parked (issue
+  // #266; tools/viewerPark.ts), and the chunked batches that park per chunk.
+  const viewerState = new ViewerParkState();
+  const parkedBatches = new Set<string>();
   const batches = new BatchDriver(jobs, {
     continueJob: (jobId, chunkSize) => {
       // After close the line no longer holds the desk lease, and a write sent
       // then would go straight to After Effects, past every other session.
       if (closing) return Promise.reject(new Error("Internal error: this server is closing; the chunk was not sent."));
-      return sendChunkWrite("_continue_job", { jobId, chunkSize });
+      const chunk = () => sendChunkWrite("_continue_job", { jobId, chunkSize });
+      if (!parkedBatches.has(jobId)) return chunk();
+      // A batch with run_jsx steps parks the viewer around each chunk, under
+      // the batch's lease: never across two, so the user's comp is back in view
+      // between chunks and a batch that stops leaves nothing parked.
+      return withParkedViewer(sendChunkWrite, viewerState, chunk).then(
+        ({ value, report }) => {
+          if (viewerReportMatters(report)) jobs.warn(jobId, `quietViewer: ${JSON.stringify(report)}`);
+          return value;
+        },
+        (e) => {
+          const note = (e as WithViewerNote)?.viewerNote;
+          if (note) jobs.warn(jobId, note);
+          throw e;
+        }
+      );
     },
     getJob: (jobId) => internalVia(() => false)("_get_job", { jobId }),
     cancel: (jobId) => line.cancel(jobId),
@@ -306,7 +358,7 @@ export function createServer(opts: CreateServerOptions = {}) {
   // through the panel version gate and the tool path's read — and every poll
   // read yields to writes: this session's, and any session's at the desk.
   const live = new LiveResources({
-    read: (op, a, background) => line.runOp(op, a, { write: false, yieldToWrites: background }),
+    read: (op, a, background) => toAe(op, a, { write: false, yieldToWrites: background }),
     // An internal op, so through the sender every internal op takes.
     probe: (a, background) => internalVia(() => false)("_live_probe", a, { yieldToWrites: background }),
     notify: (uri) => server.sendResourceUpdated({ uri }),
@@ -684,9 +736,20 @@ export function createServer(opts: CreateServerOptions = {}) {
         // keeps ops away from: a wrong AE_MCP_PORT must not hide the panel
         // answering on 7777, or the report sends the user to restart After
         // Effects for a panel that is fine (recipe 43). probeBridge dedups.
-        const setupOpts = () => ({ opPort: bridge.port, candidates: [...bridge.candidates(), ...diagnosticPortCandidates()] });
+        const setupOpts = () => ({
+          opPort: bridge.port,
+          candidates: [...bridge.candidates(), ...diagnosticPortCandidates()],
+          busyWith: () => calls.busyWith(),
+          onPanelAnswered: () => calls.answered(),
+        });
         if (name === "check_setup") {
-          return textResult(await checkSetup(setupOpts()));
+          const report = await checkSetup(setupOpts());
+          // A viewer an interrupted run_jsx left parked (issue #266) is put
+          // back here: check_setup is what an agent calls when something
+          // looks wrong. Only on a ready setup, and only if the write lock can
+          // be had at once — never behind another session's work.
+          const viewerRestored = report.ready ? await recoverViewerForCheck() : null;
+          return textResult(viewerRestored ? { ...report, viewerRestored } : report);
         }
         if (name === "setup_panel") {
           const a = schemas.StrictOpSchemas.setup_panel.parse(rawArgs);
@@ -937,7 +1000,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       let readOp = "";
       const preRead = (op: string, a: Record<string, unknown>, write: boolean) => {
         readOp = op;
-        return line.runOp(op, a, { write, onWait });
+        return toAe(op, a, { write, onWait });
       };
       // A pre-read that fails is answered like the forward would be, except a
       // timeout: its sentence says the op may still land, and none was sent.
@@ -1024,8 +1087,19 @@ export function createServer(opts: CreateServerOptions = {}) {
     try {
       // Inside this try so the panel's own error mapping — timeouts, AeError,
       // the Unknown-op backstop — applies to the internal ops these forward.
-      const runner: OpRunner = { runOp: (op, a) => line.runOp(op, a, { write: lease !== null, onWait }) };
+      const runner: OpRunner = { runOp: (op, a) => toAe(op, a, { write: lease !== null, onWait }) };
       const sendInternal = internalVia(() => lease !== null, onWait);
+      // The viewer is parked around the script (issue #266): run_jsx, and an
+      // inline run_batch with run_jsx steps; a chunked one parks per chunk.
+      const batchPark = name === "run_batch" ? batchParkMode(args) : null;
+      const parkHere = (name === "run_jsx" && runJsxWantsPark(args)) || batchPark?.mode === "inline";
+      const viewerAsked = name === "run_jsx" ? (args as { quietViewer?: unknown }).quietViewer === true : batchPark?.asked === true;
+      // A viewer this session may have left parked is put back before its next
+      // write; a park does that itself.
+      let viewerRecovered: string | null = null;
+      if (lease !== null && viewerState.maybeLeft && !parkHere) {
+        viewerRecovered = await recoverParkedViewer(sendInternal, viewerState);
+      }
       if (SNAPSHOT_OPS.has(name)) {
         const withView = clientSupportsApps(server.getClientCapabilities());
         return await runSnapshotOp(name, args, sendInternal, snapshots, withView);
@@ -1069,7 +1143,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       //     mapping (tools/runJsxAssembly.ts);
       //   - a chunked run_batch, which the panel hands back for this server to
       //     drive (`__driver: "server"`; jobs/batchDriver.ts).
-      const lifted = liftAeWarnings(
+      const forward = async () =>
         name === "get_house_style" || name === "set_house_style"
           ? await houseStyleOnServer(name, args, sendInternal, (op, a) => runner.runOp(op, a))
           : name in RAW_IMAGE_OPS
@@ -1079,8 +1153,17 @@ export function createServer(opts: CreateServerOptions = {}) {
               : await runner.runOp(
                   name,
                   name === "run_batch" ? { ...(args as Record<string, unknown>), __driver: "server" } : args
-                )
-      );
+                );
+      let viewer: ViewerReport | null = null;
+      let raw: unknown;
+      if (parkHere) {
+        const parked = await withParkedViewer(sendInternal, viewerState, forward);
+        raw = parked.value;
+        viewer = parked.report;
+      } else {
+        raw = await forward();
+      }
+      const lifted = liftAeWarnings(raw);
       const result = lifted.value;
 
       // Async envelope handling for run_batch
@@ -1156,9 +1239,13 @@ export function createServer(opts: CreateServerOptions = {}) {
           const held = lease;
           lease = null;
           held?.onLost?.((why) => jobs.warn(env.jobId, why));
+          if (batchPark?.mode === "chunks") parkedBatches.add(env.jobId);
           void batches
             .drive({ jobId: env.jobId, total: env.total, chunkSize: env.chunkSize, aeWarnings: (result as { aeWarnings?: unknown }).aeWarnings })
-            .finally(() => held?.release());
+            .finally(() => {
+              parkedBatches.delete(env.jobId);
+              held?.release();
+            });
         }
         // The undo fields travel with the envelope because this is the only
         // message the agent sees before it starts describing the work to the
@@ -1239,9 +1326,15 @@ export function createServer(opts: CreateServerOptions = {}) {
         return textResult(applyHouseStyleDetail(result, detail), wait);
       }
 
-      return withAeWarnings(textResult(result, wait), lifted.envelopeWarnings);
+      return withViewerNotes(
+        withAeWarnings(textResult(result, wait), lifted.envelopeWarnings),
+        viewerAsked || viewerReportMatters(viewer) ? viewer : null,
+        viewerRecovered
+      );
     } catch (e) {
-      return bridgeFailure(e, wait?.waitedMs ?? 0);
+      const failed = bridgeFailure(e, wait?.waitedMs ?? 0);
+      const note = (e as WithViewerNote)?.viewerNote;
+      return note ? { ...failed, content: [...failed.content, { type: "text" as const, text: note }] } : failed;
     } finally {
       // No-op unless a lease was taken, and deferred by `extendUntil` when a
       // long batch is still running behind the envelope we just returned.
@@ -1565,6 +1658,18 @@ async function clientRoots(server: Server): Promise<string[] | undefined> {
  * Vision results never come through here with a wait — screenshots are reads
  * and are never queued — so the image envelope cannot be touched by this.
  */
+/**
+ * What became of the viewer around a parked call (issue #266), as a block of
+ * its own after the result, so a script's return value keeps its shape. And a
+ * viewer an earlier call left parked and this one put back, said once.
+ */
+export function withViewerNotes<T extends { content: unknown[] }>(res: T, report: ViewerReport | null, recovered: string | null): T {
+  const extra: { type: "text"; text: string }[] = [];
+  if (report) extra.push({ type: "text", text: JSON.stringify({ quietViewer: report }) });
+  if (recovered) extra.push({ type: "text", text: recovered });
+  return extra.length ? { ...res, content: [...res.content, ...extra] } : res;
+}
+
 export function textResult(value: unknown, wait?: QueueWait | null) {
   // Compact, not pretty-printed (issue #166). The model reads JSON without the
   // indentation, and every result is re-sent on every later turn of the

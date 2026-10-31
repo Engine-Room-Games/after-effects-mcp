@@ -38,6 +38,7 @@ import {
   afterEffectsProcess,
   isDebugModeOn,
 } from "./platform.js";
+import { busyWithText, type BusyWith } from "../bridge/callsInFlight.js";
 
 /** Matches the probe timeout in discovery.ts; quoted at the user in two places. */
 const BRIDGE_PROBE_MS = 2000;
@@ -65,6 +66,12 @@ export interface SetupReport {
   ready: boolean;
   checks: Check[];
   nextSteps: string[];
+  /**
+   * Present only when the bridge is busy and this server has a call After
+   * Effects is very probably still running (issue #266) — which one, and for
+   * how long. The panel cannot say: while ExtendScript runs it answers nothing.
+   */
+  busyWith?: BusyWith;
 }
 
 export interface CheckSetupOptions {
@@ -85,6 +92,13 @@ export interface CheckSetupOptions {
    * "unknown" is the process check failing to run (issue #262).
    */
   afterEffectsRunning?: boolean | "unknown";
+  /**
+   * The MCP server only: this server's call that After Effects may still be
+   * running (bridge/callsInFlight.ts). Asked only when the bridge is busy.
+   */
+  busyWith?: () => BusyWith | null;
+  /** The MCP server only: told when the panel answers, which proves After Effects is free. */
+  onPanelAnswered?: () => void;
 }
 
 export interface BridgeProbe {
@@ -433,13 +447,19 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
   const fromFile = portFilePort();
   const bridgeTimedOut = !bridge.answering && bridge.busy !== null;
   let bridgeDetail: string;
+  let busyWith: BusyWith | null = null;
   if (bridge.answering) {
+    // Only the port this server's calls went to proves those calls are done;
+    // another panel answering on a diagnostic port says nothing about them.
+    if (opts.opPort === undefined || bridge.answering.port === opts.opPort) opts.onPanelAnswered?.();
     bridgeDetail = `responding on port ${bridge.answering.port}`;
     if (fromFile !== null && fromFile !== bridge.answering.port) {
       bridgeDetail += ` (the port file says ${fromFile}, which is stale — the socket is the authority)`;
     }
   } else if (bridge.busy) {
     bridgeDetail = `port ${bridge.busy.port} accepted the connection but did not answer within ${BRIDGE_PROBE_MS / 1000}s — After Effects is probably busy`;
+    busyWith = opts.busyWith?.() ?? null;
+    if (busyWith) bridgeDetail += `: ${busyWithText(busyWith)}`;
   } else {
     const ports = bridge.probed.map((p) => p.port).join(", ");
     const reasons = bridge.probed.map((p) => p.detail).join("; ");
@@ -627,7 +647,23 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
   }
 
   const ready = checks.every((c) => c.ok);
-  return { ready, checks, nextSteps: buildNextSteps(checks, ready, bridgeTimedOut) };
+  const nextSteps = buildNextSteps(checks, ready, bridgeTimedOut);
+  if (!busyWith) return { ready, checks, nextSteps };
+  return { ready, checks, nextSteps: withBusyStep(nextSteps, busyWith), busyWith };
+}
+
+/**
+ * The busy bridge's "wait" step, followed by what it is waiting on (#266).
+ * Said only next to that step: a busy bridge over a broken install still needs
+ * the install's remedy, which leads instead, and the detail still names the call.
+ */
+export function withBusyStep(nextSteps: string[], busyWith: BusyWith): string[] {
+  const waitAt = nextSteps.findIndex((l) => l.startsWith("Wait — "));
+  if (waitAt < 0) return nextSteps;
+  const line =
+    `What it is busy with: ${busyWithText(busyWith)}. Do not re-send that call — it would run a second time. ` +
+    "Run check_setup again every half minute or so; once the panel answers, read the project back to confirm what landed.";
+  return [...nextSteps.slice(0, waitAt + 1), line, ...nextSteps.slice(waitAt + 1)];
 }
 
 /**

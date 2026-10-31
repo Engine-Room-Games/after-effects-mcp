@@ -61,6 +61,31 @@ only quitting and reopening After Effects will.
   supersedes: run setup_panel, then restart After Effects
   supersedes: run setup_panel, then ask them to quit and reopen After Effects
 
+- **Breaking: during `run_jsx`, `app.project.activeItem` is AE MCP's
+  parking comp — use `viewerComp()` for the user's comp.** Every change a
+  script makes re-runs the expressions of the comp in the viewer, once per
+  change (a 20-change script took 74 s with a heavy comp in view, AE 26.5). So
+  when the comp in view has expressions, the server opens an empty comp ("AE
+  MCP viewer parking", in an "AE MCP" folder) in the viewer before the script
+  and reopens the user's comp after it. It is made once and reused, adds no
+  undo step, and is left out of `list_comps`, `get_project_summary` (counted
+  in `aeMcpItemsHidden`) and `find_layers` — but not out of
+  `app.project.items`. A comp the script opens in the viewer itself stays
+  there, and the answer says which. `quietViewer: false` turns it off; with
+  `quietViewer: true`, or when the comp could not be put back, the answer
+  carries a `quietViewer` block. `run_batch` with `run_jsx` steps parks too.
+  If a call was cut off between the park and the put-back, the next `run_jsx`
+  or `check_setup` reopens the user's comp (issue #266).
+  supersedes: app.project.activeItem is the comp the user has open
+  supersedes: use app.project.activeItem to get the active comp
+- **`check_setup` says what a busy After Effects is busy with.** When the
+  bridge accepts and does not answer, and this server has a call open — or one
+  that timed out with no answer since — the report carries `busyWith: {op,
+  state, calledAgoMs}` and the `bridgeReachable` detail names the call.
+  `state` is `sent` or `timedOut` (After Effects is very probably running it)
+  or `queued` (not sent yet: another session's call is what is running). Keep
+  waiting while it is there; do not re-send that call (issue #266).
+
 ## 0.5.2
 
 Four fixes, all reported from outside the project. Two change what a result
