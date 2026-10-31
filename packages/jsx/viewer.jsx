@@ -355,10 +355,6 @@ function __parkExpressionScan(comp) {
   return res;
 }
 
-// Server-only (tools/viewerPark.ts), sent under the run_jsx call's write lease
-// before the script. Answers {parked, compId?, compName?, created?, recovered?,
-// skipped?, note?}. noUndo: opening a comp in the viewer is no undo step; the
-// one-time creation opens a group of its own.
 // Why a park in force was forgotten rather than taken over: the viewer had
 // moved off the parking comp (the script, or the user, opened `now`).
 function __parkMovedWhy(now) {
@@ -379,6 +375,10 @@ function __parkDropMoved(now, reparked) {
   return rec;
 }
 
+// Server-only (tools/viewerPark.ts), sent under the run_jsx call's write lease
+// before the script. Answers {parked, compId?, compName?, created?, recovered?,
+// skipped?, note?, token?, reopenFailed?}. noUndo: opening a comp in the viewer is no undo step; the
+// one-time creation opens a group of its own.
 OPS._viewer_park = noUndo(function (args) {
   __parkDryRun = !!(args && args.dryRun);
   var out = { parked: false };
@@ -425,12 +425,23 @@ OPS._viewer_park = noUndo(function (args) {
     out.wouldPark = true;
     // A park an interrupted call left is undone here, before that script —
     // which reads activeItem — can write into the parking comp.
+    // `recovered` is claimed only once openInViewer has accepted the comp
+    // (#277 review). A read-back cannot confirm it here: measured, a viewer
+    // change lands once the call has ended. A reopen that throws answers
+    // `reopenFailed` instead, and the server does not send the script, which
+    // would read — and could write into — the parking comp.
+    // The park stays on record unless the reopen was accepted, so the next
+    // park, write or check_setup can still find the way back.
     if (alreadyParked) {
-      var undone = __parkEndBy("dry-run");
       try {
         from.openInViewer();
+        var undone = __parkEndBy("dry-run");
         if (undone) undone.reopened = true;
-      } catch (e0) {}
+      } catch (e0) {
+        delete out.recovered;
+        out.wouldPark = false;
+        out.reopenFailed = { compId: from.id, compName: from.name, error: __parkMsg(e0) };
+      }
     }
     return out;
   }

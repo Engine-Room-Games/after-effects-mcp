@@ -50,6 +50,8 @@ export interface ParkAnswer {
   scan?: string;
   wouldPark?: boolean;
   note?: string;
+  /** Dry run only: the viewer was left on the parking comp and reopening the user's comp threw (#277 review). */
+  reopenFailed?: { compId: number; compName: string; error: string };
   /** This park's own, sent back with its unpark so the unpark can tell it from another call's (#277). */
   token?: number;
 }
@@ -211,6 +213,12 @@ export async function notParkedForActiveItem(send: SendInternal, op = "run_jsx")
     return null;
   }
   if (!dry) return null;
+  // The viewer is still on the parking comp: this script would read it as
+  // activeItem, and could build in it. Not sent (#277 review).
+  if (dry.reopenFailed) {
+    throw new ScriptNotSentError(op, undefined, "reopen-failed",
+      `${compLabel(dry.reopenFailed.compId, dry.reopenFailed.compName)} could not be reopened (${dry.reopenFailed.error})`);
+  }
   // An earlier call (a dead session's, or a script that timed out) had left the
   // viewer parked, and the dry run reopened the user's comp before this script,
   // which reads activeItem: said, as a park's own `recovered` is (#277). Its
@@ -261,7 +269,7 @@ function takenOverNote(u: UnparkAnswer, what: string): string {
     const by = u.dryRun ? "a dry-run park (before another call's script that reads activeItem)" : "another call's park";
     if (u.restored === true && u.reparked === true) {
       return `${by} found ${what} already back in the viewer ${between}, forgot this call's park, and parked that comp ` +
-        "itself: it tries to reopen it when its own script is done, so nothing needs doing here";
+        "itself: it tries to reopen it when its own script is done, and this call has no park of its own left to undo";
     }
     if (u.restored === true) {
       return `${by} found ${what} already back in the viewer ${between} and forgot this call's park; nothing needed reopening`;
@@ -273,11 +281,11 @@ function takenOverNote(u: UnparkAnswer, what: string): string {
     : u.takenBy === "recover" ? "another call (check_setup, or another session's write)"
     : "another call's unpark, sent without knowing its own park (that park's answer was lost),";
   if (u.restored === true && u.reopened !== true) {
-    return `${who} ended this call's park ${between}; the viewer already shows ${what} again (read back)`;
+    return `${who} ended this call's park ${between}; at that moment the viewer was showing ${what} again (read back by that call)`;
   }
   if (u.reopened === true) {
     return `${who} ended this call's park ${between} and reopened ${what} in the viewer, so this call's script may have ` +
-      "run with the comp in view, re-evaluated after every change; it was in the viewer from then on, unless a later call moved it";
+      "run with the comp in view, re-evaluated after every change. What the viewer shows now is not known here";
   }
   return `${who} ended this call's park ${between} without reopening ${what}${why}; ` +
     "if the viewer shows AE MCP's parking comp, open the comp from the Project panel";

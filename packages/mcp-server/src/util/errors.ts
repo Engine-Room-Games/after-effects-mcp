@@ -749,13 +749,29 @@ export class ScriptNotSentError extends WriteQueueWaitError {
    * ahead of a script that reads activeItem, which never creates the parking
    * comp or parks the viewer, so its wording says only what it can do (#277).
    */
-  constructor(op: string, what?: string, check: "park" | "dry-run" = "park") {
+  constructor(op: string, what?: string, check: "park" | "dry-run" | "reopen-failed" = "park", detail?: string) {
     super(op, 0, "the viewer park");
     this.name = "ScriptNotSentError";
-    this.message = ScriptNotSentError.text(op, what, check);
+    this.message = ScriptNotSentError.text(op, what, check, detail);
   }
-  static text(op: string, what?: string, check: "park" | "dry-run" = "park"): string {
+  static text(op: string, what?: string, check: "park" | "dry-run" | "reopen-failed" = "park", detail?: string): string {
     const head = `${what ?? "`" + displayOp(op) + "`"} was not sent`;
+    // After Effects answered, so it is not busy: the dry run before a script
+    // reading activeItem found the viewer left on the parking comp and could
+    // not put the user's comp back (#277 review).
+    if (check === "reopen-failed") {
+      return [
+        `${head}: an earlier call had left the viewer on AE MCP's parking comp, and ${detail ?? "the user's comp could not be reopened"}.`,
+        "",
+        "This script reads app.project.activeItem, which would have been that empty parking comp — and anything it built",
+        "there would have landed in the wrong comp — so it was never sent. None of it ran.",
+        "",
+        "What to do, in order:",
+        "1. Ask the user to open their comp in the viewer (double-click it in the Project panel).",
+        "2. Then send this same call again: the script was never run, so sending it again is safe.",
+        "3. Better still, use viewerComp() instead of app.project.activeItem: it answers the user's comp even while parked.",
+      ].join("\n");
+    }
     const busy = [
       "After Effects is very probably still on earlier work — a long script, a render started in After Effects, another AI",
       "session's call, or a dialog nobody has clicked.",
