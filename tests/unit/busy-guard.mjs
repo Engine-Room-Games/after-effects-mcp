@@ -78,7 +78,7 @@ function fakePanel() {
     req.on("end", () => {
       const body = JSON.parse(Buffer.concat(bufs).toString("utf8"));
       state.ops.push(body.op);
-      state.lastDeadline = body.deadline;
+      state.lastTimeoutMs = body.timeoutMs;
       if (body.op === "hold") { held.push(res); return; }
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify(state.answer(body.op)));
@@ -111,13 +111,11 @@ try {
   await check("with nothing timed out, a call is sent without any probe", async () => {
     const c = client();
     const before = panel.state.healthHits;
-    const t0 = Date.now();
     assert.deepEqual(await c.runOp("list_comps", {}), { op: "list_comps" });
     assert.equal(panel.state.healthHits, before, "no /health asked");
-    // The panel drops a queued call whose deadline passed; it is when this
-    // request's own timeout fires (AE_MCP_OP_TIMEOUT_MS=300 here).
-    assert.equal(typeof panel.state.lastDeadline, "number");
-    assert.ok(Math.abs(panel.state.lastDeadline - (t0 + 300)) < 200, `deadline ${panel.state.lastDeadline - t0}ms after send`);
+    // The panel drops a queued call past this, timed from its arrival on a
+    // monotonic clock: relative, never an absolute time a clock change moves.
+    assert.equal(panel.state.lastTimeoutMs, 300, "the request's own limit (AE_MCP_OP_TIMEOUT_MS=300 here)");
   });
 
   await check("behind a stuck call that /health cannot answer, the next call is refused fast and unsent", async () => {

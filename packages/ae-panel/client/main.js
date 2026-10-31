@@ -132,6 +132,12 @@
   // is the op, reported on /health while it runs (`evalBusy`); absent for the
   // bundle load.
   var DEADLINE_GRACE_MS = 1000;
+  // Milliseconds on a monotonic clock: no wall-clock change or sleep moves it.
+  function monoNow() {
+    if (typeof performance !== "undefined" && performance && typeof performance.now === "function") return performance.now();
+    if (typeof process !== "undefined" && process.hrtime) { var t = process.hrtime(); return t[0] * 1000 + t[1] / 1e6; }
+    return Date.now();
+  }
   var __evalChain = Promise.resolve();
   var __evalPending = 0;
   var __evalRunning = null;
@@ -585,6 +591,8 @@
   function startHttp(port) {
     return new Promise(function (resolve, reject) {
       var server = http.createServer(function (req, res) {
+        // When the request arrived, on a clock no wall-clock change moves.
+        var receivedAt = monoNow();
         var url = req.url || "/";
         // Only /reload-jsx takes a query (`?force=1`); every other route is
         // still matched on the whole url, as before.
@@ -663,19 +671,23 @@
             // Queued behind a stuck call, an op would otherwise still run once
             // After Effects frees up — late, out of order, after the agent was
             // told it timed out. So it is dropped at its turn once the server
-            // has given up on it. The server's `deadline` (epoch ms, the moment
-            // its own timeout fires; same machine, same clock) is the signal
-            // that does not depend on socket events reaching this thread in
-            // time; DEADLINE_GRACE_MS past it, the server has certainly given
-            // up, so a dropped call is only ever one already reported to it as
-            // timed out. The request closing is a second signal.
+            // has given up on it. The server sends its own timeout as
+            // `timeoutMs` (relative), and the panel runs the same span from
+            // the request's arrival on a monotonic clock — arrival is after
+            // the server started its timer, so this deadline is never earlier
+            // than the server's, and DEADLINE_GRACE_MS on top makes a dropped
+            // call only ever one the server already reported as timed out.
+            // It needs no socket event to reach this thread in time; the
+            // request closing is a second signal. No `timeoutMs` (an older
+            // server): only the close is checked.
             var replied = false;
             var closedEarly = false;
             res.on("close", function () { if (!replied) closedEarly = true; });
-            var deadline = typeof body.deadline === "number" && isFinite(body.deadline) ? body.deadline : null;
+            var limitMs = typeof body.timeoutMs === "number" && isFinite(body.timeoutMs) && body.timeoutMs > 0 ? body.timeoutMs : null;
             var gone = function () {
-              if (deadline !== null && Date.now() > deadline + DEADLINE_GRACE_MS) {
-                return "the MCP server's deadline for it passed " + Math.round((Date.now() - deadline) / 1000) +
+              var over = limitMs === null ? 0 : monoNow() - receivedAt - limitMs;
+              if (limitMs !== null && over > DEADLINE_GRACE_MS) {
+                return "the MCP server's deadline for it passed " + Math.round(over / 1000) +
                   "s ago while it was queued behind another call";
               }
               if (closedEarly || (req.socket && req.socket.destroyed)) {

@@ -70,8 +70,12 @@ export const BUSY_PROBE_MS = 1500;
 const RECENT_SILENCE_MS = 2500;
 /**
  * A script the panel says it started more than this after the stuck call gave
- * up cannot be that call: the panel drops a queued call whose request has
- * closed, and a timed-out request is closed. Margin for the two clocks' reads.
+ * up, under a different op name, is taken for other work: the stuck call was
+ * either run before it or dropped by the panel (its request closed, or its
+ * timeout passed while it was queued). One with the same name may be the
+ * stuck call itself, received late, so it never counts. `evalBusy.ms` is a
+ * duration, so only the reading here depends on this clock. Margin for the
+ * two reads.
  */
 const STARTED_AFTER_MARGIN_MS = 250;
 
@@ -207,7 +211,7 @@ export class HttpClient {
         this.noteHealth(h);
         const running = h.evalBusy;
         if (!running || !this.stuck) return null;
-        if (this.now() - running.ms > this.stuck.timedOutAt + STARTED_AFTER_MARGIN_MS) {
+        if (running.op !== this.stuck.op && this.now() - running.ms > this.stuck.timedOutAt + STARTED_AFTER_MARGIN_MS) {
           // Started after the stuck call gave up: that call is over, and this
           // is ordinary work the next call can wait behind like any other.
           this.stuck = null;
@@ -322,11 +326,14 @@ export class HttpClient {
       resp = await fetch(`${this.base}/op`, {
         method: "POST",
         headers: { "content-type": "application/json", ...authHeaders(this.port) },
-        // `deadline`: when this request's own timeout fires (epoch ms; the
-        // panel is on the same machine). The panel drops the call unrun if its
-        // turn comes later than that (plus a grace), so a call this server has
-        // already reported as timed out never runs late, out of order.
-        body: JSON.stringify({ op, args: args ?? {}, progressToken, deadline: Date.now() + timeoutMs }),
+        // `timeoutMs`: how long this request's own timeout runs, from now. The
+        // panel starts the same span on its monotonic clock when the request
+        // arrives — after this send, so its deadline is never earlier than
+        // ours — and drops the call unrun if its turn comes later than that
+        // (plus a grace). Relative on purpose: an absolute time would break on
+        // a clock change or a sleep. So a call this server has already
+        // reported as timed out never runs late, out of order.
+        body: JSON.stringify({ op, args: args ?? {}, progressToken, timeoutMs }),
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {

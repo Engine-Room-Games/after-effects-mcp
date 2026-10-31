@@ -542,10 +542,12 @@ await check("drops a queued op whose request closed before its turn, and reports
 await check("drops a queued op whose server deadline passed, even with its request still open", async () => {
   const port = Number(booted.dom.nodes.port.textContent);
   const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
-  const post = (op, deadline) => fetch(panelUrl(port, "/op"), {
+  // `timeoutMs` is relative: the panel starts it on its monotonic clock when
+  // the request arrives. Absent, as from an older server: never dropped by time.
+  const post = (op, timeoutMs) => fetch(panelUrl(port, "/op"), {
     method: "POST",
     headers: { "content-type": "application/json", "x-ae-mcp-token": token },
-    body: JSON.stringify({ op, args: {}, deadline }),
+    body: JSON.stringify(timeoutMs === undefined ? { op, args: {} } : { op, args: {}, timeoutMs }),
   });
   let release = null;
   const seen = [];
@@ -555,18 +557,24 @@ await check("drops a queued op whose server deadline passed, even with its reque
     return false;
   };
   try {
-    const first = post("hold_me", Date.now() + 60_000);
+    const first = post("hold_me", 60_000);
     while (!release) await new Promise((r) => setTimeout(r, 10));
-    const late = post("expired_op", Date.now() - 1500).then((r) => r.json(), (e) => e);
-    const inGrace = post("in_grace_op", Date.now() + 5_000).then((r) => r.json());
-    await new Promise((r) => setTimeout(r, 100));
+    const late = post("expired_op", 50).then((r) => r.json(), (e) => e);
+    const graced = post("graced_op", 400).then((r) => r.json());
+    const inTime = post("in_time_op", 60_000).then((r) => r.json());
+    const noLimit = post("no_limit_op").then((r) => r.json());
+    // Past expired_op's 50 ms plus the 1 s grace; graced_op is past its 400 ms
+    // but inside the grace, so the server may not have given up yet: it runs.
+    await new Promise((r) => setTimeout(r, 1300));
     release();
     assert.equal((await (await first).json()).ok, true);
     assert.ok((await late) instanceof Error, "the dropped request gets no answer");
-    assert.equal((await inGrace).ok, true, "a call still inside its deadline runs");
+    assert.equal((await graced).ok, true, "past its limit but inside the grace: still run");
+    assert.equal((await inTime).ok, true, "a call still inside its deadline runs");
+    assert.equal((await noLimit).ok, true, "a call that sent no timeout is never dropped by time");
     await logLine(booted.dom, /expired_op was not run, the MCP server's deadline for it passed/);
     assert.ok(!seen.includes("expired_op"), "the expired op never reached ExtendScript");
-    assert.ok(seen.includes("in_grace_op"));
+    for (const op of ["graced_op", "in_time_op", "no_limit_op"]) assert.ok(seen.includes(op), `${op} ran`);
   } finally { booted.host.raw = null; }
 });
 
