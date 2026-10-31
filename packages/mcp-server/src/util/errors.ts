@@ -846,12 +846,17 @@ export class AeBusyError extends WriteQueueWaitError {
   }
   static text(op: string, stuck: StuckCall, evidence: BusyEvidence): string {
     const prior = `\`${displayOp(stuck.op)}\``;
+    // Lead with what is going on, not with how it was found out: a silent
+    // /health is the panel's thread held by After Effects, not a fault of its
+    // own, and read as "the health check failed" it sent agents to check_setup.
+    const running = evidence.kind === "running" ? `\`${displayOp(evidence.op)}\`` : prior;
     const seen =
       evidence.kind === "silent"
-        ? `Re-checked just now: the panel did not answer even its ${elapsedText(evidence.probeMs)} health check, which happens only while After Effects is not letting scripts run.`
+        ? `Re-checked just now: the panel could not answer even a ${elapsedText(evidence.probeMs)} "are you there?" — After Effects holds it for as long as it runs a script or the user holds a menu or dialog open. The panel itself is fine.`
         : `Re-checked just now: the panel answered, and After Effects has still not finished the script it is on (\`${displayOp(evidence.op)}\`, for ${elapsedText(evidence.ms)}).`;
     return [
-      `\`${displayOp(op)}\` was not sent: After Effects is still busy. An earlier ${prior} call (this session's, or another AI session's on the same After Effects) was sent ${elapsedText(stuck.sentAgoMs)} ago and gave up at its ${secondsText(stuck.limitMs)} limit ${elapsedText(stuck.timedOutAgoMs)} ago, and nothing has answered since.`,
+      `\`${displayOp(op)}\` was not sent: After Effects is still busy (still running ${running}, or the user has a menu or dialog open).`,
+      `An earlier ${prior} call (this session's, or another AI session's on the same After Effects) was sent ${elapsedText(stuck.sentAgoMs)} ago and gave up at its ${secondsText(stuck.limitMs)} limit ${elapsedText(stuck.timedOutAgoMs)} ago, and nothing has answered since.`,
       seen,
       "",
       "This call never left the server, so it changed nothing, and sending it again is",

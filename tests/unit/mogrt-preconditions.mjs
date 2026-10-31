@@ -138,6 +138,7 @@ function makeComp(opts) {
     if (opts.export === "silent") return false;
     if (opts.export === "liar") return true;
     FILES.set(outPath, "PKa real zip would go here");
+    if (opts.onExported) opts.onExported();
     return true;
   };
   return comp;
@@ -154,6 +155,8 @@ function makeContext(opts) {
   const comp = makeComp(opts);
   // opts.dirty: undefined models a host that will not say (saved, as before).
   let dirty = opts.dirty;
+  // As measured on 26.5: every export leaves the project marked changed.
+  if (opts.exportDirties) opts.onExported = () => { dirty = true; };
   const project = {
     get file() { return opts.projectSaved === false ? null : new MockFile(PROJECT_FILE); },
     get dirty() { return dirty; },
@@ -441,6 +444,20 @@ check("a saved project is reported as saved, with a note for the user", () => {
   assert.equal(r.projectSaved, true);
   assert.match(r.projectSavedNote, /Revert/);
   assert.match(r.projectSavedNote, /show\.aep/);
+});
+
+check("an export that leaves the project dirty says so, and a clean one does not", () => {
+  const dirtied = run({ controllers: 1, export: "ok", dirty: true, exportDirties: true }).call();
+  assert.equal(dirtied.projectSaved, true);
+  assert.equal(dirtied.projectDirty, true);
+  assert.match(dirtied.note, /left the project with unsaved changes/);
+  assert.match(dirtied.note, /every export/);
+  const clean = run({ controllers: 1, export: "ok", dirty: false }).call();
+  assert.equal(clean.projectDirty, false);
+  assert.equal(clean.note, undefined);
+  const unsaid = run({ controllers: 1, export: "ok" }).call();
+  assert.equal(unsaid.projectDirty, null, "a host that will not say is null, not a guess");
+  assert.equal(unsaid.note, undefined);
 });
 
 check("a read-only project is refused before anything happens", () => {

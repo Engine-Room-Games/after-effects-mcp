@@ -157,7 +157,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- motion graphics templates ----------
   export_mogrt:
-    "Export a comp as a .mogrt for Premiere. With dialogs suppressed (AE's modal font warning would freeze this connection until someone clicks OK in AE) it saves the project if it has unsaved changes, then exports, outside the undo group. `projectSaved:true` means this call saved the user's project — tell them, since File > Revert now goes back to it. A read-only project is refused first. " +
+    "Export a comp as a .mogrt for Premiere. With dialogs suppressed (AE's modal font warning would freeze this connection until someone clicks OK in AE) it saves the project if it has unsaved changes, then exports, outside the undo group. `projectSaved:true` means this call saved the user's project — tell them, since File > Revert now goes back to it. AE marks the project changed after every export: `projectDirty:true` after is normal. A read-only project is refused first. " +
     "**The comp needs at least one property in its Essential Graphics panel** — AE silently refuses an empty one, so this refuses first; add one with add_essential_property. " +
     "`posterTime` renders that frame as the thumbnail instead of AE's black one (the export still succeeds if only the thumbnail fails); needs the project saved once by hand. `fonts` in the result lists the fonts the template requires — tell the user, since Premiere flags non-Adobe ones. " +
     "If an export still fails, read the message: it lists what was checked, and under the default suppression no dialog is involved — the user sees AE's own reason by running the export by hand from the Essential Graphics panel.",

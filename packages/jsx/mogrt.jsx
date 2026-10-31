@@ -522,6 +522,21 @@ OPS.export_mogrt = noUndo(function (args) {
     }
   }
 
+  // After Effects marks the project changed after every export, saved or not
+  // (measured on 26.5: a second export in a row always saves again). That is
+  // AE's doing and not fought here; it is said, so an agent does not read
+  // the unsaved-changes star as something it did. Read through a fresh
+  // `app.project`: the export invalidated the one held before it.
+  var dirtyAfterExport = null;
+  try { dirtyAfterExport = app.project.dirty === true ? true : (app.project.dirty === false ? false : null); } catch (eDA) {}
+  result.projectDirty = dirtyAfterExport;
+  if (dirtyAfterExport === true) {
+    result.note =
+      "The export left the project with unsaved changes: After Effects marks a project changed after " +
+      "every export, even when nothing in it changed. Nothing is lost; the next export_mogrt saves it " +
+      "again first. Tell the user only if they ask why the project shows unsaved changes.";
+  }
+
   return result;
 });
 // dispatch() leaves dialogs to this op (core.jsx, "Dialog guard"):
