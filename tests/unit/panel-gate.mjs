@@ -113,6 +113,48 @@ await check("unreachable during the restart drops the verdict; a timeout keeps i
   assert.equal(await gate.check(), null);
 });
 
+// A busy After Effects (the user in a menu, a dialog, a preview) used to cost
+// a call the whole 2 s probe every 5 s for as long as it stayed busy, though
+// the panel it is running cannot have changed. A current verdict now outlives
+// a timed-out probe for the full healthy interval.
+await check("a timed-out probe keeps a current verdict for the healthy interval; a refusal still resets", async () => {
+  const b = fakeBridge();
+  b.hash = "new";
+  const c = clock();
+  const gate = createPanelGate(b, { assess, now: c.now });
+  assert.equal(await gate.check(), null);
+  c.t += HEALTHY_RECHECK_MS;
+  b.mode = "timeout";
+  assert.equal(await gate.check(), null, "the probe timed out and the verdict stands");
+  const hits = b.hits;
+  for (const step of [STALE_RECHECK_MS, STALE_RECHECK_MS * 3, HEALTHY_RECHECK_MS - STALE_RECHECK_MS * 4 - 1]) {
+    c.t += step;
+    assert.equal(await gate.check(), null);
+  }
+  assert.equal(b.hits, hits, "no call inside the healthy interval paid the probe again");
+  c.t += 1;
+  await gate.check();
+  assert.equal(b.hits, hits + 1, "re-checked once the healthy interval is up");
+  // A refusal is still the panel gone: the verdict is dropped and the next call asks.
+  b.mode = "unreachable";
+  c.t += HEALTHY_RECHECK_MS;
+  assert.equal(await gate.check(), null);
+  b.mode = "ok";
+  b.hash = "old";
+  assert.equal(await gate.check(), STALE, "after a refusal the very next call probes again");
+});
+
+await check("a probe that never got an answer still retries soon", async () => {
+  const b = fakeBridge();
+  b.mode = "timeout";
+  const c = clock();
+  const gate = createPanelGate(b, { assess, now: c.now });
+  assert.equal(await gate.check(), null);
+  c.t += STALE_RECHECK_MS;
+  b.mode = "ok";
+  assert.equal(await gate.check(), STALE, "nothing was known, so it asked again after the short interval");
+});
+
 await check("invalidate and a port change force the next call to ask", async () => {
   const b = fakeBridge();
   const c = clock();

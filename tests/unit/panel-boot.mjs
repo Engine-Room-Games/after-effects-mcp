@@ -83,6 +83,13 @@ function makeHost(extDir) {
         return void setTimeout(() => cb("ok"), 0);
       }
       if (host.namespaceGone) return void setTimeout(() => cb("__AEMCP_MISSING__"), 0);
+      // `raw(op, cb)` takes over one op's reply entirely: the raw string After
+      // Effects would answer with, or holding `cb` to play a busy After Effects.
+      if (host.raw) {
+        const open = script.indexOf("__AEMCP.call(") + "__AEMCP.call(".length;
+        const p = JSON.parse(JSON.parse(script.slice(open, script.lastIndexOf(") : '"))));
+        if (host.raw(p.op, cb)) return;
+      }
       // `answer(op, args)` plays one op's ExtendScript reply; a thrown error is
       // reported the way dispatch() reports one.
       if (host.answer) {
@@ -479,6 +486,71 @@ await check("the heal will not load a newer installed bundle into a running pane
     fs.writeFileSync(bundleFile, original);
     booted.host.namespaceGone = false;
   }
+});
+
+// A call whose MCP server gave up on it (its timeout closes the request) used
+// to run anyway once the call in front of it let go of After Effects — late,
+// out of order, after the agent was told it timed out. Now it is dropped at
+// its turn, logged; the call already handed to evalScript is untouched.
+await check("drops a queued op whose request closed before its turn, and reports the busy script on /health", async () => {
+  const port = Number(booted.dom.nodes.port.textContent);
+  const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
+  const post = (op, signal) => fetch(panelUrl(port, "/op"), {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-ae-mcp-token": token },
+    body: JSON.stringify({ op, args: {} }),
+    signal,
+  });
+  let release = null;
+  const seen = [];
+  booted.host.raw = (op, cb) => {
+    seen.push(op);
+    if (op === "hold_me") { release = () => cb(JSON.stringify({ ok: true, result: { held: true } })); return true; }
+    return false;
+  };
+  try {
+    const first = post("hold_me");
+    while (!release) await new Promise((r) => setTimeout(r, 10));
+    const abort = new AbortController();
+    const second = post("abandoned_op", abort.signal).catch((e) => e);
+    await new Promise((r) => setTimeout(r, 100));
+    const busy = await (await fetch(panelUrl(port, "/health"))).json();
+    assert.equal(busy.evalBusy?.op, "hold_me", "health names the script After Effects has not answered");
+    assert.ok(busy.evalBusy.ms >= 0);
+    assert.equal(busy.evalQueued, 1, "and counts the call queued behind it");
+    abort.abort();
+    assert.ok((await second) instanceof Error, "the client gave up");
+    await new Promise((r) => setTimeout(r, 100));
+    release();
+    const body = await (await first).json();
+    assert.equal(body.ok, true, "the op already handed to evalScript still answers");
+    assert.deepEqual(body.result, { held: true });
+    await logLine(booted.dom, /abandoned_op was not run: the MCP server closed its request/);
+    assert.ok(!seen.includes("abandoned_op"), "the abandoned op never reached ExtendScript");
+    const idle = await (await fetch(panelUrl(port, "/health"))).json();
+    assert.equal(idle.evalBusy, null);
+    assert.equal(idle.evalQueued, 0);
+    // The chain still works afterwards.
+    assert.equal((await (await post("list_comps")).json()).ok, true);
+  } finally { booted.host.raw = null; }
+});
+
+await check("\"EvalScript error.\" comes back coded as After Effects refusing to run, not as a script fault", async () => {
+  const port = Number(booted.dom.nodes.port.textContent);
+  const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
+  booted.host.raw = (op, cb) => { setTimeout(() => cb("EvalScript error."), 0); return true; };
+  try {
+    const r = await fetch(panelUrl(port, "/op"), {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-ae-mcp-token": token },
+      body: JSON.stringify({ op: "set_text", args: {} }),
+    });
+    const body = await r.json();
+    assert.equal(body.ok, false);
+    assert.equal(body.code, "EVAL_SCRIPT_ERROR");
+    assert.doesNotMatch(body.error, /syntax or runtime/);
+    assert.match(body.error, /very probably did not run/);
+  } finally { booted.host.raw = null; }
 });
 
 await check("also boots if a host build anchors __dirname at the client folder", async () => {

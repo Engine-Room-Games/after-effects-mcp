@@ -211,10 +211,18 @@ export class BridgeTimeoutError extends Error {
       "",
       "This is a timeout, not a lost connection — the panel is very probably still",
       "there. ExtendScript is single-threaded, so while After Effects is busy running a",
-      "script it cannot answer the bridge at all, and a busy AE looks exactly like a",
-      "dead one from here. It usually recovers on its own.",
+      "script — or held by the user, in a menu, a dialog, a text edit or a preview — it",
+      "cannot answer the bridge at all, and a busy AE looks exactly like a dead one from",
+      "here. It usually recovers on its own.",
       "",
       ...landingLines(opts.renderStep),
+      ...(opts.op === "health"
+        ? []
+        : [
+            "",
+            "Until After Effects answers again, each further call re-checks it first and, if it",
+            "is still busy, comes back at once unsent instead of queueing behind this one.",
+          ]),
       "",
       "What to do, in order:",
       ...(opts.renderStep
@@ -230,9 +238,12 @@ export class BridgeTimeoutError extends Error {
       "   comes back by itself once the script finishes. While nothing has answered since,",
       "   check_setup names this call under `busyWith` — a long script can hold After",
       "   Effects for minutes, and that is the sign to keep waiting rather than diagnose.",
-      "3. Ask the user to look at After Effects. A modal dialog — an unsaved-project",
-      "   prompt, a missing-font warning — blocks it in the same way and may be hidden",
-      "   behind another window. Only they can click it.",
+      "3. Ask the user to look at After Effects. Most often it is held by what they are",
+      "   doing there: an open menu, a modal dialog (an unsaved-project prompt, a",
+      "   missing-font warning — possibly hidden behind another window), a text layer",
+      "   being typed into, a RAM preview playing, or a render they started. Ask them to",
+      "   finish or close it; then carry on once check_setup shows the panel answering —",
+      "   reading this call's effect back rather than re-sending it.",
       "4. On macOS, if they have switched to another desktop (Space), ask them to switch",
       "   back to the one After Effects is on. Calls have been reported to stall until",
       "   they return, then complete normally.",
@@ -394,6 +405,40 @@ export class AeError extends Error {
     super(message);
     this.name = "AeError";
   }
+}
+
+/**
+ * The panel's code for After Effects answering `evalScript` with the literal
+ * string "EvalScript error." instead of running it.
+ */
+export const EVAL_REFUSED_CODE = "EVAL_SCRIPT_ERROR";
+
+/**
+ * What "EvalScript error." means for an op, in the server's words.
+ *
+ * It used to read "ExtendScript eval failed (syntax or runtime)", which sent
+ * agents looking for a bug in their script. But every op reaches After Effects
+ * as one fixed line, `__AEMCP.call(...)`, whose handler catches everything a
+ * script can throw and answers it as `{ok:false}` — so the bare string is not
+ * a script failing. It is After Effects declining to run the line at all,
+ * which it does while it is held: by a modal dialog, a menu, a text edit, a
+ * preview or a render. Very probably nothing ran; not certainly.
+ */
+export function evalRefusedText(op: string): string {
+  return [
+    `After Effects refused to run \`${displayOp(op)}\`: it answered "EvalScript error." instead of running the script.`,
+    "",
+    "This is not an error in the script — this server sends every call as one fixed",
+    "line whose own failures come back as ordinary error messages. After Effects gives",
+    "this bare answer when it will not run a script at all, most often because the user",
+    "is in the middle of something there: an open menu, a modal dialog, a text layer",
+    "being typed into, a RAM preview, or a render.",
+    "",
+    "The call very probably did not run, but that is not certain.",
+    "1. Ask the user to finish or close what they are doing in After Effects.",
+    "2. Then read back what this call would have changed (get_layer_full, list_layers,",
+    "   diff_comp against a snapshot), and send it again only if it did not land.",
+  ].join("\n");
 }
 
 /**
@@ -731,6 +776,77 @@ export class DeskPlaceLostError extends WriteQueueWaitError {
       "2. If it fails the same way again, tell the user another AI session's server has",
       "   stopped responding (a suspended terminal, a debugger) and ask them to resume or",
       "   close it; within seconds this session goes to After Effects directly instead.",
+    ].join("\n");
+  }
+}
+
+/** The call a busy After Effects is very probably still on: one that timed out with no answer since. */
+export interface StuckCall {
+  /** As the agent called it (`displayOp` applied by the message). */
+  op: string;
+  /** How long ago it was sent, and how long ago it gave up, at what limit. */
+  sentAgoMs: number;
+  timedOutAgoMs: number;
+  limitMs: number;
+}
+
+/**
+ * What the re-check just before refusing found: the panel did not answer its
+ * health check at all (ExtendScript holds its thread), or it answered and said
+ * After Effects has not yet answered the script it is on.
+ */
+export type BusyEvidence =
+  | { kind: "silent"; probeMs: number }
+  | { kind: "running"; op: string; ms: number };
+
+/**
+ * A call refused before it was sent, because After Effects is still on an
+ * earlier call that timed out (the busy-AE guard in `bridge/httpClient.ts`).
+ *
+ * Without this every call made while After Effects was held — by the user in
+ * a menu, a dialog, a text layer or a preview, or by a long script — waited
+ * its own full limit, then still ran once AE was free, late and out of order.
+ * Now one quick re-check decides: still busy, refuse at once, unsent.
+ *
+ * The write-queue-wait kind on purpose: nothing left this server, so re-sending
+ * is safe — the opposite of the timeout it follows, which forbids re-sending
+ * the timed-out call. Never a `BridgeUnreachableError`: `runOp` re-sends those,
+ * and this must not be sent at all. Its sentences are its own (tests hold it).
+ */
+export class AeBusyError extends WriteQueueWaitError {
+  constructor(op: string, public stuck: StuckCall, public evidence: BusyEvidence) {
+    super(op, 0, stuck.op);
+    this.name = "AeBusyError";
+    this.message = AeBusyError.text(op, stuck, evidence);
+  }
+  static text(op: string, stuck: StuckCall, evidence: BusyEvidence): string {
+    const prior = `\`${displayOp(stuck.op)}\``;
+    const seen =
+      evidence.kind === "silent"
+        ? `Re-checked just now: the panel did not answer even its ${elapsedText(evidence.probeMs)} health check, which happens only while After Effects is not letting scripts run.`
+        : `Re-checked just now: the panel answered, and After Effects has still not finished the script it is on (\`${displayOp(evidence.op)}\`, for ${elapsedText(evidence.ms)}).`;
+    return [
+      `\`${displayOp(op)}\` was not sent: After Effects is still busy. This server's ${prior} call, sent ${elapsedText(stuck.sentAgoMs)} ago, gave up at its ${secondsText(stuck.limitMs)} limit ${elapsedText(stuck.timedOutAgoMs)} ago, and nothing has answered since.`,
+      seen,
+      "",
+      "This call never left the server, so it changed nothing, and sending it again is",
+      "safe. Sent now it would only have waited its own full limit behind the stuck call,",
+      "then run whenever After Effects freed up — late, and out of order.",
+      "",
+      "The usual cause is the user working in After Effects at the same time: an open",
+      "menu, a modal dialog (a save prompt, a missing-font warning, an error alert), a",
+      "text layer being typed into, a RAM preview playing, or a render they started.",
+      "While any of those is in progress After Effects runs no scripts. A long script of",
+      "this server's own holds it the same way.",
+      "",
+      "What to do, in order:",
+      "1. Ask the user to finish or close what they are doing in After Effects — close",
+      "   the menu or dialog, press Esc to leave the text layer, stop the preview, or let",
+      "   their render finish — and tell you when they have.",
+      "2. Then send this same call again. While After Effects is still busy it is refused",
+      "   at once like this, so a retry never hangs.",
+      `3. ${prior} itself may still finish and land once After Effects is free. Read back`,
+      "   what it was meant to change before sending that one again.",
     ].join("\n");
   }
 }

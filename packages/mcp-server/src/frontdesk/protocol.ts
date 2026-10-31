@@ -1,5 +1,6 @@
 import { displayOp } from "../util/opNames.js";
 import {
+  AeBusyError,
   AeError,
   BridgeAuthError,
   BridgeBusyError,
@@ -73,6 +74,8 @@ export type WireError =
   | { kind: "reset"; message: string; port: number; op?: string }
   | { kind: "auth"; message: string; port: number; sentToken: boolean }
   | { kind: "ae"; message: string; stack?: string; line?: number; code?: string; source?: AeSourceInfo }
+  /** Refused unsent: After Effects is still on a call that timed out (the leader's busy guard). */
+  | { kind: "ae-busy"; message: string; op: string; stuck: AeBusyError["stuck"]; evidence: AeBusyError["evidence"] }
   | { kind: "queue-wait"; op: string; waitedMs: number; behind: string; behindSession?: string }
   | { kind: "queue-full"; op: string; maxDepth: number; behind: string }
   | { kind: "queue-cancelled"; op: string }
@@ -95,6 +98,8 @@ export function toWire(e: unknown): WireError {
   if (e instanceof BridgeResetError) return { kind: "reset", message: e.message, port: e.port, op: e.op };
   if (e instanceof BridgeAuthError) return { kind: "auth", message: e.message, port: e.port, sentToken: e.sentToken };
   if (e instanceof AeError) return { kind: "ae", message: e.message, stack: e.stack_, line: e.line, code: e.code, source: e.source };
+  // Before the queue waits it extends, so a follower gets the same class and words.
+  if (e instanceof AeBusyError) return { kind: "ae-busy", message: e.message, op: e.op, stuck: e.stuck, evidence: e.evidence };
   if (e instanceof DeskWaitError) return { kind: "queue-wait", op: e.op, waitedMs: e.waitedMs, behind: e.behind, behindSession: e.behindSession };
   if (e instanceof WriteQueueWaitError) return { kind: "queue-wait", op: e.op, waitedMs: e.waitedMs, behind: e.behind };
   if (e instanceof WriteQueueFullError) return { kind: "queue-full", op: e.op, maxDepth: e.maxDepth, behind: e.behind };
@@ -119,6 +124,8 @@ export function fromWire(w: WireError): Error {
       return verbatim(new BridgeAuthError(w.port, w.sentToken), w.message);
     case "ae":
       return new AeError(w.message, w.stack, w.line, w.code, w.source);
+    case "ae-busy":
+      return verbatim(new AeBusyError(w.op, w.stuck, w.evidence), w.message);
     case "queue-wait":
       return w.behindSession
         ? new DeskWaitError(w.op, w.waitedMs, w.behind, w.behindSession)
