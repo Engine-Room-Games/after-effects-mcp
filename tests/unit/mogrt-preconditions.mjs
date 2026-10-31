@@ -122,7 +122,7 @@ function makeComp(opts) {
   comp.height = 1080;
   let templateName = opts.templateName === undefined ? "Untitled" : opts.templateName;
   Object.defineProperty(comp, "motionGraphicsTemplateName", {
-    get() { return templateName; },
+    get() { if (opts.nameUnreadable && !LOG.some((l) => l.indexOf("rename:") === 0)) throw new Error("no"); return templateName; },
     set(v) { templateName = v; LOG.push("rename:" + v); },
   });
   Object.defineProperty(comp, "motionGraphicsTemplateControllerCount", {
@@ -159,6 +159,7 @@ function makeContext(opts) {
     get dirty() { return dirty; },
     save() {
       LOG.push("save");
+      if (opts.saveThrowsButLands) { dirty = false; throw new Error("spurious"); }
       if (opts.saveThrows) throw new Error("disk full");
       if (!opts.saveFails && dirty === true) dirty = false;
     },
@@ -186,7 +187,7 @@ function makeContext(opts) {
     },
     // vision.jsx supplies these; only the posterTime path reaches them.
     __tmpPngPath: () => "/tmp/poster.png",
-    __saveFrameAt: () => {},
+    __saveFrameAt: () => { if (opts.posterThrows) throw new Error("render failed"); },
   };
   if (opts.guardFails) {
     // core.jsx's guard when beginSuppressDialogs() threw inside it: null.
@@ -516,6 +517,30 @@ check("a guard that could not suppress dialogs is a refusal, never an unguarded 
   assert.equal(LOG.indexOf("beginSuppressDialogs"), -1, "no second begin outside the guard");
   assert.equal(LOG.indexOf("save"), -1);
   assert.equal(LOG.some((l) => l.indexOf("export:") === 0), false);
+});
+
+check("a poster frame that fails to render after the export is a warning on a success", () => {
+  const { call } = run({ controllers: 1, export: "ok", dirty: true, posterThrows: true }, { posterTime: 1 });
+  const r = call();
+  assert.equal(r.ok, true);
+  assert.equal(r.projectSaved, true);
+  assert.match(r.posterWarning, /render failed/);
+  assert.equal(r.posterPngPath, undefined);
+});
+
+check("a save that throws but leaves the project clean is reported as a save", () => {
+  const { call } = run({ controllers: 1, export: "ok", dirty: true, saveThrowsButLands: true });
+  const r = call();
+  assert.equal(r.projectSaved, true);
+  assert.match(r.projectSavedNote, /Revert/);
+  assert.match(r.saveWarning, /spurious/);
+});
+
+check("an unreadable previous template name is said on a failure, not silently kept", () => {
+  const { call } = run({ controllers: 1, export: "silent", dirty: true, nameUnreadable: true });
+  const msg = messageOf(call);
+  assert.match(msg, /previous name could not be read, so it was not put back/);
+  assert.match(msg, /WAS saved/);
 });
 
 console.log(`mogrt-preconditions: ${passed} checks passed`);

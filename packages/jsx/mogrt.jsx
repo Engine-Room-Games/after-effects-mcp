@@ -334,6 +334,7 @@ OPS.export_mogrt = noUndo(function (args) {
   var projectSaved = false;
   var threw = null;
   var saveFailed = null;
+  var saveWarning = null;
   var suppressFailed = null;
   try {
     var already = typeof __dialogsSuppressed === "function" && __dialogsSuppressed();
@@ -364,9 +365,18 @@ OPS.export_mogrt = noUndo(function (args) {
     if (wasDirty !== false) {
       var saveThrew = null;
       try { app.project.save(); } catch (eSave) { saveThrew = eSave; }
-      var stillDirty = false;
-      try { stillDirty = app.project.dirty === true; } catch (eD2) { stillDirty = false; }
-      if (saveThrew || stillDirty) {
+      // dirtyAfter: true, false, or null when the host will not say.
+      var dirtyAfter = null;
+      try { dirtyAfter = app.project.dirty === true ? true : (app.project.dirty === false ? false : null); } catch (eD2) { dirtyAfter = null; }
+      // A save that threw but left the project clean most likely landed: it is
+      // reported as a save (the Revert point moved), with what AE threw. A
+      // throw with no readable dirty flag proves nothing, so it is a refusal.
+      var stillDirty = dirtyAfter === true || (saveThrew !== null && dirtyAfter !== false);
+      if (!stillDirty && saveThrew) {
+        saveWarning = "After Effects threw while saving the project (" + saveThrew.message + "), but the " +
+          "project reads as saved afterwards, so the save most likely landed.";
+      }
+      if (stillDirty) {
         saveFailed = "After Effects did not save the project (" + projectPath + ")" +
           (saveThrew ? ": " + saveThrew.message : "") + ", and it has to be saved before an export. Nothing " +
           "was exported. The usual causes are a file that is locked or read-only, or a project converted " +
@@ -405,6 +415,10 @@ OPS.export_mogrt = noUndo(function (args) {
   // know their Revert point moved.
   function failAfterSave(msg) {
     var undone = undoRename();
+    if (renamed === false && templateName !== previousTemplateName) {
+      msg += " The comp's Essential Graphics template name was set to '" + templateName + "' for the export; " +
+        "its previous name could not be read, so it was not put back.";
+    }
     if (projectSaved) {
       msg += " NOTE: the user's project WAS saved (" + projectPath + ") before the export, so File > Revert " +
         "now goes back to that save — tell the user." +
@@ -477,6 +491,7 @@ OPS.export_mogrt = noUndo(function (args) {
       "The user's project was saved (" + projectPath + ") before the export, which After Effects requires. " +
       "Tell the user: File > Revert now goes back to this state, not to their last save.";
   }
+  if (saveWarning) result.saveWarning = saveWarning;
   if (aeWarnings) result.aeWarnings = aeWarnings;
   if (!suppress) {
     result.warning =
@@ -492,10 +507,19 @@ OPS.export_mogrt = noUndo(function (args) {
   // post-processes files AE has just written.
   if (hasPoster) {
     var t = args.posterTime;
-    var posterPath = __tmpPngPath();
-    __saveFrameAt(comp, t, new File(posterPath), 1);
-    result.posterPngPath = posterPath;
-    result.posterTime = t;
+    // The template is written and valid by now (and the project may have been
+    // saved): a poster frame that fails to render is a warning on a success,
+    // never a failure that hides both.
+    try {
+      var posterPath = __tmpPngPath();
+      __saveFrameAt(comp, t, new File(posterPath), 1);
+      result.posterPngPath = posterPath;
+      result.posterTime = t;
+    } catch (ePoster) {
+      result.posterWarning = "The template was exported, but the poster frame at " + t + "s could not be " +
+        "rendered (" + (ePoster && ePoster.message ? ePoster.message : String(ePoster)) + "), so it keeps " +
+        "After Effects' own thumbnail.";
+    }
   }
 
   return result;
