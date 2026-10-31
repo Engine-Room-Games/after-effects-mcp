@@ -215,7 +215,7 @@ check("there is at least one declared rule, so the rest of this file means somet
 check("every rule is well formed", () => {
   for (const { op, rule } of rules) {
     assert.ok(
-      ["exactlyOne", "atMostOne", "atLeastOne", "whenTrue"].includes(rule.kind),
+      ["exactlyOne", "atMostOne", "atLeastOne", "whenTrue", "trueExcludesFalse"].includes(rule.kind),
       `${op}: unknown rule kind ${JSON.stringify(rule.kind)}`
     );
     assert.ok(rule.fields.length >= 2, `${op}: a cross-field rule needs at least two fields`);
@@ -366,6 +366,17 @@ check("the JSON Schema form and the zod form agree on every combination", () => 
     if (rule.kind === "whenTrue") {
       payloads.push({ payload: { ...base, [rule.fields[0]]: false }, present: [`${rule.fields[0]}:false`] });
     }
+    // A "trueExcludesFalse" rule is about values, not presence: probe the
+    // trigger true and false against each other field passed as `false`.
+    if (rule.kind === "trueExcludesFalse") {
+      const [trigger, ...others] = rule.fields;
+      for (const f of others) {
+        for (const tv of [true, false]) {
+          payloads.push({ payload: { ...base, [trigger]: tv, [f]: false }, present: [`${trigger}:${tv}`, `${f}:false`] });
+        }
+        payloads.push({ payload: { ...base, [f]: false }, present: [`${f}:false`] });
+      }
+    }
 
     for (const { payload, present } of payloads) {
 
@@ -403,6 +414,7 @@ const PHRASES = {
   atLeastOne: ["at least one"],
   atMostOne: ["mutually exclusive", "not both", "at most one"],
   whenTrue: ["requires", "needs"],
+  trueExcludesFalse: ["cannot be combined", "not with"],
 };
 
 check("every rule is stated in its tool description", () => {
@@ -437,6 +449,14 @@ check("every rule is stated in its tool description", () => {
 
 check("the runtime message names the fields and says what to do", () => {
   for (const { op, rule } of rules) {
+    if (rule.kind === "trueExcludesFalse") {
+      const message = crossFieldMessage(rule, rule.fields);
+      for (const field of rule.fields) {
+        assert.ok(message.includes(field), `${op}: the message does not name \`${field}\`:\n${message}`);
+      }
+      assert.ok(/drop/i.test(message), `${op}: the message has to say what to drop:\n${message}`);
+      continue;
+    }
     if (rule.kind === "whenTrue") {
       // Broken only one way: the trigger is true and something it needs is
       // missing. The message names the trigger and the missing field, and
@@ -502,6 +522,8 @@ check("the ops known to carry a cross-field rule still carry one", () => {
     ["reorder_layer", "exactlyOne"],
     ["screenshot_frame", "atMostOne"],
     ["run_jsx", "exactlyOne"],
+    // quietViewer:true with undoGroup:false (issue #266).
+    ["run_jsx", "trueExcludesFalse"],
     ["set_temporal_ease", "atLeastOne"],
     ["set_effect_param", "atLeastOne"],
     // keyframe:true requires time (issue #151).

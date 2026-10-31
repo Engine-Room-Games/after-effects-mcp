@@ -449,7 +449,9 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
   let bridgeDetail: string;
   let busyWith: BusyWith | null = null;
   if (bridge.answering) {
-    opts.onPanelAnswered?.();
+    // Only the port this server's calls went to proves those calls are done;
+    // another panel answering on a diagnostic port says nothing about them.
+    if (opts.opPort === undefined || bridge.answering.port === opts.opPort) opts.onPanelAnswered?.();
     bridgeDetail = `responding on port ${bridge.answering.port}`;
     if (fromFile !== null && fromFile !== bridge.answering.port) {
       bridgeDetail += ` (the port file says ${fromFile}, which is stale — the socket is the authority)`;

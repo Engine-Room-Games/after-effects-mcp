@@ -244,7 +244,7 @@ export function createServer(opts: CreateServerOptions = {}) {
   // After Effects is very probably still running (issue #266).
   const calls = new CallsInFlight();
   const toAe = (op: string, a: unknown, o?: Parameters<SessionLine["runOp"]>[2]) =>
-    calls.track(op, () => line.runOp(op, a, o));
+    calls.track(op, (sent) => line.runOp(op, a, { ...o, onSent: sent }), { background: o?.yieldToWrites === true });
   // Every internal op goes through one of these: typed over InternalOpMutation,
   // and a "write" is refused unless the write lock is held (tools/internalOps.ts).
   // Sent as a write when the op is one or this call holds the lease, as the
