@@ -814,169 +814,6 @@ function __rjUndoGuardReport(g) {
   return report;
 }
 
-// ---------- quietViewer (issues #266, #274) ----------
-// Every scripted change to a comp the active viewer depends on makes After
-// Effects re-render that viewer before the next statement runs. With a heavy
-// comp in it (4K, 3D, motion blur), measured on 26.5: 695 ms to add one layer,
-// against 79 ms with an empty comp in the viewer — a rebuild script went past
-// the 300 s op limit on that alone. So by default viewer rendering is switched
-// off for the script's duration with `app.disableRendering` — undocumented,
-// read/write, found on 26.5 (#274) — and put back to what it was on every exit,
-// a throw included.
-//
-// Why this and not #267's empty "parking" comp: disableRendering is an
-// application setting, not project state. It adds no undo step, does not mark
-// the project changed, puts nothing in the Project panel, and leaves
-// app.project.activeItem — and any viewer change the script makes — alone.
-//
-//  * The previous value is restored, never a blind `false`: a user who had
-//    rendering off keeps it off. That is also what makes a nested run_jsx (one
-//    a script calls through OPS) harmless: it finds rendering already off, so
-//    it neither turns it off nor back on. Only the run that turned it off owns it.
-//  * Switched and restored inside this one evalScript call, like an undo
-//    group: each of run_batch's run_jsx steps does the same, so it is never
-//    left off across chunks or between calls.
-//  * "Back on" is claimed only when the value read back says so. If it could
-//    not be restored, the answer (or the error) says so in a CAUTION — the
-//    user's viewer would otherwise stop redrawing with no explanation.
-//  * An After Effects without the property (it does not read as a boolean) is
-//    left alone: the script runs as it always did.
-//  * Said on the answer only when asked for (quietViewer:true) or when
-//    something did not go as planned; a clean default run leaves the answer
-//    exactly as it was.
-//
-// A frame rendered from inside the script (OPS.screenshot_frame,
-// OPS.screenshot_layer, export_mogrt's poster — every caller of __saveFrameAt)
-// goes through __rjFrameRender. What it does is this one switch, because a
-// live measurement decides it (recipe 77):
-//   "resume" — rendering goes back on at the first frame and stays on for the
-//              rest of the script. saveFrameToPng finishes writing after it
-//              returns, so switching rendering off again straight after the
-//              call could stop the frame being written.
-//   "around" — on for the save only, off again after it.
-//   "leave"  — nothing: the frame renders with rendering off.
-var __RJ_FRAMES_WHILE_QUIET = "resume";
-
-// The state of the run_jsx that turned rendering off and owes it back, or null.
-var __RJ_QUIET = null;
-
-function __rjMsg(e) {
-  try { return (e && e.message) ? String(e.message) : String(e); } catch (x) { return "unknown error"; }
-}
-
-// app.disableRendering, or null when this After Effects has no such property
-// (or reading it throws).
-function __rjRenderingDisabled() {
-  var v;
-  try { v = app.disableRendering; } catch (e) { return null; }
-  return (typeof v === "boolean") ? v : null;
-}
-
-// Set it, and answer null if it took — read back the same way it is read —
-// or the reason it did not.
-function __rjSetRenderingDisabled(value) {
-  try { app.disableRendering = value; } catch (e) { return __rjMsg(e); }
-  var now = __rjRenderingDisabled();
-  if (now !== value) return "it reads " + String(now) + " after the assignment";
-  return null;
-}
-
-function __rjQuietStart(args) {
-  if (args && args.quietViewer === false) return null;
-  var st = { asked: !!(args && args.quietViewer === true), prev: null, alreadyOff: false, owned: false,
-    off: false, ranOff: false, done: false, restored: true, notes: [], resumedFor: [], outer: __RJ_QUIET };
-  var prev = __rjRenderingDisabled();
-  if (prev === null) {
-    if (st.asked) st.notes.push("app.disableRendering is not available in this After Effects, so the viewer rendered as usual");
-    return st;
-  }
-  st.prev = prev;
-  if (prev === true) {
-    // The user's own setting, or an outer run_jsx's. Nothing to switch; but
-    // when it is the user's, it is still put back if the script changes it.
-    // An outer run_jsx that switched it off owns it, and restores it itself.
-    st.alreadyOff = true;
-    st.ranOff = true;
-    if (!__RJ_QUIET) st.owned = true;
-    return st;
-  }
-  // Owned from here on even if the assignment fails: whatever it left behind
-  // is put back by __rjQuietFinish.
-  st.owned = true;
-  var failed = __rjSetRenderingDisabled(true);
-  if (failed) {
-    st.notes.push("viewer rendering could not be turned off (" + failed + "), so the script ran with the viewer " +
-      "re-rendering after every change");
-    return st;
-  }
-  st.off = true;
-  st.ranOff = true;
-  __RJ_QUIET = st;
-  return st;
-}
-
-// Idempotent: called after the script on every path and again in the finally.
-function __rjQuietFinish(st) {
-  if (!st || st.done) return;
-  st.done = true;
-  if (__RJ_QUIET === st) __RJ_QUIET = st.outer;
-  if (!st.owned) return;
-  st.off = false;
-  // Nothing to do when it already reads what it was (a frame's "resume" put it back).
-  if (__rjRenderingDisabled() === st.prev) return;
-  var failed = __rjSetRenderingDisabled(st.prev);
-  if (failed) {
-    st.restored = false;
-    st.notes.push("CAUTION: viewer rendering could not be turned back on (" + failed + ") — the After Effects " +
-      "viewer will not redraw until it is. Tell the user. A run_jsx with quietViewer:false running " +
-      "`app.disableRendering = false; return app.disableRendering;` turns it back on");
-  }
-}
-
-// See __RJ_FRAMES_WHILE_QUIET above. `why` names the op, for the report.
-function __rjFrameRender(why, fn) {
-  var st = __RJ_QUIET;
-  if (!st || !st.off || __RJ_FRAMES_WHILE_QUIET === "leave") return fn();
-  var failed = __rjSetRenderingDisabled(false);
-  if (failed) {
-    st.notes.push("viewer rendering could not be turned back on for " + why + " (" + failed + "), so its frame " +
-      "rendered with rendering off");
-    return fn();
-  }
-  st.resumedFor.push(why);
-  if (__RJ_FRAMES_WHILE_QUIET !== "around") {
-    st.off = false;
-    return fn();
-  }
-  try {
-    return fn();
-  } finally {
-    var again = __rjSetRenderingDisabled(true);
-    if (again) {
-      st.off = false;
-      st.notes.push("viewer rendering could not be turned off again after " + why + " (" + again + "), so the " +
-        "rest of the script ran with it on");
-    }
-  }
-}
-
-function __rjQuietReport(st) {
-  if (!st) return null;
-  if (!st.asked && st.notes.length === 0) return null;
-  // renderingOff: whether the script ran with viewer rendering off, at least at the start.
-  var r = { renderingOff: st.ranOff, alreadyOff: st.alreadyOff, restored: st.restored };
-  if (st.resumedFor.length) r.resumedFor = st.resumedFor;
-  if (st.notes.length) r.note = st.notes.join("; ");
-  return r;
-}
-
-// Only what the caller must hear about on a failure: rendering it could not
-// put back, or could not switch. A clean restore says nothing.
-function __rjQuietErrorSuffix(st) {
-  if (!st || st.notes.length === 0) return "";
-  return " || quietViewer: " + st.notes.join("; ");
-}
-
 // undoGroup:false is a per-call opt-out, read by dispatch() through the
 // predicate form of __meta.noUndo. It exists because AE refuses copyToComp for
 // a layer with a parent or a linked expression while an undo group is open,
@@ -1017,7 +854,6 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
     // diff:true fingerprints the comp before and after, inside this one call —
     // see snapshot.jsx. Null unless asked for, so the ordinary path is untouched.
     var __d = __diffStart(args, null);
-    var __qv = __rjQuietStart(args);
     // alert/confirm/prompt are blocking dialogs, and one up inside evalScript
     // stalls the bridge until someone clicks it. Declared here, they shadow the
     // globals for the eval'd script — eval resolves names through this
@@ -1031,7 +867,6 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
     try {
       __value = eval(built.wrapper);
     } catch (e) {
-      __rjQuietFinish(__qv);
       __rjUndoGuardFinish(__g);
       var __gr = __rjUndoGuardReport(__g);
       // Annotate before mapping the line: __rjThrowWithSource reads e.message,
@@ -1040,16 +875,13 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
       __diffAnnotateError(e, __d);
       __rjThrowWithSource(e, code, args.scriptPath, built,
         (__gr ? " || undo: " + __gr.note : "") +
-        (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : "") +
-        __rjQuietErrorSuffix(__qv));
+        (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : ""));
     }
-    __rjQuietFinish(__qv);
     __rjUndoGuardFinish(__g);
     var __report = __rjUndoGuardReport(__g);
     var __out = __rjResult(__value, undoGroupName);
     if (__d) __out = __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
-    var __qvr = __rjQuietReport(__qv);
-    if (__report || __shown.length || __qvr) {
+    if (__report || __shown.length) {
       // Always an envelope: a script that returned 1 must not read as an
       // untroubled 1 when its undo calls were changed under it.
       if (!__d && !__rjIsNullEnvelope(__out)) {
@@ -1057,14 +889,11 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
       }
       if (__report) __out.undoGuard = __report;
       if (__shown.length) __out.suppressedDialogs = __shown;
-      if (__qvr) __out.quietViewer = __qvr;
     }
     return __out;
   } finally {
     // Idempotent: the paths above have already closed everything, but a throw
-    // from anywhere else in here must not leave a group of the script's open,
-    // nor viewer rendering off.
-    __rjQuietFinish(__qv);
+    // from anywhere else in here must not leave a group of the script's open.
     __rjUndoGuardFinish(__g);
     __RJ_UNDO_GUARD = __g.previous;
   }
@@ -1170,7 +999,6 @@ OPS._run_jsx = function (args) {
     __g.opaque = built.opaqueRoutes ? built.opaqueRoutes : [];
     var undoGroupName = (args.undoGroup === false) ? false : "AE MCP: run_jsx";
     var __d = __diffStart(args, null);
-    var __qv = __rjQuietStart(args);
     var __shown = [];
     var alert = function (m) { __shown.push("alert: " + String(m)); };
     var confirm = function (m) { __shown.push("confirm (answered No): " + String(m)); return false; };
@@ -1179,32 +1007,26 @@ OPS._run_jsx = function (args) {
     try {
       __value = eval(built.wrapper);
     } catch (e) {
-      __rjQuietFinish(__qv);
       __rjUndoGuardFinish(__g);
       var __gr = __rjUndoGuardReport(__g);
       __diffAnnotateError(e, __d);
       __rjThrowRaw(e,
         (__gr ? " || undo: " + __gr.note : "") +
-        (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : "") +
-        __rjQuietErrorSuffix(__qv));
+        (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : ""));
     }
-    __rjQuietFinish(__qv);
     __rjUndoGuardFinish(__g);
     var __report = __rjUndoGuardReport(__g);
     var __out = __rjResult(__value, undoGroupName);
     if (__d) __out = __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
-    var __qvr = __rjQuietReport(__qv);
-    if (__report || __shown.length || __qvr) {
+    if (__report || __shown.length) {
       if (!__d && !__rjIsNullEnvelope(__out)) {
         __out = { ok: true, returned: __out, undoGroup: undoGroupName };
       }
       if (__report) __out.undoGuard = __report;
       if (__shown.length) __out.suppressedDialogs = __shown;
-      if (__qvr) __out.quietViewer = __qvr;
     }
     return __out;
   } finally {
-    __rjQuietFinish(__qv);
     __rjUndoGuardFinish(__g);
     __RJ_UNDO_GUARD = __g.previous;
   }

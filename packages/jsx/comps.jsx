@@ -36,6 +36,9 @@ OPS.list_comps = noUndo(function (args) {
   for (var i = 1; i <= app.project.numItems; i++) {
     var it = app.project.item(i);
     if (!(it instanceof CompItem)) continue;
+    // The viewer-parking comp (viewer.jsx, issue #266) is AE MCP's own, not
+    // the user's work: left out, as list_comps' description says.
+    if ((typeof __parkIsInternalItem === "function" && __parkIsInternalItem(it))) continue;
     var s = __compSummary(it, sections);
     // A checkpoint (checkpoint.jsx) is a full copy of a real comp; flagged so
     // nobody builds in one by mistake. Not filtered: hiding comps from the map

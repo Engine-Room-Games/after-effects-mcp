@@ -1,24 +1,31 @@
-// Issue #266: a heavy comp in the viewer is re-rendered after every scripted
-// change to its tree (695 ms against 79 ms per added layer, AE 26.5), and a
-// rebuild script went past the 300 s op limit on that alone — after which
+// Issue #266: with a heavy comp in the viewer, every change a script makes
+// re-runs that comp's expressions on After Effects' main thread — measured on
+// 26.5, a run_jsx making 1 / 3 / 20 changes cost 3.7 s / 11.1 s / 74 s — and a
+// rebuild script went past the 300 s op limit on that alone, after which
 // check_setup could say only "did not answer within 2s".
 //
 // Locked in here:
-//   1. run_jsx switches viewer rendering off with app.disableRendering by
-//      default (issue #274, replacing #267's empty "parking" comp) and puts the
-//      PREVIOUS value back — on success and on a throw, through both the
-//      bundle's own run_jsx (run_batch steps) and the server-built `_run_jsx`.
-//      A user who had it off keeps it off; a nested run_jsx owns nothing; a
-//      value that will not go back is reported, never claimed restored. The
-//      project is not touched: activeItem stays the user's comp. A frame
-//      rendered inside the script turns rendering back on (the "resume" rule).
+//   1. The viewer is parked by the SERVER, in a call of its own before the
+//      script, and put back in a call of its own after it — three calls under
+//      the one write lease, so nothing else lands between them (a swap from
+//      inside the script's own evalScript takes effect only after it ends).
+//      The parking comp is ONE persistent tagged comp, created once in its own
+//      undo step and reused, so a park and an unpark are pure view changes:
+//      no undo step, no item added or removed per call. It parks only when
+//      the viewed comp has an enabled expression of its own; respects a comp
+//      the script opened itself; says when the comp could not be put back;
+//      lets a nested run_jsx see the user's comp through viewerComp(); and an
+//      interrupted park is taken over by the next park, by this session's next
+//      write, or by check_setup. The parking comp is hidden from list_comps,
+//      get_project_summary and find_layers, and never answers as the active comp.
 //   2. The server remembers which of its calls is open — sent or still queued —
 //      and which timed out with no answer since, until the panel next answers,
 //      and names the oldest one sent (#272).
 //   3. check_setup names that call (`busyWith`) when the bridge is busy.
 //
-// What disableRendering saves, and what it does to a frame, needs a live
-// After Effects; see recipe 77 in docs/verification-recipes.md.
+// What a park saves, whether openInViewer is ever an undo step, and whether it
+// marks the project changed need a live After Effects; see recipe 77 in
+// docs/verification-recipes.md.
 //
 //   node tests/unit/quiet-viewer.mjs
 
@@ -28,6 +35,7 @@ import http from "node:http";
 import path from "node:path";
 import vm from "node:vm";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { WebSocketServer } from "ws";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const jsx = (f) => fs.readFileSync(path.join(root, "packages", "jsx", f), "utf8");
@@ -35,8 +43,10 @@ const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "
 
 const { AeError, BridgeTimeoutError } = await import(dist("util", "errors.js"));
 const asm = await import(dist("tools", "runJsxAssembly.js"));
+const park = await import(dist("tools", "viewerPark.js"));
 const { CallsInFlight } = await import(dist("bridge", "callsInFlight.js"));
 const { checkSetup, buildNextSteps, withBusyStep } = await import(dist("setup", "check.js"));
+const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panelVersion.js"));
 
 let passed = 0;
 async function check(name, fn) {
@@ -44,241 +54,427 @@ async function check(name, fn) {
   catch (e) { console.error(`quiet-viewer FAILED: ${name}`); throw e; }
 }
 
+// ---------- 1. the park, in ExtendScript (packages/jsx/viewer.jsx) ----------
+
 /**
- * An ExtendScript context with a heavy comp in the viewer and AE's
- * app.disableRendering. `initial` is the user's setting, `missing` models an
- * After Effects without the property; `refuse` makes assigning that value
- * throw, `ignore` makes assigning it silently do nothing.
+ * A project with a heavy comp in the viewer. `expressions` is how many enabled
+ * expressions its own layers carry; `nested` puts one only inside a precomp
+ * layer's source (which the measurement says costs nothing). The viewer swap
+ * is modelled the way it was measured: openInViewer() takes effect when the
+ * evalScript ends, which `call()` does.
  */
-function es({ initial = false, refuse = null, ignore = null, missing = false } = {}) {
-  const state = { rendering: initial, writes: [], frames: [], undo: [] };
-  const heavy = { id: 7, name: "TR — Opener" };
+function es({ expressions = 1, nested = false, disabledLayer = false, viewer = true } = {}) {
+  const state = { undo: [], opened: [], view: null, pending: null, changes: 0 };
+  const PropertyType = { PROPERTY: 6212, INDEXED_GROUP: 6213, NAMED_GROUP: 6214 };
+  const ViewerType = { VIEWER_COMPOSITION: 1, VIEWER_LAYER: 2 };
+  let nextId = 1;
+  class FolderItem {
+    constructor(name) { this.id = nextId++; this.name = name; this.children = []; this.comment = ""; }
+    get numItems() { return this.children.length; }
+    item(i) { return this.children[i - 1]; }
+  }
+  class FootageItem {}
+  class CompItem {
+    constructor(name, layers = []) {
+      this.id = nextId++; this.name = name; this.comment = ""; this._layers = layers; this._folder = null;
+      this.width = 16; this.height = 16; this.pixelAspect = 1; this.duration = 1; this.frameRate = 1;
+      this.workAreaStart = 0; this.workAreaDuration = 1; this.bgColor = [0, 0, 0];
+    }
+    get numLayers() { return this._layers.length; }
+    layer(i) { return this._layers[i - 1]; }
+    openInViewer() { state.opened.push(this.name); state.pending = this; }
+    get parentFolder() { return this._folder; }
+    set parentFolder(f) { this._folder = f; f.children.push(this); state.changes++; }
+  }
+  const prop = (on) => ({ propertyType: PropertyType.PROPERTY, canSetExpression: true, expressionEnabled: on, expression: on ? "wiggle(2, 20)" : "" });
+  const group = (props) => ({ propertyType: PropertyType.NAMED_GROUP, matchName: "ADBE Transform Group", enabled: true,
+    get numProperties() { return props.length; }, property(i) { return props[i - 1]; } });
+  const layer = (name, props, enabled = true) => ({ name, enabled, id: nextId++,
+    get numProperties() { return props.length; }, property(i) { return props[i - 1]; } });
+  const items = [];
+  const inner = new CompItem("Inner", [layer("deep", [group([prop(true)])])]);
+  const layers = [layer("plain", [group([prop(false), prop(false)])])];
+  for (let i = 0; i < expressions; i++) layers.push(layer(`expr ${i}`, [group([prop(true)])], !disabledLayer));
+  if (nested) layers.push(layer("precomp", [group([prop(false)])]));
+  const heavy = new CompItem("TR — Opener", layers);
+  const other = new CompItem("Other", []);
+  items.push(inner, heavy, other);
+  state.view = viewer ? heavy : null;
+  const project = {
+    get numItems() { return items.length; },
+    item(i) { return items[i - 1]; },
+    itemByID(id) { const it = items.find((x) => x.id === id); if (!it) throw new Error("internal verification failure, sorry! {Item Not Found}"); return it; },
+    get activeItem() { return state.view; },
+    file: null,
+    items: {
+      addComp(name) { const c = new CompItem(name); items.push(c); state.changes++; return c; },
+      addFolder(name) { const f = new FolderItem(name); items.push(f); state.changes++; return f; },
+    },
+  };
   const app = {
+    project,
     beginUndoGroup(n) { state.undo.push(`begin ${n}`); },
     endUndoGroup() { state.undo.push("end"); },
-    project: { activeItem: heavy, items: { length: 1 } },
+    get activeViewer() { return state.view ? { type: ViewerType.VIEWER_COMPOSITION, setActive() { return true; } } : null; },
   };
-  if (!missing) {
-    Object.defineProperty(app, "disableRendering", {
-      get() { return state.rendering; },
-      set(v) {
-        state.writes.push(v);
-        if (refuse !== null && v === refuse) throw new Error("After Effects error: cannot set disableRendering");
-        if (ignore !== null && v === ignore) return;
-        state.rendering = v;
-      },
-    });
-  }
-  const ctx = { app, heavy, state, File: function (p) { this.path = p; } };
-  // A comp whose frame records whether rendering was off at the moment it was saved.
-  ctx.frameComp = {
-    id: 9, width: 64, height: 64, resolutionFactor: [1, 1],
-    saveFrameToPng() { state.frames.push(state.rendering); },
-  };
+  const ctx = { app, PropertyType, ViewerType, CompItem, FolderItem, FootageItem, File: function (p) { this.path = p; },
+    TextLayer: class {}, ShapeLayer: class {}, AVLayer: class {}, CameraLayer: class {}, LightLayer: class {} };
   vm.createContext(ctx);
-  for (const f of ["core.jsx", "snapshot.jsx", "batch.jsx", "raw.jsx", "helpers.jsx", "vision.jsx"]) {
+  for (const f of ["core.jsx", "ids.jsx", "viewer.jsx", "comps.jsx", "layers.jsx", "snapshot.jsx", "checkpoint.jsx",
+    "batch.jsx", "explore.jsx", "selection.jsx", "helpers.jsx", "raw.jsx"]) {
     vm.runInContext(jsx(f), ctx, { filename: f });
   }
-  const dispatch = (op, args) => JSON.parse(JSON.stringify(vm.runInContext("dispatch", ctx)(JSON.stringify({ op, args }))));
-  return { state, heavy, dispatch, ctx };
-}
-
-/** The bundle's own run_jsx (run_batch steps, direct posts). */
-function viaBundle(e, args) {
-  const out = e.dispatch("run_jsx", args);
-  if (!out.ok) return { err: out.error };
-  return { result: out.result };
-}
-
-/** What a tool call does since #243: built on the server, run as `_run_jsx`. */
-async function viaServer(e, args) {
-  const send = async (op, a) => {
-    const out = e.dispatch(op, a);
-    if (!out.ok) throw new AeError(out.error, out.stack, out.line);
-    return out.result;
+  const call = (op, args = {}) => {
+    const out = JSON.parse(JSON.stringify(vm.runInContext("dispatch", ctx)(JSON.stringify({ op, args }))));
+    // The measured rule: a viewer swap lands once the evalScript has ended.
+    if (state.pending) { state.view = state.pending; state.pending = null; }
+    return out;
   };
-  try {
-    return { result: await asm.runJsxViaServer(args, send, async () => { throw new Error("fell back"); }) };
-  } catch (err) {
-    return { err: err.message };
+  return { ctx, state, heavy, other, items, call };
+}
+
+await check("a park is a call of its own: it opens the parking comp, and only the NEXT call sees it in the viewer", () => {
+  const e = es();
+  const p = e.call("_viewer_park");
+  assert.equal(p.ok, true, p.error);
+  assert.equal(p.result.parked, true);
+  assert.equal(p.result.compId, e.heavy.id);
+  assert.equal(p.result.created, true, "made the first time");
+  assert.match(e.state.view.name, /^AE MCP viewer parking/);
+  // The script's own call: activeItem is the parking comp; viewerComp() is the user's.
+  const s = e.call("run_jsx", { code: "return [app.project.activeItem.name, viewerComp().name];" });
+  assert.equal(s.ok, true, s.error);
+  assert.match(s.result[0], /^AE MCP viewer parking/);
+  assert.equal(s.result[1], "TR — Opener");
+  const u = e.call("_viewer_unpark");
+  assert.deepEqual([u.result.unparked, u.result.restored, u.result.compId], [true, true, e.heavy.id]);
+  assert.equal(e.state.view, e.heavy, "the user's comp is back in the viewer");
+});
+
+await check("the parking comp is made once, in its own undo step, and reused: later parks are pure view changes", () => {
+  const e = es();
+  e.call("_viewer_park");
+  e.call("_viewer_unpark");
+  assert.deepEqual(e.state.undo, ["begin AE MCP: create viewer parking comp", "end"]);
+  const madeChanges = e.state.changes;
+  const madeItems = e.items.length;
+  for (let i = 0; i < 3; i++) {
+    const p = e.call("_viewer_park");
+    assert.equal(p.result.parked, true);
+    assert.equal(p.result.created, undefined, "not made again");
+    e.call("run_jsx", { code: "app.project.items.addComp('built'); return 1;" });
+    e.call("_viewer_unpark");
   }
+  // The only undo steps after the first park are the scripts' own, so Cmd-Z
+  // after a run undoes the script — never the parking comp.
+  assert.deepEqual(e.state.undo.slice(2), Array(3).fill(["begin AE MCP: run_jsx", "end"]).flat());
+  assert.equal(e.items.length, madeItems + 3, "only the scripts' comps were added");
+  assert.equal(e.state.changes, madeChanges + 3, "park and unpark changed nothing in the project");
+  const tagged = e.items.filter((it) => String(it.comment).startsWith("ae-mcp-viewer-parking:v1"));
+  assert.equal(tagged.length, 1, "one parking comp, however many runs");
+  assert.equal(tagged[0].parentFolder.name, "AE MCP");
+});
+
+await check("a leftover parking comp (from a crash, or a project saved with it) is found by its tag and reused", () => {
+  const e = es();
+  e.call("_viewer_park");
+  e.call("_viewer_unpark");
+  // A fresh bundle — the panel reloaded, or After Effects restarted — knows nothing.
+  vm.runInContext("__PARK_ID = null; __PARK = null; __PARK_LAST = null;", e.ctx);
+  const p = e.call("_viewer_park");
+  assert.equal(p.result.parked, true);
+  assert.equal(p.result.created, undefined, "the comp already in the project is reused");
+});
+
+await check("no park when it cannot pay off: no expression of the viewed comp's own, or only a disabled layer's, or nothing in view", () => {
+  for (const [label, opts] of [["no expressions", { expressions: 0 }], ["only in a precomp", { expressions: 0, nested: true }],
+    ["only on a disabled layer", { disabledLayer: true }]]) {
+    const e = es(opts);
+    const p = e.call("_viewer_park");
+    assert.equal(p.result.parked, false, label);
+    assert.equal(p.result.skipped, "no-expressions", label);
+    assert.deepEqual(e.state.opened, [], `${label}: the viewer was not touched`);
+    assert.equal(e.state.changes, 0, `${label}: nothing was created`);
+    assert.deepEqual(e.call("_viewer_unpark").result, { unparked: false }, `${label}: an unpark finds nothing to do`);
+  }
+  const none = es({ viewer: false });
+  assert.equal(none.call("_viewer_park").result.skipped, "no-comp-in-viewer");
+});
+
+await check("a comp the script opened in the viewer itself is left there, and the answer says which", () => {
+  const e = es();
+  e.call("_viewer_park");
+  e.call("run_jsx", { code: `compById(${e.other.id}).openInViewer(); return 1;` });
+  const u = e.call("_viewer_unpark").result;
+  assert.equal(u.restored, false);
+  assert.deepEqual(u.viewerComp, { id: e.other.id, name: "Other" });
+  assert.match(u.note, /the script opened comp \d+ \("Other"\)/);
+  assert.equal(e.state.view, e.other, "the script's choice stands");
+  // OPS.set_active_comp from a script is the same choice.
+  const f = es();
+  f.call("_viewer_park");
+  f.call("run_jsx", { code: `return OPS.set_active_comp({compId: ${f.other.id}});` });
+  assert.equal(f.call("_viewer_unpark").result.viewerComp.name, "Other");
+});
+
+await check("a comp the script removed cannot be put back, and that is said — never a quiet success", () => {
+  const e = es();
+  e.call("_viewer_park");
+  e.items.splice(e.items.indexOf(e.heavy), 1);
+  const u = e.call("_viewer_unpark").result;
+  assert.equal(u.unparked, true);
+  assert.equal(u.restored, false);
+  assert.match(u.note, /no longer exists — the script removed it/);
+});
+
+await check("a nested run_jsx parks nothing and still sees the user's comp through viewerComp()", () => {
+  const e = es();
+  e.call("_viewer_park");
+  const opened = e.state.opened.length;
+  const s = e.call("run_jsx", { code: "var r = OPS.run_jsx({code: 'return viewerComp().name;'}); return r;" });
+  assert.equal(s.ok, true, s.error);
+  assert.equal(s.result, "TR — Opener");
+  assert.equal(e.state.opened.length, opened, "nothing was opened from inside the script");
+});
+
+await check("an interrupted park is taken over by the next one, which reopens the user's comp after its script", () => {
+  const e = es();
+  e.call("_viewer_park");
+  e.call("run_jsx", { code: "return 1;" });
+  // The server died (or the script timed out): no unpark ever came.
+  const p = e.call("_viewer_park").result;
+  assert.equal(p.parked, true);
+  assert.deepEqual(p.recovered, { compId: e.heavy.id, compName: "TR — Opener" });
+  assert.equal(p.compId, e.heavy.id, "the comp to go back to is the user's, not the parking comp");
+  const u = e.call("_viewer_unpark").result;
+  assert.equal(u.restored, true);
+  assert.equal(e.state.view, e.heavy);
+});
+
+await check("check_setup's recover reopens a comp an unpark could not, and is a no-op otherwise", () => {
+  const e = es();
+  assert.deepEqual(e.call("_viewer_unpark", { recover: true }).result, { unparked: false });
+  e.call("_viewer_park");
+  assert.equal(e.call("_viewer_unpark", { recover: true }).result.restored, true, "a park still in force is undone");
+  assert.equal(e.state.view, e.heavy);
+});
+
+await check("while parked, the parking comp is never the user's comp to a read, and is hidden from the project lists", () => {
+  const e = es();
+  e.call("_viewer_park");
+  const comps = e.call("list_comps").result;
+  assert.equal(comps.some((c) => /parking/.test(c.name)), false, "list_comps leaves it out");
+  const sum = e.call("get_project_summary").result;
+  assert.equal(sum.activeItemId, e.heavy.id, "the active item is the comp it replaced");
+  assert.equal(sum.items.some((it) => /parking|^AE MCP$/.test(it.name)), false);
+  assert.equal(sum.aeMcpItemsHidden, 2, "what was left out is counted: the comp and its folder");
+  assert.equal(sum.numItems, e.items.length);
+  const probe = e.call("_live_probe").result;
+  assert.equal(probe.activeItemId, e.heavy.id, "the live resource does not flip to the parking comp");
+  const fl = e.call("find_layers", {});
+  assert.equal(fl.ok, true, fl.error);
+  assert.equal(JSON.stringify(fl.result).includes("parking"), false);
+  // diff:true with no compId fingerprints the user's comp, not the parking comp.
+  assert.deepEqual(Array.from(vm.runInContext("__diffCompIds({diff: true}, null)", e.ctx)), [e.heavy.id]);
+});
+
+await check("a user folder that happens to be called \"AE MCP\" is never hidden", () => {
+  const e = es();
+  e.call("_viewer_park");
+  e.call("_viewer_unpark");
+  const folder = e.items.find((it) => it.name === "AE MCP");
+  folder.children.push({ name: "user thing", comment: "" });
+  const sum = e.call("get_project_summary").result;
+  assert.equal(sum.items.some((it) => it.name === "AE MCP"), true);
+  assert.equal(sum.aeMcpItemsHidden, 1, "only the parking comp itself");
+});
+
+// ---------- 1b. the server's three calls (tools/viewerPark.ts, server.ts) ----------
+
+/** A sender that answers like a panel would, recording what was sent. */
+function sender(answers) {
+  const sent = [];
+  const send = async (op, a) => {
+    sent.push(a && a.recover ? `${op}(recover)` : op);
+    const r = answers[op];
+    if (r instanceof Error) throw r;
+    return typeof r === "function" ? r(a) : r;
+  };
+  return { sent, send };
 }
+const PARKED = { parked: true, compId: 7, compName: "TR — Opener" };
+const BACK = { unparked: true, restored: true, compId: 7, compName: "TR — Opener" };
 
-const SEEN = "return [app.disableRendering, app.project.activeItem.name];";
+await check("park → script → unpark, in that order; a clean run reports nothing", async () => {
+  const st = new park.ViewerParkState();
+  const s = sender({ _viewer_park: PARKED, _viewer_unpark: BACK });
+  const out = await park.withParkedViewer(s.send, st, async () => { s.sent.push("script"); return 42; });
+  assert.deepEqual(s.sent, ["_viewer_park", "script", "_viewer_unpark"]);
+  assert.equal(out.value, 42);
+  assert.equal(park.viewerReportMatters(out.report), false);
+});
 
-for (const [label, run] of [["bundle run_jsx", viaBundle], ["server-built _run_jsx", viaServer]]) {
-  await check(`${label}: rendering is off by default, back on after, and the answer keeps its shape`, async () => {
-    const e = es();
-    const { result } = await run(e, { code: SEEN });
-    assert.deepEqual(result, [true, "TR — Opener"], "off while the script ran; activeItem is still the user's comp");
-    assert.equal(e.state.rendering, false, "back on");
-    assert.deepEqual(e.state.writes, [true, false]);
-  });
+await check("nothing worth parking: no unpark is sent", async () => {
+  const st = new park.ViewerParkState();
+  const s = sender({ _viewer_park: { parked: false, skipped: "no-expressions", compId: 7 } });
+  await park.withParkedViewer(s.send, st, async () => { s.sent.push("script"); });
+  assert.deepEqual(s.sent, ["_viewer_park", "script"]);
+});
 
-  await check(`${label}: quietViewer:true reports what it did`, async () => {
-    const e = es();
-    const { result } = await run(e, { code: "return 1;", quietViewer: true });
-    assert.equal(result.returned, 1);
-    assert.deepEqual(result.quietViewer, { renderingOff: true, alreadyOff: false, restored: true });
-  });
+await check("an unpark that could not reopen the comp is on the answer; one that failed in transit too", async () => {
+  const st = new park.ViewerParkState();
+  const s = sender({ _viewer_park: PARKED, _viewer_unpark: { unparked: true, restored: false, compId: 7, note: "comp 7 could not be reopened (boom)" } });
+  const out = await park.withParkedViewer(s.send, st, async () => 1);
+  assert.equal(park.viewerReportMatters(out.report), true);
+  assert.equal(out.report.restored, false);
+  assert.match(out.report.note, /could not be reopened/);
+  const t = sender({ _viewer_park: PARKED, _viewer_unpark: new Error("socket hang up") });
+  const out2 = await park.withParkedViewer(t.send, st, async () => 1);
+  assert.equal(out2.report.restored, false);
+  assert.match(out2.report.note, /could not be put back \(socket hang up\)/);
+  assert.equal(st.maybeLeft, true, "the session knows it may have left the viewer parked");
+});
 
-  await check(`${label}: quietViewer:false leaves rendering alone`, async () => {
-    const e = es();
-    const { result } = await run(e, { code: SEEN, quietViewer: false });
-    assert.deepEqual(result, [false, "TR — Opener"]);
-    assert.deepEqual(e.state.writes, [], "nothing was assigned");
-  });
+await check("a script that throws is still unparked; one whose comp could not be put back says so on the error", async () => {
+  const st = new park.ViewerParkState();
+  const s = sender({ _viewer_park: PARKED, _viewer_unpark: BACK });
+  const err = new AeError("boom");
+  await assert.rejects(park.withParkedViewer(s.send, st, async () => { throw err; }), (e) => e === err);
+  assert.deepEqual(s.sent, ["_viewer_park", "_viewer_unpark"]);
+  assert.equal(err.viewerNote, undefined, "a clean unpark adds nothing to the error");
+  const t = sender({ _viewer_park: PARKED, _viewer_unpark: { unparked: true, restored: false, note: "comp 7 no longer exists" } });
+  const err2 = new AeError("boom");
+  await assert.rejects(park.withParkedViewer(t.send, st, async () => { throw err2; }));
+  assert.match(err2.viewerNote, /comp 7 no longer exists/);
+});
 
-  await check(`${label}: undoGroup:false no longer turns it off — nothing here is an undo step`, async () => {
-    const e = es();
-    const { result } = await run(e, { code: SEEN, undoGroup: false });
-    assert.deepEqual(result, [true, "TR — Opener"]);
-    assert.equal(e.state.rendering, false);
-  });
+await check("a script that timed out is not unparked (it may still run); the session remembers, and its next write recovers", async () => {
+  const st = new park.ViewerParkState();
+  const s = sender({ _viewer_park: PARKED, _viewer_unpark: BACK });
+  const err = new BridgeTimeoutError(7777, 300_000, { op: "_run_jsx" });
+  await assert.rejects(park.withParkedViewer(s.send, st, async () => { throw err; }));
+  assert.deepEqual(s.sent, ["_viewer_park"], "no unpark queued behind a script that may still be running");
+  assert.match(err.viewerNote, /left on AE MCP's parking comp because the script may still be running/);
+  assert.equal(st.maybeLeft, true);
+  const msg = await park.recoverParkedViewer(s.send, st);
+  assert.deepEqual(s.sent, ["_viewer_park", "_viewer_unpark(recover)"]);
+  assert.match(msg, /comp 7 \("TR — Opener"\) was reopened/);
+  assert.equal(st.maybeLeft, false);
+});
 
-  await check(`${label}: a script that throws still gets rendering back`, async () => {
-    const e = es();
-    const { err } = await run(e, { code: "if (!app.disableRendering) return 'not off';\nthrow new Error('boom');" });
-    assert.match(err, /boom/);
-    assert.doesNotMatch(err, /quietViewer/, "a clean restore adds nothing to the error");
-    assert.equal(e.state.rendering, false, "back on after the throw");
-  });
+await check("a park whose answer was lost is undone anyway — it may have landed, and the unpark is idempotent", async () => {
+  const st = new park.ViewerParkState();
+  const s = sender({ _viewer_park: new Error("socket hang up"), _viewer_unpark: { unparked: false } });
+  const out = await park.withParkedViewer(s.send, st, async () => { s.sent.push("script"); return 1; });
+  assert.deepEqual(s.sent, ["_viewer_park", "script", "_viewer_unpark"]);
+  assert.match(out.report.note, /nothing had been parked/);
+  // After Effects answering with an error is an answer: nothing is parked.
+  const t = sender({ _viewer_park: new AeError("Unknown op: _viewer_park") });
+  await park.withParkedViewer(t.send, st, async () => { t.sent.push("script"); });
+  assert.deepEqual(t.sent, ["_viewer_park", "script"]);
+});
 
-  await check(`${label}: a user who had rendering off keeps it off`, async () => {
-    const e = es({ initial: true });
-    const { result } = await run(e, { code: "return app.disableRendering;", quietViewer: true });
-    assert.equal(result.returned, true);
-    assert.deepEqual(result.quietViewer, { renderingOff: true, alreadyOff: true, restored: true });
-    assert.equal(e.state.rendering, true, "left as the user had it");
-    assert.deepEqual(e.state.writes, [], "never written");
-    const thrown = await run(e, { code: "throw new Error('boom');" });
-    assert.match(thrown.err, /boom/);
-    assert.equal(e.state.rendering, true, "still off after a throw");
-  });
+await check("a batch parks only with a run_jsx step (at any depth) and none opting out; inline or per chunk", () => {
+  const jsxStep = (a = {}) => ({ op: "run_jsx", args: { code: "1", ...a } });
+  assert.equal(park.batchParkMode({ ops: [{ op: "set_layer", args: {} }] }), null);
+  assert.deepEqual(park.batchParkMode({ ops: [jsxStep()] }), { mode: "inline", asked: false });
+  assert.deepEqual(park.batchParkMode({ ops: [{ op: "run_batch", args: { ops: [jsxStep({ quietViewer: true })] } }] }), { mode: "inline", asked: true });
+  assert.equal(park.batchParkMode({ ops: [jsxStep(), jsxStep({ quietViewer: false })] }), null);
+  const many = Array.from({ length: 501 }, () => jsxStep());
+  assert.equal(park.batchParkMode({ ops: many }).mode, "chunks");
+  assert.equal(park.batchParkMode({ ops: many, singleUndo: true }).mode, "inline");
+  assert.equal(park.runJsxWantsPark({ code: "1" }), true);
+  assert.equal(park.runJsxWantsPark({ code: "1", quietViewer: false }), false);
+});
 
-  await check(`${label}: a script that changes it itself gets the previous value put back`, async () => {
-    const e = es();
-    const { result } = await run(e, { code: "app.disableRendering = false; return 1;" });
-    assert.equal(result, 1);
-    assert.equal(e.state.rendering, false);
-    const e2 = es({ initial: true });
-    await run(e2, { code: "app.disableRendering = false; return 1;" });
-    assert.equal(e2.state.rendering, true, "the user's own `off` comes back too");
-  });
-
-  await check(`${label}: nested run_jsx owns nothing; the outer run restores once`, async () => {
-    const e = es();
-    const { result } = await run(e, {
-      code: "var inner = OPS.run_jsx({code: 'return app.disableRendering;', quietViewer: true});\n" +
-        "return [inner.returned, inner.quietViewer.alreadyOff, app.disableRendering];",
+// Through tools/call, against a stub panel: the three calls hold ONE lease, so
+// a write issued while the script runs reaches the panel only after the unpark.
+{
+  const seen = [];
+  let release;
+  const held = new Promise((r) => (release = r));
+  let unparkAnswer = BACK;
+  const bridge = http.createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.url === "/health") {
+      res.end(JSON.stringify({ ok: true, port: 0, bundleLoaded: true, bundleHash: sourceBundleHash(), clientHash: sourceClientHash() }));
+      return;
+    }
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", async () => {
+      const { op } = JSON.parse(body || "{}");
+      seen.push(op);
+      let result = { ok: true };
+      if (op === "_viewer_park") result = PARKED;
+      if (op === "_viewer_unpark") result = unparkAnswer;
+      if (op === "_run_jsx") { await held; result = { made: 3 }; }
+      res.end(JSON.stringify({ ok: true, result }));
     });
-    assert.deepEqual(result, [true, true, true], "still off after the inner run returned");
-    assert.equal(e.state.rendering, false);
-    assert.deepEqual(e.state.writes, [true, false], "one off, one on — the inner run wrote nothing");
+  });
+  const wss = new WebSocketServer({ server: bridge, path: "/events" });
+  await new Promise((r) => bridge.listen(0, "127.0.0.1", r));
+  process.env.AE_MCP_PORT = String(bridge.address().port);
+  const { createServer } = await import(dist("server.js"));
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const server = createServer();
+  const client = new Client({ name: "quiet-viewer-test", version: "0" }, { capabilities: {} });
+  const [c, sv] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(sv), client.connect(c)]);
+  const until = async (what, cond) => {
+    for (let i = 0; i < 500 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(cond(), `never saw: ${what}`);
+  };
+
+  await check("tools/call: park, script and unpark hold one write lease; another write waits for all three", async () => {
+    seen.length = 0;
+    const script = client.callTool({ name: "run_jsx", arguments: { code: "return 1;" } });
+    await until("the script at the panel", () => seen.includes("_run_jsx"));
+    const other = client.callTool({ name: "set_layer", arguments: { compId: 1, layerId: 1, name: "x" } });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(seen.includes("set_layer"), false, "a write landed while the viewer was parked");
+    release();
+    const [r1, r2] = await Promise.all([script, other]);
+    assert.equal(r1.isError, undefined, r1.content[0].text);
+    assert.equal(r2.isError, undefined, r2.content[0].text);
+    assert.deepEqual(seen, ["_viewer_park", "_run_jsx", "_viewer_unpark", "set_layer"]);
+    assert.deepEqual(JSON.parse(r1.content[0].text), { made: 3 }, "the script's value keeps its shape");
+    assert.equal(r1.content.length, 1, "a clean park adds nothing to the answer");
   });
 
-  await check(`${label}: a nested run that throws does not turn rendering back on under the outer one`, async () => {
-    const e = es();
-    const { result } = await run(e, {
-      code: "try { OPS.run_jsx({code: 'throw new Error(\"inner\");'}); } catch (x) {}\nreturn app.disableRendering;",
-    });
-    assert.equal(result, true);
-    assert.equal(e.state.rendering, false);
+  await check("tools/call: quietViewer:true reports the park; an unpark that failed is reported unasked", async () => {
+    const asked = await client.callTool({ name: "run_jsx", arguments: { code: "return 1;", quietViewer: true } });
+    assert.deepEqual(JSON.parse(asked.content[1].text).quietViewer, { ...PARKED, restored: true });
+    unparkAnswer = { unparked: true, restored: false, compId: 7, compName: "TR — Opener", viewerComp: { id: 9, name: "Other" },
+      note: "the script opened comp 9 (\"Other\") in the viewer, so it was left there" };
+    const told = await client.callTool({ name: "run_jsx", arguments: { code: "return 1;" } });
+    const rep = JSON.parse(told.content[1].text).quietViewer;
+    assert.deepEqual(rep.viewerComp, { id: 9, name: "Other" });
+    assert.match(rep.note, /left there/);
+    unparkAnswer = BACK;
   });
 
-  await check(`${label}: rendering that will not go back on is reported, never claimed restored`, async () => {
-    const e = es({ refuse: false });
-    const { result } = await run(e, { code: "return 1;" });
-    assert.equal(result.returned, 1, "a CAUTION wraps the answer even by default");
-    assert.equal(result.quietViewer.restored, false);
-    assert.match(result.quietViewer.note, /^CAUTION: viewer rendering could not be turned back on/);
-    assert.match(result.quietViewer.note, /Tell the user/);
+  await check("tools/call: quietViewer:false sends neither a park nor an unpark", async () => {
+    seen.length = 0;
+    await client.callTool({ name: "run_jsx", arguments: { code: "return 1;", quietViewer: false } });
+    assert.deepEqual(seen, ["_run_jsx"]);
   });
 
-  await check(`${label}: an assignment AE silently ignores is caught by the read-back`, async () => {
-    const e = es({ ignore: false });
-    const { result } = await run(e, { code: "return 1;" });
-    assert.equal(result.quietViewer.restored, false);
-    assert.match(result.quietViewer.note, /reads true after the assignment/);
+  await check("tools/call: an inline run_batch with a run_jsx step is parked once around the whole call", async () => {
+    seen.length = 0;
+    await client.callTool({ name: "run_batch", arguments: { ops: [{ op: "run_jsx", args: { code: "return 1;" } }, { op: "set_layer", args: { compId: 1, layerId: 1, name: "x" } }] } });
+    assert.deepEqual(seen, ["_viewer_park", "run_batch", "_viewer_unpark"]);
+    seen.length = 0;
+    await client.callTool({ name: "run_batch", arguments: { ops: [{ op: "set_layer", args: { compId: 1, layerId: 1, name: "x" } }] } });
+    assert.deepEqual(seen, ["run_batch"], "no run_jsx step, no park");
   });
 
-  await check(`${label}: on a throw, a failed restore is on the error`, async () => {
-    const e = es({ refuse: false });
-    const { err } = await run(e, { code: "throw new Error('boom');" });
-    assert.match(err, /boom/);
-    assert.match(err, /quietViewer: CAUTION: viewer rendering could not be turned back on/);
-  });
-
-  await check(`${label}: rendering that will not go off runs the script anyway and says so`, async () => {
-    const e = es({ refuse: true });
-    const { result } = await run(e, { code: "return app.disableRendering;" });
-    assert.equal(result.returned, false);
-    assert.equal(result.quietViewer.renderingOff, false);
-    assert.equal(result.quietViewer.restored, true);
-    assert.match(result.quietViewer.note, /could not be turned off/);
-  });
-
-  await check(`${label}: an After Effects without the property is left alone`, async () => {
-    const e = es({ missing: true });
-    const { result } = await run(e, { code: "return 2;" });
-    assert.equal(result, 2, "nothing to say by default");
-    const asked = await run(es({ missing: true }), { code: "return 2;", quietViewer: true });
-    assert.equal(asked.result.quietViewer.renderingOff, false);
-    assert.match(asked.result.quietViewer.note, /not available/);
-  });
-
-  await check(`${label}: a frame rendered inside the script turns rendering back on for the rest of it`, async () => {
-    const e = es();
-    const { result } = await run(e, {
-      code: "__saveFrameAt(frameComp, 0, {}, 1, 'screenshot_frame');\nreturn app.disableRendering;",
-      quietViewer: true,
-    });
-    assert.deepEqual(e.state.frames, [false], "the frame was saved with rendering on");
-    assert.equal(result.returned, false, "and it stayed on (\"resume\")");
-    assert.deepEqual(result.quietViewer.resumedFor, ["screenshot_frame"]);
-    assert.equal(result.quietViewer.restored, true);
-    assert.equal(e.state.rendering, false);
-  });
-
-  await check(`${label}: a frame with the user's own rendering off is not this call's to change`, async () => {
-    const e = es({ initial: true });
-    await run(e, { code: "__saveFrameAt(frameComp, 0, {}, 1, 'screenshot_frame'); return 1;" });
-    assert.deepEqual(e.state.frames, [true]);
-    assert.deepEqual(e.state.writes, []);
-  });
+  await client.close();
+  await server.close();
+  wss.close();
+  await new Promise((r) => bridge.close(r));
 }
-
-await check("the frame rule is one switch: \"around\" turns rendering off again after the save", async () => {
-  const e = es();
-  const out = e.dispatch("run_jsx", {
-    code: "__RJ_FRAMES_WHILE_QUIET = 'around';\n__saveFrameAt(frameComp, 0, {}, 1, 'screenshot_layer');\nreturn app.disableRendering;",
-  });
-  assert.ok(out.ok, out.error);
-  assert.equal(out.result, true);
-  assert.deepEqual(e.state.frames, [false]);
-  assert.equal(e.state.rendering, false);
-  assert.match(jsx("raw.jsx"), /var __RJ_FRAMES_WHILE_QUIET = "resume";/, "the shipped default is \"resume\"");
-});
-
-await check("a run_batch run_jsx step follows the same rule, each for its own step", () => {
-  const e = es();
-  const out = e.dispatch("run_batch", { ops: [
-    { op: "run_jsx", args: { code: "return app.disableRendering;" } },
-    { op: "run_jsx", args: { code: "return app.disableRendering;", quietViewer: false } },
-    { op: "run_jsx", args: { code: "return app.disableRendering;" } },
-  ] });
-  assert.ok(out.ok, out.error);
-  assert.deepEqual(out.result.results, [true, false, true]);
-  assert.equal(e.state.rendering, false, "back on after the batch");
-  assert.deepEqual(e.state.writes, [true, false, true, false], "switched and restored inside each step");
-});
-
-await check("outside run_jsx a frame never touches rendering", () => {
-  const e = es();
-  vm.runInContext("__saveFrameAt(frameComp, 0, {}, 1, 'screenshot_frame');", e.ctx);
-  assert.deepEqual(e.state.frames, [false]);
-  assert.deepEqual(e.state.writes, []);
-});
 
 // ---------- 2. the server's record of open and timed-out calls ----------
 

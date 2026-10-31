@@ -765,6 +765,13 @@ const panel = http.createServer((req, res) => {
   req.on("data", (c) => (body += c));
   req.on("end", () => {
     const { op, args } = JSON.parse(body || "{}");
+    // The viewer park before a run_jsx (issue #266) finds nothing worth
+    // parking here; tests/unit/quiet-viewer.mjs covers the parked path.
+    if (op === "_viewer_park" || op === "_viewer_unpark") {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true, result: op === "_viewer_park" ? { parked: false, skipped: "no-expressions" } : { unparked: false } }));
+      return;
+    }
     // One at a time, like the real panel's evalScript chain.
     chain = chain.then(async () => {
       // run_jsx arrives as `_run_jsx`, with the server-built wrapper (#220, #243).

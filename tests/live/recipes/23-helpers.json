@@ -29,7 +29,7 @@
     {
       "call": "run_jsx",
       "args": {
-        "code": "var l = shape(app.project.activeItem, {name:'Card'}); return l.property('Transform').property('Position').value;"
+        "code": "var l = shape(viewerComp(), {name:'Card'}); return l.property('Transform').property('Position').value;"
       },
       "expect": [
         {

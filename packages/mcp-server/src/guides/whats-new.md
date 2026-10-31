@@ -61,19 +61,23 @@ only quitting and reopening After Effects will.
   supersedes: run setup_panel, then restart After Effects
   supersedes: run setup_panel, then ask them to quit and reopen After Effects
 
-- **`run_jsx` turns After Effects' viewer rendering off while the script
-  runs, and back to what it was afterwards.** After Effects re-renders the
-  comp in the viewer after every change to it or its precomps; with a heavy
-  comp in view a rebuild script slowed from seconds to past the 300 s limit.
-  Each `run_jsx` (and each `run_jsx` step of a `run_batch`) now switches
-  rendering off for its own run, puts it back on every exit, a throw included,
-  and leaves it off if the user already had it off. It is an application
-  setting, not part of the project: no comp is added and
-  `app.project.activeItem` is still the user's comp. The answer says nothing about it unless rendering could not be
-  put back (a CAUTION to pass on to the user) or you passed `quietViewer:
-  true`; `quietViewer: false` leaves rendering on. A frame the script renders
-  itself (`OPS.screenshot_frame`) turns rendering back on for the rest of that
-  script (issues #266, #274).
+- **Breaking: during `run_jsx`, `app.project.activeItem` is AE MCP's
+  parking comp — use `viewerComp()` for the user's comp.** Every change a
+  script makes re-runs the expressions of the comp in the viewer, once per
+  change (a 20-change script took 74 s with a heavy comp in view, AE 26.5). So
+  when the comp in view has expressions, the server opens an empty comp ("AE
+  MCP viewer parking", in an "AE MCP" folder) in the viewer before the script
+  and reopens the user's comp after it. It is made once and reused, adds no
+  undo step, and is left out of `list_comps`, `get_project_summary` (counted
+  in `aeMcpItemsHidden`) and `find_layers` — but not out of
+  `app.project.items`. A comp the script opens in the viewer itself stays
+  there, and the answer says which. `quietViewer: false` turns it off; with
+  `quietViewer: true`, or when the comp could not be put back, the answer
+  carries a `quietViewer` block. `run_batch` with `run_jsx` steps parks too.
+  If a call was cut off between the park and the put-back, the next `run_jsx`
+  or `check_setup` reopens the user's comp (issue #266).
+  supersedes: app.project.activeItem is the comp the user has open
+  supersedes: use app.project.activeItem to get the active comp
 - **`check_setup` says what a busy After Effects is busy with.** When the
   bridge accepts and does not answer, and this server has a call open — or one
   that timed out with no answer since — the report carries `busyWith: {op,

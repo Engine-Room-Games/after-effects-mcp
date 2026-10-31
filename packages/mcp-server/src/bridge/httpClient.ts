@@ -38,6 +38,10 @@ const SLOW_OPS = new Set([
   "import_footage", "place_audio_cues", "purge_unused_footage", "_render_prepare", "_render_save",
   // run_jsx under its internal name (issue #220, stage 6): the same script, the same limit.
   "_run_jsx",
+  // The viewer park before a run_jsx (issue #266): the first one in a project
+  // creates the parking comp, and that change re-evaluates the heavy comp still
+  // in view — the cost the park exists to avoid, paid once.
+  "_viewer_park",
 ]);
 const SLOW_OP_TIMEOUT_MS = 300_000;
 

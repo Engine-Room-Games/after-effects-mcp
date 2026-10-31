@@ -504,7 +504,8 @@ function __diffCompIds(args, ops) {
     if (ids.length > 0) return ids;
   }
   var active = null;
-  try { active = app.project.activeItem; } catch (e) {}
+  // The viewer-parking comp answers as the comp it replaced (viewer.jsx).
+  try { active = (typeof __userActiveItem === "function") ? __userActiveItem() : app.project.activeItem; } catch (e) {}
   if (active && active instanceof CompItem) __diffPushUnique(ids, active.id);
   return ids;
 }
