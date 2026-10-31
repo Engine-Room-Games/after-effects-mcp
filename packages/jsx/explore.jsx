@@ -505,8 +505,8 @@ OPS.get_project_summary = noUndo(function (args) {
   };
   if (hidden > 0) {
     out.aeMcpItemsHidden = hidden;
-    out.aeMcpItemsNote = "numItems counts " + hidden + " item(s) AE MCP keeps for itself (the AE MCP folder " +
-      "and its viewer-parking comp), left out of items";
+    out.aeMcpItemsNote = "numItems counts " + hidden + " item(s) AE MCP keeps for itself (its empty " +
+      "viewer-parking comp), left out of items";
   }
   return out;
 });

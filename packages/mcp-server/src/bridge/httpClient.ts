@@ -57,8 +57,20 @@ export function opTimeoutMs(op?: string): number {
     if (Number.isFinite(n) && n > 0) return n;
     logger.warn(`Ignoring AE_MCP_OP_TIMEOUT_MS=${raw} — expected a positive number of milliseconds.`);
   }
+  if (op && Object.prototype.hasOwnProperty.call(QUICK_OPS, op)) return QUICK_OPS[op];
   return op && SLOW_OPS.has(op) ? SLOW_OP_TIMEOUT_MS : DEFAULT_OP_TIMEOUT_MS;
 }
+
+/**
+ * Ops that only ever do a moment's work, so a write is not made to wait the
+ * full default behind one that cannot get through. `_viewer_unpark` (issue
+ * #266) reopens a comp in the viewer; sent before a write to undo a park an
+ * interrupted call left, its timeout is what that write waits at worst.
+ */
+const QUICK_OPS: Readonly<Record<string, number>> = Object.freeze({
+  _viewer_unpark: 10_000,
+  _viewer_parked: 10_000,
+});
 
 /** Liveness probe only, so it stays short whatever the op timeout is set to. */
 const HEALTH_TIMEOUT_MS = 2000;

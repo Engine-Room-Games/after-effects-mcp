@@ -19,10 +19,18 @@ import { UnleasedInternalWriteError, type SendInternal } from "./internalOps.js"
  * can pay off (an enabled expression on an enabled layer of the viewed comp)
  * and answers `parked: false` with a reason when not; then no unpark is sent.
  *
+ * A script that reads `app.project.activeItem` is never parked: while parked,
+ * that is the parking comp, and whatever the script builds there lands in the
+ * wrong comp. The server has the whole source (script and libraries), so it
+ * looks; a hit costs only a dry-run park, to say whether parking would have
+ * paid off and so whether `viewerComp()` is worth suggesting.
+ *
  * Every failure is said, never swallowed:
- *   - a park that failed in transit may still have landed, so the unpark is
- *     sent anyway — it is idempotent, and the panel runs calls in order, so it
- *     lands after the script whatever happened to the park's answer;
+ *   - a park that timed out means After Effects is stuck: the script is not
+ *     sent into it, and the call fails with that timeout;
+ *   - a park that failed some other way in transit may still have landed, so
+ *     the unpark is sent anyway — it is idempotent, and the panel runs calls in
+ *     order, so it lands after the script whatever happened to the park;
  *   - a script that timed out may still be running, so no unpark is sent (it
  *     would only wait behind the script) and the session remembers it may have
  *     left the viewer parked: its next write restores it first, and so does the
@@ -38,6 +46,7 @@ export interface ParkAnswer {
   recovered?: { compId: number; compName: string };
   skipped?: string;
   scan?: string;
+  wouldPark?: boolean;
   note?: string;
 }
 
@@ -47,6 +56,7 @@ export interface UnparkAnswer {
   compId?: number;
   compName?: string;
   viewerComp?: { id: number; name: string };
+  caution?: string;
   note?: string;
 }
 
@@ -55,7 +65,7 @@ export interface ViewerReport {
   parked: boolean;
   compId?: number;
   compName?: string;
-  /** Why it was not parked: no-expressions, no-comp-in-viewer, already-parked, failed. */
+  /** Why it was not parked: no-expressions, no-comp-in-viewer, already-parked, reads-activeItem, failed. */
   skipped?: string;
   /** Present once parked: whether the comp was reopened in the viewer. */
   restored?: boolean;
@@ -65,6 +75,8 @@ export interface ViewerReport {
   recovered?: { compId: number; compName: string };
   /** The parking comp was created by this call — one undo step of its own, the first time only. */
   created?: boolean;
+  /** Something the script wrote landed in the parking comp. */
+  caution?: string;
   note?: string;
 }
 
@@ -79,6 +91,24 @@ export type WithViewerNote = { viewerNote?: string };
 /** run_jsx parks unless the caller said `quietViewer: false`. */
 export function runJsxWantsPark(args: unknown): boolean {
   return (args as { quietViewer?: unknown } | null)?.quietViewer !== false;
+}
+
+/**
+ * Whether a script reads `activeItem` anywhere — the script or any inlined
+ * library, through `app.project`, an alias of it, or `["activeItem"]`. A name
+ * built at run time is not seen; the guide and the CAUTION on the answer cover that.
+ */
+const ACTIVE_ITEM = /\bactiveItem\b/;
+export function readsActiveItem(args: unknown): boolean {
+  const a = (args ?? {}) as { code?: unknown; libraries?: unknown };
+  if (typeof a.code === "string" && ACTIVE_ITEM.test(a.code)) return true;
+  if (Array.isArray(a.libraries)) {
+    for (const l of a.libraries) {
+      const t = typeof l === "string" ? l : (l as { text?: unknown } | null)?.text;
+      if (typeof t === "string" && ACTIVE_ITEM.test(t)) return true;
+    }
+  }
+  return false;
 }
 
 // batch.jsx's __BATCH_INLINE_MAX: at or under it (or with singleUndo) the batch
@@ -102,9 +132,12 @@ function runJsxSteps(ops: unknown, out: Record<string, unknown>[] = []): Record<
  * Whether a run_batch parks, and around what: the run_batch call itself for an
  * inline batch, each `_continue_job` for a chunked one. Only a batch with a
  * run_jsx step parks — at any depth of nesting — and none of its run_jsx steps
- * may have asked for `quietViewer: false`.
+ * may have asked for `quietViewer: false`. `readsActiveItem` means a step reads
+ * it, and the batch is not parked.
  */
-export function batchParkMode(args: unknown): { mode: "inline" | "chunks"; asked: boolean } | null {
+export function batchParkMode(
+  args: unknown
+): { mode: "inline" | "chunks"; asked: boolean; readsActiveItem: boolean } | null {
   const a = (args ?? {}) as { ops?: unknown; singleUndo?: unknown };
   const steps = runJsxSteps(a.ops);
   if (steps.length === 0 || steps.some((s) => s.quietViewer === false)) return null;
@@ -112,6 +145,7 @@ export function batchParkMode(args: unknown): { mode: "inline" | "chunks"; asked
   return {
     mode: n <= BATCH_INLINE_MAX || a.singleUndo === true ? "inline" : "chunks",
     asked: steps.some((s) => s.quietViewer === true),
+    readsActiveItem: steps.some((s) => readsActiveItem(s)),
   };
 }
 
@@ -122,12 +156,40 @@ function compLabel(id: number | undefined, name: string | undefined): string {
 /** Whether the report has anything the agent must hear without having asked. */
 export function viewerReportMatters(r: ViewerReport | null): boolean {
   if (!r) return false;
-  if (r.note || r.recovered) return true;
+  if (r.note || r.recovered || r.caution) return true;
   return r.parked && r.restored !== true;
 }
 
-function errText(e: unknown): string {
-  return (e as Error)?.message ?? String(e);
+/** A failure in a few words — the error class, not its whole remedy text. */
+function failureName(e: unknown): string {
+  if (e instanceof AeError) return e.message.slice(0, 160);
+  if (e instanceof BridgeTimeoutError) return "no answer in time";
+  const n = (e as Error)?.name;
+  return n && n !== "Error" ? n : ((e as Error)?.message ?? String(e)).slice(0, 120);
+}
+
+/**
+ * Not parked because the script reads app.project.activeItem. A dry run says
+ * whether parking would have paid off; only then is viewerComp() suggested.
+ */
+export async function notParkedForActiveItem(send: SendInternal): Promise<ViewerReport | null> {
+  let dry: ParkAnswer;
+  try {
+    dry = (await send("_viewer_park", { dryRun: true })) as ParkAnswer;
+  } catch (e) {
+    if (e instanceof UnleasedInternalWriteError) throw e;
+    return null;
+  }
+  if (!dry || dry.wouldPark !== true) return null;
+  return {
+    parked: false,
+    compId: dry.compId,
+    compName: dry.compName,
+    skipped: "reads-activeItem",
+    note: `not parked, because the script reads app.project.activeItem: ${compLabel(dry.compId, dry.compName)} stayed ` +
+      "in the viewer and After Effects re-ran its expressions after every change. Use viewerComp() for the user's comp " +
+      "instead and the next run is parked",
+  };
 }
 
 /**
@@ -146,6 +208,15 @@ export async function withParkedViewer<T>(
   } catch (e) {
     // A bug in the caller, not a bridge failure: nothing was sent.
     if (e instanceof UnleasedInternalWriteError) throw e;
+    if (e instanceof BridgeTimeoutError) {
+      // After Effects is stuck: the script is not sent into it. The park may
+      // still land, so the session remembers.
+      state.maybeLeft = true;
+      (e as WithViewerNote).viewerNote =
+        "The script itself was not sent: After Effects did not answer the viewer park that goes before it, so " +
+        "nothing of the script ran. Send it again once check_setup shows After Effects answering.";
+      throw e;
+    }
     parkError = e;
   }
   const report: ViewerReport = park
@@ -159,8 +230,8 @@ export async function withParkedViewer<T>(
         ...(park.note ? { note: park.note } : {}),
       }
     : parkError instanceof AeError
-      ? { parked: false, skipped: "failed", note: `the viewer could not be parked (${errText(parkError)}), so the script ran with the comp in view` }
-      : { parked: false, skipped: "failed", note: `the viewer park did not answer (${errText(parkError)}); it may have landed, so it is undone after the script` };
+      ? { parked: false, skipped: "failed", note: `the viewer could not be parked (${failureName(parkError)}), so the script ran with the comp in view` }
+      : { parked: false, skipped: "failed", note: `the viewer park's answer was lost (${failureName(parkError)}); it may have landed, so it is undone after the script` };
   // A park that answered has taken over whatever an earlier call left behind.
   if (park) state.maybeLeft = false;
   // After Effects answering with an error means the park ran and threw, or was
@@ -189,13 +260,13 @@ export async function withParkedViewer<T>(
     } catch (e) {
       state.maybeLeft = true;
       r.restored = false;
-      r.note = joinNotes(r.note, `the viewer could not be put back (${errText(e)}): it may still show AE MCP's parking comp ` +
+      r.note = joinNotes(r.note, `the viewer could not be put back (${failureName(e)}): it may still show AE MCP's parking comp ` +
         `instead of ${compLabel(r.compId, r.compName)}. The next write of this session, any run_jsx, or check_setup puts it back`);
       return;
     }
     if (!u || u.unparked !== true) {
-      // Nothing was parked after all (a park whose answer was lost and never landed).
       if (parkInDoubt) {
+        // A park whose answer was lost and that never landed.
         r.note = joinNotes(r.note, "nothing had been parked");
       } else {
         r.restored = false;
@@ -209,6 +280,7 @@ export async function withParkedViewer<T>(
     if (u.compId !== undefined) r.compId = u.compId;
     if (u.compName !== undefined) r.compName = u.compName;
     if (u.viewerComp) r.viewerComp = u.viewerComp;
+    if (u.caution) r.caution = u.caution;
     if (u.note) r.note = joinNotes(r.note, u.note);
   }
 
@@ -222,9 +294,10 @@ export async function withParkedViewer<T>(
     }
     const r: ViewerReport = { ...report };
     await unparkInto(r);
-    if (r.restored === true) return null;
-    if (r.note) return `quietViewer: ${r.note}.`;
-    return null;
+    const parts: string[] = [];
+    if (r.caution) parts.push(r.caution);
+    if (r.restored !== true && r.note) parts.push(r.note);
+    return parts.length ? `quietViewer: ${parts.join("; ")}.` : null;
   }
 }
 
@@ -235,7 +308,9 @@ function joinNotes(a: string | undefined, b: string): string {
 /**
  * Put back a viewer an interrupted call may have left parked. Sent before this
  * session's next write when it knows it may have, and by check_setup. Answers
- * the sentence to show, or null when nothing needed doing.
+ * the sentence to show, or null when nothing needed doing. A failure is said —
+ * the session keeps knowing, and tries again before its next write — and costs
+ * the write at most the unpark's own short timeout (bridge/httpClient.ts).
  */
 export async function recoverParkedViewer(send: SendInternal, state: ViewerParkState | null): Promise<string | null> {
   let u: UnparkAnswer;
@@ -243,15 +318,19 @@ export async function recoverParkedViewer(send: SendInternal, state: ViewerParkS
     u = (await send("_viewer_unpark", { recover: true })) as UnparkAnswer;
   } catch (e) {
     if (e instanceof UnleasedInternalWriteError) throw e;
-    return null;
+    if (state) state.maybeLeft = true;
+    return `An earlier call may have left the viewer on AE MCP's parking comp, and putting it back failed ` +
+      `(${failureName(e)}${e instanceof BridgeTimeoutError ? ": After Effects is busy" : ""}). It is tried again before ` +
+      "this session's next write, and by check_setup; tell the user if the viewer shows an empty comp.";
   }
   if (state) state.maybeLeft = false;
   if (!u || u.unparked !== true) return null;
   // The user (or a script) has since put a comp of their own in the viewer.
-  if (u.viewerComp) return null;
+  if (u.viewerComp) return u.caution ?? null;
   const what = compLabel(u.compId, u.compName);
+  const caution = u.caution ? ` ${u.caution}.` : "";
   if (u.restored === true) {
-    return `An earlier call had left the viewer on AE MCP's parking comp; ${what} was reopened in the viewer.`;
+    return `An earlier call had left the viewer on AE MCP's parking comp; ${what} was reopened in the viewer.${caution}`;
   }
-  return `An earlier call had left the viewer on AE MCP's parking comp; ${u.note ?? `${what} could not be reopened`}.`;
+  return `An earlier call had left the viewer on AE MCP's parking comp; ${u.note ?? `${what} could not be reopened`}.${caution}`;
 }

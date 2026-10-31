@@ -52,6 +52,8 @@ import { runJsxViaServer } from "./tools/runJsxAssembly.js";
 import {
   ViewerParkState,
   batchParkMode,
+  notParkedForActiveItem,
+  readsActiveItem,
   recoverParkedViewer,
   runJsxWantsPark,
   viewerReportMatters,
@@ -262,19 +264,31 @@ export function createServer(opts: CreateServerOptions = {}) {
   const internalVia = (heldByCall: () => boolean, onWait?: (message: string) => void): SendInternal =>
     internalSender((op, a, write, o) => toAe(op, a, { write: write || heldByCall(), onWait, ...o }), line);
   // check_setup's half of putting back a viewer an interrupted run_jsx left
-  // parked (issue #266): an internal write, so under the write lock — taken
-  // only if it comes within a moment, since check_setup must never wait behind
-  // another session's batch. Any failure is silence: check_setup reports the
-  // setup, and this is a courtesy on top of it.
+  // parked (issue #266). Nothing is locked or written unless a park is
+  // actually unfinished: this session knows it may have left one, or After
+  // Effects says one is in force (a read, `_viewer_parked`). Only then is the
+  // write lock asked for, for at most 2 s — a park another session holds the
+  // lock for is its own, mid-run, and is left alone. Never in read-only mode.
   const recoverViewerForCheck = async (): Promise<string | null> => {
+    if (policy.readOnly) return null;
+    if (!viewerState.maybeLeft) {
+      try {
+        const st = (await internalVia(() => false)("_viewer_parked", {})) as { parked?: unknown } | null;
+        if (st?.parked !== true) return null;
+      } catch {
+        return null;
+      }
+    }
     let held: WriteLease | null = null;
     try {
       held = await line.acquire("check_setup", AbortSignal.timeout(2_000));
-      return await recoverParkedViewer(internalVia(() => true), viewerState);
     } catch {
-      return null;
+      return "A viewer park is still in force, and another call holds the write lock — it is very probably that call's own park; check again once it has finished.";
+    }
+    try {
+      return await recoverParkedViewer(internalVia(() => true), viewerState);
     } finally {
-      held?.release();
+      held.release();
     }
   };
   // render_queue's jobs run in an aerender process this server owns; see
@@ -748,8 +762,8 @@ export function createServer(opts: CreateServerOptions = {}) {
           // back here: check_setup is what an agent calls when something
           // looks wrong. Only on a ready setup, and only if the write lock can
           // be had at once — never behind another session's work.
-          const viewerRestored = report.ready ? await recoverViewerForCheck() : null;
-          return textResult(viewerRestored ? { ...report, viewerRestored } : report);
+          const viewerNote = report.ready ? await recoverViewerForCheck() : null;
+          return textResult(viewerNote ? { ...report, viewerNote } : report);
         }
         if (name === "setup_panel") {
           const a = schemas.StrictOpSchemas.setup_panel.parse(rawArgs);
@@ -1092,7 +1106,12 @@ export function createServer(opts: CreateServerOptions = {}) {
       // The viewer is parked around the script (issue #266): run_jsx, and an
       // inline run_batch with run_jsx steps; a chunked one parks per chunk.
       const batchPark = name === "run_batch" ? batchParkMode(args) : null;
-      const parkHere = (name === "run_jsx" && runJsxWantsPark(args)) || batchPark?.mode === "inline";
+      // A script that reads app.project.activeItem is not parked: it would
+      // read — and build in — the parking comp (tools/viewerPark.ts).
+      const jsxReadsActive = name === "run_jsx" ? readsActiveItem(args) : batchPark?.readsActiveItem === true;
+      const wantsPark = (name === "run_jsx" && runJsxWantsPark(args)) || batchPark !== null;
+      const parkHere = wantsPark && !jsxReadsActive && (name === "run_jsx" || batchPark?.mode === "inline");
+      const parkChunks = wantsPark && !jsxReadsActive && batchPark?.mode === "chunks";
       const viewerAsked = name === "run_jsx" ? (args as { quietViewer?: unknown }).quietViewer === true : batchPark?.asked === true;
       // A viewer this session may have left parked is put back before its next
       // write; a park does that itself.
@@ -1100,6 +1119,9 @@ export function createServer(opts: CreateServerOptions = {}) {
       if (lease !== null && viewerState.maybeLeft && !parkHere) {
         viewerRecovered = await recoverParkedViewer(sendInternal, viewerState);
       }
+      // Said only when parking would have paid off; a dry-run park decides.
+      let viewer: ViewerReport | null = null;
+      if (lease !== null && wantsPark && jsxReadsActive) viewer = await notParkedForActiveItem(sendInternal);
       if (SNAPSHOT_OPS.has(name)) {
         const withView = clientSupportsApps(server.getClientCapabilities());
         return await runSnapshotOp(name, args, sendInternal, snapshots, withView);
@@ -1154,7 +1176,6 @@ export function createServer(opts: CreateServerOptions = {}) {
                   name,
                   name === "run_batch" ? { ...(args as Record<string, unknown>), __driver: "server" } : args
                 );
-      let viewer: ViewerReport | null = null;
       let raw: unknown;
       if (parkHere) {
         const parked = await withParkedViewer(sendInternal, viewerState, forward);
@@ -1239,7 +1260,8 @@ export function createServer(opts: CreateServerOptions = {}) {
           const held = lease;
           lease = null;
           held?.onLost?.((why) => jobs.warn(env.jobId, why));
-          if (batchPark?.mode === "chunks") parkedBatches.add(env.jobId);
+          if (parkChunks) parkedBatches.add(env.jobId);
+          if (viewer?.note) jobs.warn(env.jobId, `quietViewer: ${viewer.note}`);
           void batches
             .drive({ jobId: env.jobId, total: env.total, chunkSize: env.chunkSize, aeWarnings: (result as { aeWarnings?: unknown }).aeWarnings })
             .finally(() => {

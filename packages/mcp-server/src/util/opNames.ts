@@ -31,6 +31,7 @@ export const INTERNAL_OP_TOOLS: Readonly<Record<string, string>> = Object.freeze
   // The viewer parked around a script (issue #266); check_setup also unparks.
   _viewer_park: "run_jsx/run_batch",
   _viewer_unpark: "run_jsx/run_batch/check_setup",
+  _viewer_parked: "check_setup",
 });
 
 export function displayOp(op: string): string {

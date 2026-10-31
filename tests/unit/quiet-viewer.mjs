@@ -172,7 +172,7 @@ await check("the parking comp is made once, in its own undo step, and reused: la
   assert.equal(e.state.changes, madeChanges + 3, "park and unpark changed nothing in the project");
   const tagged = e.items.filter((it) => String(it.comment).startsWith("ae-mcp-viewer-parking:v1"));
   assert.equal(tagged.length, 1, "one parking comp, however many runs");
-  assert.equal(tagged[0].parentFolder.name, "AE MCP");
+  assert.equal(tagged[0].parentFolder, null, "no folder: two fewer project changes, and none left behind empty");
 });
 
 await check("a leftover parking comp (from a crash, or a project saved with it) is found by its tag and reused", () => {
@@ -267,7 +267,7 @@ await check("while parked, the parking comp is never the user's comp to a read, 
   const sum = e.call("get_project_summary").result;
   assert.equal(sum.activeItemId, e.heavy.id, "the active item is the comp it replaced");
   assert.equal(sum.items.some((it) => /parking|^AE MCP$/.test(it.name)), false);
-  assert.equal(sum.aeMcpItemsHidden, 2, "what was left out is counted: the comp and its folder");
+  assert.equal(sum.aeMcpItemsHidden, 1, "what was left out is counted");
   assert.equal(sum.numItems, e.items.length);
   const probe = e.call("_live_probe").result;
   assert.equal(probe.activeItemId, e.heavy.id, "the live resource does not flip to the parking comp");
@@ -278,15 +278,55 @@ await check("while parked, the parking comp is never the user's comp to a read, 
   assert.deepEqual(Array.from(vm.runInContext("__diffCompIds({diff: true}, null)", e.ctx)), [e.heavy.id]);
 });
 
-await check("a user folder that happens to be called \"AE MCP\" is never hidden", () => {
+await check("a script that wrote into the parking comp: a CAUTION names what landed, and the comp is never reused or hidden", () => {
   const e = es();
   e.call("_viewer_park");
+  // The old habit, through a name the server's scan cannot see.
+  const s1 = e.call("run_jsx", { code: "var p = app.project['active' + 'Item']; p._layers.push({name: 'Title', id: 99}); return 1;" });
+  assert.equal(s1.ok, true, s1.error);
+  const parking = e.items.find((it) => String(it.comment).startsWith("ae-mcp-viewer-parking:v1"));
+  const u = e.call("_viewer_unpark").result;
+  assert.equal(u.restored, true);
+  assert.match(u.caution, /^CAUTION: 1 layer\(s\) \("Title"\) landed in AE MCP's parking comp/);
+  assert.match(u.caution, /viewerComp\(\)/);
+  // What landed there is the user's now: listed, and the next park makes a fresh comp.
+  assert.equal(e.call("list_comps").result.some((c) => c.id === parking.id), true, "a dirty parking comp is not hidden");
+  const p2 = e.call("_viewer_park").result;
+  assert.equal(p2.created, true, "a dirty parking comp is never reused");
+  assert.notEqual(e.state.view.id, parking.id);
+});
+
+await check("viewerComp() does not trust a park an interrupted call left once the user is back in a comp of their own", () => {
+  const e = es();
+  e.call("_viewer_park");
+  // No unpark ever came; the user opened Other by hand.
+  e.state.view = e.other;
+  const s1 = e.call("run_jsx", { code: "return viewerComp().name;" });
+  assert.equal(s1.result, "Other");
+  assert.equal(e.call("get_project_summary").result.activeItemId, e.other.id);
+});
+
+await check("a dry-run park says whether parking would pay off and opens nothing; it undoes a park an interrupted call left", () => {
+  const e = es();
+  const d = e.call("_viewer_park", { dryRun: true }).result;
+  assert.deepEqual([d.parked, d.wouldPark, d.compId], [false, true, e.heavy.id]);
+  assert.deepEqual(e.state.opened, []);
+  assert.equal(e.state.changes, 0, "and creates nothing");
+  assert.equal(es({ expressions: 0 }).call("_viewer_park", { dryRun: true }).result.wouldPark, undefined);
+  // Left parked, then a script that reads activeItem: the dry run puts the user's comp back first.
+  e.call("_viewer_park");
+  const again = e.call("_viewer_park", { dryRun: true }).result;
+  assert.deepEqual(again.recovered, { compId: e.heavy.id, compName: "TR — Opener" });
+  assert.equal(e.state.view, e.heavy, "the script that reads activeItem gets the user's comp");
+});
+
+await check("_viewer_parked is a read that says whether a park is in force", () => {
+  const e = es();
+  assert.equal(e.call("_viewer_parked").result.parked, false);
+  e.call("_viewer_park");
+  assert.equal(e.call("_viewer_parked").result.parked, true);
   e.call("_viewer_unpark");
-  const folder = e.items.find((it) => it.name === "AE MCP");
-  folder.children.push({ name: "user thing", comment: "" });
-  const sum = e.call("get_project_summary").result;
-  assert.equal(sum.items.some((it) => it.name === "AE MCP"), true);
-  assert.equal(sum.aeMcpItemsHidden, 1, "only the parking comp itself");
+  assert.equal(e.call("_viewer_parked").result.parked, false);
 });
 
 // ---------- 1b. the server's three calls (tools/viewerPark.ts, server.ts) ----------
@@ -362,6 +402,35 @@ await check("a script that timed out is not unparked (it may still run); the ses
   assert.equal(st.maybeLeft, false);
 });
 
+await check("a park that timed out: the script is not sent into a stuck After Effects, and the call fails with that timeout", async () => {
+  const st = new park.ViewerParkState();
+  const err = new BridgeTimeoutError(7777, 300_000, { op: "_viewer_park" });
+  const s = sender({ _viewer_park: err });
+  await assert.rejects(park.withParkedViewer(s.send, st, async () => { s.sent.push("script"); }), (e) => e === err);
+  assert.deepEqual(s.sent, ["_viewer_park"], "the script was never sent");
+  assert.match(err.viewerNote, /^The script itself was not sent/);
+  assert.ok(err.viewerNote.length < 300, "a short note, not the timeout's whole text again");
+  assert.equal(st.maybeLeft, true, "the park may still land");
+});
+
+await check("a next-write recovery that fails is said, and the session keeps knowing", async () => {
+  const st = new park.ViewerParkState();
+  st.maybeLeft = true;
+  const s = sender({ _viewer_unpark: new BridgeTimeoutError(7777, 10_000, { op: "_viewer_unpark" }) });
+  const msg = await park.recoverParkedViewer(s.send, st);
+  assert.match(msg, /putting it back failed \(no answer in time: After Effects is busy\)/);
+  assert.equal(st.maybeLeft, true);
+});
+
+await check("a script that mentions activeItem — in its code or a library — is found by the scan", () => {
+  assert.equal(park.readsActiveItem({ code: "var c = app.project.activeItem;" }), true);
+  assert.equal(park.readsActiveItem({ code: "var p = app.project; p['activeItem'].layers.addNull();" }), true);
+  assert.equal(park.readsActiveItem({ code: "return viewerComp().name;", libraries: [{ path: "/l.jsx", text: "function f(){ return app.project.activeItem; }" }] }), true);
+  assert.equal(park.readsActiveItem({ code: "return viewerComp().name; // activeItems" }), false);
+  const step = { op: "run_jsx", args: { code: "app.project.activeItem.name" } };
+  assert.equal(park.batchParkMode({ ops: [step] }).readsActiveItem, true);
+});
+
 await check("a park whose answer was lost is undone anyway — it may have landed, and the unpark is idempotent", async () => {
   const st = new park.ViewerParkState();
   const s = sender({ _viewer_park: new Error("socket hang up"), _viewer_unpark: { unparked: false } });
@@ -377,8 +446,8 @@ await check("a park whose answer was lost is undone anyway — it may have lande
 await check("a batch parks only with a run_jsx step (at any depth) and none opting out; inline or per chunk", () => {
   const jsxStep = (a = {}) => ({ op: "run_jsx", args: { code: "1", ...a } });
   assert.equal(park.batchParkMode({ ops: [{ op: "set_layer", args: {} }] }), null);
-  assert.deepEqual(park.batchParkMode({ ops: [jsxStep()] }), { mode: "inline", asked: false });
-  assert.deepEqual(park.batchParkMode({ ops: [{ op: "run_batch", args: { ops: [jsxStep({ quietViewer: true })] } }] }), { mode: "inline", asked: true });
+  assert.deepEqual(park.batchParkMode({ ops: [jsxStep()] }), { mode: "inline", asked: false, readsActiveItem: false });
+  assert.deepEqual(park.batchParkMode({ ops: [{ op: "run_batch", args: { ops: [jsxStep({ quietViewer: true })] } }] }), { mode: "inline", asked: true, readsActiveItem: false });
   assert.equal(park.batchParkMode({ ops: [jsxStep(), jsxStep({ quietViewer: false })] }), null);
   const many = Array.from({ length: 501 }, () => jsxStep());
   assert.equal(park.batchParkMode({ ops: many }).mode, "chunks");
@@ -394,6 +463,8 @@ await check("a batch parks only with a run_jsx step (at any depth) and none opti
   let release;
   const held = new Promise((r) => (release = r));
   let unparkAnswer = BACK;
+  let runJsxHold = null;
+  const chunks = new Map();
   const bridge = http.createServer((req, res) => {
     res.setHeader("content-type", "application/json");
     if (req.url === "/health") {
@@ -403,13 +474,23 @@ await check("a batch parks only with a run_jsx step (at any depth) and none opti
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", async () => {
-      const { op } = JSON.parse(body || "{}");
-      seen.push(op);
+      const { op, args } = JSON.parse(body || "{}");
+      seen.push(args?.recover ? `${op}(recover)` : args?.dryRun ? `${op}(dryRun)` : op);
       let result = { ok: true };
-      if (op === "_viewer_park") result = PARKED;
+      if (op === "_viewer_park") result = args?.dryRun ? { parked: false, wouldPark: true, compId: 7, compName: "TR — Opener" } : PARKED;
       if (op === "_viewer_unpark") result = unparkAnswer;
-      if (op === "_run_jsx") { await held; result = { made: 3 }; }
-      res.end(JSON.stringify({ ok: true, result }));
+      if (op === "_run_jsx") { await (runJsxHold ?? held); result = { made: 3 }; }
+      if (op === "run_batch" && args.ops.length > 500) {
+        result = { jobId: "j_1", async: true, total: args.ops.length, chunkSize: 25, driver: "server" };
+      }
+      if (op === "_continue_job") {
+        const n = (chunks.get(args.jobId) ?? 0) + 1;
+        chunks.set(args.jobId, n);
+        result = n >= 2
+          ? { done: true, jobId: args.jobId, results: [], errors: [], total: 501, undoSteps: n }
+          : { done: false, jobId: args.jobId, progress: 25, total: 501, undoSteps: n };
+      }
+      try { res.end(JSON.stringify({ ok: true, result })); } catch {}
     });
   });
   const wss = new WebSocketServer({ server: bridge, path: "/events" });
@@ -468,6 +549,52 @@ await check("a batch parks only with a run_jsx step (at any depth) and none opti
     seen.length = 0;
     await client.callTool({ name: "run_batch", arguments: { ops: [{ op: "set_layer", args: { compId: 1, layerId: 1, name: "x" } }] } });
     assert.deepEqual(seen, ["run_batch"], "no run_jsx step, no park");
+  });
+
+  await check("tools/call: a script that reads app.project.activeItem is not parked, and the answer suggests viewerComp()", async () => {
+    seen.length = 0;
+    const r = await client.callTool({ name: "run_jsx", arguments: { code: "return app.project.activeItem.name;" } });
+    assert.deepEqual(seen, ["_viewer_park(dryRun)", "_run_jsx"], "no park, no unpark: only the dry run");
+    const rep = JSON.parse(r.content[1].text).quietViewer;
+    assert.equal(rep.skipped, "reads-activeItem");
+    assert.match(rep.note, /use viewerComp\(\)/i);
+    seen.length = 0;
+    await client.callTool({ name: "run_batch", arguments: { ops: [{ op: "run_jsx", args: { code: "return app.project.activeItem.name;" } }] } });
+    assert.deepEqual(seen, ["_viewer_park(dryRun)", "run_batch"], "a batch whose step reads it is not parked either");
+  });
+
+  await check("tools/call: a long run_batch with a run_jsx step parks around each chunk, never across two", async () => {
+    seen.length = 0;
+    const ops = Array.from({ length: 501 }, () => ({ op: "run_jsx", args: { code: "return 1;" } }));
+    const env = JSON.parse((await client.callTool({ name: "run_batch", arguments: { ops } })).content[0].text);
+    assert.equal(env.jobId, "j_1");
+    await client.callTool({ name: "await_job", arguments: { jobId: "j_1" } });
+    assert.deepEqual(seen, ["run_batch", "_viewer_park", "_continue_job", "_viewer_unpark", "_viewer_park", "_continue_job", "_viewer_unpark"]);
+  });
+
+  await check("tools/call: after a script timed out, this session's next write puts the viewer back first", async () => {
+    seen.length = 0;
+    let open;
+    runJsxHold = new Promise((r) => (open = r));
+    process.env.AE_MCP_OP_TIMEOUT_MS = "400";
+    let timedOut;
+    try {
+      timedOut = await client.callTool({ name: "run_jsx", arguments: { code: "return 1;" } });
+    } finally {
+      delete process.env.AE_MCP_OP_TIMEOUT_MS;
+    }
+    assert.equal(timedOut.isError, true);
+    assert.match(timedOut.content.map((c) => c.text).join("\n"), /left on AE MCP's parking comp because the script may still be running/);
+    assert.deepEqual(seen, ["_viewer_park", "_run_jsx"], "no unpark behind a script that may still be running");
+    open();
+    runJsxHold = null;
+    const w = await client.callTool({ name: "set_layer", arguments: { compId: 1, layerId: 1, name: "x" } });
+    assert.equal(w.isError, undefined, w.content[0].text);
+    assert.deepEqual(seen.slice(2), ["_viewer_unpark(recover)", "set_layer"]);
+    assert.match(w.content.map((c) => c.text).join("\n"), /comp 7 \("TR — Opener"\) was reopened/);
+    seen.length = 0;
+    await client.callTool({ name: "set_layer", arguments: { compId: 1, layerId: 1, name: "y" } });
+    assert.deepEqual(seen, ["set_layer"], "once put back, the next write sends nothing extra");
   });
 
   await client.close();

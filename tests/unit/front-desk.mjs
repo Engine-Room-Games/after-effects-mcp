@@ -755,6 +755,8 @@ let chain = Promise.resolve();
 const batches = new Map(); // jobId -> completedAt
 const running = new Map(); // jobId -> { endsAt, chunks }
 let batchMs = 700;
+/** Whether the viewer park finds something to park (issue #266); off, it is answered outside the chain. */
+let parkOn = false;
 const panel = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.setHeader("content-type", "application/json");
@@ -767,7 +769,7 @@ const panel = http.createServer((req, res) => {
     const { op, args } = JSON.parse(body || "{}");
     // The viewer park before a run_jsx (issue #266) finds nothing worth
     // parking here; tests/unit/quiet-viewer.mjs covers the parked path.
-    if (op === "_viewer_park" || op === "_viewer_unpark") {
+    if ((op === "_viewer_park" || op === "_viewer_unpark") && !parkOn) {
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ ok: true, result: op === "_viewer_park" ? { parked: false, skipped: "no-expressions" } : { unparked: false } }));
       return;
@@ -803,6 +805,8 @@ const panel = http.createServer((req, res) => {
         }
       }
       if (op === "list_comps") result = [];
+      if (op === "_viewer_park") result = { parked: true, compId: 1, compName: "Main" };
+      if (op === "_viewer_unpark") result = { unparked: true, restored: true, compId: 1, compName: "Main" };
       // A non-object result After Effects warned about, as core.jsx wraps it (#225).
       if (tag === "WARN") result = { __aemcpWarned: true, value: [1, 2], aeWarnings: ["Missing font: Inter"] };
       try {
@@ -935,6 +939,24 @@ try {
     // …and while it waited.
     assert.ok(rb.progress.some((m) => /is 1st in line .*another session's `run_jsx` \(desk-test-A, pid \d+\)/.test(m)), rb.progress.join("\n"));
     assert.ok(rc.progress.some((m) => /is 2nd in line/.test(m)), rc.progress.join("\n"));
+  });
+
+  await check("parked (#266): each session's park, script and unpark reach After Effects together, never interleaved", async () => {
+    seen.length = 0;
+    parkOn = true;
+    try {
+      const pa = call(A, "run_jsx", jsx("PA", 400));
+      await until("PA at the panel", () => ran("PA").length === 1);
+      const hb = begin(B, "run_jsx", jsx("PB", 50));
+      const [ra, rb] = await Promise.all([pa, hb.done]);
+      for (const r of [ra, rb]) assert.equal(r.res.isError, undefined, r.text);
+      assert.deepEqual(seen.map((e) => e.tag), ["_viewer_park", "PA", "_viewer_unpark", "_viewer_park", "PB", "_viewer_unpark"]);
+      for (let i = 1; i < seen.length; i++) {
+        assert.ok(seen[i].enteredAt >= seen[i - 1].leftAt, `${seen[i].tag} overlapped ${seen[i - 1].tag}`);
+      }
+    } finally {
+      parkOn = false;
+    }
   });
 
   await check("a read is never held behind another session's write", async () => {

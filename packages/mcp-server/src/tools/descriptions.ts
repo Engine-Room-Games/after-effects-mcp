@@ -121,7 +121,7 @@ export const descriptions: Record<string, string> = {
     "A batch with run_jsx steps parks the viewer like run_jsx does (per chunk when long; see run_jsx `quietViewer`).",
 
   // ---------- explore ----------
-  get_project_summary: "Project state: path, item count, active item, flat item list with type (comp | footage | solid | folder | unknown — same vocabulary as a layer's sourceType). AE MCP's viewer-parking comp and its folder are left out of the list and counted in `aeMcpItemsHidden`.",
+  get_project_summary: "Project state: path, item count, active item, flat item list with type (comp | footage | solid | folder | unknown — same vocabulary as a layer's sourceType). AE MCP's empty viewer-parking comp is left out of the list and counted in `aeMcpItemsHidden`.",
   get_selection:
     "What the user has selected right now in the comp they are looking at: `{comp:{id,name}, source, time, frame, selectedLayers:[{id,index,name}], selectedProperties:[{layerId, layerName, propertyPath, name, matchName, kind, selectedKeyTimes?}], note?}`. " +
     "Use it when the user says \"this layer\", \"these keyframes\" or \"here\" (the playhead) instead of asking them to name it. A `kind:\"property\"` propertyPath goes straight into the propertyPath tools; a `kind:\"group\"` cannot be keyframed — read its children with get_layer_full. `time` is comp seconds, the keyframe clock; `frame` is as the timeline shows it. " +
@@ -139,7 +139,7 @@ export const descriptions: Record<string, string> = {
     "No explicit `return` (a bare final expression does NOT return) answers `{ok:true, returned:null, undoGroup, note}`: it ran to completion and did **not** fail — do not re-run it; nothing rolls back, so a mutating script would apply twice. " +
     "A failure names the line of YOUR script (or says it cannot); everything before it already ran — read the state back, never re-run to see if it fails again. " +
     "AE refuses copyToComp for a layer with a parent or a linked expression inside an undo group: wrap just that part in `withoutUndoGroup(function(){ … })`, or pass undoGroup:false. Keep loops short — ExtendScript freezes the user's UI. " +
-    "**The viewer is parked by default** (`quietViewer`; AE re-runs the viewed comp's expressions after every change), so **`app.project.activeItem` is AE MCP's parking comp while the script runs: use `viewerComp()`**. A comp the script opens in the viewer stays there. quietViewer:false leaves the viewer alone. " +
+    "**Use `viewerComp()` for the user's comp, not `app.project.activeItem`**: the viewer is parked on an empty comp while the script runs (`quietViewer`, default; AE re-runs the viewed comp's expressions after every change), and a script that mentions activeItem is not parked. A comp the script opens in the viewer stays there. quietViewer:false leaves the viewer alone. " +
     "`diff:true` appends what the script changed (the answer is then `{ok, returned, diff}`), also to an error. Read ae_guide topic 'extendscript-gotchas' before writing anything substantial.",
 
   // ---------- footage ----------

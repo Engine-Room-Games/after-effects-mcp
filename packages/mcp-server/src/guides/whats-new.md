@@ -61,21 +61,24 @@ only quitting and reopening After Effects will.
   supersedes: run setup_panel, then restart After Effects
   supersedes: run setup_panel, then ask them to quit and reopen After Effects
 
-- **Breaking: during `run_jsx`, `app.project.activeItem` is AE MCP's
-  parking comp — use `viewerComp()` for the user's comp.** Every change a
-  script makes re-runs the expressions of the comp in the viewer, once per
-  change (a 20-change script took 74 s with a heavy comp in view, AE 26.5). So
-  when the comp in view has expressions, the server opens an empty comp ("AE
-  MCP viewer parking", in an "AE MCP" folder) in the viewer before the script
-  and reopens the user's comp after it. It is made once and reused, adds no
-  undo step, and is left out of `list_comps`, `get_project_summary` (counted
-  in `aeMcpItemsHidden`) and `find_layers` — but not out of
-  `app.project.items`. A comp the script opens in the viewer itself stays
-  there, and the answer says which. `quietViewer: false` turns it off; with
-  `quietViewer: true`, or when the comp could not be put back, the answer
-  carries a `quietViewer` block. `run_batch` with `run_jsx` steps parks too.
-  If a call was cut off between the park and the put-back, the next `run_jsx`
-  or `check_setup` reopens the user's comp (issue #266).
+- **Breaking: in `run_jsx`, use `viewerComp()` for the user's comp — while
+  the viewer is parked, `app.project.activeItem` is AE MCP's parking comp.**
+  Every change a script makes re-runs the expressions of the comp in the
+  viewer, once per change (a 20-change script took 74 s with a heavy comp in
+  view, AE 26.5). So when the comp in view has expressions, the server opens
+  an empty comp ("AE MCP viewer parking (safe to delete)") in the viewer
+  before the script and reopens the user's comp after it. A script that
+  mentions `activeItem` is not parked, and the answer says it could have been.
+  The comp is made once and reused, adds no undo step, and is left out of
+  `list_comps`, `get_project_summary` (counted in `aeMcpItemsHidden`) and
+  `find_layers` — but not out of `app.project.items`. Anything that lands in
+  it is reported as a CAUTION. A comp the script opens in the viewer itself
+  stays there, and the answer says which. `quietViewer: false` turns it off;
+  with `quietViewer: true`, or when something did not go as planned, the
+  answer carries a `quietViewer` block. `run_batch` with `run_jsx` steps parks
+  too. If a call was cut off between the park and the put-back, the next
+  `run_jsx`, this session's next write, or `check_setup` reopens the user's
+  comp (issue #266).
   supersedes: app.project.activeItem is the comp the user has open
   supersedes: use app.project.activeItem to get the active comp
 - **`check_setup` says what a busy After Effects is busy with.** When the

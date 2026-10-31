@@ -1949,6 +1949,8 @@ export const InternalOpMutation = {
   // a viewer an interrupted call left parked.
   _viewer_park: "write",
   _viewer_unpark: "write",
+  // Whether a park is in force: what check_setup asks before it takes any lock.
+  _viewer_parked: "read",
 } as const satisfies Record<`_${string}`, "write" | "read">;
 
 type ServerOpName = { [K in OpName]: (typeof OpMutation)[K] extends "server" ? K : never }[OpName];
