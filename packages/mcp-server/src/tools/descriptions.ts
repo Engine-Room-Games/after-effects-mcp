@@ -138,6 +138,7 @@ export const descriptions: Record<string, string> = {
     "No explicit `return` (a bare final expression does NOT return) answers `{ok:true, returned:null, undoGroup, note}`: it ran to completion and did **not** fail — do not re-run it; nothing rolls back, so a mutating script would apply twice. " +
     "A failure names the line of YOUR script (or says it cannot); everything before it already ran — read the state back, never re-run to see if it fails again. " +
     "AE refuses copyToComp for a layer with a parent or a linked expression inside an undo group: wrap just that part in `withoutUndoGroup(function(){ … })`, or pass undoGroup:false. Keep loops short — ExtendScript freezes the user's UI. " +
+    "A heavy comp in the viewer is re-rendered after every change to its tree; for a script making many changes (a rebuild), pass `quietViewer:true`. " +
     "`diff:true` appends what the script changed (the answer is then `{ok, returned, diff}`), also to an error. Read ae_guide topic 'extendscript-gotchas' before writing anything substantial.",
 
   // ---------- footage ----------

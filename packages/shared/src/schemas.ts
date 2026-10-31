@@ -1289,6 +1289,8 @@ export const RunJsx = crossField(
       .describe("Absolute paths to .jsx files the server inlines ahead of the script, in its scope. Re-evaluated every call: declarations only. Put shared helpers here instead of pasting them."),
     undoGroup: z.boolean().optional().meta({ default: true })
       .describe("Wrap the script in one undo step. false only for what AE refuses inside one (copyToComp on a parented or expression-linked layer); changes then land as AE's own undo steps."),
+    quietViewer: z.boolean().optional().meta({ default: false })
+      .describe("Park the active viewer on a tiny empty comp while the script runs, then reopen the comp that was there. AE re-renders the viewed comp after every change to it or its precomps — with a heavy comp in view that is most of the run (measured ~9× slower). Use it for scripts making many changes; while parked, app.project.activeItem is the parking comp, so address comps by id. The answer gains `quietViewer: {parked, restored, compId, note?}`."),
     diff: diffParam,
     diffCompId: diffCompIdParam,
   }),

@@ -61,6 +61,18 @@ only quitting and reopening After Effects will.
   supersedes: run setup_panel, then restart After Effects
   supersedes: run setup_panel, then ask them to quit and reopen After Effects
 
+- **`run_jsx` takes `quietViewer: true` for scripts that make many changes.**
+  After Effects re-renders the comp in the viewer after every change to it or
+  its precomps; with a heavy comp in view a rebuild script slowed from seconds
+  to past the 300 s limit. The flag parks the viewer on an empty comp for the
+  script and reopens the user's comp after. While parked,
+  `app.project.activeItem` is the parking comp (issue #266).
+- **`check_setup` says what a busy After Effects is busy with.** When the
+  bridge accepts and does not answer, and this server has a call open — or one
+  that timed out with no answer since — the report carries `busyWith: {op,
+  state, calledAgoMs}` and the `bridgeReachable` detail names the call. Keep
+  waiting while it is there; do not re-send that call (issue #266).
+
 ## 0.5.2
 
 Four fixes, all reported from outside the project. Two change what a result

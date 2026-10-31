@@ -31,6 +31,18 @@ the task needs a script rather than looking for another way to run one.
   where a scene build stays well inside the limit (reported from a
   fourteen-scene, thousand-layer build). Split a big build by scene, not by op;
   the same op repeated hundreds of times is `run_batch`, which chunks itself.
+- **A heavy comp in the viewer makes every change slow.** After Effects
+  re-renders the comp in the active viewer after each scripted change to it or
+  to any precomp it uses, before the next statement runs. With a 4K, 3D,
+  motion-blurred comp in view, adding one layer took 695 ms against 79 ms with
+  an empty comp in view (AE 26.5) — enough to carry a rebuild script that ran
+  in seconds earlier past the 300 s limit. For a script making many changes
+  (rebuilding precomps, building dozens of layers), pass `quietViewer: true`:
+  the viewer is parked on a tiny empty comp while the script runs and the
+  user's comp reopened afterwards, also when the script throws. While parked,
+  `app.project.activeItem` is the parking comp, so find your comps by id, not
+  through `activeItem`. The answer reports `quietViewer: {parked, restored,
+  compId}`, with a `note` if the comp could not be reopened.
 - **Source size** — the script plus every library it names — is capped at 1 MB
   per call, because libraries are inlined into the call, so every byte travels
   every time.

@@ -814,6 +814,97 @@ function __rjUndoGuardReport(g) {
   return report;
 }
 
+// ---------- quietViewer (issue #266) ----------
+// Every scripted change to a comp the active viewer depends on makes After
+// Effects re-render that viewer before the next statement runs. With a heavy
+// comp in it (4K, 3D, motion blur), measured on 26.5: 695 ms to add one layer,
+// against 79 ms with an empty comp in the viewer — a rebuild script went past
+// the 300 s op limit on that alone. quietViewer:true parks the viewer on a
+// tiny empty comp for the script's duration, then reopens the comp that was
+// there and removes the parking comp. Restore runs on every exit, including a
+// throw. diff:true takes its "before" ahead of the park and its "after" once
+// the viewer is back, so the parking comp is never the comp it fingerprints.
+// Opt-in: while parked, app.project.activeItem is the parking comp, which a
+// script that reads activeItem to find its comp would get wrong.
+var __RJ_PARK_NAME = "AE MCP quiet viewer (temporary)";
+
+function __rjMsg(e) {
+  try { return (e && e.message) ? String(e.message) : String(e); } catch (x) { return "unknown error"; }
+}
+
+// The comp in the active composition viewer, or null. The same two-step read
+// as get_selection: activeItem first, then the viewer itself.
+function __rjViewerComp() {
+  var a = null;
+  try { a = app.project.activeItem; } catch (e) { a = null; }
+  if (a && a instanceof CompItem) return a;
+  var v = null;
+  try { v = app.activeViewer; } catch (e1) { v = null; }
+  if (!v) return null;
+  try { if (v.type !== ViewerType.VIEWER_COMPOSITION) return null; } catch (e2) { return null; }
+  try {
+    if (v.setActive() !== false) a = app.project.activeItem;
+  } catch (e3) { a = null; }
+  return (a && a instanceof CompItem) ? a : null;
+}
+
+function __rjParkViewer(args) {
+  if (!args || args.quietViewer !== true) return null;
+  var st = { from: null, fromId: null, fromName: null, park: null, parked: false, done: false, restored: false, notes: [] };
+  var from = __rjViewerComp();
+  if (!from) {
+    st.notes.push("no composition was open in the active viewer, so there was nothing to park");
+    return st;
+  }
+  st.from = from;
+  try { st.fromId = from.id; st.fromName = from.name; } catch (e) {}
+  var c = null;
+  try {
+    c = app.project.items.addComp(__RJ_PARK_NAME, 16, 16, 1, 1, 1);
+    c.openInViewer();
+    st.park = c;
+    st.parked = true;
+  } catch (e1) {
+    if (c) { try { c.remove(); } catch (e2) {} }
+    st.notes.push("the viewer could not be parked (" + __rjMsg(e1) + "), so the script ran with comp " +
+      st.fromId + " in the viewer, re-rendering it on every change");
+  }
+  return st;
+}
+
+// Idempotent: called after the script on every path and again in the finally.
+function __rjRestoreViewer(st) {
+  if (!st || !st.parked || st.done) return;
+  st.done = true;
+  try {
+    st.from.openInViewer();
+    st.restored = true;
+  } catch (e) {
+    st.notes.push("comp " + st.fromId + " (\"" + st.fromName + "\") could not be reopened in the viewer (" +
+      __rjMsg(e) + ") — the script may have removed it");
+  }
+  try {
+    st.park.remove();
+  } catch (e1) {
+    st.notes.push("the parking comp \"" + __RJ_PARK_NAME + "\" could not be removed (" + __rjMsg(e1) +
+      "); delete it from the Project panel");
+  }
+}
+
+function __rjViewerReport(st) {
+  if (!st) return null;
+  var r = { parked: st.parked, restored: st.restored, compId: st.fromId };
+  if (st.notes.length) r.note = st.notes.join("; ");
+  return r;
+}
+
+// Only what the caller must hear about on a failure: a viewer left parked or
+// a parking comp left behind. A clean restore says nothing.
+function __rjViewerErrorSuffix(st) {
+  if (!st || !st.parked || st.notes.length === 0) return "";
+  return " || quietViewer: " + st.notes.join("; ");
+}
+
 // undoGroup:false is a per-call opt-out, read by dispatch() through the
 // predicate form of __meta.noUndo. It exists because AE refuses copyToComp for
 // a layer with a parent or a linked expression while an undo group is open,
@@ -854,6 +945,7 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
     // diff:true fingerprints the comp before and after, inside this one call —
     // see snapshot.jsx. Null unless asked for, so the ordinary path is untouched.
     var __d = __diffStart(args, null);
+    var __qv = __rjParkViewer(args);
     // alert/confirm/prompt are blocking dialogs, and one up inside evalScript
     // stalls the bridge until someone clicks it. Declared here, they shadow the
     // globals for the eval'd script — eval resolves names through this
@@ -867,6 +959,7 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
     try {
       __value = eval(built.wrapper);
     } catch (e) {
+      __rjRestoreViewer(__qv);
       __rjUndoGuardFinish(__g);
       var __gr = __rjUndoGuardReport(__g);
       // Annotate before mapping the line: __rjThrowWithSource reads e.message,
@@ -875,13 +968,15 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
       __diffAnnotateError(e, __d);
       __rjThrowWithSource(e, code, args.scriptPath, built,
         (__gr ? " || undo: " + __gr.note : "") +
-        (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : ""));
+        (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : "") +
+        __rjViewerErrorSuffix(__qv));
     }
+    __rjRestoreViewer(__qv);
     __rjUndoGuardFinish(__g);
     var __report = __rjUndoGuardReport(__g);
     var __out = __rjResult(__value, undoGroupName);
     if (__d) __out = __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
-    if (__report || __shown.length) {
+    if (__report || __shown.length || __qv) {
       // Always an envelope: a script that returned 1 must not read as an
       // untroubled 1 when its undo calls were changed under it.
       if (!__d && !__rjIsNullEnvelope(__out)) {
@@ -889,11 +984,14 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
       }
       if (__report) __out.undoGuard = __report;
       if (__shown.length) __out.suppressedDialogs = __shown;
+      if (__qv) __out.quietViewer = __rjViewerReport(__qv);
     }
     return __out;
   } finally {
     // Idempotent: the paths above have already closed everything, but a throw
-    // from anywhere else in here must not leave a group of the script's open.
+    // from anywhere else in here must not leave a group of the script's open,
+    // nor the viewer parked.
+    __rjRestoreViewer(__qv);
     __rjUndoGuardFinish(__g);
     __RJ_UNDO_GUARD = __g.previous;
   }
@@ -999,6 +1097,7 @@ OPS._run_jsx = function (args) {
     __g.opaque = built.opaqueRoutes ? built.opaqueRoutes : [];
     var undoGroupName = (args.undoGroup === false) ? false : "AE MCP: run_jsx";
     var __d = __diffStart(args, null);
+    var __qv = __rjParkViewer(args);
     var __shown = [];
     var alert = function (m) { __shown.push("alert: " + String(m)); };
     var confirm = function (m) { __shown.push("confirm (answered No): " + String(m)); return false; };
@@ -1007,26 +1106,31 @@ OPS._run_jsx = function (args) {
     try {
       __value = eval(built.wrapper);
     } catch (e) {
+      __rjRestoreViewer(__qv);
       __rjUndoGuardFinish(__g);
       var __gr = __rjUndoGuardReport(__g);
       __diffAnnotateError(e, __d);
       __rjThrowRaw(e,
         (__gr ? " || undo: " + __gr.note : "") +
-        (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : ""));
+        (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : "") +
+        __rjViewerErrorSuffix(__qv));
     }
+    __rjRestoreViewer(__qv);
     __rjUndoGuardFinish(__g);
     var __report = __rjUndoGuardReport(__g);
     var __out = __rjResult(__value, undoGroupName);
     if (__d) __out = __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
-    if (__report || __shown.length) {
+    if (__report || __shown.length || __qv) {
       if (!__d && !__rjIsNullEnvelope(__out)) {
         __out = { ok: true, returned: __out, undoGroup: undoGroupName };
       }
       if (__report) __out.undoGuard = __report;
       if (__shown.length) __out.suppressedDialogs = __shown;
+      if (__qv) __out.quietViewer = __rjViewerReport(__qv);
     }
     return __out;
   } finally {
+    __rjRestoreViewer(__qv);
     __rjUndoGuardFinish(__g);
     __RJ_UNDO_GUARD = __g.previous;
   }
