@@ -753,14 +753,18 @@ export class ScriptNotSentError extends WriteQueueWaitError {
     return [
       `${what ?? "`" + displayOp(op) + "`"} was not sent: After Effects did not answer the viewer park that goes ahead of the script, so it is busy.`,
       "",
-      "The script never reached After Effects; nothing of it ran and nothing in the project was changed by it.",
-      "After Effects is very probably still on earlier work — a long script, a render, or a dialog nobody has clicked.",
+      "The script never reached After Effects, so none of it ran. The park itself did reach After Effects and may still",
+      "land late: it switches the viewer to an empty comp named \"AE MCP viewer parking (safe to delete)\" — and, if that",
+      "comp does not exist yet, first creates it at the project root as one undo step of its own. Nothing else in the project can change.",
+      "After Effects is very probably still on earlier work — a long script, a render started in After Effects, another AI",
+      "session's call, or a dialog nobody has clicked.",
       "",
       "What to do, in order:",
-      "1. Poll check_setup until After Effects answers again (it names what it is busy with).",
-      "2. Then send this same call again: it was never run, so sending it again is safe.",
-      "3. If the viewer shows an empty comp named \"AE MCP viewer parking (safe to delete)\" meanwhile, that is the park landing late;",
-      "   the next run_jsx or check_setup puts the user's comp back.",
+      "1. Poll check_setup until After Effects answers again. If the earlier work is a call this session made, check_setup",
+      "   names it under `busyWith`; a render, another session's call or a dialog it cannot name, and says only that it is busy.",
+      "2. Then send this same call again: the script was never run, so sending it again is safe.",
+      "3. If the viewer shows that parking comp meanwhile, that is the park landing late; the next run_jsx or check_setup",
+      "   puts the user's comp back. The comp itself is AE MCP's, reused by every later run, and safe to delete.",
     ].join("\n");
   }
 }

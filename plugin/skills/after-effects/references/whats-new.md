@@ -82,10 +82,12 @@ only quitting and reopening After Effects will.
   comp. Two things it cannot help: keyboard focus moves to the viewer — on
   every parked run, and on any default run while the viewer is not the panel
   in focus, parked or not, since finding the comp in view means focusing the
-  viewer — and a heavy comp left open in another viewer tab can still be
-  re-evaluated for some changes. If After Effects does not answer the park,
-  the script is not sent at all, and the error says re-sending is safe once
-  `check_setup` shows After Effects answering (issue #266).
+  viewer — and changes inside the heavy comp itself while it stays open in a
+  background viewer tab: measured, 20 Rotation changes on one of its own
+  layers took ~38 s parked against ~40 s unparked, so parking saves next to
+  nothing there. If After Effects does not answer the park, the script is not
+  sent at all, and the error says re-sending is safe once `check_setup` shows
+  After Effects answering (issues #266, #277).
   supersedes: app.project.activeItem is the comp the user has open
   supersedes: use app.project.activeItem to get the active comp
 - **`check_setup` says what a busy After Effects is busy with.** When the
@@ -94,7 +96,11 @@ only quitting and reopening After Effects will.
   state, calledAgoMs}` and the `bridgeReachable` detail names the call.
   `state` is `sent` or `timedOut` (After Effects is very probably running it)
   or `queued` (not sent yet: another session's call is what is running). Keep
-  waiting while it is there; do not re-send that call (issue #266).
+  waiting while it is there; do not re-send that call (issue #266). The one
+  exception is `kind: "viewer-unpark"` (`op: "viewer unpark"`): the call that
+  puts the user's comp back after a parked run. It changes nothing in the
+  project and there is nothing to re-send — the session retries it itself
+  (issue #277).
 
 ## 0.5.2
 

@@ -53,9 +53,12 @@ the task needs a script rather than looking for another way to run one.
   `quietViewer: true` or something did not go as planned — then a second
   block carries `quietViewer: {parked, compId, reopened, viewerComp?, caution?,
   note?}`; tell the user if the note says the comp could not be put back. A `run_batch` with `run_jsx`
-  steps is parked the same way (per chunk when it is long). A comp left open in
-  another viewer tab can still be re-evaluated for some changes (Rotation,
-  measured).
+  steps is parked the same way (per chunk when it is long). **Parking does not
+  help changes inside the heavy comp itself while it stays open in a
+  background viewer tab:** measured, 20 Rotation changes on one of its own
+  layers took ~38 s parked against ~40 s unparked. Changes to other comps are
+  what it saves; for many changes to a heavy comp's own layers, ask the user
+  to close its viewer tab first.
 - **Source size** — the script plus every library it names — is capped at 1 MB
   per call, because libraries are inlined into the call, so every byte travels
   every time.

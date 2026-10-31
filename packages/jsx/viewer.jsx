@@ -44,10 +44,42 @@ var __PARK_UNDO_NAME = "AE MCP: create viewer parking comp";
 var __PARK_SCAN_BUDGET_MS = 200;
 var __PARK_SCAN_MAX_PROPS = 20000;
 
-// The park in force: {fromId, fromName, parkId, at}. Set by _viewer_park and
-// cleared by _viewer_unpark. It lives in the bundle's closure, so it outlives a
-// server that died between the two, but not a reload of the bundle.
+// The park in force: {fromId, fromName, parkId, at, token}. Set by _viewer_park
+// and cleared by _viewer_unpark. It lives in the bundle's closure, so it
+// outlives a server that died between the two, but not a reload of the bundle.
 var __PARK = null;
+// Each park's token, answered to the server and sent back with its unpark, so
+// an unpark can tell its own park from another call's (issue #277). Started
+// from the clock, so a token from before a reload of the bundle never matches
+// a park made after it.
+var __PARK_SEQ = new Date().getTime();
+// The parks ended by a call other than their own unpark, newest last, at most
+// __PARK_TAKEN_MAX: {token, by}, where `by` is "park" (another call's park took
+// it over), "dry-run" (a dry-run park before a script that reads activeItem
+// undid it) or "recover" (check_setup, or a session's next write). With the
+// front desk serializing every session's writes, none of this can happen
+// between a call's park and its unpark; with it off (AE_MCP_FRONT_DESK=off)
+// another session's call can land there, and the unpark then says so instead
+// of guessing at a reload.
+var __PARK_TAKEN = [];
+var __PARK_TAKEN_MAX = 16;
+
+// The park in force ends here, by `by`, when not by its own unpark.
+function __parkEndBy(by) {
+  if (__PARK) {
+    __PARK_TAKEN.push({ token: __PARK.token, by: by });
+    if (__PARK_TAKEN.length > __PARK_TAKEN_MAX) __PARK_TAKEN.shift();
+  }
+  __PARK = null;
+}
+
+// How the park with this token ended, if another call ended it; else null.
+function __parkTakenBy(token) {
+  for (var i = __PARK_TAKEN.length - 1; i >= 0; i--) {
+    if (__PARK_TAKEN[i].token === token) return __PARK_TAKEN[i].by;
+  }
+  return null;
+}
 // The last park unparked, kept so a later park that still finds the parking
 // comp in the viewer (an unpark whose reopen did not take) knows the way back.
 var __PARK_LAST = null;
@@ -310,6 +342,7 @@ function __parkExpressionScan(comp) {
 OPS._viewer_park = noUndo(function (args) {
   var out = { parked: false };
   var stale = __PARK;
+  var by = (args && args.dryRun) ? "dry-run" : "park";
   var from = __parkViewerComp();
   var alreadyParked = false;
   // A tagged comp a script wrote into, with no park on record, is the user's
@@ -320,7 +353,7 @@ OPS._viewer_park = noUndo(function (args) {
     var prior = stale || __PARK_LAST;
     var back = prior ? __parkItem(prior.fromId) : null;
     if (!back) {
-      __PARK = null;
+      __parkEndBy(by);
       out.skipped = "already-parked";
       out.note = "the viewer was already showing the AE MCP parking comp and the comp it replaced is not known " +
         "(or no longer exists), so the script ran with the parking comp in view and nothing will be reopened";
@@ -331,7 +364,7 @@ OPS._viewer_park = noUndo(function (args) {
     out.recovered = { compId: back.id, compName: back.name };
   }
   if (!from) {
-    __PARK = null;
+    __parkEndBy(by);
     out.skipped = "no-comp-in-viewer";
     return out;
   }
@@ -340,7 +373,7 @@ OPS._viewer_park = noUndo(function (args) {
   if (!alreadyParked) {
     var scan = __parkExpressionScan(from);
     if (!scan.found && !scan.unsure) {
-      __PARK = null;
+      __parkEndBy(by);
       out.skipped = "no-expressions";
       return out;
     }
@@ -354,7 +387,7 @@ OPS._viewer_park = noUndo(function (args) {
     // which reads activeItem — can write into the parking comp.
     if (alreadyParked) {
       try { from.openInViewer(); } catch (e0) {}
-      __PARK = null;
+      __parkEndBy(by);
     }
     return out;
   }
@@ -367,22 +400,33 @@ OPS._viewer_park = noUndo(function (args) {
     }
     if (!alreadyParked) park.openInViewer();
   } catch (e) {
-    __PARK = null;
+    __parkEndBy(by);
     out.skipped = "failed";
     out.note = "the viewer could not be parked (" + __parkMsg(e) + "), so the script ran with comp " + from.id +
       " in view, re-evaluated after every change";
     return out;
   }
-  __PARK = { fromId: from.id, fromName: from.name, parkId: park.id, at: new Date().getTime() };
+  __parkEndBy(by);
+  __PARK_SEQ++;
+  __PARK = { fromId: from.id, fromName: from.name, parkId: park.id, at: new Date().getTime(), token: __PARK_SEQ };
   out.parked = true;
+  out.token = __PARK_SEQ;
   return out;
 });
 
 // Server-only, sent after the script under the same lease (and by check_setup
 // with recover:true). Idempotent: with no park in force it does nothing.
-// Answers {unparked, reopened?, restored, compId, compName, viewerComp?, caution?, note?}.
+// Answers {unparked, reopened?, restored, compId, compName, viewerComp?, caution?, note?},
+// or {unparked: false, takenBy?}. `token` (the park's own, from its answer)
+// makes it this park's unpark only: another call's park is left alone, and
+// one that ended another way is named (`takenBy`, see __PARK_TAKEN).
 OPS._viewer_unpark = noUndo(function (args) {
   var st = __PARK;
+  var token = (args && typeof args.token === "number") ? args.token : null;
+  if (token !== null && !(args && args.recover) && (!st || st.token !== token)) {
+    var takenBy = __parkTakenBy(token);
+    return takenBy ? { unparked: false, takenBy: takenBy } : { unparked: false };
+  }
   if (!st) {
     if (!(args && args.recover)) return { unparked: false };
     // A park whose reopen did not take: the viewer still on the parking comp.
@@ -395,11 +439,12 @@ OPS._viewer_unpark = noUndo(function (args) {
     // A park left by an interrupted call whose script built in the parking
     // comp: that comp is the user's work now, and it is what they are looking
     // at. Nothing is reopened over it; the park is forgotten and the CAUTION said.
-    __PARK = null;
+    __parkEndBy("recover");
     __PARK_LAST = null;
     return { unparked: false, caution: __parkDirt(__parkItem(st.parkId)) };
   }
-  __PARK = null;
+  if (args && args.recover) __parkEndBy("recover");
+  else __PARK = null;
   __PARK_LAST = st;
   var res = { unparked: true, restored: false, compId: st.fromId, compName: st.fromName };
   var dirt = __parkDirt(__parkItem(st.parkId));
