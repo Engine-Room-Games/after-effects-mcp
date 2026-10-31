@@ -19,7 +19,7 @@ export type InternalOp = keyof typeof schemas.InternalOpMutation;
  * `yieldToWrites` marks a background read (the live-resource poll, issue
  * #248): refused unsent while a write is held — see SessionLine.runOp.
  */
-export type SendInternal = (op: InternalOp, args: unknown, o?: { yieldToWrites?: boolean; untracked?: boolean }) => Promise<unknown>;
+export type SendInternal = (op: InternalOp, args: unknown, o?: { yieldToWrites?: boolean }) => Promise<unknown>;
 
 export class UnleasedInternalWriteError extends Error {
   constructor(op: string) {
@@ -32,22 +32,13 @@ export class UnleasedInternalWriteError extends Error {
 }
 
 export function internalSender(
-  runOp: (op: string, args: unknown, write: boolean, o?: { yieldToWrites?: boolean; untracked?: boolean }) => Promise<unknown>,
+  runOp: (op: string, args: unknown, write: boolean, o?: { yieldToWrites?: boolean }) => Promise<unknown>,
   writes: { readonly held: string | null }
 ): SendInternal {
   return async (op, args, o) => {
     const effect = (schemas.InternalOpMutation as Record<string, string | undefined>)[op];
     if (effect === undefined) throw new Error(`Internal error: ${op} is not a classified internal op; nothing was sent.`);
     if (effect === "write" && writes.held === null) throw new UnleasedInternalWriteError(op);
-    // `untracked`: kept out of the calls-in-flight record (bridge/callsInFlight.ts),
-    // so check_setup's busyWith never names it. The viewer park is the one
-    // (issue #266): a park that times out sent no script, and naming its tool
-    // there as "still running, do not re-send" would contradict the error that
-    // says re-sending is safe.
-    const opts = {
-      ...(effect === "read" && o?.yieldToWrites ? { yieldToWrites: true } : {}),
-      ...(o?.untracked ? { untracked: true } : {}),
-    };
-    return runOp(op, args, effect === "write", Object.keys(opts).length ? opts : undefined);
+    return runOp(op, args, effect === "write", effect === "read" && o?.yieldToWrites ? { yieldToWrites: true } : undefined);
   };
 }
