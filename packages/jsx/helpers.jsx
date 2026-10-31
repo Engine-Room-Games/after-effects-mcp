@@ -18,10 +18,13 @@
 // These are listed by signature in the run_jsx tool description. If you change
 // one, change that too — it is the only place a caller ever sees them.
 
-// viewerComp() — the active comp (app.project.activeItem when it is a comp),
-// or null. Kept from the viewer parking of issue #266, removed in #273, so
-// scripts written against it keep working. Never calls viewer.setActive():
-// that would take focus from whatever panel the user is in.
+// viewerComp() — app.project.activeItem when it is a comp, or null. Kept from
+// the viewer parking of issue #266, removed in #273, so scripts written against
+// it keep working. Despite the name it is the project's active item: with the
+// Project panel focused that is the Project panel's selection, which may not be
+// the comp in the viewer. The Viewer object exposes no comp, and the only way
+// to make activeItem the viewer's (viewer.setActive()) takes focus from the
+// user's panel, so it is not done. Scripts should target comps by id.
 function viewerComp() {
   var a = null;
   try { a = app.project.activeItem; } catch (e) { a = null; }

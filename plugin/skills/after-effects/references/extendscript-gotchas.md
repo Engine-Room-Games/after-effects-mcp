@@ -36,11 +36,16 @@ the task needs a script rather than looking for another way to run one.
   expressions of the comp in the viewer, once per change, on its main thread:
   with a heavy comp in view, a script making 20 changes took 74 s (AE 26.5),
   and changes to that comp's own layers stay slow while it is open in any
-  viewer tab. AE MCP leaves the viewer alone — it never switches comps, steals
-  focus or adds a comp of its own. So before a big rebuild with an
+  viewer tab. `run_jsx` does nothing to the viewer around your script — no
+  comp swapped in, none added to the project. So before a big rebuild with an
   expression-heavy comp in view, ask the user to switch the viewer to a light
   comp or close that comp's viewer tab; for a handful of changes, do not
   bother.
+- **Target comps by id (`compById(id)`), not by `app.project.activeItem` or
+  `viewerComp()`.** Both are the project's active item: with the Project panel
+  focused, that is whatever is selected there, which may not be the comp in
+  the viewer — a script built on it can write the wrong comp. Get the id from
+  `list_comps` or `get_selection` first.
 - **Source size** — the script plus every library it names — is capped at 1 MB
   per call, because libraries are inlined into the call, so every byte travels
   every time.

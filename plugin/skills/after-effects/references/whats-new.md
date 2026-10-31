@@ -67,9 +67,10 @@ only quitting and reopening After Effects will.
   each script — is removed (issue #273). It took keyboard focus from the
   user's panel, saved a comp and an undo step into their project, added two
   calls to every script, and measured about 5% faster. `quietViewer` is still
-  accepted and does nothing. `app.project.activeItem` is the active item
-  again, and `viewerComp()` is kept as a short way to get it when it is a comp
-  (null otherwise). A parking comp an earlier build left in a project is safe
+  accepted and does nothing. `app.project.activeItem` is the project's active
+  item again (with the Project panel focused, its selection, not necessarily
+  the comp in the viewer), and `viewerComp()` is kept only as a short way to
+  get it when it is a comp (null otherwise); target comps by id. A parking comp an earlier build left in a project is safe
   to delete. A heavy comp in the viewer still slows every scripted change —
   each change re-runs its expressions — so for a big rebuild ask the user to
   switch the viewer to a light comp or close that comp's viewer tab.
