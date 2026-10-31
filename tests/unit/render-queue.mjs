@@ -95,16 +95,13 @@ function sigkill(pids) {
   }
 }
 function reapOwn() {
-  const pids = pidsMentioning(tmp, processLines());
-  // The pid files too: an engine that wrote one is this run's, whatever its arguments.
-  try {
-    for (const f of fs.readdirSync(tmp)) if (/^(grandchild|self)-/.test(f)) pids.push(Number(fs.readFileSync(path.join(tmp, f), "utf8")));
-  } catch {}
-  sigkill(pids);
+  // Only by command line, never by the pid files: most of those processes
+  // have already been reaped, and a pid can be reused by anything by now.
+  sigkill(pidsMentioning(tmp, processLines()));
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
 }
-// Earlier runs of this suite whose owner is gone. A folder with no owner file
-// predates it, and counts as abandoned only once it is older than any run.
+// Earlier runs of this suite whose owner is gone. Only a folder carrying the
+// owner file this suite writes is touched; one without it is left alone.
 function reapAbandoned() {
   let dirs;
   try { dirs = fs.readdirSync(os.tmpdir()).filter((d) => d.startsWith(tmpPrefix) && d.length === tmpPrefix.length + 6); } catch { return; }
@@ -113,12 +110,9 @@ function reapAbandoned() {
   for (const d of dirs) {
     if (d === ours) continue;
     const dir = path.join(os.tmpdir(), d);
-    try {
-      const owner = Number(fs.readFileSync(path.join(dir, "owner"), "utf8"));
-      if (Number.isInteger(owner) && owner > 0 && alive(owner)) continue;
-    } catch {
-      try { if (Date.now() - fs.statSync(dir).mtimeMs < 2 * watchdogMs) continue; } catch { continue; }
-    }
+    let owner;
+    try { owner = Number(fs.readFileSync(path.join(dir, "owner"), "utf8")); } catch { continue; }
+    if (!Number.isInteger(owner) || owner <= 0 || alive(owner)) continue;
     // Only by command line: a stale pid file's pid may belong to anything by now.
     lines ??= processLines();
     sigkill(pidsMentioning(dir, lines));
