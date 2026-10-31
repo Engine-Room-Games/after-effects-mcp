@@ -188,6 +188,12 @@ function makeContext(opts) {
     __tmpPngPath: () => "/tmp/poster.png",
     __saveFrameAt: () => {},
   };
+  if (opts.guardFails) {
+    // core.jsx's guard when beginSuppressDialogs() threw inside it: null.
+    ctx.__dialogsSuppressed = () => false;
+    ctx.__dialogGuardStart = () => null;
+    ctx.__dialogGuardEnd = () => {};
+  }
   if (opts.guard) {
     // core.jsx's dialog guard, as dispatch() uses it: suppression plus an
     // app.onError collector, ended with endSuppressDialogs(false).
@@ -466,6 +472,50 @@ check("what After Effects reported while suppressed comes back as aeWarnings", (
   assert.deepEqual(r.aeWarnings, ["Font not synced (severity WARNING)"]);
   const failed = run({ controllers: 1, export: "silent", guard: ["Font not synced (severity WARNING)"] });
   assert.match(messageOf(failed.call), /After Effects also reported.*Font not synced/);
+});
+
+check("dialogs are restored when a dirty project's export throws", () => {
+  const { call } = run({ controllers: 1, export: "throws", dirty: true });
+  assert.throws(call, /AE blew up mid-export/);
+  assert.deepEqual(
+    LOG.filter((l) => l.indexOf("SuppressDialogs") >= 0),
+    ["beginSuppressDialogs", "endSuppressDialogs:false"],
+  );
+});
+
+check("an export that fails after the save says the project WAS saved, and puts the rename back", () => {
+  for (const mode of ["throws", "silent"]) {
+    const { ctx, call } = run({ controllers: 1, export: mode, dirty: true, templateName: "Untitled" });
+    const msg = messageOf(call);
+    assert.match(msg, /project WAS saved \(\/proj\/show\.aep\)/, mode);
+    assert.match(msg, /File > Revert/, mode);
+    assert.match(msg, /put back to 'Untitled'/, mode);
+    assert.equal(ctx.__comp.motionGraphicsTemplateName, "Untitled", mode + ": the rename is undone");
+  }
+});
+
+check("an export that fails with no save made does not claim one", () => {
+  const { call } = run({ controllers: 1, export: "silent", dirty: false });
+  assert.doesNotMatch(messageOf(call), /WAS saved/);
+});
+
+check("a posterTime outside the comp is refused before the save, the rename and the export", () => {
+  const { ctx, call } = run({ controllers: 1, export: "ok", dirty: true }, { posterTime: 99 });
+  const msg = messageOf(call);
+  assert.match(msg, /posterTime 99 is outside/);
+  assert.match(msg, /Nothing was exported/);
+  assert.deepEqual(LOG, []);
+  assert.equal(ctx.__comp.motionGraphicsTemplateName, "Untitled");
+});
+
+check("a guard that could not suppress dialogs is a refusal, never an unguarded retry", () => {
+  const { call } = run({ controllers: 1, export: "ok", dirty: true, guardFails: true });
+  const msg = messageOf(call);
+  assert.match(msg, /would not suppress its dialogs/);
+  assert.match(msg, /Nothing was saved or exported/);
+  assert.equal(LOG.indexOf("beginSuppressDialogs"), -1, "no second begin outside the guard");
+  assert.equal(LOG.indexOf("save"), -1);
+  assert.equal(LOG.some((l) => l.indexOf("export:") === 0), false);
 });
 
 console.log(`mogrt-preconditions: ${passed} checks passed`);

@@ -294,6 +294,17 @@ OPS.export_mogrt = noUndo(function (args) {
     );
   }
 
+  // posterTime is checked here, with the other preconditions, so a bad one
+  // costs nothing: after the save and the export it would leave the user with
+  // a saved project and a template they did not ask for.
+  var hasPoster = args.posterTime !== undefined && args.posterTime !== null;
+  if (hasPoster && (args.posterTime < 0 || args.posterTime > comp.duration)) {
+    throw new Error(
+      "posterTime " + args.posterTime + " is outside the comp's 0.." + comp.duration + "s. Nothing was " +
+      "exported and nothing in the project was changed. Pass a time inside the comp."
+    );
+  }
+
   var fonts = [];
   try { __collectFonts(comp, 0, [], fonts); } catch (eF) {}
 
@@ -323,13 +334,31 @@ OPS.export_mogrt = noUndo(function (args) {
   var projectSaved = false;
   var threw = null;
   var saveFailed = null;
+  var suppressFailed = null;
   try {
     var already = typeof __dialogsSuppressed === "function" && __dialogsSuppressed();
     if (suppress && !already) {
-      guard = (typeof __dialogGuardStart === "function") ? __dialogGuardStart() : null;
-      if (!guard) app.beginSuppressDialogs();
-      suppressed = true;
+      if (typeof __dialogGuardStart === "function") {
+        guard = __dialogGuardStart();
+        // A null guard here means the guard is switched off (__DIALOG_GUARD)
+        // or beginSuppressDialogs() threw inside it. Only the first may begin
+        // suppression by hand; the second is a refusal, never a retry.
+        if (!guard && (typeof __DIALOG_GUARD === "undefined" || __DIALOG_GUARD)) {
+          suppressFailed = "After Effects would not suppress its dialogs (beginSuppressDialogs failed), so " +
+            "the save and the export were not attempted: either could raise a modal dialog that freezes " +
+            "this connection. Nothing was saved or exported. Try again once After Effects is idle.";
+        }
+      }
+      if (!guard && !suppressFailed) {
+        try { app.beginSuppressDialogs(); } catch (eB) {
+          suppressFailed = "After Effects would not suppress its dialogs (" + eB.message + "), so the save " +
+            "and the export were not attempted: either could raise a modal dialog that freezes this " +
+            "connection. Nothing was saved or exported. Try again once After Effects is idle.";
+        }
+      }
+      if (!suppressFailed) suppressed = true;
     }
+    if (suppressFailed) throw new Error(suppressFailed);
     var wasDirty = null;
     try { wasDirty = app.project.dirty; } catch (eD) { wasDirty = null; }
     if (wasDirty !== false) {
@@ -364,16 +393,30 @@ OPS.export_mogrt = noUndo(function (args) {
       ? msg + " || After Effects also reported, through app.onError while dialogs were suppressed: " + aeWarnings.join(" | ")
       : msg;
   }
-  if (saveFailed) {
-    // The template rename above is the one change made so far; put it back.
-    if (templateName !== previousTemplateName && previousTemplateName !== null) {
-      try { comp.motionGraphicsTemplateName = previousTemplateName; } catch (eR) {}
-    }
-    throw new Error(withWarnings(saveFailed));
+  var renamed = templateName !== previousTemplateName && previousTemplateName !== null;
+  // The template rename is the one change this call makes to the project; a
+  // failure puts it back. The export invalidates held references, so the comp
+  // is fetched fresh.
+  function undoRename() {
+    if (!renamed) return false;
+    try { getCompById(compId).motionGraphicsTemplateName = previousTemplateName; return true; } catch (eR) { return false; }
   }
+  // A failure after a save that landed: the save stays, and the user has to
+  // know their Revert point moved.
+  function failAfterSave(msg) {
+    var undone = undoRename();
+    if (projectSaved) {
+      msg += " NOTE: the user's project WAS saved (" + projectPath + ") before the export, so File > Revert " +
+        "now goes back to that save — tell the user." +
+        (undone ? " The template name set for the export ('" + templateName + "') is in that saved file; it " +
+          "was put back to '" + previousTemplateName + "' in the open project, which now has unsaved changes." : "");
+    }
+    return new Error(withWarnings(msg));
+  }
+  if (saveFailed) throw failAfterSave(saveFailed);
   if (threw) {
-    if (!aeWarnings) throw threw;
-    throw new Error(withWarnings(threw && threw.message ? threw.message : String(threw)));
+    if (!aeWarnings && !projectSaved && !undoRename()) throw threw;
+    throw failAfterSave(threw && threw.message ? threw.message : String(threw));
   }
 
   // exportAsMotionGraphicsTemplate invalidates every object reference held
@@ -399,16 +442,16 @@ OPS.export_mogrt = noUndo(function (args) {
     } else {
       controllerText = String(preControllerCount) + " Essential Graphics controllers";
     }
-    throw new Error(withWarnings(__exportFailureMessage({
+    throw failAfterSave(__exportFailureMessage({
       exported: exported,
       outPath: outPath,
       projectPath: projectPath,
       suppressed: suppress,
       controllerText: controllerText
-    })));
+    }));
   }
   var bytes = written.length;
-  if (!(bytes > 0)) throw new Error("The exported template at " + outPath + " is empty (0 bytes).");
+  if (!(bytes > 0)) throw failAfterSave("The exported template at " + outPath + " is empty (0 bytes).");
 
   var result = {
     ok: true,
@@ -447,14 +490,8 @@ OPS.export_mogrt = noUndo(function (args) {
   // here and let the panel (or, on a server-images panel, the server) put it into the archive: ExtendScript can write a
   // PNG but cannot rewrite a zip, and the panel is already the layer that
   // post-processes files AE has just written.
-  if (args.posterTime !== undefined && args.posterTime !== null) {
+  if (hasPoster) {
     var t = args.posterTime;
-    if (t < 0 || t > comp.duration) {
-      throw new Error(
-        "posterTime " + t + " is outside the comp's 0.." + comp.duration + "s. The template was still " +
-        "exported to " + outPath + " with After Effects' own thumbnail."
-      );
-    }
     var posterPath = __tmpPngPath();
     __saveFrameAt(comp, t, new File(posterPath), 1);
     result.posterPngPath = posterPath;
