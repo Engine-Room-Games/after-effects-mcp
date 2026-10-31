@@ -19,7 +19,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
@@ -56,6 +56,77 @@ const watchdog = setTimeout(() => {
   process.exit(1);
 }, watchdogMs);
 watchdog.unref();
+
+// Every process this suite starts carries its temp folder in its command line
+// (the fake aerender and its engines by path, the plain sleepers by an extra
+// argument), and several of them ignore SIGTERM or run detached, so nothing
+// ends them when this process goes. They used to outlive a failed or killed
+// run by days. However this run ends, what it started ends with it; and a run
+// that was SIGKILLed, so never got to do that, is cleaned up by the next one.
+const tmpPrefix = "ae-mcp-render-";
+fs.writeFileSync(path.join(tmp, "owner"), String(process.pid));
+function processLines() {
+  try {
+    if (process.platform === "win32") {
+      const listed = execFileSync("powershell.exe", ["-NoProfile", "-Command",
+        "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }"],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
+      return listed.split(/\r?\n/);
+    }
+    return execFileSync("ps", ["-axo", "pid=,args="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 }).split("\n");
+  } catch {
+    return [];
+  }
+}
+function pidsMentioning(dir, lines) {
+  const pids = [];
+  for (const l of lines) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(l);
+    if (m && m[2].includes(dir)) pids.push(Number(m[1]));
+  }
+  return pids;
+}
+function sigkill(pids) {
+  for (const pid of pids) {
+    // Never 0, negative or this process: the first two signal this suite's
+    // own process group (#260).
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    try { process.kill(pid, "SIGKILL"); } catch {}
+  }
+}
+function reapOwn() {
+  // Only by command line, never by the pid files: most of those processes
+  // have already been reaped, and a pid can be reused by anything by now.
+  sigkill(pidsMentioning(tmp, processLines()));
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+}
+// Earlier runs of this suite whose owner is gone. Only a folder carrying the
+// owner file this suite writes is touched; one without it is left alone.
+function reapAbandoned() {
+  let dirs;
+  try { dirs = fs.readdirSync(os.tmpdir()).filter((d) => d.startsWith(tmpPrefix) && d.length === tmpPrefix.length + 6); } catch { return; }
+  const ours = path.basename(tmp);
+  let lines = null;
+  for (const d of dirs) {
+    if (d === ours) continue;
+    const dir = path.join(os.tmpdir(), d);
+    let owner;
+    try { owner = Number(fs.readFileSync(path.join(dir, "owner"), "utf8")); } catch { continue; }
+    if (!Number.isInteger(owner) || owner <= 0 || alive(owner)) continue;
+    // Only by command line: a stale pid file's pid may belong to anything by now.
+    lines ??= processLines();
+    sigkill(pidsMentioning(dir, lines));
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  }
+}
+reapAbandoned();
+process.on("exit", reapOwn);
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(sig, () => {
+    console.error(`render-queue: stopped by ${sig}; ending what it started`);
+    process.exit(1);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // aerender's output
@@ -607,7 +678,8 @@ if (mode === "hang") {
   fs.writeFileSync(process.env.FAKE_SELF, String(process.pid));
   // Stands in for the render engine aerender starts: a grandchild that keeps
   // running unless the whole group is stopped.
-  const g = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { stdio: "ignore" });
+  // The extra argument is a path in the suite's temp folder: how its exit reaper finds this one.
+  const g = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)", "--", process.env.FAKE_GRANDCHILD], { stdio: "ignore" });
   fs.writeFileSync(process.env.FAKE_GRANDCHILD, String(g.pid));
   fs.writeFileSync(out, "partial");
   console.log("PROGRESS:  0:00:00:00 (1): 0 Seconds");
@@ -930,7 +1002,8 @@ async function exitedOk(runner) {
     if (prior !== undefined) fs.writeFileSync(out, prior);
     for (const [n, c] of Object.entries(priorFiles)) fs.writeFileSync(path.join(projDir, n), c);
     const priorStat = prior !== undefined ? fs.statSync(out) : null;
-    const sleeper = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { stdio: "ignore" });
+    // `tmp` in its arguments is how the exit reaper finds it if this check fails.
+    const sleeper = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)", "--", tmp], { stdio: "ignore" });
     const jobs = new JobManager();
     const runner = runnerFor(jobs, {
       tmpRoot: runTmp,

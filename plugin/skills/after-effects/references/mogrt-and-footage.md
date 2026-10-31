@@ -29,6 +29,14 @@ export of a comp using a non-Adobe font returns in about three seconds;
 unsuppressed, the same export blocks past sixty and writes nothing until the
 dialog is clicked.
 
+**After Effects marks the project changed after every export**, even when
+nothing in it changed, so the project shows unsaved changes when the call
+returns and a second export in a row always saves again (measured on 26.5).
+That is AE's doing, not yours, and nothing fights it: the result carries
+`projectDirty: true` and a `note` saying so. Do not save the project to "clean
+up" after an export, and do not report the unsaved changes as something you
+did; mention them only if the user asks why the project looks modified.
+
 Four things to know before you call it. The first is the one that actually
 stops exports:
 

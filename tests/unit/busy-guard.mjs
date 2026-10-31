@@ -134,7 +134,11 @@ try {
     assert.ok(took < BUSY_PROBE_MS + 1000, `refused after ${took}ms — it waited as if sent`);
     assert.equal(panel.state.ops.length, sent, "nothing reached the panel");
     assert.equal(err.evidence.kind, "silent");
-    assert.match(err.message, /^`create_null_layer` was not sent: After Effects is still busy/);
+    assert.match(err.message, /^`create_null_layer` was not sent: After Effects is still busy \(still running `hold`, or the user has a menu or dialog open\)/);
+    // A /health that went unanswered is After Effects holding the panel, not
+    // a failed check: worded that way, it sent agents off to check_setup.
+    assert.doesNotMatch(err.message, /health check|failed/i);
+    assert.match(err.message, /The panel itself is fine/);
     assert.match(err.message, /An earlier `hold` call \(this session's, or another AI session's/);
     assert.match(err.message, /sending it again is\s+safe/);
     assert.match(err.message, /open\s+menu/);
@@ -159,6 +163,7 @@ try {
       assert.ok(e instanceof AeBusyError, e.message);
       assert.equal(e.evidence.kind, "running");
       assert.match(e.message, /has still not finished the script it is on \(`hold`/);
+      assert.match(e.message, /still busy \(still running `hold`, or the user has a menu or dialog open\)/);
       return true;
     });
     assert.equal(panel.state.ops.length, sent);

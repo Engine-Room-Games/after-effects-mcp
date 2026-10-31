@@ -62,6 +62,11 @@ only quitting and reopening After Effects will.
   with nothing exported. Its `projectSaved` used to be the project's path; the
   path is now `projectPath`.
   supersedes: export_mogrt projectSaved is the project path
+- **`export_mogrt` says when the export left the project with unsaved
+  changes.** After Effects marks a project changed after every export, so
+  `projectDirty: true` with a `note` is the normal result, and a second export
+  in a row saves again. It is not something the call did wrong; do not save
+  to clear it.
 
 - **A call made while After Effects is still on one that timed out comes back
   at once, unsent, with "was not sent: After Effects is still busy".** It names
