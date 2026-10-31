@@ -74,6 +74,8 @@ export interface UnparkAnswer {
   why?: string;
   /** "dropped" by a dry-run park, not a park. */
   dryRun?: boolean;
+  /** "dropped" with the user's comp back in view, which that call then parked itself (and tries to reopen). */
+  reparked?: boolean;
 }
 
 export type TakenBy = "park" | "dropped" | "dry-run" | "recover" | "unpark";
@@ -257,6 +259,13 @@ function takenOverNote(u: UnparkAnswer, what: string): string {
   }
   if (u.takenBy === "dropped") {
     const by = u.dryRun ? "a dry-run park (before another call's script that reads activeItem)" : "another call's park";
+    if (u.restored === true && u.reparked === true) {
+      return `${by} found ${what} already back in the viewer ${between}, forgot this call's park, and parked that comp ` +
+        "itself: it tries to reopen it when its own script is done, so nothing needs doing here";
+    }
+    if (u.restored === true) {
+      return `${by} found ${what} already back in the viewer ${between} and forgot this call's park; nothing needed reopening`;
+    }
     return `${by} forgot this call's park ${between}, without reopening ${what}${why}; the viewer shows ` +
       "whatever it showed then — if that is AE MCP's parking comp, open the comp from the Project panel";
   }
@@ -268,7 +277,7 @@ function takenOverNote(u: UnparkAnswer, what: string): string {
   }
   if (u.reopened === true) {
     return `${who} ended this call's park ${between} and reopened ${what} in the viewer, so this call's script may have ` +
-      "run with the comp in view, re-evaluated after every change; the viewer already shows it";
+      "run with the comp in view, re-evaluated after every change; it was in the viewer from then on, unless a later call moved it";
   }
   return `${who} ended this call's park ${between} without reopening ${what}${why}; ` +
     "if the viewer shows AE MCP's parking comp, open the comp from the Project panel";
@@ -353,8 +362,13 @@ export async function withParkedViewer<T>(
       } else if (u?.takenBy) {
         // Not lost: another session's call ended this park, and said how (#277).
         r.takenBy = u.takenBy;
-        if (u.restored === true) r.restored = true;
-        else if (u.reopened !== true && u.takenBy !== "park") r.restored = false;
+        // Re-parked by the other call: in view at that moment, parked again since — neither claimed.
+        // Re-parked by the other call (`reparked`): in view at that moment and
+        // parked again since, so `restored` is claimed neither way.
+        if (u.reparked !== true) {
+          if (u.restored === true) r.restored = true;
+          else if (u.reopened !== true && u.takenBy !== "park") r.restored = false;
+        }
         r.note = joinNotes(r.note, takenOverNote(u, compLabel(r.compId, r.compName)));
       } else {
         r.restored = false;

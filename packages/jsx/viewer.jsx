@@ -365,6 +365,20 @@ function __parkMovedWhy(now) {
   return "the viewer was showing comp " + now.id + " (\"" + now.name + "\") by then, not the parking comp";
 }
 
+// A park in force forgotten because the viewer had moved on to `now`. When
+// `now` is the very comp that park replaced, the user's comp is back in view:
+// recorded as `restored`, and `reparked` when this call then parks it again
+// (it reopens it itself) — never "without reopening" (#277 review).
+function __parkDropMoved(now, reparked) {
+  var back = __PARK && __PARK.fromId === now.id;
+  var rec = __parkEndBy("dropped", __parkMovedWhy(now));
+  if (rec && back) {
+    rec.restored = true;
+    if (reparked) rec.reparked = true;
+  }
+  return rec;
+}
+
 OPS._viewer_park = noUndo(function (args) {
   __parkDryRun = !!(args && args.dryRun);
   var out = { parked: false };
@@ -399,7 +413,7 @@ OPS._viewer_park = noUndo(function (args) {
   if (!alreadyParked) {
     var scan = __parkExpressionScan(from);
     if (!scan.found && !scan.unsure) {
-      __parkEndBy("dropped", __parkMovedWhy(from));
+      __parkDropMoved(from, false);
       out.skipped = "no-expressions";
       return out;
     }
@@ -439,7 +453,7 @@ OPS._viewer_park = noUndo(function (args) {
   // Taken over (the viewer still on the parking comp: this park reopens that
   // comp later), or forgotten (the viewer had moved on: nothing reopened).
   if (alreadyParked) __parkEndBy("park");
-  else __parkEndBy("dropped", __parkMovedWhy(from));
+  else __parkDropMoved(from, true);
   __PARK_SEQ++;
   __PARK = { fromId: from.id, fromName: from.name, parkId: park.id, at: new Date().getTime(), token: __PARK_SEQ };
   out.parked = true;
@@ -479,6 +493,7 @@ OPS._viewer_unpark = noUndo(function (args) {
     if (taken.why) t.why = taken.why;
     if (taken.dryRun) t.dryRun = true;
     if (taken.restored) t.restored = true;
+    if (taken.reparked) t.reparked = true;
     return t;
   }
   if (!st) {
