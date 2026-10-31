@@ -40,12 +40,16 @@ export interface BusyWith {
 }
 
 interface Open { op: string; at: number; sentAt: number | null; }
-interface TimedOut { op: string; at: number; timedOutAt: number; limitMs: number; }
+/** `sentAt` is when it left for the panel, or when it was made if that was never reported. */
+interface TimedOut { op: string; at: number; sentAt: number; timedOutAt: number; limitMs: number; }
+
+/** Timed-out calls kept on record at most; the oldest is the one that matters, so it is the one kept. */
+const MAX_TIMED_OUT = 16;
 
 export class CallsInFlight {
   private seq = 0;
   private open = new Map<number, Open>();
-  private timedOut: TimedOut | null = null;
+  private timedOut: TimedOut[] = [];
 
   constructor(private now: () => number = () => Date.now()) {}
 
@@ -74,10 +78,13 @@ export class CallsInFlight {
       return v;
     } catch (e) {
       if (e instanceof BridgeTimeoutError) {
-        // The newest timeout is the one worth naming: it is the one the agent
-        // just read, and the older one cannot have outlived it on a panel that
-        // runs one call at a time.
-        this.timedOut = { op: rec.op, at: rec.at, timedOutAt: this.now(), limitMs: e.timeoutMs };
+        // Every timeout is kept until the panel answers, not only the newest:
+        // the panel runs one call at a time, so a call that timed out while
+        // waiting behind an earlier timed-out one never started, and naming it
+        // would name the wrong work (issue #272).
+        if (this.timedOut.length < MAX_TIMED_OUT) {
+          this.timedOut.push({ op: rec.op, at: rec.at, sentAt: rec.sentAt ?? rec.at, timedOutAt: this.now(), limitMs: e.timeoutMs });
+        }
       }
       // An After Effects error is an answer: the panel replied, so it is free.
       // Any other failure proves nothing either way.
@@ -90,13 +97,15 @@ export class CallsInFlight {
 
   /** The panel answered something: After Effects is free, so nothing sent earlier is still running. */
   answered(): void {
-    this.timedOut = null;
+    this.timedOut = [];
   }
 
   /**
-   * The longest-open call that was sent; else the last one that timed out with
-   * no answer since; else the longest-open call still waiting its turn; null
-   * when there is none of the three.
+   * The call After Effects is on: of every call that reached the panel and has
+   * no answer — still open, or timed out with nothing answered since — the one
+   * sent first, because the panel runs them one at a time and in order (issue
+   * #272: a call sent later is waiting behind it, not running). Else the
+   * longest-open call still waiting its turn; null when there is none.
    */
   busyWith(): BusyWith | null {
     const t = this.now();
@@ -106,11 +115,12 @@ export class CallsInFlight {
       if (o.sentAt !== null) { if (!sent || o.sentAt < sent.sentAt!) sent = o; }
       else if (!queued || o.at < queued.at) queued = o;
     }
-    if (sent) return { op: sent.op, state: "sent", calledAgoMs: t - sent.at, sentAgoMs: t - sent.sentAt! };
-    if (this.timedOut) {
-      const x = this.timedOut;
-      return { op: x.op, state: "timedOut", calledAgoMs: t - x.at, timedOutAgoMs: t - x.timedOutAt, limitMs: x.limitMs };
+    let late: TimedOut | null = null;
+    for (const x of this.timedOut) if (!late || x.sentAt < late.sentAt) late = x;
+    if (late && (!sent || late.sentAt <= sent.sentAt!)) {
+      return { op: late.op, state: "timedOut", calledAgoMs: t - late.at, timedOutAgoMs: t - late.timedOutAt, limitMs: late.limitMs };
     }
+    if (sent) return { op: sent.op, state: "sent", calledAgoMs: t - sent.at, sentAgoMs: t - sent.sentAt! };
     if (queued) return { op: queued.op, state: "queued", calledAgoMs: t - queued.at };
     return null;
   }

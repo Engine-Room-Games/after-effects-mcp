@@ -161,14 +161,7 @@ export type CrossFieldKind =
    * `keyframe: true` with no `time` has no keyframe to write (issue #151);
    * `keyframe: false` or absent asks for nothing, so needs nothing.
    */
-  | "whenTrue"
-  /**
-   * When the first field is `true`, none of the others may be `false`. Absent
-   * is fine either way. `quietViewer: true` with `undoGroup: false` asks for a
-   * parking comp whose creation and removal would become two undo steps of the
-   * user's own (issue #266); either alone is a coherent request.
-   */
-  | "trueExcludesFalse";
+  | "whenTrue";
 
 export interface CrossFieldRule {
   kind: CrossFieldKind;
@@ -201,15 +194,6 @@ const joinWith = (parts: readonly string[], conjunction: string) => {
  * those apart re-sends the same mistake.
  */
 export function crossFieldMessage(rule: CrossFieldRule, present: readonly string[]): string {
-  if (rule.kind === "trueExcludesFalse") {
-    const [trigger, ...others] = rule.fields;
-    const offs = joinWith(others.map((f) => "`" + f + ": false`"), "or");
-    return (
-      `\`${trigger}: true\` cannot be combined with ${offs}.` +
-      ` Drop \`${trigger}\`, or drop ${offs}.` +
-      (rule.then ? " " + rule.then : "")
-    );
-  }
   if (rule.kind === "whenTrue") {
     const [trigger, ...needed] = rule.fields;
     const missing = needed.filter((f) => !present.includes(f));
@@ -246,11 +230,6 @@ export function crossFieldPresent(rule: CrossFieldRule, value: unknown): string[
 }
 
 export function crossFieldSatisfied(rule: CrossFieldRule, value: unknown): boolean {
-  if (rule.kind === "trueExcludesFalse") {
-    const obj = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
-    if (obj[rule.fields[0]] !== true) return true;
-    return rule.fields.slice(1).every((f) => obj[f] !== false);
-  }
   if (rule.kind === "whenTrue") {
     const obj = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
     if (obj[rule.fields[0]] !== true) return true;
@@ -280,16 +259,6 @@ export function crossFieldJsonSchema(rule: CrossFieldRule): Record<string, unkno
   const each = rule.fields.map((f) => ({ required: [f] }));
   if (rule.kind === "exactlyOne") return { oneOf: each };
   if (rule.kind === "atLeastOne") return { anyOf: each };
-  if (rule.kind === "trueExcludesFalse") {
-    // "Not (the trigger is `true` and some other field is `false`)" — one
-    // negated pair per other field.
-    const [trigger, ...others] = rule.fields;
-    const pairs = others.map((f) => ({
-      required: [trigger, f],
-      properties: { [trigger]: { const: true }, [f]: { const: false } },
-    }));
-    return { not: pairs.length === 1 ? pairs[0] : { anyOf: pairs } };
-  }
   if (rule.kind === "whenTrue") {
     // "Either the trigger is not `true`, or the rest are all there." Written
     // as `anyOf` over a negation rather than `if`/`then`, for the same
@@ -1310,7 +1279,7 @@ export const FindLayers = z.object({
 });
 
 // ---------- raw ----------
-export const RunJsx = crossField(crossField(
+export const RunJsx = crossField(
   z.object({
     code: z.string().optional()
       .describe("The ExtendScript to run. Exactly one of `code` or `scriptPath`."),
@@ -1321,7 +1290,7 @@ export const RunJsx = crossField(crossField(
     undoGroup: z.boolean().optional().meta({ default: true })
       .describe("Wrap the script in one undo step. false only for what AE refuses inside one (copyToComp on a parented or expression-linked layer); changes then land as AE's own undo steps."),
     quietViewer: z.boolean().optional().meta({ default: true })
-      .describe("Park the active viewer on an empty comp while the script runs (default). false leaves the viewer alone."),
+      .describe("Turn After Effects' viewer rendering off while the script runs, and back to what it was after (default). true also reports it on the answer; false leaves rendering on."),
     diff: diffParam,
     diffCompId: diffCompIdParam,
   }),
@@ -1334,16 +1303,6 @@ export const RunJsx = crossField(crossField(
     kind: "exactlyOne",
     fields: ["code", "scriptPath"],
     then: "Prefer `scriptPath` for anything long — the server reads the file, so the script never enters the conversation.",
-  }
-),
-  // Parking the viewer creates and removes a comp; with no undo group of the
-  // script's, those are two undo steps of the user's own, and one Cmd-Z
-  // resurrects the parking comp (issue #266). Unset, undoGroup:false turns the
-  // quiet viewer off by itself; only asking for both is refused.
-  {
-    kind: "trueExcludesFalse",
-    fields: ["quietViewer", "undoGroup"],
-    then: "With undoGroup:false the viewer is left alone anyway.",
   }
 );
 

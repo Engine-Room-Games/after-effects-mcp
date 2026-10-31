@@ -61,17 +61,19 @@ only quitting and reopening After Effects will.
   supersedes: run setup_panel, then restart After Effects
   supersedes: run setup_panel, then ask them to quit and reopen After Effects
 
-- **Breaking: during `run_jsx`, `app.project.activeItem` is a parking comp —
-  use `viewerComp()` for the user's comp.** After Effects re-renders the comp
-  in the viewer after every change to it or its precomps; with a heavy comp in
-  view a rebuild script slowed from seconds to past the 300 s limit. So
-  `run_jsx` (and each `run_jsx` step of a `run_batch`) now parks the active
-  viewer on a tiny empty comp for the script and reopens the user's comp
-  after. Pass `quietViewer: false` to keep the old behaviour; `undoGroup:
-  false` keeps it too, and `quietViewer: true` with `undoGroup: false` is
-  refused (issue #266).
-  supersedes: app.project.activeItem is the comp the user has open
-  supersedes: use app.project.activeItem to get the active comp
+- **`run_jsx` turns After Effects' viewer rendering off while the script
+  runs, and back to what it was afterwards.** After Effects re-renders the
+  comp in the viewer after every change to it or its precomps; with a heavy
+  comp in view a rebuild script slowed from seconds to past the 300 s limit.
+  Each `run_jsx` (and each `run_jsx` step of a `run_batch`) now switches
+  rendering off for its own run, puts it back on every exit, a throw included,
+  and leaves it off if the user already had it off. It is an application
+  setting, not part of the project: no comp is added and
+  `app.project.activeItem` is still the user's comp. The answer says nothing about it unless rendering could not be
+  put back (a CAUTION to pass on to the user) or you passed `quietViewer:
+  true`; `quietViewer: false` leaves rendering on. A frame the script renders
+  itself (`OPS.screenshot_frame`) turns rendering back on for the rest of that
+  script (issues #266, #274).
 - **`check_setup` says what a busy After Effects is busy with.** When the
   bridge accepts and does not answer, and this server has a call open — or one
   that timed out with no answer since — the report carries `busyWith: {op,

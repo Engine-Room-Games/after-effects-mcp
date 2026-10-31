@@ -4,20 +4,21 @@
 // check_setup could say only "did not answer within 2s".
 //
 // Locked in here:
-//   1. run_jsx parks the active viewer on an empty comp by default, reopens the
-//      comp that was there and removes the parking comp — on success and on a
-//      throw, through both the bundle's own run_jsx (run_batch steps) and the
-//      server-built `_run_jsx`. quietViewer:false and undoGroup:false leave the
-//      viewer alone; quietViewer:true with undoGroup:false is refused. The comp
-//      is read from the viewer, never from a Project-panel selection, and
-//      "restored" is claimed only when the viewer shows it again. viewerComp()
-//      answers the user's comp while parked.
+//   1. run_jsx switches viewer rendering off with app.disableRendering by
+//      default (issue #274, replacing #267's empty "parking" comp) and puts the
+//      PREVIOUS value back — on success and on a throw, through both the
+//      bundle's own run_jsx (run_batch steps) and the server-built `_run_jsx`.
+//      A user who had it off keeps it off; a nested run_jsx owns nothing; a
+//      value that will not go back is reported, never claimed restored. The
+//      project is not touched: activeItem stays the user's comp. A frame
+//      rendered inside the script turns rendering back on (the "resume" rule).
 //   2. The server remembers which of its calls is open — sent or still queued —
-//      and which timed out with no answer since, until the panel next answers.
+//      and which timed out with no answer since, until the panel next answers,
+//      and names the oldest one sent (#272).
 //   3. check_setup names that call (`busyWith`) when the bridge is busy.
 //
-// The viewer re-render itself needs a live After Effects; see recipe 77 in
-// docs/verification-recipes.md.
+// What disableRendering saves, and what it does to a frame, needs a live
+// After Effects; see recipe 77 in docs/verification-recipes.md.
 //
 //   node tests/unit/quiet-viewer.mjs
 
@@ -31,13 +32,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const jsx = (f) => fs.readFileSync(path.join(root, "packages", "jsx", f), "utf8");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
-const shared = (...p) => pathToFileURL(path.join(root, "packages", "shared", "dist", ...p)).href;
 
 const { AeError, BridgeTimeoutError } = await import(dist("util", "errors.js"));
 const asm = await import(dist("tools", "runJsxAssembly.js"));
 const { CallsInFlight } = await import(dist("bridge", "callsInFlight.js"));
 const { checkSetup, buildNextSteps, withBusyStep } = await import(dist("setup", "check.js"));
-const { StrictOpSchemas } = await import(shared("schemas.js"));
 
 let passed = 0;
 async function check(name, fn) {
@@ -46,64 +45,42 @@ async function check(name, fn) {
 }
 
 /**
- * An ExtendScript context with a project, one composition viewer and a heavy
- * comp in it. `activeItem` follows focus as in AE: the viewer's comp while the
- * viewer has focus, the Project panel's selection while that panel does.
+ * An ExtendScript context with a heavy comp in the viewer and AE's
+ * app.disableRendering. `initial` is the user's setting, `missing` models an
+ * After Effects without the property; `refuse` makes assigning that value
+ * throw, `ignore` makes assigning it silently do nothing.
  */
-function es({ viewerComp = true, projectFocus = false } = {}) {
-  const state = { viewer: null, selection: null, focus: "viewer", items: [], nextId: 100, opened: [], undo: [] };
-  class CompItem {
-    constructor(id, name) { this._id = id; this._name = name; this.removed = false; }
-    get id() { if (this.removed) throw new Error("Object is invalid"); return this._id; }
-    get name() { if (this.removed) throw new Error("Object is invalid"); return this._name; }
-    openInViewer() {
-      if (this.removed) throw new Error("Object is invalid");
-      state.viewer = this;
-      state.focus = "viewer";
-      state.opened.push(this._name);
-      return {};
-    }
-    remove() {
-      if (this.removed) throw new Error("Object is invalid");
-      this.removed = true;
-      state.items = state.items.filter((c) => c !== this);
-      if (state.viewer === this) state.viewer = null;
-    }
-  }
-  const heavy = new CompItem(7, "TR — Opener");
-  const other = new CompItem(8, "Selected in Project panel");
-  state.items.push(heavy, other);
-  if (viewerComp) state.viewer = heavy;
-  if (projectFocus) { state.focus = "project"; state.selection = other; }
-  const ctx = {
-    CompItem,
-    ViewerType: { VIEWER_COMPOSITION: 1 },
-    app: {
-      beginUndoGroup(n) { state.undo.push(`begin ${n}`); },
-      endUndoGroup() { state.undo.push("end"); },
-      get activeViewer() {
-        if (!state.viewer) return null;
-        return { type: 1, setActive() { state.focus = "viewer"; return true; } };
-      },
-      project: {
-        get activeItem() { return state.focus === "viewer" ? state.viewer : state.selection; },
-        items: {
-          addComp(name) {
-            const c = new CompItem(++state.nextId, name);
-            state.items.push(c);
-            return c;
-          },
-        },
-      },
-    },
+function es({ initial = false, refuse = null, ignore = null, missing = false } = {}) {
+  const state = { rendering: initial, writes: [], frames: [], undo: [] };
+  const heavy = { id: 7, name: "TR — Opener" };
+  const app = {
+    beginUndoGroup(n) { state.undo.push(`begin ${n}`); },
+    endUndoGroup() { state.undo.push("end"); },
+    project: { activeItem: heavy, items: { length: 1 } },
   };
-  ctx.heavy = heavy;
+  if (!missing) {
+    Object.defineProperty(app, "disableRendering", {
+      get() { return state.rendering; },
+      set(v) {
+        state.writes.push(v);
+        if (refuse !== null && v === refuse) throw new Error("After Effects error: cannot set disableRendering");
+        if (ignore !== null && v === ignore) return;
+        state.rendering = v;
+      },
+    });
+  }
+  const ctx = { app, heavy, state, File: function (p) { this.path = p; } };
+  // A comp whose frame records whether rendering was off at the moment it was saved.
+  ctx.frameComp = {
+    id: 9, width: 64, height: 64, resolutionFactor: [1, 1],
+    saveFrameToPng() { state.frames.push(state.rendering); },
+  };
   vm.createContext(ctx);
-  for (const f of ["core.jsx", "snapshot.jsx", "batch.jsx", "raw.jsx", "helpers.jsx"]) {
+  for (const f of ["core.jsx", "snapshot.jsx", "batch.jsx", "raw.jsx", "helpers.jsx", "vision.jsx"]) {
     vm.runInContext(jsx(f), ctx, { filename: f });
   }
   const dispatch = (op, args) => JSON.parse(JSON.stringify(vm.runInContext("dispatch", ctx)(JSON.stringify({ op, args }))));
-  return { state, heavy, other, dispatch };
+  return { state, heavy, dispatch, ctx };
 }
 
 /** The bundle's own run_jsx (run_batch steps, direct posts). */
@@ -127,132 +104,180 @@ async function viaServer(e, args) {
   }
 }
 
-const SEEN = "return app.project.activeItem ? app.project.activeItem.name : null;";
-const PARK = /quiet viewer/i;
+const SEEN = "return [app.disableRendering, app.project.activeItem.name];";
 
 for (const [label, run] of [["bundle run_jsx", viaBundle], ["server-built _run_jsx", viaServer]]) {
-  await check(`${label}: parked by default, restored after, and the answer keeps its shape`, async () => {
+  await check(`${label}: rendering is off by default, back on after, and the answer keeps its shape`, async () => {
     const e = es();
     const { result } = await run(e, { code: SEEN });
-    assert.match(String(result), PARK, "the parking comp was in the viewer while the script ran");
-    assert.equal(e.state.viewer, e.heavy, "the user's comp is back in the viewer");
-    assert.deepEqual(e.state.items.map((c) => c.name), ["TR — Opener", "Selected in Project panel"], "the parking comp is gone");
-  });
-
-  await check(`${label}: viewerComp() is the user's comp while parked`, async () => {
-    const e = es();
-    const { result } = await run(e, { code: "return [viewerComp().id, app.project.activeItem.id === viewerComp().id];" });
-    assert.deepEqual(result, [7, false]);
+    assert.deepEqual(result, [true, "TR — Opener"], "off while the script ran; activeItem is still the user's comp");
+    assert.equal(e.state.rendering, false, "back on");
+    assert.deepEqual(e.state.writes, [true, false]);
   });
 
   await check(`${label}: quietViewer:true reports what it did`, async () => {
     const e = es();
     const { result } = await run(e, { code: "return 1;", quietViewer: true });
     assert.equal(result.returned, 1);
-    assert.deepEqual(result.quietViewer, { parked: true, restored: true, compId: 7 });
+    assert.deepEqual(result.quietViewer, { renderingOff: true, alreadyOff: false, restored: true });
   });
 
-  await check(`${label}: quietViewer:false leaves the viewer alone`, async () => {
+  await check(`${label}: quietViewer:false leaves rendering alone`, async () => {
     const e = es();
     const { result } = await run(e, { code: SEEN, quietViewer: false });
-    assert.equal(result, "TR — Opener");
-    assert.deepEqual(e.state.opened, [], "nothing was opened");
+    assert.deepEqual(result, [false, "TR — Opener"]);
+    assert.deepEqual(e.state.writes, [], "nothing was assigned");
   });
 
-  await check(`${label}: undoGroup:false leaves the viewer alone by itself`, async () => {
+  await check(`${label}: undoGroup:false no longer turns it off — nothing here is an undo step`, async () => {
     const e = es();
     const { result } = await run(e, { code: SEEN, undoGroup: false });
-    assert.equal(result, "TR — Opener");
-    assert.deepEqual(e.state.opened, []);
+    assert.deepEqual(result, [true, "TR — Opener"]);
+    assert.equal(e.state.rendering, false);
   });
 
-  await check(`${label}: quietViewer:true with undoGroup:false is refused before anything runs`, async () => {
+  await check(`${label}: a script that throws still gets rendering back`, async () => {
     const e = es();
-    const { err } = await run(e, { code: "heavy.remove(); return 1;", quietViewer: true, undoGroup: false });
-    assert.match(err, /cannot be combined with undoGroup: false/);
-    assert.equal(e.heavy.removed, false, "the script did not run");
-    assert.deepEqual(e.state.opened, []);
+    const { err } = await run(e, { code: "if (!app.disableRendering) return 'not off';\nthrow new Error('boom');" });
+    assert.match(err, /boom/);
+    assert.doesNotMatch(err, /quietViewer/, "a clean restore adds nothing to the error");
+    assert.equal(e.state.rendering, false, "back on after the throw");
   });
 
-  await check(`${label}: a script that throws still gets the viewer back`, async () => {
+  await check(`${label}: a user who had rendering off keeps it off`, async () => {
+    const e = es({ initial: true });
+    const { result } = await run(e, { code: "return app.disableRendering;", quietViewer: true });
+    assert.equal(result.returned, true);
+    assert.deepEqual(result.quietViewer, { renderingOff: true, alreadyOff: true, restored: true });
+    assert.equal(e.state.rendering, true, "left as the user had it");
+    assert.deepEqual(e.state.writes, [], "never written");
+    const thrown = await run(e, { code: "throw new Error('boom');" });
+    assert.match(thrown.err, /boom/);
+    assert.equal(e.state.rendering, true, "still off after a throw");
+  });
+
+  await check(`${label}: a script that changes it itself gets the previous value put back`, async () => {
     const e = es();
+    const { result } = await run(e, { code: "app.disableRendering = false; return 1;" });
+    assert.equal(result, 1);
+    assert.equal(e.state.rendering, false);
+    const e2 = es({ initial: true });
+    await run(e2, { code: "app.disableRendering = false; return 1;" });
+    assert.equal(e2.state.rendering, true, "the user's own `off` comes back too");
+  });
+
+  await check(`${label}: nested run_jsx owns nothing; the outer run restores once`, async () => {
+    const e = es();
+    const { result } = await run(e, {
+      code: "var inner = OPS.run_jsx({code: 'return app.disableRendering;', quietViewer: true});\n" +
+        "return [inner.returned, inner.quietViewer.alreadyOff, app.disableRendering];",
+    });
+    assert.deepEqual(result, [true, true, true], "still off after the inner run returned");
+    assert.equal(e.state.rendering, false);
+    assert.deepEqual(e.state.writes, [true, false], "one off, one on — the inner run wrote nothing");
+  });
+
+  await check(`${label}: a nested run that throws does not turn rendering back on under the outer one`, async () => {
+    const e = es();
+    const { result } = await run(e, {
+      code: "try { OPS.run_jsx({code: 'throw new Error(\"inner\");'}); } catch (x) {}\nreturn app.disableRendering;",
+    });
+    assert.equal(result, true);
+    assert.equal(e.state.rendering, false);
+  });
+
+  await check(`${label}: rendering that will not go back on is reported, never claimed restored`, async () => {
+    const e = es({ refuse: false });
+    const { result } = await run(e, { code: "return 1;" });
+    assert.equal(result.returned, 1, "a CAUTION wraps the answer even by default");
+    assert.equal(result.quietViewer.restored, false);
+    assert.match(result.quietViewer.note, /^CAUTION: viewer rendering could not be turned back on/);
+    assert.match(result.quietViewer.note, /Tell the user/);
+  });
+
+  await check(`${label}: an assignment AE silently ignores is caught by the read-back`, async () => {
+    const e = es({ ignore: false });
+    const { result } = await run(e, { code: "return 1;" });
+    assert.equal(result.quietViewer.restored, false);
+    assert.match(result.quietViewer.note, /reads true after the assignment/);
+  });
+
+  await check(`${label}: on a throw, a failed restore is on the error`, async () => {
+    const e = es({ refuse: false });
     const { err } = await run(e, { code: "throw new Error('boom');" });
     assert.match(err, /boom/);
-    assert.equal(e.state.viewer, e.heavy);
-    assert.equal(e.state.items.length, 2, "no parking comp left behind");
+    assert.match(err, /quietViewer: CAUTION: viewer rendering could not be turned back on/);
   });
 
-  await check(`${label}: a comp the script removed is reported, never claimed restored`, async () => {
-    const e = es();
-    const { result } = await run(e, { code: "heavy.remove(); return 1;" });
-    assert.equal(result.returned, 1, "a note wraps the answer even by default");
-    assert.equal(result.quietViewer.parked, true);
-    assert.equal(result.quietViewer.restored, false);
-    assert.match(result.quietViewer.note, /no longer exists/);
-    assert.equal(e.state.items.length, 1, "the parking comp is removed anyway");
+  await check(`${label}: rendering that will not go off runs the script anyway and says so`, async () => {
+    const e = es({ refuse: true });
+    const { result } = await run(e, { code: "return app.disableRendering;" });
+    assert.equal(result.returned, false);
+    assert.equal(result.quietViewer.renderingOff, false);
+    assert.equal(result.quietViewer.restored, true);
+    assert.match(result.quietViewer.note, /could not be turned off/);
   });
 
-  await check(`${label}: a parking comp the script removed itself is not the user's to delete`, async () => {
-    const e = es();
-    const { result } = await run(e, { code: "app.project.activeItem.remove(); return 1;" });
-    assert.equal(result, 1, "nothing to report: the viewer is back and nothing is left over");
-    assert.equal(e.state.viewer, e.heavy);
-  });
-
-  await check(`${label}: a Project-panel selection is not what gets parked or reopened`, async () => {
-    const e = es({ projectFocus: true });
-    const { result } = await run(e, { code: "return viewerComp().id;", quietViewer: true });
-    assert.equal(result.returned, 7, "the viewer's comp, not the selected one");
-    assert.equal(result.quietViewer.compId, 7);
-    assert.equal(e.state.viewer, e.heavy);
-    assert.ok(!e.state.opened.includes("Selected in Project panel"), "the selection was never opened");
-  });
-
-  await check(`${label}: nothing in the viewer, nothing parked`, async () => {
-    const e = es({ viewerComp: false });
+  await check(`${label}: an After Effects without the property is left alone`, async () => {
+    const e = es({ missing: true });
     const { result } = await run(e, { code: "return 2;" });
-    assert.equal(result, 2);
-    assert.equal(e.state.items.length, 2);
-    const asked = await run(es({ viewerComp: false }), { code: "return 2;", quietViewer: true });
-    assert.equal(asked.result.quietViewer.parked, false);
-    assert.match(asked.result.quietViewer.note, /nothing to park/);
+    assert.equal(result, 2, "nothing to say by default");
+    const asked = await run(es({ missing: true }), { code: "return 2;", quietViewer: true });
+    assert.equal(asked.result.quietViewer.renderingOff, false);
+    assert.match(asked.result.quietViewer.note, /not available/);
   });
 
-  await check(`${label}: a reopen the viewer does not show is not claimed restored`, async () => {
+  await check(`${label}: a frame rendered inside the script turns rendering back on for the rest of it`, async () => {
     const e = es();
-    // The script leaves the parking comp's viewer in a state where reopening
-    // does not land: openInViewer on the user's comp becomes a no-op.
-    const { result } = await run(e, { code: "heavy.openInViewer = function () { return {}; }; return 1;" });
-    assert.equal(result.quietViewer.restored, false);
-    assert.match(result.quietViewer.note, /does not show it/);
+    const { result } = await run(e, {
+      code: "__saveFrameAt(frameComp, 0, {}, 1, 'screenshot_frame');\nreturn app.disableRendering;",
+      quietViewer: true,
+    });
+    assert.deepEqual(e.state.frames, [false], "the frame was saved with rendering on");
+    assert.equal(result.returned, false, "and it stayed on (\"resume\")");
+    assert.deepEqual(result.quietViewer.resumedFor, ["screenshot_frame"]);
+    assert.equal(result.quietViewer.restored, true);
+    assert.equal(e.state.rendering, false);
   });
 
-  await check(`${label}: withoutUndoGroup() inside a parked run carries a CAUTION`, async () => {
-    const e = es();
-    const { result } = await run(e, { code: "withoutUndoGroup(function () {}); return 1;" });
-    assert.equal(result.returned, 1);
-    assert.match(result.quietViewer.note, /CAUTION: the script split its undo step/);
-    assert.equal(e.state.viewer, e.heavy);
+  await check(`${label}: a frame with the user's own rendering off is not this call's to change`, async () => {
+    const e = es({ initial: true });
+    await run(e, { code: "__saveFrameAt(frameComp, 0, {}, 1, 'screenshot_frame'); return 1;" });
+    assert.deepEqual(e.state.frames, [true]);
+    assert.deepEqual(e.state.writes, []);
   });
 }
 
-await check("a run_batch run_jsx step follows the same default", () => {
+await check("the frame rule is one switch: \"around\" turns rendering off again after the save", async () => {
   const e = es();
-  const out = e.dispatch("run_batch", { ops: [{ op: "run_jsx", args: { code: SEEN } }, { op: "run_jsx", args: { code: SEEN, quietViewer: false } }] });
+  const out = e.dispatch("run_jsx", {
+    code: "__RJ_FRAMES_WHILE_QUIET = 'around';\n__saveFrameAt(frameComp, 0, {}, 1, 'screenshot_layer');\nreturn app.disableRendering;",
+  });
   assert.ok(out.ok, out.error);
-  assert.match(String(out.result.results[0]), PARK);
-  assert.equal(out.result.results[1], "TR — Opener");
-  assert.equal(e.state.viewer, e.heavy);
-  assert.equal(e.state.items.length, 2);
+  assert.equal(out.result, true);
+  assert.deepEqual(e.state.frames, [false]);
+  assert.equal(e.state.rendering, false);
+  assert.match(jsx("raw.jsx"), /var __RJ_FRAMES_WHILE_QUIET = "resume";/, "the shipped default is \"resume\"");
 });
 
-await check("the schema refuses quietViewer:true with undoGroup:false, and only that", () => {
-  const S = StrictOpSchemas.run_jsx;
-  assert.equal(S.safeParse({ code: "1", quietViewer: true, undoGroup: false }).success, false);
-  assert.match(S.safeParse({ code: "1", quietViewer: true, undoGroup: false }).error.message, /cannot be combined/);
-  for (const ok of [{}, { undoGroup: false }, { quietViewer: false, undoGroup: false }, { quietViewer: true }, { quietViewer: true, undoGroup: true }]) {
-    assert.equal(S.safeParse({ code: "1", ...ok }).success, true, JSON.stringify(ok));
-  }
+await check("a run_batch run_jsx step follows the same rule, each for its own step", () => {
+  const e = es();
+  const out = e.dispatch("run_batch", { ops: [
+    { op: "run_jsx", args: { code: "return app.disableRendering;" } },
+    { op: "run_jsx", args: { code: "return app.disableRendering;", quietViewer: false } },
+    { op: "run_jsx", args: { code: "return app.disableRendering;" } },
+  ] });
+  assert.ok(out.ok, out.error);
+  assert.deepEqual(out.result.results, [true, false, true]);
+  assert.equal(e.state.rendering, false, "back on after the batch");
+  assert.deepEqual(e.state.writes, [true, false, true, false], "switched and restored inside each step");
+});
+
+await check("outside run_jsx a frame never touches rendering", () => {
+  const e = es();
+  vm.runInContext("__saveFrameAt(frameComp, 0, {}, 1, 'screenshot_frame');", e.ctx);
+  assert.deepEqual(e.state.frames, [false]);
+  assert.deepEqual(e.state.writes, []);
 });
 
 // ---------- 2. the server's record of open and timed-out calls ----------
@@ -285,6 +310,43 @@ await check("a sent call is running, a queued one is not, a timed-out one stays 
   assert.equal(calls.busyWith()?.state, "timedOut", "a failure that is not an answer clears nothing");
   await assert.rejects(calls.track("get_comp", async () => { throw new AeError("no such comp"); }));
   assert.equal(calls.busyWith(), null, "an After Effects error is an answer: AE is free");
+});
+
+await check("busyWith names the oldest unanswered call, not one queued behind it at the panel (#272)", async () => {
+  let t = 0;
+  const calls = new CallsInFlight(() => t);
+  // run_jsx is sent at 1s and times out at 301s; After Effects is still running it.
+  await assert.rejects(calls.track("_run_jsx", async (sent) => {
+    t = 1_000; sent(); t = 301_000;
+    throw new BridgeTimeoutError(7777, 300_000, { op: "run_jsx" });
+  }));
+  // A later call is sent and is still open: it is waiting behind run_jsx in the panel.
+  t = 310_000;
+  let release;
+  const later = calls.track("get_comp", (sent) => { sent(); return new Promise((r) => { release = r; }); });
+  t = 320_000;
+  assert.deepEqual(calls.busyWith(), {
+    op: "run_jsx", state: "timedOut", calledAgoMs: 320_000, timedOutAgoMs: 19_000, limitMs: 300_000,
+  }, "the timed-out run_jsx is what After Effects is on");
+  // The later call is answered: the panel replied, so run_jsx is over too.
+  release(1);
+  await later;
+  assert.equal(calls.busyWith(), null);
+
+  t = 400_000;
+  await assert.rejects(calls.track("run_jsx", async (sent) => { sent(); t = 700_000; throw new BridgeTimeoutError(7777, 300_000, { op: "run_jsx" }); }));
+  await assert.rejects(calls.track("set_layer", async (sent) => { t = 701_000; sent(); t = 821_000; throw new BridgeTimeoutError(7777, 120_000, { op: "set_layer" }); }));
+  t = 830_000;
+  assert.equal(calls.busyWith()?.op, "run_jsx", "two timeouts: the first one sent is the one running");
+  // An open call sent before every timed-out one is named instead.
+  const calls2 = new CallsInFlight(() => t);
+  let r2;
+  const first = calls2.track("run_jsx", (sent) => { sent(); return new Promise((r) => { r2 = r; }); });
+  t = 840_000;
+  await assert.rejects(calls2.track("get_comp", async (sent) => { sent(); t = 960_000; throw new BridgeTimeoutError(7777, 120_000, { op: "get_comp" }); }));
+  assert.deepEqual(calls2.busyWith(), { op: "run_jsx", state: "sent", calledAgoMs: 130_000, sentAgoMs: 130_000 });
+  r2(1);
+  await first;
 });
 
 await check("SessionLine says when a call leaves for the panel, and not before", async () => {

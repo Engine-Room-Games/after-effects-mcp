@@ -18,16 +18,6 @@
 // These are listed by signature in the run_jsx tool description. If you change
 // one, change that too — it is the only place a caller ever sees them.
 
-// viewerComp() — the comp the user had in the viewer when this run_jsx began,
-// or null. run_jsx parks the viewer on an empty comp by default (issue #266),
-// so app.project.activeItem is the parking comp for the whole script; this is
-// the comp it replaced. With quietViewer:false (or undoGroup:false) nothing is
-// parked and this asks the viewer directly. Outside run_jsx it does the same.
-function viewerComp() {
-  if (__RJ_USER_COMP) return __RJ_USER_COMP;
-  return __rjViewerComp();
-}
-
 // getCompById by a shorter name, because that is the name agents guess.
 function compById(id) {
   return getCompById(id);
