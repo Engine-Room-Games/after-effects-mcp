@@ -744,23 +744,62 @@ export class DeskPlaceLostError extends WriteQueueWaitError {
  * opposite of this one.
  */
 export class ScriptNotSentError extends WriteQueueWaitError {
-  constructor(op: string, what?: string) {
+  /**
+   * `check`: "park" for the park itself; "dry-run" for the dry-run park sent
+   * ahead of a script that reads activeItem, which never creates the parking
+   * comp or parks the viewer, so its wording says only what it can do (#277).
+   */
+  constructor(op: string, what?: string, check: "park" | "dry-run" | "reopen-failed" = "park", detail?: string) {
     super(op, 0, "the viewer park");
     this.name = "ScriptNotSentError";
-    this.message = ScriptNotSentError.text(op, what);
+    this.message = ScriptNotSentError.text(op, what, check, detail);
   }
-  static text(op: string, what?: string): string {
-    return [
-      `${what ?? "`" + displayOp(op) + "`"} was not sent: After Effects did not answer the viewer park that goes ahead of the script, so it is busy.`,
-      "",
-      "The script never reached After Effects; nothing of it ran and nothing in the project was changed by it.",
-      "After Effects is very probably still on earlier work — a long script, a render, or a dialog nobody has clicked.",
+  static text(op: string, what?: string, check: "park" | "dry-run" | "reopen-failed" = "park", detail?: string): string {
+    const head = `${what ?? "`" + displayOp(op) + "`"} was not sent`;
+    // After Effects answered, so it is not busy: the dry run before a script
+    // reading activeItem found the viewer left on the parking comp and could
+    // not put the user's comp back (#277 review).
+    if (check === "reopen-failed") {
+      return [
+        `${head}: an earlier call had left the viewer on AE MCP's parking comp, and ${detail ?? "the user's comp could not be reopened"}.`,
+        "",
+        "This script reads app.project.activeItem, which would have been that empty parking comp — and anything it built",
+        "there would have landed in the wrong comp — so it was never sent. None of it ran.",
+        "",
+        "What to do, in order:",
+        "1. Ask the user to open their comp in the viewer (double-click it in the Project panel).",
+        "2. Then send this same call again: the script was never run, so sending it again is safe.",
+        "3. Better still, use viewerComp() instead of app.project.activeItem: it answers the user's comp even while parked.",
+      ].join("\n");
+    }
+    const busy = [
+      "After Effects is very probably still on earlier work — a long script, a render started in After Effects, another AI",
+      "session's call, or a dialog nobody has clicked.",
       "",
       "What to do, in order:",
-      "1. Poll check_setup until After Effects answers again (it names what it is busy with).",
-      "2. Then send this same call again: it was never run, so sending it again is safe.",
-      "3. If the viewer shows an empty comp named \"AE MCP viewer parking (safe to delete)\" meanwhile, that is the park landing late;",
-      "   the next run_jsx or check_setup puts the user's comp back.",
+      "1. Poll check_setup until After Effects answers again. If the earlier work is a call this session made, check_setup",
+      "   names it under `busyWith`; a render, another session's call or a dialog it cannot name, and says only that it is busy.",
+      "2. Then send this same call again: the script was never run, so sending it again is safe.",
+    ];
+    if (check === "dry-run") {
+      return [
+        `${head}: After Effects did not answer the viewer check that goes ahead of a script reading app.project.activeItem, so it is busy.`,
+        "",
+        "The script never reached After Effects, so none of it ran. The check creates nothing and parks nothing; if it lands",
+        "late, the most it does is reopen the user's comp in the viewer in place of a park an earlier call left behind.",
+        "Nothing in the project can change.",
+        ...busy,
+      ].join("\n");
+    }
+    return [
+      `${head}: After Effects did not answer the viewer park that goes ahead of the script, so it is busy.`,
+      "",
+      "The script never reached After Effects, so none of it ran. The park itself did reach After Effects and may still",
+      "land late: it switches the viewer to an empty comp named \"AE MCP viewer parking (safe to delete)\" — and, if that",
+      "comp does not exist yet, first creates it at the project root as one undo step of its own. Nothing else in the project can change.",
+      ...busy,
+      "3. If the viewer shows that parking comp meanwhile, that is the park landing late; the next run_jsx or check_setup",
+      "   puts the user's comp back. The comp itself is AE MCP's, reused by every later run, and safe to delete.",
     ].join("\n");
   }
 }

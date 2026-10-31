@@ -44,10 +44,62 @@ var __PARK_UNDO_NAME = "AE MCP: create viewer parking comp";
 var __PARK_SCAN_BUDGET_MS = 200;
 var __PARK_SCAN_MAX_PROPS = 20000;
 
-// The park in force: {fromId, fromName, parkId, at}. Set by _viewer_park and
-// cleared by _viewer_unpark. It lives in the bundle's closure, so it outlives a
-// server that died between the two, but not a reload of the bundle.
+// The park in force: {fromId, fromName, parkId, at, token}. Set by _viewer_park
+// and cleared by _viewer_unpark. It lives in the bundle's closure, so it
+// outlives a server that died between the two, but not a reload of the bundle.
 var __PARK = null;
+// Each park's token, answered to the server and sent back with its unpark, so
+// an unpark can tell its own park from another call's (issue #277). Started
+// from the clock, so a token from before a reload of the bundle never matches
+// a park made after it.
+var __PARK_SEQ = new Date().getTime();
+// The parks ended by a call other than their own unpark, newest last, at most
+// __PARK_TAKEN_MAX: {token, by, reopened, why?}. `by` is who ended it and
+// `reopened` whether that call actually reopened the comp the park replaced —
+// recorded as it happened, never assumed (issue #277 review):
+//   "park"     another call's park took it over (the viewer still on the
+//              parking comp): that call's unpark tries to reopen the comp;
+//   "dropped"  another call's park found the viewer no longer on the parking
+//              comp, or the comp gone, or could not park, and forgot this
+//              park — nothing reopened; `why` says which;
+//   "dry-run"  a dry-run park (before a script that reads activeItem) undid it;
+//   "recover"  check_setup or a session's next write undid it;
+//   "unpark"   an unpark sent without a token (its own park's answer was lost)
+//              ended it in its place.
+// With the front desk serializing every session's writes, none of this can
+// happen between a call's park and its unpark; with it off
+// (AE_MCP_FRONT_DESK=off) another session's call can land there, and the
+// unpark then says what happened instead of guessing.
+var __PARK_TAKEN = [];
+var __PARK_TAKEN_MAX = 16;
+
+// The park in force ends here, by `by`, when not by its own unpark. Answers
+// the record (so the caller can mark `reopened` once it has), or null when no
+// park was in force.
+function __parkEndBy(by, why) {
+  var rec = null;
+  if (__PARK) {
+    rec = { token: __PARK.token, by: by, reopened: false };
+    if (why) rec.why = why;
+    // A "dropped" by a dry-run park (before a script that reads activeItem) is said as one.
+    if (by === "dropped" && __parkDryRun) rec.dryRun = true;
+    __PARK_TAKEN.push(rec);
+    if (__PARK_TAKEN.length > __PARK_TAKEN_MAX) __PARK_TAKEN.shift();
+  }
+  __PARK = null;
+  return rec;
+}
+
+// Whether the _viewer_park running now is a dry run (read by __parkEndBy).
+var __parkDryRun = false;
+
+// How the park with this token ended, if another call ended it; else null.
+function __parkTakenBy(token) {
+  for (var i = __PARK_TAKEN.length - 1; i >= 0; i--) {
+    if (__PARK_TAKEN[i].token === token) return __PARK_TAKEN[i];
+  }
+  return null;
+}
 // The last park unparked, kept so a later park that still finds the parking
 // comp in the viewer (an unpark whose reopen did not take) knows the way back.
 var __PARK_LAST = null;
@@ -303,11 +355,32 @@ function __parkExpressionScan(comp) {
   return res;
 }
 
+// Why a park in force was forgotten rather than taken over: the viewer had
+// moved off the parking comp (the script, or the user, opened `now`).
+function __parkMovedWhy(now) {
+  return "the viewer was showing comp " + now.id + " (\"" + now.name + "\") by then, not the parking comp";
+}
+
+// A park in force forgotten because the viewer had moved on to `now`. When
+// `now` is the very comp that park replaced, the user's comp is back in view:
+// recorded as `restored`, and `reparked` when this call then parks it again
+// (it reopens it itself) — never "without reopening" (#277 review).
+function __parkDropMoved(now, reparked) {
+  var back = __PARK && __PARK.fromId === now.id;
+  var rec = __parkEndBy("dropped", __parkMovedWhy(now));
+  if (rec && back) {
+    rec.restored = true;
+    if (reparked) rec.reparked = true;
+  }
+  return rec;
+}
+
 // Server-only (tools/viewerPark.ts), sent under the run_jsx call's write lease
 // before the script. Answers {parked, compId?, compName?, created?, recovered?,
-// skipped?, note?}. noUndo: opening a comp in the viewer is no undo step; the
+// skipped?, note?, token?, reopenFailed?}. noUndo: opening a comp in the viewer is no undo step; the
 // one-time creation opens a group of its own.
 OPS._viewer_park = noUndo(function (args) {
+  __parkDryRun = !!(args && args.dryRun);
   var out = { parked: false };
   var stale = __PARK;
   var from = __parkViewerComp();
@@ -320,7 +393,7 @@ OPS._viewer_park = noUndo(function (args) {
     var prior = stale || __PARK_LAST;
     var back = prior ? __parkItem(prior.fromId) : null;
     if (!back) {
-      __PARK = null;
+      __parkEndBy("dropped", "the comp it replaced no longer exists");
       out.skipped = "already-parked";
       out.note = "the viewer was already showing the AE MCP parking comp and the comp it replaced is not known " +
         "(or no longer exists), so the script ran with the parking comp in view and nothing will be reopened";
@@ -331,7 +404,7 @@ OPS._viewer_park = noUndo(function (args) {
     out.recovered = { compId: back.id, compName: back.name };
   }
   if (!from) {
-    __PARK = null;
+    __parkEndBy("dropped", "the viewer was no longer showing a composition");
     out.skipped = "no-comp-in-viewer";
     return out;
   }
@@ -340,7 +413,7 @@ OPS._viewer_park = noUndo(function (args) {
   if (!alreadyParked) {
     var scan = __parkExpressionScan(from);
     if (!scan.found && !scan.unsure) {
-      __PARK = null;
+      __parkDropMoved(from, false);
       out.skipped = "no-expressions";
       return out;
     }
@@ -352,9 +425,23 @@ OPS._viewer_park = noUndo(function (args) {
     out.wouldPark = true;
     // A park an interrupted call left is undone here, before that script —
     // which reads activeItem — can write into the parking comp.
+    // `recovered` is claimed only once openInViewer has accepted the comp
+    // (#277 review). A read-back cannot confirm it here: measured, a viewer
+    // change lands once the call has ended. A reopen that throws answers
+    // `reopenFailed` instead, and the server does not send the script, which
+    // would read — and could write into — the parking comp.
+    // The park stays on record unless the reopen was accepted, so the next
+    // park, write or check_setup can still find the way back.
     if (alreadyParked) {
-      try { from.openInViewer(); } catch (e0) {}
-      __PARK = null;
+      try {
+        from.openInViewer();
+        var undone = __parkEndBy("dry-run");
+        if (undone) undone.reopened = true;
+      } catch (e0) {
+        delete out.recovered;
+        out.wouldPark = false;
+        out.reopenFailed = { compId: from.id, compName: from.name, error: __parkMsg(e0) };
+      }
     }
     return out;
   }
@@ -367,22 +454,59 @@ OPS._viewer_park = noUndo(function (args) {
     }
     if (!alreadyParked) park.openInViewer();
   } catch (e) {
-    __PARK = null;
+    __parkEndBy("dropped", "another call's park failed (" + __parkMsg(e) + ")" +
+      (alreadyParked ? ", with the viewer still on the parking comp" : ""));
     out.skipped = "failed";
     out.note = "the viewer could not be parked (" + __parkMsg(e) + "), so the script ran with comp " + from.id +
       " in view, re-evaluated after every change";
     return out;
   }
-  __PARK = { fromId: from.id, fromName: from.name, parkId: park.id, at: new Date().getTime() };
+  // Taken over (the viewer still on the parking comp: this park reopens that
+  // comp later), or forgotten (the viewer had moved on: nothing reopened).
+  if (alreadyParked) __parkEndBy("park");
+  else __parkDropMoved(from, true);
+  __PARK_SEQ++;
+  __PARK = { fromId: from.id, fromName: from.name, parkId: park.id, at: new Date().getTime(), token: __PARK_SEQ };
   out.parked = true;
+  out.token = __PARK_SEQ;
   return out;
 });
 
+// What an unpark that ended another call's park did, recorded on that park's
+// record as it happened: reopened, or why not (#277 review).
+function __parkEnded(rec, res) {
+  if (!rec) return res;
+  rec.reopened = res.reopened === true;
+  // The comp the park replaced is what the viewer shows, read back (a script
+  // that reopened it itself, say): said as such, never as "not reopened".
+  if (res.restored === true) rec.restored = true;
+  if (!rec.reopened && !rec.restored) {
+    if (res.note) rec.why = res.note;
+    else if (res.viewerComp) rec.why = "the viewer was showing comp " + res.viewerComp.id + " (\"" + res.viewerComp.name + "\") by then, which was left there";
+    else rec.why = "the comp was not reopened";
+  }
+  return res;
+}
+
 // Server-only, sent after the script under the same lease (and by check_setup
 // with recover:true). Idempotent: with no park in force it does nothing.
-// Answers {unparked, reopened?, restored, compId, compName, viewerComp?, caution?, note?}.
+// Answers {unparked, reopened?, restored, compId, compName, viewerComp?, caution?, note?},
+// or {unparked: false, takenBy?}. `token` (the park's own, from its answer)
+// makes it this park's unpark only: another call's park is left alone, and
+// one that ended another way is named (`takenBy`, see __PARK_TAKEN).
 OPS._viewer_unpark = noUndo(function (args) {
   var st = __PARK;
+  var token = (args && typeof args.token === "number") ? args.token : null;
+  if (token !== null && !(args && args.recover) && (!st || st.token !== token)) {
+    var taken = __parkTakenBy(token);
+    if (!taken) return { unparked: false };
+    var t = { unparked: false, takenBy: taken.by, reopened: taken.reopened };
+    if (taken.why) t.why = taken.why;
+    if (taken.dryRun) t.dryRun = true;
+    if (taken.restored) t.restored = true;
+    if (taken.reparked) t.reparked = true;
+    return t;
+  }
   if (!st) {
     if (!(args && args.recover)) return { unparked: false };
     // A park whose reopen did not take: the viewer still on the parking comp.
@@ -395,11 +519,17 @@ OPS._viewer_unpark = noUndo(function (args) {
     // A park left by an interrupted call whose script built in the parking
     // comp: that comp is the user's work now, and it is what they are looking
     // at. Nothing is reopened over it; the park is forgotten and the CAUTION said.
-    __PARK = null;
+    __parkEndBy("recover", "the parking comp had been written into, so it was left in the viewer as the user's");
     __PARK_LAST = null;
     return { unparked: false, caution: __parkDirt(__parkItem(st.parkId)) };
   }
-  __PARK = null;
+  // Ended by its own unpark (the token matched) — or, with no token, by an
+  // unpark that cannot know whose park this is: recorded, so the park's own
+  // unpark is told what happened instead of finding nothing (#277 review).
+  var ended = null;
+  if (args && args.recover) ended = __parkEndBy("recover");
+  else if (token === null) ended = __parkEndBy("unpark");
+  else __PARK = null;
   __PARK_LAST = st;
   var res = { unparked: true, restored: false, compId: st.fromId, compName: st.fromName };
   var dirt = __parkDirt(__parkItem(st.parkId));
@@ -414,7 +544,7 @@ OPS._viewer_unpark = noUndo(function (args) {
     if (now.id === st.fromId) res.restored = true;
     else res.note = "the script opened comp " + now.id + " (\"" + now.name + "\") in the viewer, so it was left there " +
       "rather than reopening comp " + st.fromId + " (\"" + st.fromName + "\")";
-    return res;
+    return __parkEnded(ended, res);
   }
   if (!now) {
     var v = null;
@@ -422,14 +552,14 @@ OPS._viewer_unpark = noUndo(function (args) {
     if (v) {
       res.note = "the active viewer is no longer a composition viewer (the script opened a layer or footage " +
         "viewer?), so comp " + st.fromId + " (\"" + st.fromName + "\") was not reopened";
-      return res;
+      return __parkEnded(ended, res);
     }
   }
   var from = __parkItem(st.fromId);
   if (!from || !(from instanceof CompItem)) {
     res.note = "comp " + st.fromId + " (\"" + st.fromName + "\") was in the viewer and no longer exists — the script " +
       "removed it — so the viewer still shows the AE MCP parking comp";
-    return res;
+    return __parkEnded(ended, res);
   }
   try {
     from.openInViewer();
@@ -446,7 +576,7 @@ OPS._viewer_unpark = noUndo(function (args) {
     res.note = "comp " + st.fromId + " (\"" + st.fromName + "\") could not be reopened in the viewer (" + __parkMsg(e2) +
       "), so the viewer still shows the AE MCP parking comp — open the comp from the Project panel";
   }
-  return res;
+  return __parkEnded(ended, res);
 });
 
 // Server-only, a read: is a park in force (or the viewer still on the parking

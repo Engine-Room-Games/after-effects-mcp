@@ -778,7 +778,7 @@ const panel = http.createServer((req, res) => {
     chain = chain.then(async () => {
       // run_jsx arrives as `_run_jsx`, with the server-built wrapper (#220, #243).
       const jsxSource = op === "run_jsx" || op === "_run_jsx" ? String(args.code ?? args.built?.wrapper ?? "") : null;
-      const tag = jsxSource !== null ? /tag:(\w+)/.exec(jsxSource)?.[1] : op;
+      const tag = jsxSource !== null ? /tag:(\w+)/.exec(jsxSource)?.[1] : op === "_viewer_park" && args?.dryRun ? "_viewer_park(dryRun)" : op;
       let ms = jsxSource !== null ? Number(/ms:(\d+)/.exec(jsxSource)?.[1] ?? 5) : 5;
       // The server drives every batch (#243): each chunk runs up to 50ms, and
       // the job is done once it has run for batchMs.
@@ -954,6 +954,40 @@ try {
       for (let i = 1; i < seen.length; i++) {
         assert.ok(seen[i].enteredAt >= seen[i - 1].leftAt, `${seen[i].tag} overlapped ${seen[i - 1].tag}`);
       }
+    } finally {
+      parkOn = false;
+    }
+  });
+
+  await check("parked chunks (#277): with the desk on, no other session's call lands between a chunk's park and its unpark", async () => {
+    // Live with the desk off, another session's activeItem script slipped in
+    // between a chunk's park and the chunk and took the park back. Through the
+    // desk the batch's lease is held end to end, so that cannot happen.
+    seen.length = 0;
+    parkOn = true;
+    try {
+      const ops = Array.from({ length: 501 }, () => ({ op: "run_jsx", args: { code: "return 1;" } }));
+      const rb = await call(A, "run_batch", { ops });
+      assert.equal(rb.res.isError, undefined, rb.text);
+      const { jobId } = rb.json();
+      await until("a parked chunk at the panel", () => ran("_continue_job").length >= 1);
+      // B's script reads activeItem: a dry-run park that would undo A's park.
+      const hb = begin(B, "run_jsx", { code: "// tag:PB ms:5\nreturn app.project.activeItem.name;" });
+      const done = await call(A, "await_job", { jobId });
+      assert.equal(done.res.isError, undefined, done.text);
+      assert.doesNotMatch(done.text, /another call|reloaded/, "no chunk lost its park");
+      const r = await hb.done;
+      assert.equal(r.res.isError, undefined, r.text);
+      const tags = seen.map((e) => e.tag);
+      const firstB = tags.indexOf("_viewer_park(dryRun)");
+      assert.ok(firstB > 0, tags.join(" "));
+      assert.ok(tags.indexOf("PB") > firstB, "B's script came after its dry run");
+      const batch = tags.slice(tags.indexOf("run_batch") + 1, firstB);
+      assert.ok(batch.length >= 6, `several chunks ran: ${batch.join(" ")}`);
+      for (let i = 0; i < batch.length; i += 3) {
+        assert.deepEqual(batch.slice(i, i + 3), ["_viewer_park", "_continue_job", "_viewer_unpark"], `chunk at ${i}: ${batch.join(" ")}`);
+      }
+      assert.ok(seen[firstB].enteredAt >= batches.get(jobId), "B's dry run reached After Effects only after the batch finished");
     } finally {
       parkOn = false;
     }
