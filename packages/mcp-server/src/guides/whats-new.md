@@ -61,6 +61,25 @@ only quitting and reopening After Effects will.
   supersedes: run setup_panel, then restart After Effects
   supersedes: run setup_panel, then ask them to quit and reopen After Effects
 
+- **Breaking: during `run_jsx`, `app.project.activeItem` is a parking comp —
+  use `viewerComp()` for the user's comp.** After Effects re-renders the comp
+  in the viewer after every change to it or its precomps; with a heavy comp in
+  view a rebuild script slowed from seconds to past the 300 s limit. So
+  `run_jsx` (and each `run_jsx` step of a `run_batch`) now parks the active
+  viewer on a tiny empty comp for the script and reopens the user's comp
+  after. Pass `quietViewer: false` to keep the old behaviour; `undoGroup:
+  false` keeps it too, and `quietViewer: true` with `undoGroup: false` is
+  refused (issue #266).
+  supersedes: app.project.activeItem is the comp the user has open
+  supersedes: use app.project.activeItem to get the active comp
+- **`check_setup` says what a busy After Effects is busy with.** When the
+  bridge accepts and does not answer, and this server has a call open — or one
+  that timed out with no answer since — the report carries `busyWith: {op,
+  state, calledAgoMs}` and the `bridgeReachable` detail names the call.
+  `state` is `sent` or `timedOut` (After Effects is very probably running it)
+  or `queued` (not sent yet: another session's call is what is running). Keep
+  waiting while it is there; do not re-send that call (issue #266).
+
 ## 0.5.2
 
 Four fixes, all reported from outside the project. Two change what a result
