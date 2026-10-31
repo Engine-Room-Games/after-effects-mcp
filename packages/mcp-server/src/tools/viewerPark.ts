@@ -72,6 +72,8 @@ export interface UnparkAnswer {
    */
   takenBy?: TakenBy;
   why?: string;
+  /** "dropped" by a dry-run park, not a park. */
+  dryRun?: boolean;
 }
 
 export type TakenBy = "park" | "dropped" | "dry-run" | "recover" | "unpark";
@@ -250,16 +252,20 @@ function takenOverNote(u: UnparkAnswer, what: string): string {
     "front desk is not serializing sessions: AE_MCP_FRONT_DESK=off)";
   const why = u.why ? ` (${u.why})` : "";
   if (u.takenBy === "park") {
-    return `another call parked the viewer ${between}, and took ${what} over: that call reopens it when its own script ` +
-      "is done, so nothing needs doing here";
+    return `another call parked the viewer ${between}, and took ${what} over: that call tries to reopen it when its own ` +
+      "script is done, unless that script puts another comp in the viewer itself; its own answer says what it did";
   }
   if (u.takenBy === "dropped") {
-    return `another call's park forgot this call's park ${between}, without reopening ${what}${why}; the viewer shows ` +
+    const by = u.dryRun ? "a dry-run park (before another call's script that reads activeItem)" : "another call's park";
+    return `${by} forgot this call's park ${between}, without reopening ${what}${why}; the viewer shows ` +
       "whatever it showed then — if that is AE MCP's parking comp, open the comp from the Project panel";
   }
   const who = u.takenBy === "dry-run" ? "another call (a dry-run park, before a script that reads activeItem)"
     : u.takenBy === "recover" ? "another call (check_setup, or another session's write)"
     : "another call's unpark, sent without knowing its own park (that park's answer was lost),";
+  if (u.restored === true && u.reopened !== true) {
+    return `${who} ended this call's park ${between}; the viewer already shows ${what} again (read back)`;
+  }
   if (u.reopened === true) {
     return `${who} ended this call's park ${between} and reopened ${what} in the viewer, so this call's script may have ` +
       "run with the comp in view, re-evaluated after every change; the viewer already shows it";
@@ -347,7 +353,8 @@ export async function withParkedViewer<T>(
       } else if (u?.takenBy) {
         // Not lost: another session's call ended this park, and said how (#277).
         r.takenBy = u.takenBy;
-        if (u.reopened !== true && u.takenBy !== "park") r.restored = false;
+        if (u.restored === true) r.restored = true;
+        else if (u.reopened !== true && u.takenBy !== "park") r.restored = false;
         r.note = joinNotes(r.note, takenOverNote(u, compLabel(r.compId, r.compName)));
       } else {
         r.restored = false;

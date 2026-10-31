@@ -58,7 +58,7 @@ var __PARK_SEQ = new Date().getTime();
 // `reopened` whether that call actually reopened the comp the park replaced —
 // recorded as it happened, never assumed (issue #277 review):
 //   "park"     another call's park took it over (the viewer still on the
-//              parking comp): that call's unpark reopens the comp;
+//              parking comp): that call's unpark tries to reopen the comp;
 //   "dropped"  another call's park found the viewer no longer on the parking
 //              comp, or the comp gone, or could not park, and forgot this
 //              park — nothing reopened; `why` says which;
@@ -81,12 +81,17 @@ function __parkEndBy(by, why) {
   if (__PARK) {
     rec = { token: __PARK.token, by: by, reopened: false };
     if (why) rec.why = why;
+    // A "dropped" by a dry-run park (before a script that reads activeItem) is said as one.
+    if (by === "dropped" && __parkDryRun) rec.dryRun = true;
     __PARK_TAKEN.push(rec);
     if (__PARK_TAKEN.length > __PARK_TAKEN_MAX) __PARK_TAKEN.shift();
   }
   __PARK = null;
   return rec;
 }
+
+// Whether the _viewer_park running now is a dry run (read by __parkEndBy).
+var __parkDryRun = false;
 
 // How the park with this token ended, if another call ended it; else null.
 function __parkTakenBy(token) {
@@ -361,6 +366,7 @@ function __parkMovedWhy(now) {
 }
 
 OPS._viewer_park = noUndo(function (args) {
+  __parkDryRun = !!(args && args.dryRun);
   var out = { parked: false };
   var stale = __PARK;
   var from = __parkViewerComp();
@@ -446,7 +452,10 @@ OPS._viewer_park = noUndo(function (args) {
 function __parkEnded(rec, res) {
   if (!rec) return res;
   rec.reopened = res.reopened === true;
-  if (!rec.reopened) {
+  // The comp the park replaced is what the viewer shows, read back (a script
+  // that reopened it itself, say): said as such, never as "not reopened".
+  if (res.restored === true) rec.restored = true;
+  if (!rec.reopened && !rec.restored) {
     if (res.note) rec.why = res.note;
     else if (res.viewerComp) rec.why = "the viewer was showing comp " + res.viewerComp.id + " (\"" + res.viewerComp.name + "\") by then, which was left there";
     else rec.why = "the comp was not reopened";
@@ -468,6 +477,8 @@ OPS._viewer_unpark = noUndo(function (args) {
     if (!taken) return { unparked: false };
     var t = { unparked: false, takenBy: taken.by, reopened: taken.reopened };
     if (taken.why) t.why = taken.why;
+    if (taken.dryRun) t.dryRun = true;
+    if (taken.restored) t.restored = true;
     return t;
   }
   if (!st) {

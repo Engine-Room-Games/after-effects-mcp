@@ -160,9 +160,13 @@ function span(ms: number): string {
 /** check_setup's sentence for a busy bridge with one of this server's calls outstanding. */
 export function busyWithText(b: BusyWith): string {
   if (b.kind === "viewer-unpark") {
-    const what = "this server's viewer unpark (the call that puts the user's comp back in the viewer after a run_jsx or run_batch has finished)";
-    const tail = "it changes nothing in the project, and nothing needs re-sending for it: the script it follows has already answered, " +
-      "and this session's next write, any run_jsx, or check_setup puts the viewer back once After Effects answers";
+    // Neutral on purpose (#277 review): it may follow a run_jsx, one chunk of a
+    // batch still running, or no script at all (the recovery before a write,
+    // or check_setup's).
+    const what = "this server's viewer unpark (the call that puts the user's comp back in the viewer in place of AE MCP's " +
+      "parking comp, after a parked run_jsx or batch chunk, or when undoing a park an earlier call left)";
+    const tail = "it changes nothing in the project, and nothing needs re-sending for it: this session's next write, any " +
+      "run_jsx, or check_setup tries it again once After Effects answers";
     if (b.state === "sent") return `${what} reached the panel ${span(b.sentAgoMs ?? b.calledAgoMs)} ago and is still waiting for its answer; ${tail}`;
     if (b.state === "queued") {
       return `${what} (made ${span(b.calledAgoMs)} ago) has not been sent yet — it is waiting its turn behind another session's call, ` +

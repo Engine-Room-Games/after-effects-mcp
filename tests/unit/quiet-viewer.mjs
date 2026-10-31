@@ -378,7 +378,13 @@ await check("review #1: a park that skipped records that it forgot the park and 
   d.call("run_jsx", { code: "compById(" + d.other.id + ").openInViewer(); return 1;" });
   d.call("_viewer_park", { dryRun: true });
   const ud = d.call("_viewer_unpark", { token: pd.token }).result;
-  assert.deepEqual([ud.takenBy, ud.reopened], ["dropped", false]);
+  assert.deepEqual([ud.takenBy, ud.reopened, ud.dryRun], ["dropped", false, true], "said as a dry run's doing (round 2)");
+  // A real park's skip is not marked as a dry run.
+  const e2 = es();
+  const pa2 = e2.call("_viewer_park").result;
+  e2.call("run_jsx", { code: "compById(" + e2.other.id + ").openInViewer(); return 1;" });
+  e2.call("_viewer_park");
+  assert.equal(e2.call("_viewer_unpark", { token: pa2.token }).result.dryRun, undefined);
   // A dry run whose reopen threw says it did not reopen.
   const f = es();
   const pf = f.call("_viewer_park").result;
@@ -393,6 +399,17 @@ await check("review #1: a park that skipped records that it forgot the park and 
   const uw = w.call("_viewer_unpark", { token: pw.token }).result;
   assert.deepEqual([uw.takenBy, uw.reopened], ["recover", false]);
   assert.match(uw.why, /written into/);
+});
+
+await check("round 2: a token-less unpark that found the user's comp already back says it is in view, not 'not reopened'", () => {
+  const e = es();
+  const a = e.call("_viewer_park").result;
+  // The script put the user's comp back itself.
+  e.call("run_jsx", { code: "compById(" + e.heavy.id + ").openInViewer(); return 1;" });
+  assert.equal(e.state.view, e.heavy);
+  e.call("_viewer_unpark");
+  const u = e.call("_viewer_unpark", { token: a.token }).result;
+  assert.deepEqual([u.takenBy, u.reopened, u.restored, u.why], ["unpark", false, true, undefined]);
 });
 
 await check("review #2: an unpark sent without a token records that it ended another call's park", () => {
@@ -611,7 +628,8 @@ await check("a park's own token goes back with its unpark; one another call ende
   assert.equal(out.report.takenBy, "park");
   assert.match(out.report.note, /another call parked the viewer between this call's park and its unpark/);
   assert.match(out.report.note, /AE_MCP_FRONT_DESK=off/);
-  assert.match(out.report.note, /that call reopens it/);
+  assert.match(out.report.note, /that call tries to reopen it when its own script is done, unless that script puts another comp in the viewer/);
+  assert.doesNotMatch(out.report.note, /that call reopens it/);
   assert.doesNotMatch(out.report.note, /reloaded/);
   assert.equal(park.viewerReportMatters(out.report), true);
   for (const [by, who] of [["dry-run", /a dry-run park, before a script that reads activeItem\)/], ["recover", /check_setup, or another session's write\)/],
@@ -632,6 +650,16 @@ await check("a park's own token goes back with its unpark; one another call ende
   const dn = (await park.withParkedViewer(dr.send, st, async () => 1)).report.note;
   assert.match(dn, /another call's park forgot this call's park .* without reopening comp 7 \("TR — Opener"\) \(the viewer was showing comp 9/);
   assert.doesNotMatch(dn, /took .* over|that call reopens it/);
+  assert.match(dn, /^another call's park forgot/);
+  // Round 2: a dry run's skip is said as a dry run's.
+  const dd = sender({ _viewer_park: { ...PARKED, token: 45 }, _viewer_unpark: { unparked: false, takenBy: "dropped", dryRun: true, reopened: false, why: "x" } });
+  assert.match((await park.withParkedViewer(dd.send, st, async () => 1)).report.note, /^a dry-run park \(before another call's script that reads activeItem\) forgot this call's park/);
+  // Round 2: the user's comp read back in view is said so, and not as restored:false.
+  const rs = sender({ _viewer_park: { ...PARKED, token: 46 }, _viewer_unpark: { unparked: false, takenBy: "unpark", reopened: false, restored: true } });
+  const rr = (await park.withParkedViewer(rs.send, st, async () => 1)).report;
+  assert.equal(rr.restored, true);
+  assert.match(rr.note, /the viewer already shows comp 7 \("TR — Opener"\) again \(read back\)/);
+  assert.doesNotMatch(rr.note, /without reopening/);
   // Nothing on record ended it: a reload is the likely cause, not stated as fact (review #2).
   const u = sender({ _viewer_park: { ...PARKED, token: 43 }, _viewer_unpark: { unparked: false } });
   const un = (await park.withParkedViewer(u.send, st, async () => 1)).report.note;
@@ -1127,6 +1155,8 @@ await check("a timed-out viewer unpark is never named as a run_jsx/run_batch/che
     const steps = withBusyStep(buildNextSteps(checks, false, true), bw);
     assert.match(steps[1], /^What it is busy with: this server's viewer unpark/);
     assert.match(steps[1], /nothing needs re-sending for it/);
+    // Round 2: true for a chunk of a running batch and for a recovery with no script before it.
+    assert.doesNotMatch(steps[1], /has finished|already answered/);
     assert.doesNotMatch(steps[1], /run_jsx\/run_batch|check_setup`|Do not re-send|run a second time|very probably still running that call/);
   }
   // The script it follows still reads as the script.
