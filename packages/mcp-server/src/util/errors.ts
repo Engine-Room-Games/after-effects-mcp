@@ -759,7 +759,7 @@ export class ScriptNotSentError extends WriteQueueWaitError {
       "What to do, in order:",
       "1. Poll check_setup until After Effects answers again (it names what it is busy with).",
       "2. Then send this same call again: it was never run, so sending it again is safe.",
-      "3. If the viewer shows an empty comp named \"AE MCP viewer parking\" meanwhile, that is the park landing late;",
+      "3. If the viewer shows an empty comp named \"AE MCP viewer parking (safe to delete)\" meanwhile, that is the park landing late;",
       "   the next run_jsx or check_setup puts the user's comp back.",
     ].join("\n");
   }

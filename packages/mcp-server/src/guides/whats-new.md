@@ -79,8 +79,10 @@ only quitting and reopening After Effects will.
   answer carries a `quietViewer` block. `run_batch` with `run_jsx` steps parks
   too. If a call was cut off between the park and the put-back, the next
   `run_jsx`, this session's next write, or `check_setup` reopens the user's
-  comp. Two things it cannot help: keyboard focus moves to the viewer on every
-  parked run, and a heavy comp left open in another viewer tab can still be
+  comp. Two things it cannot help: keyboard focus moves to the viewer — on
+  every parked run, and on any default run while the viewer is not the panel
+  in focus, parked or not, since finding the comp in view means focusing the
+  viewer — and a heavy comp left open in another viewer tab can still be
   re-evaluated for some changes. If After Effects does not answer the park,
   the script is not sent at all, and the error says re-sending is safe once
   `check_setup` shows After Effects answering (issue #266).

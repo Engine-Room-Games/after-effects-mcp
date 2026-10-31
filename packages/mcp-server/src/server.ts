@@ -54,6 +54,8 @@ import {
   batchParkMode,
   notParkedForActiveItem,
   readsActiveItem,
+  recoverBeforeActiveItemScript,
+  batchReadsActiveItem,
   recoverForCheck,
   recoverParkedViewer,
   runJsxWantsPark,
@@ -194,6 +196,8 @@ export interface CreateServerOptions {
    * `AE_MCP_RESOURCE_POLL_MS`. Not clamped, so a test can poll fast.
    */
   livePollMs?: number;
+  /** Tests only: the record check_setup's `busyWith` reads, so a test can read it too. */
+  callsInFlight?: CallsInFlight;
   /** The quiet period after this session's last write before the poll runs again. */
   liveQuietMs?: number;
   /** How often the summary is walked in full with nothing else prompting it. */
@@ -255,9 +259,13 @@ export function createServer(opts: CreateServerOptions = {}) {
   // Every call to After Effects is recorded while it is open, and a timed-out
   // one until the panel next answers, so check_setup can say which call a busy
   // After Effects is very probably still running (issue #266).
-  const calls = new CallsInFlight();
-  const toAe = (op: string, a: unknown, o?: Parameters<SessionLine["runOp"]>[2]) =>
-    calls.track(op, (sent) => line.runOp(op, a, { ...o, onSent: sent }), { background: o?.yieldToWrites === true });
+  const calls = opts.callsInFlight ?? new CallsInFlight();
+  const toAe = (op: string, a: unknown, o?: Parameters<SessionLine["runOp"]>[2] & { untracked?: boolean }) => {
+    const { untracked, ...rest } = o ?? {};
+    return calls.track(op, (sent) => line.runOp(op, a, { ...rest, onSent: sent }), {
+      background: rest.yieldToWrites === true || untracked === true,
+    });
+  };
   // Every internal op goes through one of these: typed over InternalOpMutation,
   // and a "write" is refused unless the write lock is held (tools/internalOps.ts).
   // Sent as a write when the op is one or this call holds the lease, as the
@@ -1099,7 +1107,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       const batchPark = name === "run_batch" ? batchParkMode(args) : null;
       // A script that reads app.project.activeItem is not parked: it would
       // read — and build in — the parking comp (tools/viewerPark.ts).
-      const jsxReadsActive = name === "run_jsx" ? readsActiveItem(args) : batchPark?.readsActiveItem === true;
+      const jsxReadsActive = name === "run_jsx" ? readsActiveItem(args) : name === "run_batch" ? batchReadsActiveItem(args) : false;
       const wantsPark = (name === "run_jsx" && runJsxWantsPark(args)) || batchPark !== null;
       const parkHere = wantsPark && !jsxReadsActive && (name === "run_jsx" || batchPark?.mode === "inline");
       const parkChunks = wantsPark && !jsxReadsActive && batchPark?.mode === "chunks";
@@ -1112,7 +1120,12 @@ export function createServer(opts: CreateServerOptions = {}) {
       }
       // Said only when parking would have paid off; a dry-run park decides.
       let viewer: ViewerReport | null = null;
-      if (lease !== null && wantsPark && jsxReadsActive) viewer = await notParkedForActiveItem(sendInternal);
+      if (lease !== null && wantsPark && jsxReadsActive) viewer = await notParkedForActiveItem(sendInternal, name);
+      // quietViewer:false and reading activeItem: no park, no dry run, so a
+      // park a dead session left is looked for here (a read) before the script.
+      if (lease !== null && !wantsPark && jsxReadsActive && !viewerState.maybeLeft && !viewerRecovered) {
+        viewerRecovered = await recoverBeforeActiveItemScript(sendInternal, viewerState);
+      }
       if (SNAPSHOT_OPS.has(name)) {
         const withView = clientSupportsApps(server.getClientCapabilities());
         return await runSnapshotOp(name, args, sendInternal, snapshots, withView);

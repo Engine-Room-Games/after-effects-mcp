@@ -75,9 +75,11 @@ function es({ expressions = 1, nested = false, disabledLayer = false, viewer = t
     item(i) { return this.children[i - 1]; }
   }
   class FootageItem {}
+  const root = new FolderItem("Root");
   class CompItem {
     constructor(name, layers = []) {
-      this.id = nextId++; this.name = name; this.comment = ""; this._layers = layers; this._folder = null;
+      this.id = nextId++; this.name = name; this.comment = ""; this._layers = layers; this._folder = root;
+      this.displayStartTime = 0; this.motionBlur = false; this.frameBlending = false;
       this.width = 16; this.height = 16; this.pixelAspect = 1; this.duration = 1; this.frameRate = 1;
       this.workAreaStart = 0; this.workAreaDuration = 1; this.bgColor = [0, 0, 0]; this.markerProperty = { numKeys: 0 };
     }
@@ -107,6 +109,7 @@ function es({ expressions = 1, nested = false, disabledLayer = false, viewer = t
     itemByID(id) { const it = items.find((x) => x.id === id); if (!it) throw new Error("internal verification failure, sorry! {Item Not Found}"); return it; },
     get activeItem() { return state.panelFocus ? state.panelItem : state.view; },
     file: null,
+    rootFolder: root,
     items: {
       addComp(name) { const c = new CompItem(name); items.push(c); state.changes++; return c; },
       addFolder(name) { const f = new FolderItem(name); items.push(f); state.changes++; return f; },
@@ -177,7 +180,7 @@ await check("the parking comp is made once, in its own undo step, and reused: la
   assert.equal(e.state.changes, madeChanges + 3, "park and unpark changed nothing in the project");
   const tagged = e.items.filter((it) => String(it.comment).startsWith("ae-mcp-viewer-parking:v1"));
   assert.equal(tagged.length, 1, "one parking comp, however many runs");
-  assert.equal(tagged[0].parentFolder, null, "no folder: two fewer project changes, and none left behind empty");
+  assert.equal(tagged[0].parentFolder.name, "Root", "no folder: two fewer project changes, and none left behind empty");
 });
 
 await check("a leftover parking comp (from a crash, or a project saved with it) is found by its tag and reused", () => {
@@ -361,6 +364,12 @@ await check("any change to the parking comp — name, duration, frame rate, size
     ["frame rate", (c) => { c.frameRate = 24; }, /frame rate/],
     ["markers", (c) => { c.markerProperty.numKeys = 1; }, /markers/],
     ["size", (c) => { c.width = 1920; }, /width/],
+    ["background colour", (c) => { c.bgColor = [1, 0, 0]; }, /background colour/],
+    ["work area", (c) => { c.workAreaDuration = 0.5; }, /work area/],
+    ["motion blur", (c) => { c.motionBlur = true; }, /motion blur/],
+    ["frame blending", (c) => { c.frameBlending = true; }, /frame blending/],
+    ["start timecode", (c) => { c.displayStartTime = 10; }, /start timecode/],
+    ["folder", (c) => { c._folder = { id: -5, name: "Elsewhere" }; }, /folder/],
   ]) {
     const e = es();
     e.call("_viewer_park");
@@ -390,6 +399,36 @@ await check("a parking comp written into is the user's everywhere: not parked, n
   assert.deepEqual(Array.from(vm.runInContext("__diffCompIds({diff: true}, null)", e.ctx)), [parking.id]);
   const p = e.call("_viewer_park").result;
   assert.equal(p.recovered, undefined, "a later park does not take it for a leftover");
+});
+
+await check("a parking comp's own settings are recorded when it is made, so After Effects' defaults never read as a change", () => {
+  const e = es();
+  e.call("_viewer_park");
+  const parking = e.items.find((it) => String(it.comment).startsWith("ae-mcp-viewer-parking:v1"));
+  assert.match(parking.comment, /made=16\|16\|1\|1\|1\|0\+1\|0\|false\|false\|0\.0\.0 /);
+  // Whatever AE defaults to is what is compared against: a comp made with a
+  // different work area is still clean.
+  e.call("_viewer_unpark");
+  parking.workAreaDuration = 0.9;
+  parking.comment = parking.comment.replace("0+1", "0+0.9");
+  assert.equal(e.call("_viewer_park").result.created, undefined, "reused");
+  // comp.time is not a setting: moving it changes nothing.
+  e.call("_viewer_unpark");
+  parking.time = 0.5;
+  assert.equal(e.call("_viewer_park").result.created, undefined);
+});
+
+await check("viewerComp() trusts a park only for its own parking comp (the park id), not any clean one", () => {
+  const e = es();
+  e.call("_viewer_park");
+  e.call("_viewer_unpark");
+  const first = e.items.find((it) => String(it.comment).startsWith("ae-mcp-viewer-parking:v1"));
+  const other = e.ctx.app.project.items.addComp("AE MCP viewer parking (safe to delete)");
+  other.comment = first.comment;
+  vm.runInContext(`__PARK = { fromId: ${e.heavy.id}, fromName: "TR — Opener", parkId: ${first.id}, at: 0 };`, e.ctx);
+  e.state.view = other;
+  const r = e.call("run_jsx", { code: "var c = viewerComp(); return c ? c.id : null;" }).result;
+  assert.equal(r && typeof r === "object" ? r.returned : r, null, "not the stale park's comp");
 });
 
 await check("the server's inline-batch limit is batch.jsx's", () => {
@@ -564,6 +603,8 @@ await check("a batch parks only with a run_jsx step (at any depth) and none opti
   const held = new Promise((r) => (release = r));
   let unparkAnswer = BACK;
   let runJsxHold = null;
+  let parkHold = null;
+  let parkedAnswer = { parked: false };
   const chunks = new Map();
   const bridge = http.createServer((req, res) => {
     res.setHeader("content-type", "application/json");
@@ -577,7 +618,11 @@ await check("a batch parks only with a run_jsx step (at any depth) and none opti
       const { op, args } = JSON.parse(body || "{}");
       seen.push(args?.recover ? `${op}(recover)` : args?.dryRun ? `${op}(dryRun)` : op);
       let result = { ok: true };
-      if (op === "_viewer_park") result = args?.dryRun ? { parked: false, wouldPark: true, compId: 7, compName: "TR — Opener" } : PARKED;
+      if (op === "_viewer_park") {
+        if (parkHold) await parkHold;
+        result = args?.dryRun ? { parked: false, wouldPark: true, compId: 7, compName: "TR — Opener" } : PARKED;
+      }
+      if (op === "_viewer_parked") result = parkedAnswer;
       if (op === "_viewer_unpark") result = unparkAnswer;
       if (op === "_run_jsx") { await (runJsxHold ?? held); result = { made: 3 }; }
       if (op === "run_batch" && args.ops.length > 500) {
@@ -599,7 +644,8 @@ await check("a batch parks only with a run_jsx step (at any depth) and none opti
   const { createServer } = await import(dist("server.js"));
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
-  const server = createServer();
+  const callsRecord = new CallsInFlight();
+  const server = createServer({ callsInFlight: callsRecord });
   const client = new Client({ name: "quiet-viewer-test", version: "0" }, { capabilities: {} });
   const [c, sv] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(sv), client.connect(c)]);
@@ -695,6 +741,53 @@ await check("a batch parks only with a run_jsx step (at any depth) and none opti
     seen.length = 0;
     await client.callTool({ name: "set_layer", arguments: { compId: 1, layerId: 1, name: "y" } });
     assert.deepEqual(seen, ["set_layer"], "once put back, the next write sends nothing extra");
+  });
+
+  await check("tools/call: a park that times out says the script was not sent — and busyWith never contradicts it", async () => {
+    seen.length = 0;
+    let open;
+    parkHold = new Promise((res) => (open = res));
+    process.env.AE_MCP_OP_TIMEOUT_MS = "400";
+    let r;
+    try {
+      r = await client.callTool({ name: "run_jsx", arguments: { code: "return 1;" } });
+    } finally {
+      delete process.env.AE_MCP_OP_TIMEOUT_MS;
+    }
+    const text = r.content.map((c) => c.text).join("\n");
+    assert.equal(r.isError, true);
+    assert.match(text, /^`run_jsx` was not sent: After Effects did not answer the viewer park/);
+    assert.doesNotMatch(text, /do not re-send/i);
+    assert.deepEqual(seen, ["_viewer_park"], "the script was never sent");
+    assert.equal(callsRecord.busyWith(), null, "check_setup would not name run_jsx as still running");
+    // The dry-run park before a script that reads activeItem is held to the same rule.
+    process.env.AE_MCP_OP_TIMEOUT_MS = "400";
+    try {
+      r = await client.callTool({ name: "run_jsx", arguments: { code: "return app.project.activeItem.name;" } });
+    } finally {
+      delete process.env.AE_MCP_OP_TIMEOUT_MS;
+    }
+    assert.match(r.content.map((c) => c.text).join("\n"), /^`run_jsx` was not sent/);
+    assert.equal(seen.includes("_run_jsx"), false, "nothing sent into a stuck After Effects");
+    assert.equal(callsRecord.busyWith(), null);
+    open();
+    parkHold = null;
+    // The parks landed late; put back what they left, so later checks start clean.
+    await client.callTool({ name: "set_layer", arguments: { compId: 1, layerId: 1, name: "z" } });
+  });
+
+  await check("tools/call: quietViewer:false and a script reading activeItem — a park a dead session left is found first", async () => {
+    seen.length = 0;
+    parkedAnswer = { parked: true, compId: 7 };
+    await client.callTool({ name: "run_jsx", arguments: { code: "return app.project.activeItem.name;", quietViewer: false } });
+    assert.deepEqual(seen, ["_viewer_parked", "_viewer_unpark(recover)", "_run_jsx"]);
+    parkedAnswer = { parked: false };
+    seen.length = 0;
+    await client.callTool({ name: "run_jsx", arguments: { code: "return app.project.activeItem.name;", quietViewer: false } });
+    assert.deepEqual(seen, ["_viewer_parked", "_run_jsx"], "nothing to undo: a read, then the script");
+    seen.length = 0;
+    await client.callTool({ name: "run_jsx", arguments: { code: "return 1;", quietViewer: false } });
+    assert.deepEqual(seen, ["_run_jsx"], "a script that does not read activeItem costs nothing extra");
   });
 
   await client.close();

@@ -78,6 +78,42 @@ function __parkIsTagged(item) {
 // app.project.activeItem while parked, or the user — and is no longer the
 // parking comp: never reused, never hidden, never treated as parked; whatever
 // landed in it is the user's work now.
+// The settings a script could change, each read as text. Recorded in the tag
+// when the comp is made (`made=`, in the one comment write creation does
+// anyway), so a comp is compared with how After Effects actually made it —
+// never with a guess at its defaults, which, if wrong, would read every fresh
+// parking comp as changed and make a new one on every run.
+var __PARK_FIELDS = [
+  ["width", function (c) { return c.width; }],
+  ["height", function (c) { return c.height; }],
+  ["duration", function (c) { return c.duration; }],
+  ["frame rate", function (c) { return c.frameRate; }],
+  ["pixel aspect", function (c) { return c.pixelAspect; }],
+  ["work area", function (c) { return c.workAreaStart + "+" + c.workAreaDuration; }],
+  ["start timecode", function (c) { return c.displayStartTime; }],
+  ["motion blur", function (c) { return c.motionBlur; }],
+  ["frame blending", function (c) { return c.frameBlending; }],
+  ["background colour", function (c) { var k = c.bgColor; return Math.round(k[0] * 255) + "." + Math.round(k[1] * 255) + "." + Math.round(k[2] * 255); }]
+];
+// comp.time is deliberately NOT a field: opening a comp in the viewer, and a
+// user scrubbing a viewer that shows it, move its time indicator with no
+// script involved, and that is no change to the project.
+
+function __parkFieldValue(c, i) {
+  try { return String(__PARK_FIELDS[i][1](c)); } catch (e) { return "?"; }
+}
+
+function __parkFingerprint(c) {
+  var parts = [];
+  for (var i = 0; i < __PARK_FIELDS.length; i++) parts.push(__parkFieldValue(c, i));
+  return parts.join("|");
+}
+
+// What differs from how the comp was made, by name. A tagged comp that differs
+// in anything was changed by someone — a script that wrote to
+// app.project.activeItem while parked, or the user — and is no longer the
+// parking comp: never reused, never hidden, never treated as parked; whatever
+// landed in it is the user's work now.
 function __parkChanges(item) {
   var out = [];
   function differs(label, read, want) {
@@ -86,12 +122,24 @@ function __parkChanges(item) {
     if (v !== want) out.push(label);
   }
   differs("layers", function () { return item.numLayers; }, 0);
-  differs("width", function () { return item.width; }, 16);
-  differs("height", function () { return item.height; }, 16);
-  differs("duration", function () { return item.duration; }, 1);
-  differs("frame rate", function () { return item.frameRate; }, 1);
   differs("name", function () { return item.name; }, __PARK_COMP_NAME);
   differs("markers", function () { return item.markerProperty.numKeys; }, 0);
+  differs("folder", function () { return item.parentFolder.id === app.project.rootFolder.id; }, true);
+  var made = null;
+  try {
+    var m = /\bmade=(\S+)/.exec(item.comment);
+    if (m) made = m[1].split("|");
+  } catch (e) { made = null; }
+  if (made && made.length === __PARK_FIELDS.length) {
+    for (var i = 0; i < __PARK_FIELDS.length; i++) {
+      var now = __parkFieldValue(item, i);
+      if (now !== "?" && made[i] !== "?" && now !== made[i]) out.push(__PARK_FIELDS[i][0]);
+    }
+  } else {
+    // A tag without the record: the size it was always made at.
+    differs("width", function () { return item.width; }, 16);
+    differs("height", function () { return item.height; }, 16);
+  }
   return out;
 }
 
@@ -139,7 +187,7 @@ function __parkFind() {
 // one would be two more, and an empty one left visible when the comp is gone.
 function __parkCreate() {
   var c = app.project.items.addComp(__PARK_COMP_NAME, 16, 16, 1, 1, 1);
-  c.comment = __PARK_TAG + " — AE MCP shows this empty comp in the viewer while a script runs, so After Effects " +
+  c.comment = __PARK_TAG + " made=" + __parkFingerprint(c) + " — AE MCP shows this empty comp in the viewer while a script runs, so After Effects " +
     "does not re-evaluate your comp's expressions after every change the script makes. Safe to delete; it is made " +
     "again when needed.";
   __PARK_ID = c.id;

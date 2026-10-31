@@ -181,12 +181,14 @@ function failureName(e: unknown): string {
  * Not parked because the script reads app.project.activeItem. A dry run says
  * whether parking would have paid off; only then is viewerComp() suggested.
  */
-export async function notParkedForActiveItem(send: SendInternal): Promise<ViewerReport | null> {
+export async function notParkedForActiveItem(send: SendInternal, op = "run_jsx"): Promise<ViewerReport | null> {
   let dry: ParkAnswer;
   try {
-    dry = (await send("_viewer_park", { dryRun: true })) as ParkAnswer;
+    dry = (await send("_viewer_park", { dryRun: true }, { untracked: true })) as ParkAnswer;
   } catch (e) {
     if (e instanceof UnleasedInternalWriteError) throw e;
+    // After Effects is stuck: the script is not sent into it (as for a park).
+    if (e instanceof BridgeTimeoutError) throw new ScriptNotSentError(op);
     return null;
   }
   if (!dry || dry.wouldPark !== true) return null;
@@ -215,7 +217,7 @@ export async function withParkedViewer<T>(
   let park: ParkAnswer | null = null;
   let parkError: unknown = null;
   try {
-    park = (await send("_viewer_park", {})) as ParkAnswer;
+    park = (await send("_viewer_park", {}, { untracked: true })) as ParkAnswer;
   } catch (e) {
     // A bug in the caller, not a bridge failure: nothing was sent.
     if (e instanceof UnleasedInternalWriteError) throw e;
@@ -381,4 +383,28 @@ export async function recoverForCheck(o: {
   } finally {
     held.release();
   }
+}
+
+/**
+ * A script that reads `activeItem` with `quietViewer: false` gets no park and
+ * no dry run — so nothing would notice a park another session's dead server
+ * left, and the script would read the parking comp. One background read says
+ * whether one is unfinished; only then is it undone. Errors are not this
+ * call's to report: the script itself meets the same bridge next.
+ */
+export async function recoverBeforeActiveItemScript(send: SendInternal, state: ViewerParkState): Promise<string | null> {
+  let parked = false;
+  try {
+    const st = (await send("_viewer_parked", {}, { untracked: true })) as { parked?: unknown } | null;
+    parked = st?.parked === true;
+  } catch (e) {
+    if (e instanceof UnleasedInternalWriteError) throw e;
+    return null;
+  }
+  return parked ? recoverParkedViewer(send, state) : null;
+}
+
+/** Whether any run_jsx step of a batch — at any depth, opted out or not — reads `activeItem`. */
+export function batchReadsActiveItem(args: unknown): boolean {
+  return runJsxSteps((args as { ops?: unknown } | null)?.ops).some((s) => readsActiveItem(s));
 }
