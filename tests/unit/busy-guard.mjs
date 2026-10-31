@@ -78,6 +78,7 @@ function fakePanel() {
     req.on("end", () => {
       const body = JSON.parse(Buffer.concat(bufs).toString("utf8"));
       state.ops.push(body.op);
+      state.lastDeadline = body.deadline;
       if (body.op === "hold") { held.push(res); return; }
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify(state.answer(body.op)));
@@ -110,8 +111,13 @@ try {
   await check("with nothing timed out, a call is sent without any probe", async () => {
     const c = client();
     const before = panel.state.healthHits;
+    const t0 = Date.now();
     assert.deepEqual(await c.runOp("list_comps", {}), { op: "list_comps" });
     assert.equal(panel.state.healthHits, before, "no /health asked");
+    // The panel drops a queued call whose deadline passed; it is when this
+    // request's own timeout fires (AE_MCP_OP_TIMEOUT_MS=300 here).
+    assert.equal(typeof panel.state.lastDeadline, "number");
+    assert.ok(Math.abs(panel.state.lastDeadline - (t0 + 300)) < 200, `deadline ${panel.state.lastDeadline - t0}ms after send`);
   });
 
   await check("behind a stuck call that /health cannot answer, the next call is refused fast and unsent", async () => {
@@ -131,7 +137,7 @@ try {
     assert.equal(panel.state.ops.length, sent, "nothing reached the panel");
     assert.equal(err.evidence.kind, "silent");
     assert.match(err.message, /^`create_null_layer` was not sent: After Effects is still busy/);
-    assert.match(err.message, /This server's `hold` call/);
+    assert.match(err.message, /An earlier `hold` call \(this session's, or another AI session's/);
     assert.match(err.message, /sending it again is\s+safe/);
     assert.match(err.message, /open\s+menu/);
     assert.match(err.message, /RAM preview/);
@@ -222,13 +228,22 @@ try {
       await assert.rejects(c.runOp("set_text", {}), (e) => {
         assert.ok(e instanceof AeError);
         assert.equal(e.code, EVAL_REFUSED_CODE, "keeps its code, so it is presented without an AE: prefix");
-        assert.match(e.message, /After Effects refused to run `set_text`/);
-        assert.match(e.message, /not an error in the script/);
+        assert.match(e.message, /After Effects answered "EvalScript error." for `set_text`/);
+        assert.match(e.message, /not an error in the call/);
         assert.match(e.message, /very probably did not run/);
         assert.match(e.message, /read back/);
         assert.doesNotMatch(e.message, /syntax or runtime/);
         return true;
       });
+      // The caller's own script can escape its handler part way through, so
+      // for run_jsx and run_batch it may have partly run.
+      for (const op of ["run_jsx", "_run_jsx", "run_batch"]) {
+        await assert.rejects(c.runOp(op, {}), (e) => {
+          assert.match(e.message, /may have partly run/, op);
+          assert.doesNotMatch(e.message, /very probably did not run/, op);
+          return true;
+        });
+      }
     } finally {
       panel.state.answer = (op) => ({ ok: true, result: { op } });
     }

@@ -413,31 +413,56 @@ export class AeError extends Error {
  */
 export const EVAL_REFUSED_CODE = "EVAL_SCRIPT_ERROR";
 
+/** Ops that run the caller's own script, which can escape the handler part way through. */
+const CALLER_SCRIPT_OPS = new Set(["run_jsx", "_run_jsx", "run_batch", "_continue_job"]);
+
 /**
  * What "EvalScript error." means for an op, in the server's words.
  *
  * It used to read "ExtendScript eval failed (syntax or runtime)", which sent
- * agents looking for a bug in their script. But every op reaches After Effects
- * as one fixed line, `__AEMCP.call(...)`, whose handler catches everything a
- * script can throw and answers it as `{ok:false}` — so the bare string is not
- * a script failing. It is After Effects declining to run the line at all,
- * which it does while it is held: by a modal dialog, a menu, a text edit, a
- * preview or a render. Very probably nothing ran; not certainly.
+ * agents looking for a bug in their script. Every op reaches After Effects as
+ * one fixed line, `__AEMCP.call(...)`, whose handler catches what an op throws
+ * and answers it as `{ok:false}` — so for an op of this server's the bare
+ * string most often means After Effects declined to run the line, which it
+ * does while it is held: a modal dialog, a menu, a text edit, a preview, a
+ * render. Not certainly. And for `run_jsx` and `run_batch` the caller's own
+ * code runs, and an exception escaping the handler gives the same answer after
+ * part of it ran, so those say "may have partly run". (The bundle load is not
+ * an op: the panel keeps the syntax-error wording for it.)
  */
 export function evalRefusedText(op: string): string {
-  return [
-    `After Effects refused to run \`${displayOp(op)}\`: it answered "EvalScript error." instead of running the script.`,
-    "",
-    "This is not an error in the script — this server sends every call as one fixed",
-    "line whose own failures come back as ordinary error messages. After Effects gives",
-    "this bare answer when it will not run a script at all, most often because the user",
-    "is in the middle of something there: an open menu, a modal dialog, a text layer",
-    "being typed into, a RAM preview, or a render.",
-    "",
-    "The call very probably did not run, but that is not certain.",
+  const head = `After Effects answered "EvalScript error." for \`${displayOp(op)}\` instead of a result.`;
+  const causes = [
+    "After Effects gives this bare answer when it will not run a script at all, most",
+    "often because the user is in the middle of something there: an open menu, a",
+    "modal dialog, a text layer being typed into, a RAM preview, or a render.",
+  ];
+  const steps = [
     "1. Ask the user to finish or close what they are doing in After Effects.",
     "2. Then read back what this call would have changed (get_layer_full, list_layers,",
     "   diff_comp against a snapshot), and send it again only if it did not land.",
+  ];
+  if (CALLER_SCRIPT_OPS.has(op)) {
+    return [
+      head,
+      "",
+      ...causes,
+      "It is also what an error escaping the script's own handling looks like, and then",
+      "part of the script may already have run — nothing rolls back.",
+      "",
+      "So it may not have run at all, or may have partly run.",
+      ...steps,
+    ].join("\n");
+  }
+  return [
+    head,
+    "",
+    "This is not an error in the call — this server sends every call as one fixed line",
+    "whose own failures come back as ordinary error messages.",
+    ...causes,
+    "",
+    "The call very probably did not run, but that is not certain.",
+    ...steps,
   ].join("\n");
 }
 
@@ -826,7 +851,7 @@ export class AeBusyError extends WriteQueueWaitError {
         ? `Re-checked just now: the panel did not answer even its ${elapsedText(evidence.probeMs)} health check, which happens only while After Effects is not letting scripts run.`
         : `Re-checked just now: the panel answered, and After Effects has still not finished the script it is on (\`${displayOp(evidence.op)}\`, for ${elapsedText(evidence.ms)}).`;
     return [
-      `\`${displayOp(op)}\` was not sent: After Effects is still busy. This server's ${prior} call, sent ${elapsedText(stuck.sentAgoMs)} ago, gave up at its ${secondsText(stuck.limitMs)} limit ${elapsedText(stuck.timedOutAgoMs)} ago, and nothing has answered since.`,
+      `\`${displayOp(op)}\` was not sent: After Effects is still busy. An earlier ${prior} call (this session's, or another AI session's on the same After Effects) was sent ${elapsedText(stuck.sentAgoMs)} ago and gave up at its ${secondsText(stuck.limitMs)} limit ${elapsedText(stuck.timedOutAgoMs)} ago, and nothing has answered since.`,
       seen,
       "",
       "This call never left the server, so it changed nothing, and sending it again is",

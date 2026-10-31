@@ -80,7 +80,7 @@ function makeHost(extDir) {
       // loadJsxBundle asks ExtendScript to evaluate the bundle and answer "ok".
       if (script.indexOf("$.evalFile") >= 0) {
         host.namespaceGone = false;
-        return void setTimeout(() => cb("ok"), 0);
+        return void setTimeout(() => cb(host.loadAnswer ?? "ok"), 0);
       }
       if (host.namespaceGone) return void setTimeout(() => cb("__AEMCP_MISSING__"), 0);
       // `raw(op, cb)` takes over one op's reply entirely: the raw string After
@@ -525,7 +525,7 @@ await check("drops a queued op whose request closed before its turn, and reports
     const body = await (await first).json();
     assert.equal(body.ok, true, "the op already handed to evalScript still answers");
     assert.deepEqual(body.result, { held: true });
-    await logLine(booted.dom, /abandoned_op was not run: the MCP server closed its request/);
+    await logLine(booted.dom, /abandoned_op was not run, the MCP server closed its request/);
     assert.ok(!seen.includes("abandoned_op"), "the abandoned op never reached ExtendScript");
     const idle = await (await fetch(panelUrl(port, "/health"))).json();
     assert.equal(idle.evalBusy, null);
@@ -533,6 +533,59 @@ await check("drops a queued op whose request closed before its turn, and reports
     // The chain still works afterwards.
     assert.equal((await (await post("list_comps")).json()).ok, true);
   } finally { booted.host.raw = null; }
+});
+
+// The socket close is one signal; the server's deadline is the one that does
+// not depend on CEP delivering socket events in time. Here the request stays
+// open, so only the deadline can drop it — and only once it is past by more
+// than the grace, so the server has certainly given up on it already.
+await check("drops a queued op whose server deadline passed, even with its request still open", async () => {
+  const port = Number(booted.dom.nodes.port.textContent);
+  const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
+  const post = (op, deadline) => fetch(panelUrl(port, "/op"), {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-ae-mcp-token": token },
+    body: JSON.stringify({ op, args: {}, deadline }),
+  });
+  let release = null;
+  const seen = [];
+  booted.host.raw = (op, cb) => {
+    seen.push(op);
+    if (op === "hold_me") { release = () => cb(JSON.stringify({ ok: true, result: { held: true } })); return true; }
+    return false;
+  };
+  try {
+    const first = post("hold_me", Date.now() + 60_000);
+    while (!release) await new Promise((r) => setTimeout(r, 10));
+    const late = post("expired_op", Date.now() - 1500).then((r) => r.json(), (e) => e);
+    const inGrace = post("in_grace_op", Date.now() + 5_000).then((r) => r.json());
+    await new Promise((r) => setTimeout(r, 100));
+    release();
+    assert.equal((await (await first).json()).ok, true);
+    assert.ok((await late) instanceof Error, "the dropped request gets no answer");
+    assert.equal((await inGrace).ok, true, "a call still inside its deadline runs");
+    await logLine(booted.dom, /expired_op was not run, the MCP server's deadline for it passed/);
+    assert.ok(!seen.includes("expired_op"), "the expired op never reached ExtendScript");
+    assert.ok(seen.includes("in_grace_op"));
+  } finally { booted.host.raw = null; }
+});
+
+await check("the bundle load keeps the syntax-error wording for \"EvalScript error.\"", async () => {
+  const port = Number(booted.dom.nodes.port.textContent);
+  const token = fs.readFileSync(path.join(path.dirname(booted.portFile), `token-${port}`), "utf8").trim();
+  booted.host.loadAnswer = "EvalScript error.";
+  try {
+    const r = await fetch(panelUrl(port, "/reload-jsx"), {
+      method: "POST", headers: { "content-type": "application/json", "x-ae-mcp-token": token }, body: "{}",
+    });
+    const body = await r.json();
+    assert.equal(body.ok, false);
+    assert.match(body.error, /syntax or runtime/);
+  } finally { booted.host.loadAnswer = undefined; }
+  const ok = await fetch(panelUrl(port, "/reload-jsx"), {
+    method: "POST", headers: { "content-type": "application/json", "x-ae-mcp-token": token }, body: "{}",
+  });
+  assert.equal(ok.status, 200, "and a good load afterwards restores the bundle");
 });
 
 await check("\"EvalScript error.\" comes back coded as After Effects refusing to run, not as a script fault", async () => {
@@ -549,7 +602,7 @@ await check("\"EvalScript error.\" comes back coded as After Effects refusing to
     assert.equal(body.ok, false);
     assert.equal(body.code, "EVAL_SCRIPT_ERROR");
     assert.doesNotMatch(body.error, /syntax or runtime/);
-    assert.match(body.error, /very probably did not run/);
+    assert.match(body.error, /declined to run it while busy/);
   } finally { booted.host.raw = null; }
 });
 

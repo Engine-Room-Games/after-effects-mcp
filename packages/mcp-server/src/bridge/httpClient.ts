@@ -322,7 +322,11 @@ export class HttpClient {
       resp = await fetch(`${this.base}/op`, {
         method: "POST",
         headers: { "content-type": "application/json", ...authHeaders(this.port) },
-        body: JSON.stringify({ op, args: args ?? {}, progressToken }),
+        // `deadline`: when this request's own timeout fires (epoch ms; the
+        // panel is on the same machine). The panel drops the call unrun if its
+        // turn comes later than that (plus a grace), so a call this server has
+        // already reported as timed out never runs late, out of order.
+        body: JSON.stringify({ op, args: args ?? {}, progressToken, deadline: Date.now() + timeoutMs }),
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {

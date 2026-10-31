@@ -72,7 +72,8 @@ only quitting and reopening After Effects will.
   by the panel before it runs.
   supersedes: every call after a timeout also times out
 - **"EvalScript error." is reported as After Effects refusing to run the call,
-  not as a script error.** Very probably nothing ran: read back, then re-send.
+  not as a script error.** Very probably nothing ran (a `run_jsx` or
+  `run_batch` may have partly run): read back, then re-send if it did not land.
   supersedes: ExtendScript eval failed (syntax or runtime)
 - **`setup_panel` refuses while After Effects is open, and changes nothing
   when it does.** Installing into an open After Effects leaves the panel

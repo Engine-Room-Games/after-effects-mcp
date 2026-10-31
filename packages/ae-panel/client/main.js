@@ -124,12 +124,14 @@
   var bundlePath = path.join(extDir, "jsx", "bundle.jsx");
 
   // ---------- ExtendScript evalScript: serialized via Promise chain ----------
-  // `opts.live`: asked when the call's turn comes, before anything is handed to
-  // After Effects. False means whoever asked has gone — the MCP server gave up
-  // and closed its request — so the call is dropped instead of run late and
-  // out of order behind whatever held After Effects. A call already handed to
-  // evalScript is never touched. `opts.label` is what /health reports while it
-  // runs (`evalBusy`).
+  // `opts.gone`: asked when the call's turn comes, before anything is handed to
+  // After Effects. A reason (string) means the MCP server has already given up
+  // on the call — its deadline passed, or it closed the request — so the call
+  // is dropped instead of run late and out of order behind whatever held After
+  // Effects. A call already handed to evalScript is never touched. `opts.label`
+  // is the op, reported on /health while it runs (`evalBusy`); absent for the
+  // bundle load.
+  var DEADLINE_GRACE_MS = 1000;
   var __evalChain = Promise.resolve();
   var __evalPending = 0;
   var __evalRunning = null;
@@ -139,11 +141,12 @@
     var p = __evalChain.then(function () {
       // One turn of the event loop first, so Node reads the sockets that closed
       // while ExtendScript held this thread — a request read only once AE let
-      // go may already have been abandoned — and `live` sees it.
-      return opts.live ? new Promise(function (r) { setTimeout(r, 0); }) : null;
+      // go may already have been abandoned — and `gone` sees it.
+      return opts.gone ? new Promise(function (r) { setTimeout(r, 0); }) : null;
     }).then(function () {
-      if (opts.live && !opts.live()) {
-        var gone = new Error("dropped before it ran: its request was closed while it waited its turn");
+      var why = opts.gone ? opts.gone() : null;
+      if (why) {
+        var gone = new Error("dropped before it ran: " + why);
         gone.code = "REQUEST_CLOSED";
         throw gone;
       }
@@ -151,13 +154,16 @@
         __evalRunning = { op: opts.label || "script", since: Date.now() };
         cs.evalScript(script, function (raw) {
           __evalRunning = null;
-          // Every op is one fixed line whose own failures come back as JSON, so
-          // this bare answer is After Effects declining to run it — most often
-          // while the user has it held — not a fault in the script.
           if (raw === "EvalScript error.") {
-            var refused = new Error("After Effects answered \"EvalScript error.\" instead of running " +
-              (opts.label || "the script") + " — it very probably did not run (After Effects was busy: a dialog, " +
-              "a menu, a text edit, a preview or a render). Read back before re-sending.");
+            // The bundle load (no label) is a whole file, and there this
+            // answer is what a parse or runtime error in it looks like.
+            if (!opts.label) return reject(new Error("ExtendScript eval failed (syntax or runtime)"));
+            // An op is one fixed line whose own failures come back as JSON, so
+            // this bare answer is most often After Effects declining to run it
+            // while the user has it held. The server words it per op.
+            var refused = new Error("After Effects answered \"EvalScript error.\" for " + opts.label +
+              " — most often it declined to run it while busy (a dialog, a menu, a text edit, a preview " +
+              "or a render). Read back before re-sending.");
             refused.code = "EVAL_SCRIPT_ERROR";
             return reject(refused);
           }
@@ -218,10 +224,10 @@
   }
 
   // Run an op through the dispatch table. Returns parsed JS object.
-  // `live` (optional): see evalScript — the op is dropped unrun once it is false.
-  function runOp(op, args, live) {
+  // `gone` (optional): see evalScript — the op is dropped unrun once it answers a reason.
+  function runOp(op, args, gone) {
     var payload = JSON.stringify({ op: op, args: args || {} });
-    var evalOpts = { label: op, live: live };
+    var evalOpts = { label: op, gone: gone };
     return evalScript(opScript(payload), evalOpts).then(function (raw) {
       if (raw !== NS_MISSING) return raw;
       // Nothing ran: NS_MISSING is answered instead of the op, so sending it
@@ -531,7 +537,7 @@
   // the house style's file I/O and run_jsx's assembly are the server's (issue
   // #220), and the copies of that work that used to live here are gone (issue
   // #243). What is left is bookkeeping for /reload-jsx.
-  function handleOp(op, args, live) {
+  function handleOp(op, args, gone) {
     if (op === "run_batch") {
       // The driver flag is the server's word to this panel, never an op
       // argument: ExtendScript does not see it.
@@ -540,7 +546,7 @@
         for (var ak in args) { if (args.hasOwnProperty(ak) && ak !== "__driver") stripped[ak] = args[ak]; }
         args = stripped;
       }
-      return runOp(op, args, live).then(function (res) {
+      return runOp(op, args, gone).then(function (res) {
         if (res && res.async && res.jobId) {
           trackServerJob(res.jobId, res.total);
           // The undo fields ride out with the envelope so the agent is told the
@@ -564,7 +570,7 @@
     // /reload-jsx.
     if (op === "_continue_job" && args && jobsInFlight[args.jobId]) {
       var cj = args.jobId;
-      return runOp(op, args, live).then(function (res) {
+      return runOp(op, args, gone).then(function (res) {
         noteServerChunk(cj, res);
         return res;
       }, function (e) {
@@ -572,7 +578,7 @@
         throw e;
       });
     }
-    return runOp(op, args, live);
+    return runOp(op, args, gone);
   }
 
   // ---------- HTTP server ----------
@@ -654,15 +660,30 @@
 
           if (url === "/op") {
             bumpReq();
-            // The MCP server closes its request when it gives up on the call
-            // (its timeout). Queued behind a stuck call, it would otherwise
-            // still run once After Effects frees up — late, out of order, after
-            // the agent was told it timed out. So it is dropped at its turn.
+            // Queued behind a stuck call, an op would otherwise still run once
+            // After Effects frees up — late, out of order, after the agent was
+            // told it timed out. So it is dropped at its turn once the server
+            // has given up on it. The server's `deadline` (epoch ms, the moment
+            // its own timeout fires; same machine, same clock) is the signal
+            // that does not depend on socket events reaching this thread in
+            // time; DEADLINE_GRACE_MS past it, the server has certainly given
+            // up, so a dropped call is only ever one already reported to it as
+            // timed out. The request closing is a second signal.
             var replied = false;
             var closedEarly = false;
             res.on("close", function () { if (!replied) closedEarly = true; });
-            var live = function () { return !closedEarly && !(req.socket && req.socket.destroyed); };
-            handleOp(body.op, body.args, live)
+            var deadline = typeof body.deadline === "number" && isFinite(body.deadline) ? body.deadline : null;
+            var gone = function () {
+              if (deadline !== null && Date.now() > deadline + DEADLINE_GRACE_MS) {
+                return "the MCP server's deadline for it passed " + Math.round((Date.now() - deadline) / 1000) +
+                  "s ago while it was queued behind another call";
+              }
+              if (closedEarly || (req.socket && req.socket.destroyed)) {
+                return "the MCP server closed its request (it gave up waiting) while it was queued behind another call";
+              }
+              return null;
+            };
+            handleOp(body.op, body.args, gone)
               .then(function (result) {
                 replied = true;
                 res.statusCode = 200; res.setHeader("content-type", "application/json");
@@ -671,8 +692,11 @@
               .catch(function (err) {
                 replied = true;
                 if (err && err.code === "REQUEST_CLOSED") {
-                  log("warn", body.op + " was not run: the MCP server closed its request (it gave up waiting) " +
-                    "while the call was queued behind another, so it was dropped rather than run late.");
+                  log("warn", body.op + " was not run, " + err.message.replace(/^dropped before it ran: /, "") +
+                    " — dropped rather than run late.");
+                  // No answer: the server has already reported this call as
+                  // timed out, and nothing it could read here would be newer.
+                  try { res.destroy(); } catch (e) {}
                   return;
                 }
                 log("error", body.op + ": " + err.message);

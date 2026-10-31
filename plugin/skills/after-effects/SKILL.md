@@ -317,8 +317,9 @@ you are about to build on rather than trusting what you last saw.
   render). The stuck call itself may still land: read back before re-sending it.
 - **After Effects refused to run the call ("EvalScript error.").** Not a fault in
   your script: AE declined to run it, almost always because the user has it held
-  the same way. Very probably nothing ran — ask the user to finish, read back,
-  and re-send only if it did not land.
+  the same way. Very probably nothing ran (for `run_jsx`/`run_batch` it may have
+  partly run) — ask the user to finish, read back, and re-send only if it did
+  not land.
 - **Refused: the bridge token did not match.** The panel is running and
   answered at once, by refusing; nothing reached After Effects. Do not re-send
   it — it will be refused identically — and do not restart After Effects or run
