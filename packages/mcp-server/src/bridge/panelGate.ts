@@ -55,6 +55,11 @@ function assessFromDisk(health: Health): PanelAssessment {
  * verdict was about is not answering, and "cannot reach After Effects" is
  * `runOp`'s error to report, with a much better message than this. A *timeout*
  * keeps the stale verdict — a busy After Effects is still running the old code.
+ * It keeps a *current* verdict too, for the full healthy interval: a busy
+ * After Effects is still running the same panel it was a moment ago, and
+ * re-probing every few seconds charged each call it landed on the whole 2 s
+ * probe while the user had After Effects held (a menu, a dialog, a preview).
+ * Only a verdict never reached waits the short interval before asking again.
  *
  * Since issue #243 the server has one path per tool, and every one of them
  * needs the current panel; there is no older path a stale panel could be sent
@@ -65,6 +70,8 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
   const assess = opts.assess ?? assessFromDisk;
   const now = opts.now ?? Date.now;
   let verdict: string | null = null;
+  /** A probe has answered since the last invalidate, so `verdict` is a verdict rather than "not asked yet". */
+  let assessed = false;
   /** When the next probe is due; 0 = ask on the next call. */
   let nextCheckAt = 0;
   /** Bumped by every invalidate, so a probe begun before one cannot write after it. */
@@ -75,6 +82,7 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
   const invalidate = () => {
     generation++;
     verdict = null;
+    assessed = false;
     nextCheckAt = 0;
     inflight = null;
   };
@@ -90,6 +98,7 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
       if (gen !== generation) return verdict;
       const assessment = assess(health);
       verdict = assessment.state === "current" || assessment.state === "unknown" ? null : assessment.message;
+      assessed = true;
       nextCheckAt = now() + (verdict !== null ? STALE_RECHECK_MS : HEALTHY_RECHECK_MS);
       // "unknown" is the one state besides "current" let through: this server
       // has no shipped panel to hash, and the running panel lists every
@@ -105,8 +114,10 @@ export function createPanelGate(bridge: PanelGateBridge, opts: PanelGateOptions 
       }
       // Timed out (After Effects busy) or answered oddly: whatever was known
       // before still stands. Wait before asking again, so a busy AE does not
-      // cost every call the full health-probe timeout.
-      nextCheckAt = now() + STALE_RECHECK_MS;
+      // cost every call the full health-probe timeout — the healthy interval
+      // when the panel was last seen current, since nothing a busy After
+      // Effects does can change the panel it is running.
+      nextCheckAt = now() + (assessed && verdict === null ? HEALTHY_RECHECK_MS : STALE_RECHECK_MS);
       return verdict;
     }
   }

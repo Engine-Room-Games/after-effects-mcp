@@ -44,8 +44,10 @@ import { busyWithText, type BusyWith } from "../bridge/callsInFlight.js";
 const BRIDGE_PROBE_MS = 2000;
 const BRIDGE_BUSY_FIX =
   "This is a timeout, not a refused connection — something is listening, it just did not answer in time. " +
-  "After Effects is most likely busy running a script, or waiting on a modal dialog nobody has clicked. " +
-  "Wait and run check_setup again, up to about a minute, before restarting anything; it usually clears on its own. " +
+  "After Effects is most likely busy running a script, or held by the user: an open menu, a modal dialog nobody has clicked, " +
+  "a text layer being typed into, a RAM preview playing, or a render they started. " +
+  "Ask the user to finish or close it, then retry; otherwise wait and run check_setup again, up to about a minute, " +
+  "before restarting anything — it usually clears on its own. " +
   "On macOS, if the user has switched to another desktop, ask them to switch back to the one After Effects is on.";
 
 export interface Check {
@@ -730,7 +732,7 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
     const out = [
       "Wait — do not restart anything yet. The panel is answering its port but is too busy to reply, which almost always means After Effects is still running a script.",
       "Run check_setup again in about ten seconds, and keep checking for up to a minute. It usually clears on its own.",
-      "While waiting, ask the user to look at After Effects: a dialog it is waiting on (unsaved project, missing fonts) blocks it the same way and may be hidden behind another window.",
+      "While waiting, ask the user to look at After Effects. What they are doing there blocks it the same way: an open menu, a modal dialog (unsaved project, missing fonts — possibly hidden behind another window), a text layer being typed into, a RAM preview playing, or a render they started. Ask them to finish or close it, then retry — but read back whether a call that timed out has landed before sending that one again.",
       "On macOS, if they have moved to a different desktop, ask them to switch back to the one After Effects is on.",
     ];
     if (agreement && agreement.ok === false) {

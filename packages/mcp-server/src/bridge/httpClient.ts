@@ -1,5 +1,5 @@
 import type { AeSourceInfo } from "../util/errors.js";
-import { AeError, BridgeAuthError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, isResetError, isTimeoutError, isUnsentError } from "../util/errors.js";
+import { AeBusyError, AeError, BridgeAuthError, BridgeResetError, BridgeTimeoutError, BridgeUnreachableError, EVAL_REFUSED_CODE, evalRefusedText, isResetError, isTimeoutError, isUnsentError, type BusyEvidence } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { authHeaders, DEFAULT_PORT, discoverPort, locatePanel, panelToken, pinnedPort, portCandidates, type LocateResult, type PanelHealth } from "./discovery.js";
 import { displayOp } from "../util/opNames.js";
@@ -59,6 +59,26 @@ export function opTimeoutMs(op?: string): number {
 /** Liveness probe only, so it stays short whatever the op timeout is set to. */
 const HEALTH_TIMEOUT_MS = 2000;
 
+/**
+ * The busy re-check made before sending anything while an earlier call has
+ * timed out unanswered (see `refuseWhileStuck`). Shorter than the gate's probe:
+ * it is paid by a call that is about to be refused or sent, and a free panel
+ * answers /health in milliseconds.
+ */
+export const BUSY_PROBE_MS = 1500;
+/** A /health that went unanswered this recently already says After Effects is busy. */
+const RECENT_SILENCE_MS = 2500;
+/**
+ * A script the panel says it started more than this after the stuck call gave
+ * up, under a different op name, is taken for other work: the stuck call was
+ * either run before it or dropped by the panel (its request closed, or its
+ * timeout passed while it was queued). One with the same name may be the
+ * stuck call itself, received late, so it never counts. `evalBusy.ms` is a
+ * duration, so only the reading here depends on this clock. Margin for the
+ * two reads.
+ */
+const STARTED_AFTER_MARGIN_MS = 250;
+
 /** Told when the client moves to a different port. May be async; awaited, bounded. */
 export type PortChangeListener = (next: number, previous: number) => void | Promise<void>;
 
@@ -87,7 +107,12 @@ export interface HttpClientOptions {
    * a test hands in its own list so nothing real on the machine is ever asked.
    */
   candidates?: () => number[];
+  /** Test seam for the busy guard's clock. */
+  now?: () => number;
 }
+
+/** A call this client sent that timed out and has had no answer since. */
+interface Stuck { op: string; sentAt: number; timedOutAt: number; limitMs: number; }
 
 /**
  * One line appended to the unreachable message when a refusal was followed by
@@ -119,12 +144,110 @@ export class HttpClient {
   readonly initialPort: number;
   private listeners: PortChangeListener[] = [];
   private candidatesFn: () => number[];
+  private now: () => number;
+  /**
+   * The earliest call sent from here that timed out with nothing answered
+   * since — what After Effects is very probably still on. Every op this
+   * process forwards comes through here, its own and (when it runs the front
+   * desk) every other session's, so one record covers them all.
+   */
+  private stuck: Stuck | null = null;
+  /** When a /health last went unanswered, and how long it had waited. */
+  private silentAt = Number.NEGATIVE_INFINITY;
+  private silentProbeMs = 0;
+  /** The busy re-check in flight, shared by every call that arrives while it runs. */
+  private busyCheck: Promise<BusyEvidence | null> | null = null;
 
   constructor(port?: number, opts: HttpClientOptions = {}) {
     this.port = port ?? discoverPort();
     this.initialPort = this.port;
     this.base = `http://127.0.0.1:${this.port}`;
     this.candidatesFn = opts.candidates ?? portCandidates;
+    this.now = opts.now ?? Date.now;
+  }
+
+  /** The call the busy guard believes After Effects is still on, if any. For tests. */
+  stuckCall(): Readonly<Stuck> | null {
+    return this.stuck;
+  }
+
+  /** A /health body answered: an idle evalScript chain proves the stuck call is over. */
+  private noteHealth(h: PanelHealth): void {
+    if (!h.evalBusy) this.stuck = null;
+  }
+
+  /**
+   * Is After Effects still on the stuck call? One quick /health decides.
+   *
+   * Unanswered: the panel's JavaScript thread is held — ExtendScript runs on
+   * it, measured to block /health for a script's whole duration
+   * (docs/fragile-areas-bridge.md) — so busy. Answered with `evalBusy`: the
+   * thread is free but After Effects has not answered the script it was
+   * handed — what a dialog or a menu looks like if CEP keeps running through
+   * one — so busy, unless that script started after the stuck call gave up and
+   * so cannot be it. Answered idle: AE is free. Refused, or anything else: not
+   * this guard's to report; the op goes out and meets the bridge's own
+   * diagnosis.
+   */
+  private checkBusy(): Promise<BusyEvidence | null> {
+    if (this.now() - this.silentAt < RECENT_SILENCE_MS) {
+      return Promise.resolve({ kind: "silent", probeMs: this.silentProbeMs });
+    }
+    if (!this.busyCheck) {
+      const p = (async (): Promise<BusyEvidence | null> => {
+        let h: PanelHealth;
+        try {
+          const r = await fetch(`${this.base}/health`, { signal: AbortSignal.timeout(BUSY_PROBE_MS) });
+          if (!r.ok) throw new Error(`health HTTP ${r.status}`);
+          h = (await r.json()) as PanelHealth;
+        } catch (e) {
+          if (isTimeoutError(e)) {
+            this.silentAt = this.now();
+            this.silentProbeMs = BUSY_PROBE_MS;
+            return { kind: "silent", probeMs: BUSY_PROBE_MS };
+          }
+          return null;
+        }
+        this.noteHealth(h);
+        const running = h.evalBusy;
+        if (!running || !this.stuck) return null;
+        if (running.op !== this.stuck.op && this.now() - running.ms > this.stuck.timedOutAt + STARTED_AFTER_MARGIN_MS) {
+          // Started after the stuck call gave up: that call is over, and this
+          // is ordinary work the next call can wait behind like any other.
+          this.stuck = null;
+          return null;
+        }
+        return { kind: "running", op: running.op, ms: running.ms };
+      })().finally(() => {
+        if (this.busyCheck === p) this.busyCheck = null;
+      });
+      this.busyCheck = p;
+    }
+    return this.busyCheck;
+  }
+
+  /**
+   * Refuse `op` unsent while After Effects is still on a call that timed out.
+   *
+   * Without this, every call made while After Effects was held waited its own
+   * full limit (120 s by default) behind the stuck one, then still ran once AE
+   * was free — late, out of order, after its caller had been told it timed
+   * out. Now a call after a timeout re-checks once, quickly: still busy, it
+   * gets `AeBusyError` at once — the not-sent kind, so the agent may send it
+   * again, which a timeout forbids — and free, the record is dropped and the
+   * call goes out as normal.
+   */
+  private async refuseWhileStuck(op: string): Promise<void> {
+    if (!this.stuck) return;
+    const evidence = await this.checkBusy();
+    const stuck = this.stuck;
+    if (!evidence || !stuck) return;
+    const t = this.now();
+    throw new AeBusyError(
+      op,
+      { op: stuck.op, sentAgoMs: t - stuck.sentAt, timedOutAgoMs: t - stuck.timedOutAt, limitMs: stuck.limitMs },
+      evidence
+    );
   }
 
   /** The ports a rediscovery will ask, in order. Exposed so `check_setup` asks the same ones. */
@@ -145,6 +268,9 @@ export class HttpClient {
     const previous = this.port;
     if (next === previous) return;
     this.port = next;
+    // The busy record was about the panel on the old port.
+    this.stuck = null;
+    this.silentAt = Number.NEGATIVE_INFINITY;
     this.base = `http://127.0.0.1:${next}`;
     logger.warn(`Bridge port changed: ${previous} -> ${next}`);
     await Promise.race([
@@ -171,12 +297,16 @@ export class HttpClient {
     try {
       const r = await fetch(`${this.base}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
       if (!r.ok) throw new Error(`health HTTP ${r.status}`);
-      return (await r.json()) as PanelHealth;
+      const h = (await r.json()) as PanelHealth;
+      this.noteHealth(h);
+      return h;
     } catch (e) {
       // A busy AE blows this 2s probe long before it blows the op timeout, and
       // check_setup is exactly what a confused user runs next — so this failure
       // must not claim the panel is gone either.
       if (isTimeoutError(e)) {
+        this.silentAt = this.now();
+        this.silentProbeMs = HEALTH_TIMEOUT_MS;
         throw new BridgeTimeoutError(this.port, HEALTH_TIMEOUT_MS, { op: "health", adjustable: false });
       }
       throw new BridgeUnreachableError(this.port, e as Error);
@@ -191,18 +321,31 @@ export class HttpClient {
   private async postOp(op: string, args: unknown, progressToken?: string | number, opts: RunOpOptions = {}): Promise<unknown> {
     let resp: Response;
     const timeoutMs = opts.timeoutMs ?? opTimeoutMs(op);
+    const sentAt = this.now();
     try {
       resp = await fetch(`${this.base}/op`, {
         method: "POST",
         headers: { "content-type": "application/json", ...authHeaders(this.port) },
-        body: JSON.stringify({ op, args: args ?? {}, progressToken }),
+        // `timeoutMs`: how long this request's own timeout runs, from now. The
+        // panel starts the same span on its monotonic clock when the request
+        // arrives — after this send, so its deadline is never earlier than
+        // ours — and drops the call unrun if its turn comes later than that
+        // (plus a grace). Relative on purpose: an absolute time would break on
+        // a clock change or a sleep. So a call this server has already
+        // reported as timed out never runs late, out of order.
+        body: JSON.stringify({ op, args: args ?? {}, progressToken, timeoutMs }),
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
       // Timed out and refused are different diagnoses with different remedies.
       // Collapsing them into "cannot reach the panel" is what sends people off
       // restarting a bridge that was only busy.
-      if (isTimeoutError(e)) throw new BridgeTimeoutError(this.port, timeoutMs, { op });
+      if (isTimeoutError(e)) {
+        // The earliest is kept: the panel runs calls in order, so a later one
+        // that timed out was waiting behind it, not running.
+        if (!this.stuck) this.stuck = { op, sentAt, timedOutAt: this.now(), limitMs: timeoutMs };
+        throw new BridgeTimeoutError(this.port, timeoutMs, { op });
+      }
       // A reset is a third case (#163): the request reached a panel, so it is
       // not "unreachable" — and must not be, because runOp re-sends those.
       if (!isUnsentError(e) && isResetError(e)) throw new BridgeResetError(this.port, op, e as Error);
@@ -212,12 +355,19 @@ export class HttpClient {
     if (resp.status === 401 || resp.status === 403) {
       throw new BridgeAuthError(this.port, panelToken(this.port) !== null);
     }
+    // Any other answer to an op came back through the panel's evalScript
+    // chain, which runs one call at a time in order: whatever timed out before
+    // it is over.
+    this.stuck = null;
     let data: OpResult;
     try { data = (await resp.json()) as OpResult; }
     catch {
       throw new AeError(`Bridge returned non-JSON (HTTP ${resp.status})`);
     }
     if (!data.ok) {
+      // After Effects declining to run the call is worded by the server, so it
+      // names the op as the agent knows it, and a follower gets the same text.
+      if (data.code === EVAL_REFUSED_CODE) throw new AeError(evalRefusedText(op), undefined, undefined, data.code);
       throw new AeError(data.error, data.stack, data.line, data.code, data.source);
     }
     return data.result;
@@ -241,6 +391,7 @@ export class HttpClient {
    * something else, and that is the original error's story to tell.
    */
   async runOp(op: string, args: unknown, progressToken?: string | number, opts: RunOpOptions = {}): Promise<unknown> {
+    await this.refuseWhileStuck(op);
     try {
       return await this.postOp(op, args, progressToken, opts);
     } catch (e) {

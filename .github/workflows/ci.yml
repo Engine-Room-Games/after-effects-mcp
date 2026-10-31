@@ -177,6 +177,12 @@ jobs:
       - name: Bridge timeouts are diagnosed apart from disconnections
         run: node tests/unit/bridge-timeout.mjs
 
+      # A user holding After Effects (a menu, a dialog, a text edit, a preview)
+      # must cost one timeout, not one per call: the next call is refused
+      # unsent, fast, while AE is still on the stuck one.
+      - name: Calls behind a stuck call are refused unsent, not queued
+        run: node tests/unit/busy-guard.mjs
+
       # Issue #106: the bridge is on 127.0.0.1 and /op is an eval inside After
       # Effects, so a web page reaching it is arbitrary code execution as the
       # user. Dropping the CORS header does not close that — a text/plain POST

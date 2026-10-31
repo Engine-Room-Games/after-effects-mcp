@@ -281,7 +281,10 @@ you are about to build on rather than trusting what you last saw.
   started, and either way can still land after the error (measured): do **not**
   re-send it, do not restart
   After Effects, do not run `setup_panel`. Poll `check_setup` for about a
-  minute, and ask the user whether a dialog is hiding behind another window.
+  minute, and ask the user whether they are in the middle of something in
+  After Effects — an open menu, a dialog (perhaps hidden behind another
+  window), a text layer being typed into, a RAM preview, a render of their own —
+  and to finish or close it.
   While After Effects has answered nothing since, `check_setup` names the call
   under `busyWith` — keep waiting while it does; a long `run_jsx` can hold After
   Effects for minutes. A
@@ -306,6 +309,17 @@ you are about to build on rather than trusting what you last saw.
   it has finished: nothing ran, so a second copy is impossible. When
   the message says it waited behind *another session*, `get_job` cannot see that
   work: tell the user another session is writing to the same After Effects.
+- **Not sent: After Effects is still busy.** An earlier call timed out and
+  After Effects has answered nothing since, so this one was refused at once
+  instead of queueing behind it; the message names the stuck call. Nothing ran,
+  so re-sending is safe — once the user has finished or closed what is holding
+  After Effects (the usual cause: a menu, a dialog, a text edit, a preview, a
+  render). The stuck call itself may still land: read back before re-sending it.
+- **After Effects refused to run the call ("EvalScript error.").** Not a fault in
+  your script: AE declined to run it, almost always because the user has it held
+  the same way. Very probably nothing ran (for `run_jsx`/`run_batch` it may have
+  partly run) — ask the user to finish, read back, and re-send only if it did
+  not land.
 - **Refused: the bridge token did not match.** The panel is running and
   answered at once, by refusing; nothing reached After Effects. Do not re-send
   it — it will be refused identically — and do not restart After Effects or run

@@ -118,6 +118,15 @@ export interface PanelHealth {
   capabilities?: unknown;
   /** Requires a bridge token. Absent before issue #106: `undefined` is "too old to want one". */
   auth?: boolean;
+  /**
+   * The script the panel has handed to After Effects and has no answer for
+   * yet, or null when its evalScript chain is idle. Absent on panels older
+   * than this field. Only ever seen while the panel's own JavaScript thread is
+   * free: while ExtendScript holds that thread, /health is not answered at all.
+   */
+  evalBusy?: { op: string; ms: number } | null;
+  /** Calls queued in the panel behind `evalBusy`. */
+  evalQueued?: number;
   ts?: number;
 }
 

@@ -124,19 +124,68 @@
   var bundlePath = path.join(extDir, "jsx", "bundle.jsx");
 
   // ---------- ExtendScript evalScript: serialized via Promise chain ----------
+  // `opts.gone`: asked when the call's turn comes, before anything is handed to
+  // After Effects. A reason (string) means the MCP server has already given up
+  // on the call — its deadline passed, or it closed the request — so the call
+  // is dropped instead of run late and out of order behind whatever held After
+  // Effects. A call already handed to evalScript is never touched. `opts.label`
+  // is the op, reported on /health while it runs (`evalBusy`); absent for the
+  // bundle load.
+  var DEADLINE_GRACE_MS = 1000;
+  // Milliseconds on a monotonic clock: no wall-clock change or sleep moves it.
+  function monoNow() {
+    if (typeof performance !== "undefined" && performance && typeof performance.now === "function") return performance.now();
+    if (typeof process !== "undefined" && process.hrtime) { var t = process.hrtime(); return t[0] * 1000 + t[1] / 1e6; }
+    return Date.now();
+  }
   var __evalChain = Promise.resolve();
-  function evalScript(script) {
+  var __evalPending = 0;
+  var __evalRunning = null;
+  function evalScript(script, opts) {
+    opts = opts || {};
+    __evalPending += 1;
     var p = __evalChain.then(function () {
+      // One turn of the event loop first, so Node reads the sockets that closed
+      // while ExtendScript held this thread — a request read only once AE let
+      // go may already have been abandoned — and `gone` sees it.
+      return opts.gone ? new Promise(function (r) { setTimeout(r, 0); }) : null;
+    }).then(function () {
+      var why = opts.gone ? opts.gone() : null;
+      if (why) {
+        var gone = new Error("dropped before it ran: " + why);
+        gone.code = "REQUEST_CLOSED";
+        throw gone;
+      }
       return new Promise(function (resolve, reject) {
+        __evalRunning = { op: opts.label || "script", since: Date.now() };
         cs.evalScript(script, function (raw) {
-          if (raw === "EvalScript error.") return reject(new Error("ExtendScript eval failed (syntax or runtime)"));
+          __evalRunning = null;
+          if (raw === "EvalScript error.") {
+            // The bundle load (no label) is a whole file, and there this
+            // answer is what a parse or runtime error in it looks like.
+            if (!opts.label) return reject(new Error("ExtendScript eval failed (syntax or runtime)"));
+            // An op is one fixed line whose own failures come back as JSON, so
+            // this bare answer is most often After Effects declining to run it
+            // while the user has it held. The server words it per op.
+            var refused = new Error("After Effects answered \"EvalScript error.\" for " + opts.label +
+              " — most often it declined to run it while busy (a dialog, a menu, a text edit, a preview " +
+              "or a render). Read back before re-sending.");
+            refused.code = "EVAL_SCRIPT_ERROR";
+            return reject(refused);
+          }
           resolve(raw);
         });
       });
     });
+    var settle = function () { __evalPending -= 1; };
+    p.then(settle, settle);
     // Keep the chain alive even on rejection so subsequent calls aren't blocked.
     __evalChain = p.catch(function () { return null; });
     return p;
+  }
+
+  function evalBusyNow() {
+    return __evalRunning ? { op: __evalRunning.op, ms: Date.now() - __evalRunning.since } : null;
   }
 
   // ---------- The bundle's one global (issue #185) ----------
@@ -181,13 +230,15 @@
   }
 
   // Run an op through the dispatch table. Returns parsed JS object.
-  function runOp(op, args) {
+  // `gone` (optional): see evalScript — the op is dropped unrun once it answers a reason.
+  function runOp(op, args, gone) {
     var payload = JSON.stringify({ op: op, args: args || {} });
-    return evalScript(opScript(payload)).then(function (raw) {
+    var evalOpts = { label: op, gone: gone };
+    return evalScript(opScript(payload), evalOpts).then(function (raw) {
       if (raw !== NS_MISSING) return raw;
       // Nothing ran: NS_MISSING is answered instead of the op, so sending it
       // again after the reload cannot run it twice.
-      return healNamespace(op).then(function () { return evalScript(opScript(payload)); });
+      return healNamespace(op).then(function () { return evalScript(opScript(payload), evalOpts); });
     }).then(function (raw) {
       if (raw === NS_MISSING) {
         throw new Error("The AE MCP bundle is not loaded in After Effects (__AEMCP missing even after reloading " +
@@ -492,7 +543,7 @@
   // the house style's file I/O and run_jsx's assembly are the server's (issue
   // #220), and the copies of that work that used to live here are gone (issue
   // #243). What is left is bookkeeping for /reload-jsx.
-  function handleOp(op, args) {
+  function handleOp(op, args, gone) {
     if (op === "run_batch") {
       // The driver flag is the server's word to this panel, never an op
       // argument: ExtendScript does not see it.
@@ -501,7 +552,7 @@
         for (var ak in args) { if (args.hasOwnProperty(ak) && ak !== "__driver") stripped[ak] = args[ak]; }
         args = stripped;
       }
-      return runOp(op, args).then(function (res) {
+      return runOp(op, args, gone).then(function (res) {
         if (res && res.async && res.jobId) {
           trackServerJob(res.jobId, res.total);
           // The undo fields ride out with the envelope so the agent is told the
@@ -525,7 +576,7 @@
     // /reload-jsx.
     if (op === "_continue_job" && args && jobsInFlight[args.jobId]) {
       var cj = args.jobId;
-      return runOp(op, args).then(function (res) {
+      return runOp(op, args, gone).then(function (res) {
         noteServerChunk(cj, res);
         return res;
       }, function (e) {
@@ -533,13 +584,15 @@
         throw e;
       });
     }
-    return runOp(op, args);
+    return runOp(op, args, gone);
   }
 
   // ---------- HTTP server ----------
   function startHttp(port) {
     return new Promise(function (resolve, reject) {
       var server = http.createServer(function (req, res) {
+        // When the request arrived, on a clock no wall-clock change moves.
+        var receivedAt = monoNow();
         var url = req.url || "/";
         // Only /reload-jsx takes a query (`?force=1`); every other route is
         // still matched on the whole url, as before.
@@ -576,6 +629,12 @@
             // What this panel can do (issue #220). The server's gate reads it
             // only when it has no shipped panel to compare the hashes with.
             capabilities: PANEL_CAPABILITIES,
+            // The script handed to After Effects with no answer yet, or null.
+            // The server's busy guard reads it after a timeout: answered here
+            // with this set, After Effects is still on that script. (While
+            // ExtendScript holds this thread, /health is not answered at all.)
+            evalBusy: evalBusyNow(),
+            evalQueued: Math.max(0, __evalPending - (__evalRunning ? 1 : 0)),
             ts: Date.now()
           }));
           return;
@@ -609,12 +668,49 @@
 
           if (url === "/op") {
             bumpReq();
-            handleOp(body.op, body.args)
+            // Queued behind a stuck call, an op would otherwise still run once
+            // After Effects frees up — late, out of order, after the agent was
+            // told it timed out. So it is dropped at its turn once the server
+            // has given up on it. The server sends its own timeout as
+            // `timeoutMs` (relative), and the panel runs the same span from
+            // the request's arrival on a monotonic clock — arrival is after
+            // the server started its timer, so this deadline is never earlier
+            // than the server's, and DEADLINE_GRACE_MS on top makes a dropped
+            // call only ever one the server already reported as timed out.
+            // It needs no socket event to reach this thread in time; the
+            // request closing is a second signal. No `timeoutMs` (an older
+            // server): only the close is checked.
+            var replied = false;
+            var closedEarly = false;
+            res.on("close", function () { if (!replied) closedEarly = true; });
+            var limitMs = typeof body.timeoutMs === "number" && isFinite(body.timeoutMs) && body.timeoutMs > 0 ? body.timeoutMs : null;
+            var gone = function () {
+              var over = limitMs === null ? 0 : monoNow() - receivedAt - limitMs;
+              if (limitMs !== null && over > DEADLINE_GRACE_MS) {
+                return "the MCP server's deadline for it passed " + Math.round(over / 1000) +
+                  "s ago while it was queued behind another call";
+              }
+              if (closedEarly || (req.socket && req.socket.destroyed)) {
+                return "the MCP server closed its request (it gave up waiting) while it was queued behind another call";
+              }
+              return null;
+            };
+            handleOp(body.op, body.args, gone)
               .then(function (result) {
+                replied = true;
                 res.statusCode = 200; res.setHeader("content-type", "application/json");
                 res.end(JSON.stringify({ ok: true, result: result }));
               })
               .catch(function (err) {
+                replied = true;
+                if (err && err.code === "REQUEST_CLOSED") {
+                  log("warn", body.op + " was not run, " + err.message.replace(/^dropped before it ran: /, "") +
+                    " — dropped rather than run late.");
+                  // No answer: the server has already reported this call as
+                  // timed out, and nothing it could read here would be newer.
+                  try { res.destroy(); } catch (e) {}
+                  return;
+                }
                 log("error", body.op + ": " + err.message);
                 res.statusCode = 500; res.setHeader("content-type", "application/json");
                 // `code` marks a failure the panel diagnosed itself rather than

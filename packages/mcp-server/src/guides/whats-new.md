@@ -63,6 +63,18 @@ only quitting and reopening After Effects will.
   path is now `projectPath`.
   supersedes: export_mogrt projectSaved is the project path
 
+- **A call made while After Effects is still on one that timed out comes back
+  at once, unsent, with "was not sent: After Effects is still busy".** It names
+  the stuck call; re-send it once the user has finished or closed what is
+  holding After Effects (a menu, a dialog, a text edit, a RAM preview, a
+  render). Before, each such call waited its own full limit and then still ran
+  late, out of order; a call whose request the server gave up on is now dropped
+  by the panel before it runs.
+  supersedes: every call after a timeout also times out
+- **"EvalScript error." is reported as After Effects refusing to run the call,
+  not as a script error.** Very probably nothing ran (a `run_jsx` or
+  `run_batch` may have partly run): read back, then re-send if it did not land.
+  supersedes: ExtendScript eval failed (syntax or runtime)
 - **`setup_panel` refuses while After Effects is open, and changes nothing
   when it does.** Installing into an open After Effects leaves the panel
   half-updated, so the order is now always: ask the user to quit After
