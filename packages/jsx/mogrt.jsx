@@ -193,6 +193,18 @@ OPS.export_mogrt = noUndo(function (args) {
     );
   }
 
+  // A read-only .aep cannot be saved, and under suppression the save would
+  // simply not happen; unsuppressed it is a modal. Either way, refuse first.
+  var projectReadOnly = null;
+  try { projectReadOnly = app.project.file.readonly === true; } catch (eRO) { projectReadOnly = null; }
+  if (projectReadOnly === true) {
+    throw new Error(
+      "The project file " + app.project.file.fsName + " is read-only, so it cannot be saved before the " +
+      "export, which After Effects requires. Nothing was exported and nothing in the project was changed. " +
+      "Ask the user to make it writable or Save As somewhere else, then call export_mogrt again."
+    );
+  }
+
   // Every precondition that can be established from a script runs here, before
   // the project is touched at all: the template is not renamed, the project is
   // not saved and no export is attempted until they all pass. A refusal below
@@ -282,32 +294,143 @@ OPS.export_mogrt = noUndo(function (args) {
     );
   }
 
+  // posterTime is checked here, with the other preconditions, so a bad one
+  // costs nothing: after the save and the export it would leave the user with
+  // a saved project and a template they did not ask for.
+  var hasPoster = args.posterTime !== undefined && args.posterTime !== null;
+  if (hasPoster && (args.posterTime < 0 || args.posterTime > comp.duration)) {
+    throw new Error(
+      "posterTime " + args.posterTime + " is outside the comp's 0.." + comp.duration + "s. Nothing was " +
+      "exported and nothing in the project was changed. Pass a time inside the comp."
+    );
+  }
+
   var fonts = [];
   try { __collectFonts(comp, 0, [], fonts); } catch (eF) {}
 
   if (templateName !== previousTemplateName) comp.motionGraphicsTemplateName = templateName;
-
-  // Saving is what removes the save prompt, and it has to happen per export:
-  // exporting dirties the project, so a project saved before the first export
-  // is dirty again before the second.
-  app.project.save();
 
   // Everything the result needs, read *before* the export. See below.
   var compId = comp.id;
   var compName = comp.name;
   var projectPath = app.project.file.fsName;
 
+  // Saving is what removes the save prompt, and it has to happen per export:
+  // exporting dirties the project, so a project saved before the first export
+  // is dirty again before the second. It happens INSIDE the suppressed block:
+  // a save can raise its own modal (a locked file, a project converted from an
+  // older version that only Save As will write), which would freeze this
+  // connection. Under suppression such a save just does not happen, so the
+  // dirty flag is checked afterwards rather than trusted, as _render_save does
+  // (render.jsx). A project with no unsaved changes is not saved at all.
+  //
+  // dispatch() leaves dialogs to this op (__meta.ownDialogs below), so it also
+  // collects what After Effects reports through app.onError itself, with the
+  // same guard dispatch() uses, and puts it on the result as `aeWarnings`.
   var suppress = args.suppressDialogs !== false;
   var suppressed = false;
+  var guard = null;
   var exported;
+  var projectSaved = false;
+  var threw = null;
+  var saveFailed = null;
+  var saveWarning = null;
+  var suppressFailed = null;
   try {
     var already = typeof __dialogsSuppressed === "function" && __dialogsSuppressed();
-    if (suppress && !already) { app.beginSuppressDialogs(); suppressed = true; }
-    exported = comp.exportAsMotionGraphicsTemplate(true, folder.fsName);
+    if (suppress && !already) {
+      if (typeof __dialogGuardStart === "function") {
+        guard = __dialogGuardStart();
+        // A null guard here means the guard is switched off (__DIALOG_GUARD)
+        // or beginSuppressDialogs() threw inside it. Only the first may begin
+        // suppression by hand; the second is a refusal, never a retry.
+        if (!guard && (typeof __DIALOG_GUARD === "undefined" || __DIALOG_GUARD)) {
+          suppressFailed = "After Effects would not suppress its dialogs (beginSuppressDialogs failed), so " +
+            "the save and the export were not attempted: either could raise a modal dialog that freezes " +
+            "this connection. Nothing was saved or exported. Try again once After Effects is idle.";
+        }
+      }
+      if (!guard && !suppressFailed) {
+        try { app.beginSuppressDialogs(); } catch (eB) {
+          suppressFailed = "After Effects would not suppress its dialogs (" + eB.message + "), so the save " +
+            "and the export were not attempted: either could raise a modal dialog that freezes this " +
+            "connection. Nothing was saved or exported. Try again once After Effects is idle.";
+        }
+      }
+      if (!suppressFailed) suppressed = true;
+    }
+    if (suppressFailed) throw new Error(suppressFailed);
+    var wasDirty = null;
+    try { wasDirty = app.project.dirty; } catch (eD) { wasDirty = null; }
+    if (wasDirty !== false) {
+      var saveThrew = null;
+      try { app.project.save(); } catch (eSave) { saveThrew = eSave; }
+      // dirtyAfter: true, false, or null when the host will not say.
+      var dirtyAfter = null;
+      try { dirtyAfter = app.project.dirty === true ? true : (app.project.dirty === false ? false : null); } catch (eD2) { dirtyAfter = null; }
+      // A save that threw but left the project clean most likely landed: it is
+      // reported as a save (the Revert point moved), with what AE threw. A
+      // throw with no readable dirty flag proves nothing, so it is a refusal.
+      var stillDirty = dirtyAfter === true || (saveThrew !== null && dirtyAfter !== false);
+      if (!stillDirty && saveThrew) {
+        saveWarning = "After Effects threw while saving the project (" + saveThrew.message + "), but the " +
+          "project reads as saved afterwards, so the save most likely landed.";
+      }
+      if (stillDirty) {
+        saveFailed = "After Effects did not save the project (" + projectPath + ")" +
+          (saveThrew ? ": " + saveThrew.message : "") + ", and it has to be saved before an export. Nothing " +
+          "was exported. The usual causes are a file that is locked or read-only, or a project converted " +
+          "from an older version of After Effects, which only File > Save As will write. Ask the user to " +
+          "save it by hand, then call export_mogrt again.";
+      } else {
+        projectSaved = true;
+      }
+    }
+    if (!saveFailed) exported = comp.exportAsMotionGraphicsTemplate(true, folder.fsName);
+  } catch (eX) {
+    threw = eX;
   } finally {
     // Unconditional: leaving dialogs suppressed would silence every warning in
     // the rest of the user's session, including ones they need to see.
-    if (suppressed) { try { app.endSuppressDialogs(false); } catch (eS) {} }
+    if (suppressed) {
+      if (guard) { try { __dialogGuardEnd(guard); } catch (eG) {} }
+      else { try { app.endSuppressDialogs(false); } catch (eS) {} }
+    }
+  }
+  var aeWarnings = (guard && guard.messages && guard.messages.length) ? guard.messages : null;
+  function withWarnings(msg) {
+    return aeWarnings
+      ? msg + " || After Effects also reported, through app.onError while dialogs were suppressed: " + aeWarnings.join(" | ")
+      : msg;
+  }
+  var renamed = templateName !== previousTemplateName && previousTemplateName !== null;
+  // The template rename is the one change this call makes to the project; a
+  // failure puts it back. The export invalidates held references, so the comp
+  // is fetched fresh.
+  function undoRename() {
+    if (!renamed) return false;
+    try { getCompById(compId).motionGraphicsTemplateName = previousTemplateName; return true; } catch (eR) { return false; }
+  }
+  // A failure after a save that landed: the save stays, and the user has to
+  // know their Revert point moved.
+  function failAfterSave(msg) {
+    var undone = undoRename();
+    if (renamed === false && templateName !== previousTemplateName) {
+      msg += " The comp's Essential Graphics template name was set to '" + templateName + "' for the export; " +
+        "its previous name could not be read, so it was not put back.";
+    }
+    if (projectSaved) {
+      msg += " NOTE: the user's project WAS saved (" + projectPath + ") before the export, so File > Revert " +
+        "now goes back to that save — tell the user." +
+        (undone ? " The template name set for the export ('" + templateName + "') is in that saved file; it " +
+          "was put back to '" + previousTemplateName + "' in the open project, which now has unsaved changes." : "");
+    }
+    return new Error(withWarnings(msg));
+  }
+  if (saveFailed) throw failAfterSave(saveFailed);
+  if (threw) {
+    if (!aeWarnings && !projectSaved && !undoRename()) throw threw;
+    throw failAfterSave(threw && threw.message ? threw.message : String(threw));
   }
 
   // exportAsMotionGraphicsTemplate invalidates every object reference held
@@ -333,7 +456,7 @@ OPS.export_mogrt = noUndo(function (args) {
     } else {
       controllerText = String(preControllerCount) + " Essential Graphics controllers";
     }
-    throw new Error(__exportFailureMessage({
+    throw failAfterSave(__exportFailureMessage({
       exported: exported,
       outPath: outPath,
       projectPath: projectPath,
@@ -342,7 +465,7 @@ OPS.export_mogrt = noUndo(function (args) {
     }));
   }
   var bytes = written.length;
-  if (!(bytes > 0)) throw new Error("The exported template at " + outPath + " is empty (0 bytes).");
+  if (!(bytes > 0)) throw failAfterSave("The exported template at " + outPath + " is empty (0 bytes).");
 
   var result = {
     ok: true,
@@ -353,13 +476,23 @@ OPS.export_mogrt = noUndo(function (args) {
     compName: compName,
     replaced: existed,
     createdDir: createdDir,
-    projectSaved: app.project.file.fsName,
+    // Whether THIS call saved the user's project. A save moves what File >
+    // Revert goes back to, so the agent has to be able to tell the user.
+    projectSaved: projectSaved,
+    projectPath: projectPath,
     dialogsSuppressed: suppress,
     // Re-read rather than echoed: the export is the only thing that can change
     // it, and a host that will not answer says null instead of a made-up 0.
     controllerCount: __controllerCount(comp),
     fonts: fonts
   };
+  if (projectSaved) {
+    result.projectSavedNote =
+      "The user's project was saved (" + projectPath + ") before the export, which After Effects requires. " +
+      "Tell the user: File > Revert now goes back to this state, not to their last save.";
+  }
+  if (saveWarning) result.saveWarning = saveWarning;
+  if (aeWarnings) result.aeWarnings = aeWarnings;
   if (!suppress) {
     result.warning =
       "Dialogs were not suppressed. If this call took a long time, a modal font warning was waiting " +
@@ -372,18 +505,21 @@ OPS.export_mogrt = noUndo(function (args) {
   // here and let the panel (or, on a server-images panel, the server) put it into the archive: ExtendScript can write a
   // PNG but cannot rewrite a zip, and the panel is already the layer that
   // post-processes files AE has just written.
-  if (args.posterTime !== undefined && args.posterTime !== null) {
+  if (hasPoster) {
     var t = args.posterTime;
-    if (t < 0 || t > comp.duration) {
-      throw new Error(
-        "posterTime " + t + " is outside the comp's 0.." + comp.duration + "s. The template was still " +
-        "exported to " + outPath + " with After Effects' own thumbnail."
-      );
+    // The template is written and valid by now (and the project may have been
+    // saved): a poster frame that fails to render is a warning on a success,
+    // never a failure that hides both.
+    try {
+      var posterPath = __tmpPngPath();
+      __saveFrameAt(comp, t, new File(posterPath), 1);
+      result.posterPngPath = posterPath;
+      result.posterTime = t;
+    } catch (ePoster) {
+      result.posterWarning = "The template was exported, but the poster frame at " + t + "s could not be " +
+        "rendered (" + (ePoster && ePoster.message ? ePoster.message : String(ePoster)) + "), so it keeps " +
+        "After Effects' own thumbnail.";
     }
-    var posterPath = __tmpPngPath();
-    __saveFrameAt(comp, t, new File(posterPath), 1);
-    result.posterPngPath = posterPath;
-    result.posterTime = t;
   }
 
   return result;

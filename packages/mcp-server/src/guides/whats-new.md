@@ -47,6 +47,22 @@ only quitting and reopening After Effects will.
 
 ## 0.6.0
 
+- **`get_selection` never takes keyboard focus.** When the active item is not
+  a comp, it answers `comp: null` with a `reason` saying a composition viewer
+  is open but its comp cannot be read without focusing it; ask the user which
+  comp they mean. It used to focus the viewer to read it, and answer
+  `source: "viewer"` — that source no longer occurs.
+  supersedes: get_selection asks the viewer when the active item is not a comp
+  supersedes: source: "viewer"
+- **`export_mogrt` and `render_queue` say when they saved the user's project.**
+  `projectSaved: true` (with `projectSavedNote`) means this call saved it, so
+  File > Revert now goes back to that state — tell the user. `export_mogrt`
+  saves only a project with unsaved changes, and only with dialogs already
+  suppressed; a read-only project, or a save that does not land, is refused
+  with nothing exported. Its `projectSaved` used to be the project's path; the
+  path is now `projectPath`.
+  supersedes: export_mogrt projectSaved is the project path
+
 - **`setup_panel` refuses while After Effects is open, and changes nothing
   when it does.** Installing into an open After Effects leaves the panel
   half-updated, so the order is now always: ask the user to quit After

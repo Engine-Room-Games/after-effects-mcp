@@ -59,7 +59,12 @@ const ctx = {
   File: EsFile,
   Folder: EsFolder,
   ImportOptions: function () { reached(); },
-  app: { project: { file: null, save: reached, renderQueue: { items: { add: reached } } } },
+  // export_mogrt suppresses dialogs, saves only a dirty project (this one is
+  // clean), then exports: the export is where it has passed every check.
+  app: {
+    beginSuppressDialogs() {}, endSuppressDialogs() {},
+    project: { file: null, dirty: false, save: reached, renderQueue: { items: { add: reached } } },
+  },
 };
 vm.createContext(ctx);
 vm.runInContext(`
@@ -73,6 +78,7 @@ vm.runInContext(`
   COMP.motionGraphicsTemplateControllerCount = 1;
   function getCompById(id) { if (id !== 7) throw new Error("No comp with id " + id); return COMP; }
 `, ctx);
+ctx.COMP.exportAsMotionGraphicsTemplate = reached;
 for (const f of ["render.jsx", "footage.jsx", "mogrt.jsx"]) {
   vm.runInContext(fs.readFileSync(path.join(root, "packages", "jsx", f), "utf8"), ctx);
 }
