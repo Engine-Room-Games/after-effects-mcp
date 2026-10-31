@@ -205,35 +205,34 @@ check("activeItem is a comp: it is used as is and focus is never touched", () =>
   assert.equal(r.note, undefined);
 });
 
-check("activeItem not a comp: the viewer is asked, and the answer says so", () => {
+// The viewer's comp is readable only by viewer.setActive(), which takes the
+// user's keyboard focus. A read never does that: it says it does not know.
+check("activeItem not a comp: focus is never taken, and the reason says why it does not know", () => {
   const ctx = load(SCENE + SPY + `
     var f = new FootageItem(); f.id = 5; f.name = "clip.mov";
     app.project.activeItem = f;
     app.activeViewer = spyViewer(comp);
   `);
   const r = plain(ctx.OPS.get_selection({}));
-  assert.equal(r.comp.id, 100);
-  assert.equal(r.source, "viewer");
-  assert.equal(ctx.setActiveCalls, 1);
-  assert.match(r.note, /clip\.mov/);
-  assert.match(r.note, /composition viewer/);
+  assert.equal(ctx.setActiveCalls, 0, "get_selection must never call setActive()");
+  assert.equal(r.comp, null);
+  assert.match(r.reason, /composition viewer is open/);
+  assert.match(r.reason, /keyboard focus/);
+  assert.match(r.reason, /clip\.mov/);
 });
 
-check("activeItem empty: the viewer is asked", () => {
+check("activeItem empty with a comp viewer open: focus is never taken", () => {
   const ctx = load(SCENE + SPY + "app.project.activeItem = null; app.activeViewer = spyViewer(comp);");
   const r = plain(ctx.OPS.get_selection({}));
-  assert.equal(r.comp.id, 100);
-  assert.equal(r.source, "viewer");
-  assert.match(r.note, /was empty/);
-});
-
-check("a viewer that refuses focus is not read as the viewer's comp", () => {
-  const ctx = load(SCENE + SPY + "app.project.activeItem = null; app.activeViewer = spyViewer(comp, true);");
-  const r = plain(ctx.OPS.get_selection({}));
+  assert.equal(ctx.setActiveCalls, 0, "get_selection must never call setActive()");
   assert.equal(r.comp, null);
-  assert.match(r.reason, /could not be read/);
+  assert.match(r.reason, /there is no active item either/);
 });
 
+check("selection.jsx has no setActive() call at all", () => {
+  const src = read("selection.jsx").replace(/\/\/[^\n]*/g, "");
+  assert.doesNotMatch(src, /\.setActive\s*\(/, "get_selection must not move keyboard focus");
+});
 
 check("Project panel focused with items selected: the reason says so, never 'nothing open'", () => {
   const ctx = load("app.project.activeItem = null; app.project.selection = [{}, {}];");

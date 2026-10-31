@@ -193,6 +193,18 @@ OPS.export_mogrt = noUndo(function (args) {
     );
   }
 
+  // A read-only .aep cannot be saved, and under suppression the save would
+  // simply not happen; unsuppressed it is a modal. Either way, refuse first.
+  var projectReadOnly = null;
+  try { projectReadOnly = app.project.file.readonly === true; } catch (eRO) { projectReadOnly = null; }
+  if (projectReadOnly === true) {
+    throw new Error(
+      "The project file " + app.project.file.fsName + " is read-only, so it cannot be saved before the " +
+      "export, which After Effects requires. Nothing was exported and nothing in the project was changed. " +
+      "Ask the user to make it writable or Save As somewhere else, then call export_mogrt again."
+    );
+  }
+
   // Every precondition that can be established from a script runs here, before
   // the project is touched at all: the template is not renamed, the project is
   // not saved and no export is attempted until they all pass. A refusal below
@@ -287,27 +299,81 @@ OPS.export_mogrt = noUndo(function (args) {
 
   if (templateName !== previousTemplateName) comp.motionGraphicsTemplateName = templateName;
 
-  // Saving is what removes the save prompt, and it has to happen per export:
-  // exporting dirties the project, so a project saved before the first export
-  // is dirty again before the second.
-  app.project.save();
-
   // Everything the result needs, read *before* the export. See below.
   var compId = comp.id;
   var compName = comp.name;
   var projectPath = app.project.file.fsName;
 
+  // Saving is what removes the save prompt, and it has to happen per export:
+  // exporting dirties the project, so a project saved before the first export
+  // is dirty again before the second. It happens INSIDE the suppressed block:
+  // a save can raise its own modal (a locked file, a project converted from an
+  // older version that only Save As will write), which would freeze this
+  // connection. Under suppression such a save just does not happen, so the
+  // dirty flag is checked afterwards rather than trusted, as _render_save does
+  // (render.jsx). A project with no unsaved changes is not saved at all.
+  //
+  // dispatch() leaves dialogs to this op (__meta.ownDialogs below), so it also
+  // collects what After Effects reports through app.onError itself, with the
+  // same guard dispatch() uses, and puts it on the result as `aeWarnings`.
   var suppress = args.suppressDialogs !== false;
   var suppressed = false;
+  var guard = null;
   var exported;
+  var projectSaved = false;
+  var threw = null;
+  var saveFailed = null;
   try {
     var already = typeof __dialogsSuppressed === "function" && __dialogsSuppressed();
-    if (suppress && !already) { app.beginSuppressDialogs(); suppressed = true; }
-    exported = comp.exportAsMotionGraphicsTemplate(true, folder.fsName);
+    if (suppress && !already) {
+      guard = (typeof __dialogGuardStart === "function") ? __dialogGuardStart() : null;
+      if (!guard) app.beginSuppressDialogs();
+      suppressed = true;
+    }
+    var wasDirty = null;
+    try { wasDirty = app.project.dirty; } catch (eD) { wasDirty = null; }
+    if (wasDirty !== false) {
+      var saveThrew = null;
+      try { app.project.save(); } catch (eSave) { saveThrew = eSave; }
+      var stillDirty = false;
+      try { stillDirty = app.project.dirty === true; } catch (eD2) { stillDirty = false; }
+      if (saveThrew || stillDirty) {
+        saveFailed = "After Effects did not save the project (" + projectPath + ")" +
+          (saveThrew ? ": " + saveThrew.message : "") + ", and it has to be saved before an export. Nothing " +
+          "was exported. The usual causes are a file that is locked or read-only, or a project converted " +
+          "from an older version of After Effects, which only File > Save As will write. Ask the user to " +
+          "save it by hand, then call export_mogrt again.";
+      } else {
+        projectSaved = true;
+      }
+    }
+    if (!saveFailed) exported = comp.exportAsMotionGraphicsTemplate(true, folder.fsName);
+  } catch (eX) {
+    threw = eX;
   } finally {
     // Unconditional: leaving dialogs suppressed would silence every warning in
     // the rest of the user's session, including ones they need to see.
-    if (suppressed) { try { app.endSuppressDialogs(false); } catch (eS) {} }
+    if (suppressed) {
+      if (guard) { try { __dialogGuardEnd(guard); } catch (eG) {} }
+      else { try { app.endSuppressDialogs(false); } catch (eS) {} }
+    }
+  }
+  var aeWarnings = (guard && guard.messages && guard.messages.length) ? guard.messages : null;
+  function withWarnings(msg) {
+    return aeWarnings
+      ? msg + " || After Effects also reported, through app.onError while dialogs were suppressed: " + aeWarnings.join(" | ")
+      : msg;
+  }
+  if (saveFailed) {
+    // The template rename above is the one change made so far; put it back.
+    if (templateName !== previousTemplateName && previousTemplateName !== null) {
+      try { comp.motionGraphicsTemplateName = previousTemplateName; } catch (eR) {}
+    }
+    throw new Error(withWarnings(saveFailed));
+  }
+  if (threw) {
+    if (!aeWarnings) throw threw;
+    throw new Error(withWarnings(threw && threw.message ? threw.message : String(threw)));
   }
 
   // exportAsMotionGraphicsTemplate invalidates every object reference held
@@ -333,13 +399,13 @@ OPS.export_mogrt = noUndo(function (args) {
     } else {
       controllerText = String(preControllerCount) + " Essential Graphics controllers";
     }
-    throw new Error(__exportFailureMessage({
+    throw new Error(withWarnings(__exportFailureMessage({
       exported: exported,
       outPath: outPath,
       projectPath: projectPath,
       suppressed: suppress,
       controllerText: controllerText
-    }));
+    })));
   }
   var bytes = written.length;
   if (!(bytes > 0)) throw new Error("The exported template at " + outPath + " is empty (0 bytes).");
@@ -353,13 +419,22 @@ OPS.export_mogrt = noUndo(function (args) {
     compName: compName,
     replaced: existed,
     createdDir: createdDir,
-    projectSaved: app.project.file.fsName,
+    // Whether THIS call saved the user's project. A save moves what File >
+    // Revert goes back to, so the agent has to be able to tell the user.
+    projectSaved: projectSaved,
+    projectPath: projectPath,
     dialogsSuppressed: suppress,
     // Re-read rather than echoed: the export is the only thing that can change
     // it, and a host that will not answer says null instead of a made-up 0.
     controllerCount: __controllerCount(comp),
     fonts: fonts
   };
+  if (projectSaved) {
+    result.projectSavedNote =
+      "The user's project was saved (" + projectPath + ") before the export, which After Effects requires. " +
+      "Tell the user: File > Revert now goes back to this state, not to their last save.";
+  }
+  if (aeWarnings) result.aeWarnings = aeWarnings;
   if (!suppress) {
     result.warning =
       "Dialogs were not suppressed. If this call took a long time, a modal font warning was waiting " +

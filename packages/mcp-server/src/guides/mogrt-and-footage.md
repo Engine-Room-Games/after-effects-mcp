@@ -16,10 +16,15 @@ why an export failed. It answers with a bare boolean and nothing else. So the
 tool checks every precondition it can *before* exporting, which is the half of
 the job a script cannot do.
 
-`export_mogrt` saves the project first (which removes AE's "the project needs to
-be saved" prompt, and has to happen per export because exporting dirties the
-project again), suppresses the font warning, and runs outside the undo group so
-there is no "undo group mismatch" afterwards. Measured on 26.3: suppressed, an
+`export_mogrt` suppresses dialogs, then saves the project if it has unsaved
+changes (which removes AE's "the project needs to be saved" prompt, and has to
+happen per export because exporting dirties the project again), exports, and
+runs outside the undo group so there is no "undo group mismatch" afterwards.
+**A save is the user's business:** when the result says `projectSaved: true`,
+tell the user their project was saved — File > Revert now goes back to that
+state, not to their own last save. A read-only project is refused before
+anything changes, and a save that does not land is refused with nothing
+exported. Measured on 26.3: suppressed, an
 export of a comp using a non-Adobe font returns in about three seconds;
 unsuppressed, the same export blocks past sixty and writes nothing until the
 dialog is clicked.

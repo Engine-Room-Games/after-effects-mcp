@@ -1414,6 +1414,12 @@ async function runRender(
     })),
     projectPath: plan.projectPath,
     projectSaved: save.saved,
+    ...(save.saved
+      ? {
+          projectSavedNote:
+            "The user's project was saved before the render (saveProject:true). Tell the user: File > Revert now goes back to this state, not to their last save.",
+        }
+      : {}),
     ...(savedForFootage
       ? {
           projectSavedBecause:

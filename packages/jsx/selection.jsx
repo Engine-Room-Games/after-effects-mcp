@@ -69,14 +69,12 @@ function __selProperty(prop) {
   return out;
 }
 
-// Which comp the user is looking at. app.project.activeItem is read first and,
-// when it is a comp, used as it is — no focus is touched (`source:
-// "activeItem"`). Only when it is not a comp (the Project panel has focus on
-// footage, a folder, or nothing) is the viewer asked: app.activeViewer is the
-// last-focused viewer even while another panel has focus, and setActive() on
-// it makes activeItem answer for that viewer (`source: "viewer"`). That moves
-// keyboard focus to the viewer, which changes nothing in the project. Every
-// way of not knowing is said as such.
+// Which comp the user is looking at: app.project.activeItem, used as it is
+// when it is a comp (`source: "activeItem"`). When it is not (the Project
+// panel has focus on footage, a folder, or nothing), the composition viewer's
+// comp could only be read by focusing the viewer with setActive(), which takes
+// the user's keyboard focus — so it is not read, and the answer says why it
+// does not know. Every way of not knowing is said as such.
 function __selProjectSelectionCount() {
   try { return app.project.selection ? app.project.selection.length : 0; } catch (e) { return 0; }
 }
@@ -93,22 +91,10 @@ function __selResolveComp() {
     var isComp = false;
     try { isComp = viewer.type === ViewerType.VIEWER_COMPOSITION; } catch (e) { isComp = false; }
     if (isComp) {
-      var fromViewer = null;
-      try {
-        // setActive() answers false when it could not focus the viewer; then
-        // activeItem still follows the other panel and must not be read as
-        // the viewer's comp.
-        if (viewer.setActive() !== false) fromViewer = app.project.activeItem;
-      } catch (e) { fromViewer = null; }
-      if (fromViewer && fromViewer instanceof CompItem) {
-        return {
-          comp: fromViewer,
-          source: "viewer",
-          note: "The project's active item was " + (before ? "'" + before.name + "', not a comp" : "empty") +
-            ", so this is the comp in the composition viewer; reading it moved keyboard focus to that viewer."
-        };
-      }
-      viewerNote = "a composition viewer is open but its comp could not be read";
+      // Which comp it shows is not readable without viewer.setActive(), which
+      // moves the user's keyboard focus to the viewer. A read must not take the
+      // user's focus, so this says it does not know instead.
+      viewerNote = "a composition viewer is open, but which comp it shows cannot be read without moving the user's keyboard focus to it, which this tool does not do";
     } else {
       viewerNote = "the active viewer is a layer or footage viewer, not a composition viewer";
     }
@@ -138,6 +124,8 @@ OPS.get_selection = noUndo(function (args) {
   var fr = c.frameRate;
   var out = {
     comp: { id: c.id, name: c.name },
+    // Always "activeItem" now that the viewer is never focused to ask it; kept
+    // so a caller reading it keeps working.
     source: found.source,
     time: c.time,
     // As the timeline shows it: AE numbers frames from displayStartFrame
@@ -166,7 +154,6 @@ OPS.get_selection = noUndo(function (args) {
     out.note = "The selection is larger than one answer carries; the first " + nl + " layers and " + np +
       " properties are listed and `omitted` counts the rest.";
   }
-  if (found.note) out.note = out.note ? found.note + " " + out.note : found.note;
   if (__cpIsCheckpoint(c)) {
     out.checkpoint = true;
     out.warning = "The active comp is a checkpoint (a restore point made by checkpoint_comp), not the user's scene — do not edit its layers.";

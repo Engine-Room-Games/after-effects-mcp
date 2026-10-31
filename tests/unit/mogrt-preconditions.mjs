@@ -54,6 +54,8 @@ const PROJECT_FILE = "/proj/show.aep";
 let FILES;
 let DIRS;
 let UNWRITABLE;
+/** Files the host reports as read-only, by path. */
+let READONLY = new Set();
 /** Everything the handler did to the project, in order. */
 let LOG;
 
@@ -69,6 +71,7 @@ class MockFile {
   get fsName() { return this.path; }
   get exists() { return FILES.has(this.path); }
   get length() { return (FILES.get(this.path) || "").length; }
+  get readonly() { return READONLY.has(this.path); }
   get parent() { return new MockFolder(dirnameOf(this.path)); }
   open(mode) {
     if (mode !== "w") return false;
@@ -144,13 +147,21 @@ function makeContext(opts) {
   FILES = new Map([[PROJECT_FILE, "aep bytes"]]);
   DIRS = new Set(["/", PROJECT_DIR]);
   UNWRITABLE = new Set(opts.unwritable || []);
+  READONLY = new Set(opts.readOnly ? [PROJECT_FILE] : []);
   LOG = [];
   if (opts.existingTemplate) FILES.set(opts.existingTemplate, "an older .mogrt");
 
   const comp = makeComp(opts);
+  // opts.dirty: undefined models a host that will not say (saved, as before).
+  let dirty = opts.dirty;
   const project = {
     get file() { return opts.projectSaved === false ? null : new MockFile(PROJECT_FILE); },
-    save() { LOG.push("save"); },
+    get dirty() { return dirty; },
+    save() {
+      LOG.push("save");
+      if (opts.saveThrows) throw new Error("disk full");
+      if (!opts.saveFails && dirty === true) dirty = false;
+    },
     itemByID(id) { return id === comp.id ? comp : null; },
   };
 
@@ -177,6 +188,16 @@ function makeContext(opts) {
     __tmpPngPath: () => "/tmp/poster.png",
     __saveFrameAt: () => {},
   };
+  if (opts.guard) {
+    // core.jsx's dialog guard, as dispatch() uses it: suppression plus an
+    // app.onError collector, ended with endSuppressDialogs(false).
+    ctx.__dialogsSuppressed = () => false;
+    ctx.__dialogGuardStart = () => {
+      ctx.app.beginSuppressDialogs();
+      return { messages: opts.guard.slice() };
+    };
+    ctx.__dialogGuardEnd = () => { ctx.app.endSuppressDialogs(false); };
+  }
   vm.createContext(ctx);
   vm.runInContext(source, ctx, { filename: "mogrt.jsx" });
   ctx.__comp = comp;
@@ -386,6 +407,65 @@ check("a name the user set on the comp is kept; AE's Untitled default is not", (
 
   const replaced = run({ controllers: 1, export: "ok", templateName: "Untitled" });
   assert.equal(replaced.call().name, "Lower Third", "Untitled collides with every other comp");
+});
+
+// ---------- the save: inside suppression, only when dirty, and said ----------
+
+check("the save happens only after dialogs are suppressed, and before the export", () => {
+  const { call } = run({ controllers: 1, export: "ok", dirty: true });
+  call();
+  const order = LOG.filter((l) => /^(beginSuppressDialogs|save|export:|endSuppressDialogs)/.test(l));
+  assert.deepEqual(order, ["beginSuppressDialogs", "save", "export:/proj", "endSuppressDialogs:false"],
+    "a save before suppression can raise a modal that freezes the connection");
+});
+
+check("a project with no unsaved changes is not saved, and the result says so", () => {
+  const { call } = run({ controllers: 1, export: "ok", dirty: false });
+  const r = call();
+  assert.equal(LOG.indexOf("save"), -1, "a clean project must not be saved");
+  assert.equal(r.projectSaved, false);
+  assert.equal(r.projectSavedNote, undefined);
+  assert.equal(r.projectPath, PROJECT_FILE);
+});
+
+check("a saved project is reported as saved, with a note for the user", () => {
+  const { call } = run({ controllers: 1, export: "ok", dirty: true });
+  const r = call();
+  assert.equal(r.projectSaved, true);
+  assert.match(r.projectSavedNote, /Revert/);
+  assert.match(r.projectSavedNote, /show\.aep/);
+});
+
+check("a read-only project is refused before anything happens", () => {
+  const { ctx, call } = run({ controllers: 1, export: "ok", dirty: true, readOnly: true });
+  const msg = messageOf(call);
+  assert.match(msg, /read-only/);
+  assert.match(msg, /Nothing was exported/);
+  assert.deepEqual(LOG, []);
+  assert.equal(ctx.__comp.motionGraphicsTemplateName, "Untitled");
+});
+
+check("a save that does not land is refused, nothing exported, the rename put back", () => {
+  const { ctx, call } = run({ controllers: 1, export: "ok", dirty: true, saveFails: true });
+  const msg = messageOf(call);
+  assert.match(msg, /did not save the project/);
+  assert.match(msg, /Nothing was exported/);
+  assert.equal(LOG.some((l) => l.indexOf("export:") === 0), false, "no export after a failed save");
+  assert.equal(ctx.__comp.motionGraphicsTemplateName, "Untitled", "the template rename is undone");
+  assert.ok(LOG.indexOf("endSuppressDialogs:false") > LOG.indexOf("save"), "suppression is ended after the failed save");
+});
+
+check("a save that throws is refused the same way", () => {
+  const { call } = run({ controllers: 1, export: "ok", dirty: true, saveThrows: true });
+  assert.match(messageOf(call), /did not save the project \(\/proj\/show\.aep\): disk full/);
+});
+
+check("what After Effects reported while suppressed comes back as aeWarnings", () => {
+  const { call } = run({ controllers: 1, export: "ok", dirty: true, guard: ["Font not synced (severity WARNING)"] });
+  const r = call();
+  assert.deepEqual(r.aeWarnings, ["Font not synced (severity WARNING)"]);
+  const failed = run({ controllers: 1, export: "silent", guard: ["Font not synced (severity WARNING)"] });
+  assert.match(messageOf(failed.call), /After Effects also reported.*Font not synced/);
 });
 
 console.log(`mogrt-preconditions: ${passed} checks passed`);

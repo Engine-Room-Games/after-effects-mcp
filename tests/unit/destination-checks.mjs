@@ -59,7 +59,8 @@ const ctx = {
   File: EsFile,
   Folder: EsFolder,
   ImportOptions: function () { reached(); },
-  app: { project: { file: null, save: reached, renderQueue: { items: { add: reached } } } },
+  // export_mogrt's first side effect is suppressing dialogs, then the save.
+  app: { beginSuppressDialogs: reached, project: { file: null, save: reached, renderQueue: { items: { add: reached } } } },
 };
 vm.createContext(ctx);
 vm.runInContext(`
