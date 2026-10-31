@@ -736,6 +736,36 @@ export class DeskPlaceLostError extends WriteQueueWaitError {
 }
 
 /**
+ * A script that never left this server because the viewer park sent ahead of
+ * it got no answer in time (issue #266). After Effects is busy — the park
+ * reached it and may still land — but the script itself was never sent, so
+ * this is the write-queue-wait kind: re-sending is safe once After Effects
+ * answers. Never the timeout's wording, whose remedy (do not re-send) is the
+ * opposite of this one.
+ */
+export class ScriptNotSentError extends WriteQueueWaitError {
+  constructor(op: string, what?: string) {
+    super(op, 0, "the viewer park");
+    this.name = "ScriptNotSentError";
+    this.message = ScriptNotSentError.text(op, what);
+  }
+  static text(op: string, what?: string): string {
+    return [
+      `${what ?? "`" + displayOp(op) + "`"} was not sent: After Effects did not answer the viewer park that goes ahead of the script, so it is busy.`,
+      "",
+      "The script never reached After Effects; nothing of it ran and nothing in the project was changed by it.",
+      "After Effects is very probably still on earlier work — a long script, a render, or a dialog nobody has clicked.",
+      "",
+      "What to do, in order:",
+      "1. Poll check_setup until After Effects answers again (it names what it is busy with).",
+      "2. Then send this same call again: it was never run, so sending it again is safe.",
+      "3. If the viewer shows an empty comp named \"AE MCP viewer parking\" meanwhile, that is the park landing late;",
+      "   the next run_jsx or check_setup puts the user's comp back.",
+    ].join("\n");
+  }
+}
+
+/**
  * A background read that asked to yield to writes found one in progress, in
  * this session or — through the front desk — in any session, and was not sent
  * (issue #248). Never shown to an agent: the live-resource poll that sends

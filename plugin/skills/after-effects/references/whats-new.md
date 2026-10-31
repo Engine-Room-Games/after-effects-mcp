@@ -69,7 +69,8 @@ only quitting and reopening After Effects will.
   an empty comp ("AE MCP viewer parking (safe to delete)") in the viewer
   before the script and reopens the user's comp after it. A script that
   mentions `activeItem` is not parked, and the answer says it could have been.
-  The comp is made once and reused, adds no undo step, and is left out of
+  The comp is made once and reused: creating it is one undo step of its own,
+  the first time only, and after that a park adds none. It is left out of
   `list_comps`, `get_project_summary` (counted in `aeMcpItemsHidden`) and
   `find_layers` — but not out of `app.project.items`. Anything that lands in
   it is reported as a CAUTION. A comp the script opens in the viewer itself
@@ -78,7 +79,11 @@ only quitting and reopening After Effects will.
   answer carries a `quietViewer` block. `run_batch` with `run_jsx` steps parks
   too. If a call was cut off between the park and the put-back, the next
   `run_jsx`, this session's next write, or `check_setup` reopens the user's
-  comp (issue #266).
+  comp. Two things it cannot help: keyboard focus moves to the viewer on every
+  parked run, and a heavy comp left open in another viewer tab can still be
+  re-evaluated for some changes. If After Effects does not answer the park,
+  the script is not sent at all, and the error says re-sending is safe once
+  `check_setup` shows After Effects answering (issue #266).
   supersedes: app.project.activeItem is the comp the user has open
   supersedes: use app.project.activeItem to get the active comp
 - **`check_setup` says what a busy After Effects is busy with.** When the

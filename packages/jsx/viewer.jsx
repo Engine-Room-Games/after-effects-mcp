@@ -14,8 +14,8 @@
 //
 // So the server sends three calls under one write lease (tools/viewerPark.ts):
 // _viewer_park, then the script, then _viewer_unpark. Both are pure VIEW
-// changes: the parking comp is one persistent, tagged 16×16 comp in a folder
-// named "AE MCP", created the first time it is needed and reused after. A comp
+// changes: the parking comp is one persistent, tagged, empty 16×16 comp at the
+// project root, created the first time it is needed and reused after. A comp
 // made and removed per call would itself be two project changes — each one a
 // full re-evaluation of the heavy comp, the project marked unsaved, and two
 // undo steps around the script's, so Cmd-Z after a run would bring the parking
@@ -73,12 +73,31 @@ function __parkIsTagged(item) {
   return typeof c === "string" && c.indexOf(__PARK_TAG) === 0;
 }
 
-// Tagged and still as made: empty and 16x16. A tagged comp a script wrote into
-// is no longer the parking comp: never reused, never hidden from the lists —
-// whatever landed in it is the user's work now.
+// How the parking comp is made (__parkCreate), field by field. A tagged comp
+// that differs in any of these was changed by someone — a script that wrote to
+// app.project.activeItem while parked, or the user — and is no longer the
+// parking comp: never reused, never hidden, never treated as parked; whatever
+// landed in it is the user's work now.
+function __parkChanges(item) {
+  var out = [];
+  function differs(label, read, want) {
+    var v;
+    try { v = read(); } catch (e) { return; }
+    if (v !== want) out.push(label);
+  }
+  differs("layers", function () { return item.numLayers; }, 0);
+  differs("width", function () { return item.width; }, 16);
+  differs("height", function () { return item.height; }, 16);
+  differs("duration", function () { return item.duration; }, 1);
+  differs("frame rate", function () { return item.frameRate; }, 1);
+  differs("name", function () { return item.name; }, __PARK_COMP_NAME);
+  differs("markers", function () { return item.markerProperty.numKeys; }, 0);
+  return out;
+}
+
 function __parkIsParkingComp(item) {
   if (!__parkIsTagged(item)) return false;
-  try { return item.numLayers === 0 && item.width === 16 && item.height === 16; } catch (e) { return false; }
+  return __parkChanges(item).length === 0;
 }
 
 // What list_comps, get_project_summary and find_layers leave out, and count.
@@ -95,7 +114,11 @@ function __parkDirt(item) {
   for (var i = 1; i <= n && names.length < 5; i++) {
     try { names.push("\"" + item.layer(i).name + "\""); } catch (e1) {}
   }
-  var what = n > 0 ? n + " layer(s) (" + names.join(", ") + (n > names.length ? ", …" : "") + ")" : "a change to its settings";
+  var changed = __parkChanges(item);
+  var settings = [];
+  for (var k = 0; k < changed.length; k++) if (changed[k] !== "layers") settings.push(changed[k]);
+  var what = n > 0 ? n + " layer(s) (" + names.join(", ") + (n > names.length ? ", …" : "") + ")" : "";
+  if (settings.length) what += (what ? " and " : "") + "a change to its " + settings.join(", ");
   return "CAUTION: " + what + " landed in AE MCP's parking comp " + item.id + " (\"" + item.name + "\"), not in the " +
     "user's comp — the script wrote to app.project.activeItem, which is the parking comp while it runs; use viewerComp(). " +
     "Tell the user; move the layers into the right comp or undo the script. That comp is no longer used for parking";
@@ -123,19 +146,26 @@ function __parkCreate() {
   return c;
 }
 
-// The comp in the active composition viewer, or null. app.project.activeItem is
-// read first and used when it is a comp and a composition viewer is active —
-// no focus is moved (get_selection's rule). Only otherwise is the viewer
-// focused with setActive() to make activeItem answer for it. Opening a comp in
-// the viewer, which a park and an unpark do, focuses it anyway (#273).
+// The comp in the active composition viewer, or null. app.project.activeItem
+// answers for the viewer only while that viewer has focus (`active`); while
+// the Project panel has it, activeItem is the panel's SELECTION, which may be a
+// comp nobody has in view — parking would then scan the wrong comp and the
+// unpark reopen a comp the user never had open. So activeItem is used as it
+// is only when the composition viewer is active; otherwise the viewer is
+// focused with setActive() first. Opening a comp in the viewer, which a park
+// and an unpark do, focuses it anyway (#273). Live check: recipe 77.
 function __parkViewerComp() {
   var v = null;
   try { v = app.activeViewer; } catch (e) { v = null; }
   if (!v) return null;
   try { if (v.type !== ViewerType.VIEWER_COMPOSITION) return null; } catch (e1) { return null; }
   var a = null;
-  try { a = app.project.activeItem; } catch (e2) { a = null; }
-  if (a && a instanceof CompItem) return a;
+  var focused = false;
+  try { focused = v.active === true; } catch (e4) { focused = false; }
+  if (focused) {
+    try { a = app.project.activeItem; } catch (e2) { a = null; }
+    if (a && a instanceof CompItem) return a;
+  }
   a = null;
   try {
     if (v.setActive() !== false) a = app.project.activeItem;
@@ -151,7 +181,7 @@ function __parkedFrom() {
   if (!st) return null;
   var a = null;
   try { a = app.project.activeItem; } catch (e) { a = null; }
-  if (!a || !__parkIsTagged(a)) return null;
+  if (!a || !__parkIsParkingComp(a) || a.id !== st.parkId) return null;
   return __parkItem(st.fromId);
 }
 
@@ -161,7 +191,7 @@ function __parkedFrom() {
 function __userActiveItem() {
   var a = null;
   try { a = app.project.activeItem; } catch (e) { a = null; }
-  if (!a || !__parkIsTagged(a)) return a;
+  if (!a || !__parkIsParkingComp(a)) return a;
   var st = __PARK || __PARK_LAST;
   return st ? __parkItem(st.fromId) : null;
 }
@@ -236,7 +266,7 @@ OPS._viewer_park = noUndo(function (args) {
   var alreadyParked = false;
   // A tagged comp a script wrote into, with no park on record, is the user's
   // to work in now: parked like any other.
-  if (from && __parkIsTagged(from) && (__parkIsParkingComp(from) || stale)) {
+  if (from && __parkIsParkingComp(from)) {
     // An earlier park nobody unparked (a server that died, a script that timed
     // out), or an unpark whose reopen did not take: take its comp over.
     var prior = stale || __PARK_LAST;
@@ -302,7 +332,7 @@ OPS._viewer_park = noUndo(function (args) {
 
 // Server-only, sent after the script under the same lease (and by check_setup
 // with recover:true). Idempotent: with no park in force it does nothing.
-// Answers {unparked, restored, compId, compName, viewerComp?, note?}.
+// Answers {unparked, reopened?, restored, compId, compName, viewerComp?, caution?, note?}.
 OPS._viewer_unpark = noUndo(function (args) {
   var st = __PARK;
   if (!st) {
@@ -311,8 +341,15 @@ OPS._viewer_unpark = noUndo(function (args) {
     // activeItem only — no focus is moved for a check that is nearly always no.
     var a = null;
     try { a = app.project.activeItem; } catch (e) { a = null; }
-    if (!a || !__parkIsTagged(a) || !__PARK_LAST) return { unparked: false };
+    if (!a || !__parkIsParkingComp(a) || !__PARK_LAST) return { unparked: false };
     st = __PARK_LAST;
+  } else if (args && args.recover && __parkDirt(__parkItem(st.parkId))) {
+    // A park left by an interrupted call whose script built in the parking
+    // comp: that comp is the user's work now, and it is what they are looking
+    // at. Nothing is reopened over it; the park is forgotten and the CAUTION said.
+    __PARK = null;
+    __PARK_LAST = null;
+    return { unparked: false, caution: __parkDirt(__parkItem(st.parkId)) };
   }
   __PARK = null;
   __PARK_LAST = st;
@@ -320,7 +357,9 @@ OPS._viewer_unpark = noUndo(function (args) {
   var dirt = __parkDirt(__parkItem(st.parkId));
   if (dirt) res.caution = dirt;
   var now = __parkViewerComp();
-  if (now && !__parkIsTagged(now)) {
+  // Still parked: the viewer shows this park's own comp (written into or not —
+  // the CAUTION above says so). Anything else is the script's choice.
+  if (now && now.id !== st.parkId && !__parkIsParkingComp(now)) {
     // The script put a comp in the viewer itself (openInViewer,
     // OPS.set_active_comp): its choice stands.
     res.viewerComp = { id: now.id, name: now.name };
@@ -346,7 +385,15 @@ OPS._viewer_unpark = noUndo(function (args) {
   }
   try {
     from.openInViewer();
-    res.restored = true;
+    res.reopened = true;
+    // `restored` is claimed only when the viewer is seen showing the comp.
+    // Measured on 26.5, a viewer change lands once the call has ended, so this
+    // read usually cannot see it yet; the next park checks instead (a viewer
+    // still on the parking comp is taken over). Whether it ever reads true
+    // here is recipe 77's to record.
+    var after = null;
+    try { after = app.project.activeItem; } catch (e3) { after = null; }
+    if (after && after.id === from.id) res.restored = true;
   } catch (e2) {
     res.note = "comp " + st.fromId + " (\"" + st.fromName + "\") could not be reopened in the viewer (" + __parkMsg(e2) +
       "), so the viewer still shows the AE MCP parking comp — open the comp from the Project panel";
@@ -357,8 +404,9 @@ OPS._viewer_unpark = noUndo(function (args) {
 // Server-only, a read: is a park in force (or the viewer still on the parking
 // comp)? check_setup asks this before it takes any lock to undo one.
 OPS._viewer_parked = noUndo(function (args) {
-  if (__PARK) return { parked: true, compId: __PARK.fromId };
+  // A park whose comp a script wrote into is not one to undo (see the recover above).
+  if (__PARK) return { parked: !__parkDirt(__parkItem(__PARK.parkId)), compId: __PARK.fromId };
   var a = null;
   try { a = app.project.activeItem; } catch (e) { a = null; }
-  return { parked: !!(a && __parkIsTagged(a) && __PARK_LAST) };
+  return { parked: !!(a && __parkIsParkingComp(a) && __PARK_LAST) };
 });

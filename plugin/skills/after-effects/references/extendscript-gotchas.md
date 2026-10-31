@@ -41,7 +41,8 @@ the task needs a script rather than looking for another way to run one.
   `app.project.activeItem` is that empty comp — so a script whose source
   (libraries included) mentions `activeItem` is **not** parked, and the answer
   says it could have been. Switch it to `viewerComp()` and the next run is.
-  The parking comp is made once and reused; parking adds no undo step, so
+  The parking comp is made once (one undo step, the first time) and reused;
+  after that parking adds no undo step, so
   Cmd-Z after your run undoes your script. `list_comps`, `get_project_summary`
   and `find_layers` leave it out; `app.project.items` does not — skip it if
   you loop over items. If anything lands in it anyway, the answer carries a
@@ -50,8 +51,8 @@ the task needs a script rather than looking for another way to run one.
   answer says which comp is in view. `quietViewer: false` leaves the viewer
   alone. The answer says nothing about any of this unless you passed
   `quietViewer: true` or something did not go as planned — then a second
-  block carries `quietViewer: {parked, compId, restored, viewerComp?, caution?,
-  note?}`; tell the user if `restored` is false. A `run_batch` with `run_jsx`
+  block carries `quietViewer: {parked, compId, reopened, viewerComp?, caution?,
+  note?}`; tell the user if the note says the comp could not be put back. A `run_batch` with `run_jsx`
   steps is parked the same way (per chunk when it is long). A comp left open in
   another viewer tab can still be re-evaluated for some changes (Rotation,
   measured).

@@ -41,7 +41,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const jsx = (f) => fs.readFileSync(path.join(root, "packages", "jsx", f), "utf8");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
-const { AeError, BridgeTimeoutError } = await import(dist("util", "errors.js"));
+const { AeError, BridgeTimeoutError, WriteQueueWaitError } = await import(dist("util", "errors.js"));
 const asm = await import(dist("tools", "runJsxAssembly.js"));
 const park = await import(dist("tools", "viewerPark.js"));
 const { CallsInFlight } = await import(dist("bridge", "callsInFlight.js"));
@@ -64,7 +64,8 @@ async function check(name, fn) {
  * evalScript ends, which `call()` does.
  */
 function es({ expressions = 1, nested = false, disabledLayer = false, viewer = true } = {}) {
-  const state = { undo: [], opened: [], view: null, pending: null, changes: 0 };
+  // panelFocus: the Project panel has focus, so activeItem is its selection (panelItem), not the viewer's comp.
+  const state = { undo: [], opened: [], view: null, pending: null, changes: 0, panelFocus: false, panelItem: null };
   const PropertyType = { PROPERTY: 6212, INDEXED_GROUP: 6213, NAMED_GROUP: 6214 };
   const ViewerType = { VIEWER_COMPOSITION: 1, VIEWER_LAYER: 2 };
   let nextId = 1;
@@ -78,7 +79,7 @@ function es({ expressions = 1, nested = false, disabledLayer = false, viewer = t
     constructor(name, layers = []) {
       this.id = nextId++; this.name = name; this.comment = ""; this._layers = layers; this._folder = null;
       this.width = 16; this.height = 16; this.pixelAspect = 1; this.duration = 1; this.frameRate = 1;
-      this.workAreaStart = 0; this.workAreaDuration = 1; this.bgColor = [0, 0, 0];
+      this.workAreaStart = 0; this.workAreaDuration = 1; this.bgColor = [0, 0, 0]; this.markerProperty = { numKeys: 0 };
     }
     get numLayers() { return this._layers.length; }
     layer(i) { return this._layers[i - 1]; }
@@ -104,7 +105,7 @@ function es({ expressions = 1, nested = false, disabledLayer = false, viewer = t
     get numItems() { return items.length; },
     item(i) { return items[i - 1]; },
     itemByID(id) { const it = items.find((x) => x.id === id); if (!it) throw new Error("internal verification failure, sorry! {Item Not Found}"); return it; },
-    get activeItem() { return state.view; },
+    get activeItem() { return state.panelFocus ? state.panelItem : state.view; },
     file: null,
     items: {
       addComp(name) { const c = new CompItem(name); items.push(c); state.changes++; return c; },
@@ -115,7 +116,10 @@ function es({ expressions = 1, nested = false, disabledLayer = false, viewer = t
     project,
     beginUndoGroup(n) { state.undo.push(`begin ${n}`); },
     endUndoGroup() { state.undo.push("end"); },
-    get activeViewer() { return state.view ? { type: ViewerType.VIEWER_COMPOSITION, setActive() { return true; } } : null; },
+    get activeViewer() {
+      return state.view ? { type: ViewerType.VIEWER_COMPOSITION, get active() { return !state.panelFocus; },
+        setActive() { state.panelFocus = false; return true; } } : null;
+    },
   };
   const ctx = { app, PropertyType, ViewerType, CompItem, FolderItem, FootageItem, File: function (p) { this.path = p; },
     TextLayer: class {}, ShapeLayer: class {}, AVLayer: class {}, CameraLayer: class {}, LightLayer: class {} };
@@ -147,7 +151,8 @@ await check("a park is a call of its own: it opens the parking comp, and only th
   assert.match(s.result[0], /^AE MCP viewer parking/);
   assert.equal(s.result[1], "TR — Opener");
   const u = e.call("_viewer_unpark");
-  assert.deepEqual([u.result.unparked, u.result.restored, u.result.compId], [true, true, e.heavy.id]);
+  // Reopened, not "restored": the swap lands after the call, so it cannot be seen yet.
+  assert.deepEqual([u.result.unparked, u.result.reopened, u.result.restored, u.result.compId], [true, true, false, e.heavy.id]);
   assert.equal(e.state.view, e.heavy, "the user's comp is back in the viewer");
 });
 
@@ -247,7 +252,7 @@ await check("an interrupted park is taken over by the next one, which reopens th
   assert.deepEqual(p.recovered, { compId: e.heavy.id, compName: "TR — Opener" });
   assert.equal(p.compId, e.heavy.id, "the comp to go back to is the user's, not the parking comp");
   const u = e.call("_viewer_unpark").result;
-  assert.equal(u.restored, true);
+  assert.equal(u.reopened, true);
   assert.equal(e.state.view, e.heavy);
 });
 
@@ -255,7 +260,7 @@ await check("check_setup's recover reopens a comp an unpark could not, and is a 
   const e = es();
   assert.deepEqual(e.call("_viewer_unpark", { recover: true }).result, { unparked: false });
   e.call("_viewer_park");
-  assert.equal(e.call("_viewer_unpark", { recover: true }).result.restored, true, "a park still in force is undone");
+  assert.equal(e.call("_viewer_unpark", { recover: true }).result.reopened, true, "a park still in force is undone");
   assert.equal(e.state.view, e.heavy);
 });
 
@@ -286,7 +291,7 @@ await check("a script that wrote into the parking comp: a CAUTION names what lan
   assert.equal(s1.ok, true, s1.error);
   const parking = e.items.find((it) => String(it.comment).startsWith("ae-mcp-viewer-parking:v1"));
   const u = e.call("_viewer_unpark").result;
-  assert.equal(u.restored, true);
+  assert.equal(u.reopened, true);
   assert.match(u.caution, /^CAUTION: 1 layer\(s\) \("Title"\) landed in AE MCP's parking comp/);
   assert.match(u.caution, /viewerComp\(\)/);
   // What landed there is the user's now: listed, and the next park makes a fresh comp.
@@ -327,6 +332,69 @@ await check("_viewer_parked is a read that says whether a park is in force", () 
   assert.equal(e.call("_viewer_parked").result.parked, true);
   e.call("_viewer_unpark");
   assert.equal(e.call("_viewer_parked").result.parked, false);
+});
+
+await check("a Project-panel selection is never taken for the viewer's comp: the park focuses the viewer to ask it", () => {
+  const e = es();
+  e.state.panelFocus = true;
+  e.state.panelItem = e.other; // a comp selected in the Project panel, not in view
+  const p = e.call("_viewer_park").result;
+  assert.equal(p.parked, true);
+  assert.equal(p.compId, e.heavy.id, "the comp in the viewer, not the panel's selection");
+  e.call("_viewer_unpark");
+  assert.equal(e.state.view, e.heavy, "and the one reopened is the one that was in view");
+});
+
+await check("get_selection, with the Project panel focused while parked, names the user's comp, not the parking comp", () => {
+  const e = es();
+  e.call("_viewer_park");
+  e.state.panelFocus = true;
+  e.state.panelItem = null;
+  const r = vm.runInContext("(function(){ var x = __selResolveComp(); return x.comp ? x.comp.name : null; })()", e.ctx);
+  assert.equal(r, "TR — Opener");
+});
+
+await check("any change to the parking comp — name, duration, frame rate, size, markers, layers — is a CAUTION, and ends its use", () => {
+  for (const [label, change, word] of [
+    ["name", (c) => { c.name = "Renamed"; }, /name/],
+    ["duration", (c) => { c.duration = 10; }, /duration/],
+    ["frame rate", (c) => { c.frameRate = 24; }, /frame rate/],
+    ["markers", (c) => { c.markerProperty.numKeys = 1; }, /markers/],
+    ["size", (c) => { c.width = 1920; }, /width/],
+  ]) {
+    const e = es();
+    e.call("_viewer_park");
+    const parking = e.items.find((it) => String(it.comment).startsWith("ae-mcp-viewer-parking:v1"));
+    change(parking);
+    const u = e.call("_viewer_unpark").result;
+    assert.match(u.caution ?? "", /^CAUTION: a change to its /, label);
+    assert.match(u.caution, word, label);
+    assert.equal(e.call("_viewer_park").result.created, true, `${label}: not reused`);
+  }
+});
+
+await check("a parking comp written into is the user's everywhere: not parked, not recovered over, and named as the comp in view", () => {
+  const e = es();
+  e.call("_viewer_park");
+  const parking = e.items.find((it) => String(it.comment).startsWith("ae-mcp-viewer-parking:v1"));
+  e.call("run_jsx", { code: "var p = app.project['active' + 'Item']; p._layers.push({name: 'Title', id: 99}); return 1;" });
+  // The unpark never came (the server died). The user is looking at the comp the script built in.
+  assert.equal(e.call("_viewer_parked").result.parked, false, "check_setup sees no park to undo");
+  const rec = e.call("_viewer_unpark", { recover: true }).result;
+  assert.equal(rec.unparked, false, "nothing reopens the old comp over it");
+  assert.match(rec.caution, /^CAUTION: 1 layer\(s\) \("Title"\)/, "and what landed there is said");
+  assert.equal(e.state.view, parking);
+  assert.deepEqual(e.call("_viewer_unpark", { recover: true }).result, { unparked: false }, "the park is forgotten");
+  assert.equal(e.call("get_project_summary").result.activeItemId, parking.id);
+  assert.equal(e.call("run_jsx", { code: "return viewerComp().id;" }).result, parking.id, "viewerComp() names it, never null");
+  assert.deepEqual(Array.from(vm.runInContext("__diffCompIds({diff: true}, null)", e.ctx)), [parking.id]);
+  const p = e.call("_viewer_park").result;
+  assert.equal(p.recovered, undefined, "a later park does not take it for a leftover");
+});
+
+await check("the server's inline-batch limit is batch.jsx's", () => {
+  const m = /var __BATCH_INLINE_MAX = (\d+);/.exec(jsx("batch.jsx"));
+  assert.equal(Number(m[1]), park.BATCH_INLINE_MAX);
 });
 
 // ---------- 1b. the server's three calls (tools/viewerPark.ts, server.ts) ----------
@@ -402,15 +470,47 @@ await check("a script that timed out is not unparked (it may still run); the ses
   assert.equal(st.maybeLeft, false);
 });
 
-await check("a park that timed out: the script is not sent into a stuck After Effects, and the call fails with that timeout", async () => {
+await check("a park that timed out: the script is not sent, and the call fails as never sent — not with the timeout's wording", async () => {
   const st = new park.ViewerParkState();
-  const err = new BridgeTimeoutError(7777, 300_000, { op: "_viewer_park" });
-  const s = sender({ _viewer_park: err });
-  await assert.rejects(park.withParkedViewer(s.send, st, async () => { s.sent.push("script"); }), (e) => e === err);
+  const s = sender({ _viewer_park: new BridgeTimeoutError(7777, 300_000, { op: "_viewer_park" }) });
+  let thrown;
+  await assert.rejects(park.withParkedViewer(s.send, st, async () => { s.sent.push("script"); }, { op: "run_jsx" }), (e) => (thrown = e, true));
   assert.deepEqual(s.sent, ["_viewer_park"], "the script was never sent");
-  assert.match(err.viewerNote, /^The script itself was not sent/);
-  assert.ok(err.viewerNote.length < 300, "a short note, not the timeout's whole text again");
+  assert.ok(thrown instanceof WriteQueueWaitError, "the write-queue-wait kind: re-sending is safe");
+  assert.equal(thrown instanceof BridgeTimeoutError, false);
+  assert.match(thrown.message, /^`run_jsx` was not sent: After Effects did not answer the viewer park/);
+  assert.match(thrown.message, /send this same call again/);
+  assert.doesNotMatch(thrown.message, /do not re-send|Do not re-send|may still be running/i, "says one thing, once");
   assert.equal(st.maybeLeft, true, "the park may still land");
+  // A chunk says so as a chunk, and the batch driver reads it as surely unsent.
+  const t = sender({ _viewer_park: new BridgeTimeoutError(7777, 300_000, { op: "_viewer_park" }) });
+  await assert.rejects(park.withParkedViewer(t.send, st, async () => 1, { op: "run_batch", what: "The next chunk of batch j_1" }),
+    (e) => /^The next chunk of batch j_1 was not sent/.test(e.message));
+});
+
+await check("check_setup's recovery: nothing in read-only mode, no lock unless a park is unfinished", async () => {
+  const run = async ({ readOnly = false, maybeLeft = false, parked = false, lockFree = true } = {}) => {
+    const calls = [];
+    const st = new park.ViewerParkState();
+    st.maybeLeft = maybeLeft;
+    const s = sender({ _viewer_unpark: BACK });
+    const msg = await park.recoverForCheck({
+      readOnly, state: st,
+      isParked: async () => { calls.push("isParked"); return parked; },
+      acquire: async () => { calls.push("acquire"); if (!lockFree) throw new Error("timed out"); return { release() { calls.push("release"); } }; },
+      send: async (op, a) => { calls.push(op); return s.send(op, a); },
+    });
+    return { calls, msg };
+  };
+  assert.deepEqual((await run({ readOnly: true, maybeLeft: true, parked: true })).calls, [], "read-only: nothing at all");
+  assert.deepEqual((await run()).calls, ["isParked"], "no park: a read, and no lock");
+  const r = await run({ parked: true });
+  assert.deepEqual(r.calls, ["isParked", "acquire", "_viewer_unpark", "release"]);
+  assert.match(r.msg, /was reopened/);
+  assert.deepEqual((await run({ maybeLeft: true })).calls, ["acquire", "_viewer_unpark", "release"], "this session knows: no read needed");
+  const busy = await run({ parked: true, lockFree: false });
+  assert.deepEqual(busy.calls, ["isParked", "acquire"], "a lock held elsewhere is left alone");
+  assert.match(busy.msg, /another call holds the write lock/);
 });
 
 await check("a next-write recovery that fails is said, and the session keeps knowing", async () => {

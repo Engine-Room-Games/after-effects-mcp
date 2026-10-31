@@ -1,4 +1,4 @@
-import { AeError, BridgeTimeoutError } from "../util/errors.js";
+import { AeError, BridgeTimeoutError, ScriptNotSentError } from "../util/errors.js";
 import { UnleasedInternalWriteError, type SendInternal } from "./internalOps.js";
 
 /**
@@ -27,7 +27,9 @@ import { UnleasedInternalWriteError, type SendInternal } from "./internalOps.js"
  *
  * Every failure is said, never swallowed:
  *   - a park that timed out means After Effects is stuck: the script is not
- *     sent into it, and the call fails with that timeout;
+ *     sent into it, and the call fails as never sent (`ScriptNotSentError`, the
+ *     write-queue-wait kind: re-sending is safe once AE answers) — never with
+ *     the timeout's wording, whose remedy is the opposite;
  *   - a park that failed some other way in transit may still have landed, so
  *     the unpark is sent anyway — it is idempotent, and the panel runs calls in
  *     order, so it lands after the script whatever happened to the park;
@@ -52,6 +54,7 @@ export interface ParkAnswer {
 
 export interface UnparkAnswer {
   unparked: boolean;
+  reopened?: boolean;
   restored?: boolean;
   compId?: number;
   compName?: string;
@@ -67,7 +70,13 @@ export interface ViewerReport {
   compName?: string;
   /** Why it was not parked: no-expressions, no-comp-in-viewer, already-parked, reads-activeItem, failed. */
   skipped?: string;
-  /** Present once parked: whether the comp was reopened in the viewer. */
+  /** The comp was handed back to the viewer (openInViewer accepted it). */
+  reopened?: boolean;
+  /**
+   * Only ever true when the viewer was SEEN showing the comp again. A viewer
+   * change lands after the call that makes it, so a clean reopen usually
+   * reports `reopened` alone; the next park checks it took.
+   */
   restored?: boolean;
   /** The comp the script itself put in the viewer, left there. */
   viewerComp?: { id: number; name: string };
@@ -157,7 +166,7 @@ function compLabel(id: number | undefined, name: string | undefined): string {
 export function viewerReportMatters(r: ViewerReport | null): boolean {
   if (!r) return false;
   if (r.note || r.recovered || r.caution) return true;
-  return r.parked && r.restored !== true;
+  return r.parked && r.restored !== true && r.reopened !== true;
 }
 
 /** A failure in a few words — the error class, not its whole remedy text. */
@@ -199,7 +208,9 @@ export async function notParkedForActiveItem(send: SendInternal): Promise<Viewer
 export async function withParkedViewer<T>(
   send: SendInternal,
   state: ViewerParkState,
-  run: () => Promise<T>
+  run: () => Promise<T>,
+  /** The tool, and what was not sent if the park times out (a chunk, say). */
+  label: { op: string; what?: string } = { op: "run_jsx" }
 ): Promise<{ value: T; report: ViewerReport }> {
   let park: ParkAnswer | null = null;
   let parkError: unknown = null;
@@ -209,13 +220,10 @@ export async function withParkedViewer<T>(
     // A bug in the caller, not a bridge failure: nothing was sent.
     if (e instanceof UnleasedInternalWriteError) throw e;
     if (e instanceof BridgeTimeoutError) {
-      // After Effects is stuck: the script is not sent into it. The park may
-      // still land, so the session remembers.
+      // After Effects is stuck: the script is not sent into it, and the call
+      // fails as never sent. The park may still land, so the session remembers.
       state.maybeLeft = true;
-      (e as WithViewerNote).viewerNote =
-        "The script itself was not sent: After Effects did not answer the viewer park that goes before it, so " +
-        "nothing of the script ran. Send it again once check_setup shows After Effects answering.";
-      throw e;
+      throw new ScriptNotSentError(label.op, label.what);
     }
     parkError = e;
   }
@@ -276,6 +284,7 @@ export async function withParkedViewer<T>(
       return;
     }
     r.parked = true;
+    if (u.reopened === true) r.reopened = true;
     r.restored = u.restored === true;
     if (u.compId !== undefined) r.compId = u.compId;
     if (u.compName !== undefined) r.compName = u.compName;
@@ -296,7 +305,7 @@ export async function withParkedViewer<T>(
     await unparkInto(r);
     const parts: string[] = [];
     if (r.caution) parts.push(r.caution);
-    if (r.restored !== true && r.note) parts.push(r.note);
+    if (r.restored !== true && r.reopened !== true && r.note) parts.push(r.note);
     return parts.length ? `quietViewer: ${parts.join("; ")}.` : null;
   }
 }
@@ -324,13 +333,52 @@ export async function recoverParkedViewer(send: SendInternal, state: ViewerParkS
       "this session's next write, and by check_setup; tell the user if the viewer shows an empty comp.";
   }
   if (state) state.maybeLeft = false;
-  if (!u || u.unparked !== true) return null;
+  if (!u || u.unparked !== true) return u?.caution ? `${u.caution}.` : null;
   // The user (or a script) has since put a comp of their own in the viewer.
   if (u.viewerComp) return u.caution ?? null;
   const what = compLabel(u.compId, u.compName);
   const caution = u.caution ? ` ${u.caution}.` : "";
-  if (u.restored === true) {
+  if (u.restored === true || u.reopened === true) {
     return `An earlier call had left the viewer on AE MCP's parking comp; ${what} was reopened in the viewer.${caution}`;
   }
   return `An earlier call had left the viewer on AE MCP's parking comp; ${u.note ?? `${what} could not be reopened`}.${caution}`;
+}
+
+/**
+ * check_setup's half: put back a viewer an interrupted call left parked — and
+ * otherwise touch nothing. Never in read-only mode. No lock is taken unless a
+ * park is actually unfinished: this session knows it may have left one, or
+ * After Effects says one is in force (`isParked`, a background read that is
+ * never the call check_setup names as busy). Then the write lock is asked for
+ * briefly (`acquire` bounds it); one held elsewhere is very probably that
+ * call's own park, mid-run, and is left alone.
+ */
+export async function recoverForCheck(o: {
+  readOnly: boolean;
+  state: ViewerParkState;
+  isParked: () => Promise<boolean>;
+  acquire: () => Promise<{ release(): void }>;
+  send: SendInternal;
+}): Promise<string | null> {
+  if (o.readOnly) return null;
+  if (!o.state.maybeLeft) {
+    let parked = false;
+    try {
+      parked = await o.isParked();
+    } catch {
+      return null;
+    }
+    if (!parked) return null;
+  }
+  let held: { release(): void };
+  try {
+    held = await o.acquire();
+  } catch {
+    return "A viewer park is still in force and another call holds the write lock — very probably that call's own park; check again once it has finished.";
+  }
+  try {
+    return await recoverParkedViewer(o.send, o.state);
+  } finally {
+    held.release();
+  }
 }

@@ -54,6 +54,7 @@ import {
   batchParkMode,
   notParkedForActiveItem,
   readsActiveItem,
+  recoverForCheck,
   recoverParkedViewer,
   runJsxWantsPark,
   viewerReportMatters,
@@ -269,28 +270,18 @@ export function createServer(opts: CreateServerOptions = {}) {
   // Effects says one is in force (a read, `_viewer_parked`). Only then is the
   // write lock asked for, for at most 2 s — a park another session holds the
   // lock for is its own, mid-run, and is left alone. Never in read-only mode.
-  const recoverViewerForCheck = async (): Promise<string | null> => {
-    if (policy.readOnly) return null;
-    if (!viewerState.maybeLeft) {
-      try {
-        const st = (await internalVia(() => false)("_viewer_parked", {})) as { parked?: unknown } | null;
-        if (st?.parked !== true) return null;
-      } catch {
-        return null;
-      }
-    }
-    let held: WriteLease | null = null;
-    try {
-      held = await line.acquire("check_setup", AbortSignal.timeout(2_000));
-    } catch {
-      return "A viewer park is still in force, and another call holds the write lock — it is very probably that call's own park; check again once it has finished.";
-    }
-    try {
-      return await recoverParkedViewer(internalVia(() => true), viewerState);
-    } finally {
-      held.release();
-    }
-  };
+  const recoverViewerForCheck = (): Promise<string | null> =>
+    recoverForCheck({
+      readOnly: policy.readOnly,
+      state: viewerState,
+      // Background: refused unsent while a write is held here, and never the
+      // call check_setup names under busyWith.
+      isParked: async () =>
+        ((await internalVia(() => false)("_viewer_parked", {}, { yieldToWrites: true })) as { parked?: unknown } | null)
+          ?.parked === true,
+      acquire: () => line.acquire("check_setup", AbortSignal.timeout(2_000)),
+      send: internalVia(() => true),
+    });
   // render_queue's jobs run in an aerender process this server owns; see
   // render/aerender.ts. When a job ends, its verified items are unticked in the
   // live queue so they do not render twice — once, as one named undo step, and
@@ -320,7 +311,7 @@ export function createServer(opts: CreateServerOptions = {}) {
       // A batch with run_jsx steps parks the viewer around each chunk, under
       // the batch's lease: never across two, so the user's comp is back in view
       // between chunks and a batch that stops leaves nothing parked.
-      return withParkedViewer(sendChunkWrite, viewerState, chunk).then(
+      return withParkedViewer(sendChunkWrite, viewerState, chunk, { op: "run_batch", what: `The next chunk of batch ${jobId}` }).then(
         ({ value, report }) => {
           if (viewerReportMatters(report)) jobs.warn(jobId, `quietViewer: ${JSON.stringify(report)}`);
           return value;
@@ -1178,7 +1169,7 @@ export function createServer(opts: CreateServerOptions = {}) {
                 );
       let raw: unknown;
       if (parkHere) {
-        const parked = await withParkedViewer(sendInternal, viewerState, forward);
+        const parked = await withParkedViewer(sendInternal, viewerState, forward, { op: name });
         raw = parked.value;
         viewer = parked.report;
       } else {

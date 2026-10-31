@@ -25,7 +25,7 @@ function viewerComp() {
   var from = __parkedFrom();
   if (from) return from;
   var v = __parkViewerComp();
-  return (v && !__parkIsTagged(v)) ? v : null;
+  return (v && !__parkIsParkingComp(v)) ? v : null;
 }
 
 // getCompById by a shorter name, because that is the name agents guess.

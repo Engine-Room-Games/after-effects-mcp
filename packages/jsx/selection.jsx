@@ -101,7 +101,7 @@ function __selResolveComp() {
         // the viewer's comp.
         if (viewer.setActive() !== false) fromViewer = app.project.activeItem;
       } catch (e) { fromViewer = null; }
-      if (fromViewer && typeof __parkIsTagged === "function" && __parkIsTagged(fromViewer)) {
+      if (fromViewer && typeof __parkIsParkingComp === "function" && __parkIsParkingComp(fromViewer)) {
         fromViewer = __parkedFrom();
       }
       if (fromViewer && fromViewer instanceof CompItem) {

@@ -482,8 +482,8 @@ function __itemKind(it) {
 OPS.get_project_summary = noUndo(function (args) {
   var p = app.project;
   var items = [];
-  // AE MCP's own viewer-parking comp and its folder (viewer.jsx, issue #266)
-  // are left out of the list and counted, never silently.
+  // AE MCP's own empty viewer-parking comp (viewer.jsx, issue #266) is left
+  // out of the list and counted, never silently.
   var hidden = 0;
   for (var i = 1; i <= p.numItems; i++) {
     var it = p.item(i);
