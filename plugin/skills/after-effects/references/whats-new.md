@@ -61,46 +61,26 @@ only quitting and reopening After Effects will.
   supersedes: run setup_panel, then restart After Effects
   supersedes: run setup_panel, then ask them to quit and reopen After Effects
 
-- **Breaking: in `run_jsx`, use `viewerComp()` for the user's comp — while
-  the viewer is parked, `app.project.activeItem` is AE MCP's parking comp.**
-  Every change a script makes re-runs the expressions of the comp in the
-  viewer, once per change (a 20-change script took 74 s with a heavy comp in
-  view, AE 26.5). So when the comp in view has expressions, the server opens
-  an empty comp ("AE MCP viewer parking (safe to delete)") in the viewer
-  before the script and reopens the user's comp after it. A script that
-  mentions `activeItem` is not parked, and the answer says it could have been.
-  The comp is made once and reused: creating it is one undo step of its own,
-  the first time only, and after that a park adds none. It is left out of
-  `list_comps`, `get_project_summary` (counted in `aeMcpItemsHidden`) and
-  `find_layers` — but not out of `app.project.items`. Anything that lands in
-  it is reported as a CAUTION. A comp the script opens in the viewer itself
-  stays there, and the answer says which. `quietViewer: false` turns it off;
-  with `quietViewer: true`, or when something did not go as planned, the
-  answer carries a `quietViewer` block. `run_batch` with `run_jsx` steps parks
-  too. If a call was cut off between the park and the put-back, the next
-  `run_jsx`, this session's next write, or `check_setup` reopens the user's
-  comp. Two things it cannot help: keyboard focus moves to the viewer — on
-  every parked run, and on any default run while the viewer is not the panel
-  in focus, parked or not, since finding the comp in view means focusing the
-  viewer — and changes inside the heavy comp itself while it stays open in a
-  background viewer tab: measured, 20 Rotation changes on one of its own
-  layers took ~38 s parked against ~40 s unparked, so parking saves next to
-  nothing there. If After Effects does not answer the park, the script is not
-  sent at all, and the error says re-sending is safe once `check_setup` shows
-  After Effects answering (issues #266, #277).
-  supersedes: app.project.activeItem is the comp the user has open
-  supersedes: use app.project.activeItem to get the active comp
+- **`run_jsx` leaves the viewer alone: no parking comp, no focus change, no
+  extra calls.** The viewer parking tried during this release — an empty
+  "AE MCP viewer parking (safe to delete)" comp swapped into the viewer around
+  each script — is removed (issue #273). It took keyboard focus from the
+  user's panel, saved a comp and an undo step into their project, added two
+  calls to every script, and measured about 5% faster. `quietViewer` is still
+  accepted and does nothing. `app.project.activeItem` is the project's active
+  item again (with the Project panel focused, its selection, not necessarily
+  the comp in the viewer), and `viewerComp()` is kept only as a short way to
+  get it when it is a comp (null otherwise); target comps by id. A parking comp an earlier build left in a project is safe
+  to delete. A heavy comp in the viewer still slows every scripted change —
+  each change re-runs its expressions — so for a big rebuild ask the user to
+  switch the viewer to a light comp or close that comp's viewer tab.
 - **`check_setup` says what a busy After Effects is busy with.** When the
   bridge accepts and does not answer, and this server has a call open — or one
   that timed out with no answer since — the report carries `busyWith: {op,
   state, calledAgoMs}` and the `bridgeReachable` detail names the call.
   `state` is `sent` or `timedOut` (After Effects is very probably running it)
   or `queued` (not sent yet: another session's call is what is running). Keep
-  waiting while it is there; do not re-send that call (issue #266). The one
-  exception is `kind: "viewer-unpark"` (`op: "viewer unpark"`): the call that
-  puts the user's comp back after a parked run. It changes nothing in the
-  project and there is nothing to re-send — the session retries it itself
-  (issue #277).
+  waiting while it is there; do not re-send that call (issue #266).
 
 ## 0.5.2
 

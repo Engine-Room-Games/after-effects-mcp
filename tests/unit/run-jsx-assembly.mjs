@@ -38,7 +38,6 @@ const jsx = (f) => fs.readFileSync(path.join(root, "packages", "jsx", f), "utf8"
 const core = jsx("core.jsx");
 const snapshot = jsx("snapshot.jsx");
 const raw = jsx("raw.jsx");
-const viewer = jsx("viewer.jsx");
 const dist = (...p) => pathToFileURL(path.join(root, "packages", "mcp-server", "dist", ...p)).href;
 
 const { AeError, aeErrorText } = await import(dist("util", "errors.js"));
@@ -88,7 +87,6 @@ function es(opts = {}) {
   vm.runInContext(core, ctx, { filename: "core.jsx" });
   vm.runInContext(snapshot, ctx, { filename: "snapshot.jsx" });
   vm.runInContext(raw, ctx, { filename: "raw.jsx" });
-  vm.runInContext(viewer, ctx, { filename: "viewer.jsx" });
   return {
     log,
     get: (n) => vm.runInContext(n, ctx),
@@ -521,9 +519,6 @@ async function session(health, opts = {}) {
   return s;
 }
 
-// What the panel ran, less the viewer park and unpark around a script.
-const scriptOps = (s) => s.seen.filter((op) => op !== "_viewer_park" && op !== "_viewer_unpark");
-
 const referencePanel = await session({}, { reference: true });
 const capablePanel = await session({});
 
@@ -551,8 +546,7 @@ for (const [name, args] of toolFixtures) {
     referencePanel.referenceArgs = resolveRunJsxSource(args);
     const before = await referencePanel.call("run_jsx", args);
     const after = await capablePanel.call("run_jsx", args);
-    // The viewer park around it (issue #266) is tests/unit/quiet-viewer.mjs's.
-    assert.deepEqual(scriptOps(capablePanel), ["_run_jsx"], "the panel gets the built op and nothing else");
+    assert.deepEqual(capablePanel.seen, ["_run_jsx"], "the panel gets the built op and nothing else");
     // The library and script paths are the only thing that differ by fixture
     // file, and they are the same files on both sides.
     assert.equal(after.isError, before.isError);
@@ -567,14 +561,35 @@ await check("tools/call: a panel that does not know _run_jsx is told to update, 
   assert.equal(r.isError, true, r.text);
   assert.match(r.text, /older than these tools/);
   assert.match(r.text, /setup_panel/);
-  assert.deepEqual(scriptOps(old), ["_run_jsx"], "retried under the public name");
+  assert.deepEqual(old.seen, ["_run_jsx"], "retried under the public name");
 });
 
 await check("tools/call: run_batch steps still go to OPS.run_jsx inside the batch", async () => {
   // Routing only: batch.jsx dispatches its steps to OPS[step.op] itself, so a
   // run_jsx step is assembled and mapped in ExtendScript on every panel.
   await capablePanel.call("run_batch", { ops: [{ op: "run_jsx", args: { code: "return 2;" } }] });
-  assert.deepEqual(scriptOps(capablePanel), ["run_batch"]);
+  assert.deepEqual(capablePanel.seen, ["run_batch"]);
+});
+
+await check("tools/call: run_jsx never touches the viewer — no park or unpark ops, quietViewer accepted and ignored (#273)", async () => {
+  // The viewer parking of #266 sent `_viewer_park` / `_viewer_unpark` around
+  // every script and batch with run_jsx steps: focus stolen, a comp added to
+  // the user's project, two extra calls. It is gone; `quietViewer` stays in
+  // the schema only so an older caller passing it is not refused.
+  for (const quietViewer of [undefined, true, false]) {
+    const args = { code: "return 1;", ...(quietViewer === undefined ? {} : { quietViewer }) };
+    const r = await capablePanel.call("run_jsx", args);
+    assert.equal(r.isError, false, r.text);
+    assert.deepEqual(capablePanel.seen, ["_run_jsx"], `quietViewer ${quietViewer}: only the script reached the panel`);
+    assert.doesNotMatch(r.text, /quietViewer|park/i, "no viewer report on the answer");
+  }
+  for (const quietViewer of [undefined, true]) {
+    const step = { op: "run_jsx", args: { code: "return 2;", ...(quietViewer === undefined ? {} : { quietViewer }) } };
+    const r = await capablePanel.call("run_batch", { ops: [step, step] });
+    // This panel has no batch.jsx, so the batch itself errors; what reached it is the point.
+    assert.deepEqual(capablePanel.seen, ["run_batch"], "only the batch reached the panel");
+    assert.doesNotMatch(r.text, /quietViewer|park/i);
+  }
 });
 
 console.log(`run-jsx-assembly: ${passed} checks passed`);

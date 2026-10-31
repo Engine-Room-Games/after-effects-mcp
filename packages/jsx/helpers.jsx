@@ -18,14 +18,17 @@
 // These are listed by signature in the run_jsx tool description. If you change
 // one, change that too — it is the only place a caller ever sees them.
 
-// viewerComp() — the comp the user has in the viewer, or null. While run_jsx
-// has the viewer parked (viewer.jsx, issue #266) app.project.activeItem is the
-// parking comp; this is the comp it replaced. Otherwise it asks the viewer.
+// viewerComp() — app.project.activeItem when it is a comp, or null. Kept from
+// the viewer parking of issue #266, removed in #273, so scripts written against
+// it keep working. Despite the name it is the project's active item: with the
+// Project panel focused that is the Project panel's selection, which may not be
+// the comp in the viewer. The Viewer object exposes no comp, and the only way
+// to make activeItem the viewer's (viewer.setActive()) takes focus from the
+// user's panel, so it is not done. Scripts should target comps by id.
 function viewerComp() {
-  var from = __parkedFrom();
-  if (from) return from;
-  var v = __parkViewerComp();
-  return (v && !__parkIsParkingComp(v)) ? v : null;
+  var a = null;
+  try { a = app.project.activeItem; } catch (e) { a = null; }
+  return (a && a instanceof CompItem) ? a : null;
 }
 
 // getCompById by a shorter name, because that is the name agents guess.

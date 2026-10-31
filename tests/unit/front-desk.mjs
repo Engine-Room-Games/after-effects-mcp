@@ -755,8 +755,6 @@ let chain = Promise.resolve();
 const batches = new Map(); // jobId -> completedAt
 const running = new Map(); // jobId -> { endsAt, chunks }
 let batchMs = 700;
-/** Whether the viewer park finds something to park (issue #266); off, it is answered outside the chain. */
-let parkOn = false;
 const panel = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.setHeader("content-type", "application/json");
@@ -767,18 +765,11 @@ const panel = http.createServer((req, res) => {
   req.on("data", (c) => (body += c));
   req.on("end", () => {
     const { op, args } = JSON.parse(body || "{}");
-    // The viewer park before a run_jsx (issue #266) finds nothing worth
-    // parking here; tests/unit/quiet-viewer.mjs covers the parked path.
-    if ((op === "_viewer_park" || op === "_viewer_unpark") && !parkOn) {
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ ok: true, result: op === "_viewer_park" ? { parked: false, skipped: "no-expressions" } : { unparked: false } }));
-      return;
-    }
     // One at a time, like the real panel's evalScript chain.
     chain = chain.then(async () => {
       // run_jsx arrives as `_run_jsx`, with the server-built wrapper (#220, #243).
       const jsxSource = op === "run_jsx" || op === "_run_jsx" ? String(args.code ?? args.built?.wrapper ?? "") : null;
-      const tag = jsxSource !== null ? /tag:(\w+)/.exec(jsxSource)?.[1] : op === "_viewer_park" && args?.dryRun ? "_viewer_park(dryRun)" : op;
+      const tag = jsxSource !== null ? /tag:(\w+)/.exec(jsxSource)?.[1] : op;
       let ms = jsxSource !== null ? Number(/ms:(\d+)/.exec(jsxSource)?.[1] ?? 5) : 5;
       // The server drives every batch (#243): each chunk runs up to 50ms, and
       // the job is done once it has run for batchMs.
@@ -805,8 +796,6 @@ const panel = http.createServer((req, res) => {
         }
       }
       if (op === "list_comps") result = [];
-      if (op === "_viewer_park") result = { parked: true, compId: 1, compName: "Main" };
-      if (op === "_viewer_unpark") result = { unparked: true, restored: true, compId: 1, compName: "Main" };
       // A non-object result After Effects warned about, as core.jsx wraps it (#225).
       if (tag === "WARN") result = { __aemcpWarned: true, value: [1, 2], aeWarnings: ["Missing font: Inter"] };
       try {
@@ -939,58 +928,6 @@ try {
     // …and while it waited.
     assert.ok(rb.progress.some((m) => /is 1st in line .*another session's `run_jsx` \(desk-test-A, pid \d+\)/.test(m)), rb.progress.join("\n"));
     assert.ok(rc.progress.some((m) => /is 2nd in line/.test(m)), rc.progress.join("\n"));
-  });
-
-  await check("parked (#266): each session's park, script and unpark reach After Effects together, never interleaved", async () => {
-    seen.length = 0;
-    parkOn = true;
-    try {
-      const pa = call(A, "run_jsx", jsx("PA", 400));
-      await until("PA at the panel", () => ran("PA").length === 1);
-      const hb = begin(B, "run_jsx", jsx("PB", 50));
-      const [ra, rb] = await Promise.all([pa, hb.done]);
-      for (const r of [ra, rb]) assert.equal(r.res.isError, undefined, r.text);
-      assert.deepEqual(seen.map((e) => e.tag), ["_viewer_park", "PA", "_viewer_unpark", "_viewer_park", "PB", "_viewer_unpark"]);
-      for (let i = 1; i < seen.length; i++) {
-        assert.ok(seen[i].enteredAt >= seen[i - 1].leftAt, `${seen[i].tag} overlapped ${seen[i - 1].tag}`);
-      }
-    } finally {
-      parkOn = false;
-    }
-  });
-
-  await check("parked chunks (#277): with the desk on, no other session's call lands between a chunk's park and its unpark", async () => {
-    // Live with the desk off, another session's activeItem script slipped in
-    // between a chunk's park and the chunk and took the park back. Through the
-    // desk the batch's lease is held end to end, so that cannot happen.
-    seen.length = 0;
-    parkOn = true;
-    try {
-      const ops = Array.from({ length: 501 }, () => ({ op: "run_jsx", args: { code: "return 1;" } }));
-      const rb = await call(A, "run_batch", { ops });
-      assert.equal(rb.res.isError, undefined, rb.text);
-      const { jobId } = rb.json();
-      await until("a parked chunk at the panel", () => ran("_continue_job").length >= 1);
-      // B's script reads activeItem: a dry-run park that would undo A's park.
-      const hb = begin(B, "run_jsx", { code: "// tag:PB ms:5\nreturn app.project.activeItem.name;" });
-      const done = await call(A, "await_job", { jobId });
-      assert.equal(done.res.isError, undefined, done.text);
-      assert.doesNotMatch(done.text, /another call|reloaded/, "no chunk lost its park");
-      const r = await hb.done;
-      assert.equal(r.res.isError, undefined, r.text);
-      const tags = seen.map((e) => e.tag);
-      const firstB = tags.indexOf("_viewer_park(dryRun)");
-      assert.ok(firstB > 0, tags.join(" "));
-      assert.ok(tags.indexOf("PB") > firstB, "B's script came after its dry run");
-      const batch = tags.slice(tags.indexOf("run_batch") + 1, firstB);
-      assert.ok(batch.length >= 6, `several chunks ran: ${batch.join(" ")}`);
-      for (let i = 0; i < batch.length; i += 3) {
-        assert.deepEqual(batch.slice(i, i + 3), ["_viewer_park", "_continue_job", "_viewer_unpark"], `chunk at ${i}: ${batch.join(" ")}`);
-      }
-      assert.ok(seen[firstB].enteredAt >= batches.get(jobId), "B's dry run reached After Effects only after the batch finished");
-    } finally {
-      parkOn = false;
-    }
   });
 
   await check("a read is never held behind another session's write", async () => {

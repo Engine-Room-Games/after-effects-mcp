@@ -83,8 +83,7 @@ function __selProjectSelectionCount() {
 
 function __selResolveComp() {
   var before = null;
-  // The viewer-parking comp answers as the comp it replaced (viewer.jsx).
-  try { before = (typeof __userActiveItem === "function") ? __userActiveItem() : app.project.activeItem; } catch (e) { before = null; }
+  try { before = app.project.activeItem; } catch (e) { before = null; }
   if (before && before instanceof CompItem) return { comp: before, source: "activeItem" };
 
   var viewer = null;
@@ -101,9 +100,6 @@ function __selResolveComp() {
         // the viewer's comp.
         if (viewer.setActive() !== false) fromViewer = app.project.activeItem;
       } catch (e) { fromViewer = null; }
-      if (fromViewer && typeof __parkIsParkingComp === "function" && __parkIsParkingComp(fromViewer)) {
-        fromViewer = __parkedFrom();
-      }
       if (fromViewer && fromViewer instanceof CompItem) {
         return {
           comp: fromViewer,

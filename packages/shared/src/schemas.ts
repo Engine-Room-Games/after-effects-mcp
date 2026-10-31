@@ -1289,8 +1289,10 @@ export const RunJsx = crossField(
       .describe("Absolute paths to .jsx files the server inlines ahead of the script, in its scope. Re-evaluated every call: declarations only. Put shared helpers here instead of pasting them."),
     undoGroup: z.boolean().optional().meta({ default: true })
       .describe("Wrap the script in one undo step. false only for what AE refuses inside one (copyToComp on a parented or expression-linked layer); changes then land as AE's own undo steps."),
-    quietViewer: z.boolean().optional().meta({ default: true })
-      .describe("Park the viewer on AE MCP's empty comp while the script runs, when the comp in view has expressions, and reopen it after (default): AE otherwise re-evaluates them after every change. true also reports it on the answer; false leaves the viewer alone."),
+    // Accepted and ignored: the viewer parking it switched was removed (issue
+    // #273). Kept so an agent still passing it is not refused by the strict schema.
+    quietViewer: z.boolean().optional()
+      .describe("Deprecated, ignored. AE MCP no longer touches the viewer around a script."),
     diff: diffParam,
     diffCompId: diffCompIdParam,
   }),
@@ -1940,17 +1942,6 @@ export const InternalOpMutation = {
   // run_jsx with the script assembled by the server (issue #220, stage 6).
   // Sent under run_jsx's own lease.
   _run_jsx: "write",
-  // The viewer parked on AE MCP's light comp before a run_jsx (or a run_batch
-  // with run_jsx steps, each chunk) and put back after, under that call's lease
-  // so no other session lands between the three (issue #266;
-  // tools/viewerPark.ts). Writes because they change what the user sees and
-  // must not interleave with another session's park; the park also creates the
-  // parking comp the first time. check_setup sends the unpark too, to restore
-  // a viewer an interrupted call left parked.
-  _viewer_park: "write",
-  _viewer_unpark: "write",
-  // Whether a park is in force: what check_setup asks before it takes any lock.
-  _viewer_parked: "read",
 } as const satisfies Record<`_${string}`, "write" | "read">;
 
 type ServerOpName = { [K in OpName]: (typeof OpMutation)[K] extends "server" ? K : never }[OpName];

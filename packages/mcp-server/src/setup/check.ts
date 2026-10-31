@@ -660,13 +660,9 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
 export function withBusyStep(nextSteps: string[], busyWith: BusyWith): string[] {
   const waitAt = nextSteps.findIndex((l) => l.startsWith("Wait — "));
   if (waitAt < 0) return nextSteps;
-  // The viewer unpark is not a call to re-send or not (#277): its own text says
-  // nothing needs re-sending, and "it would run a second time" would contradict it.
   const line =
-    busyWith.kind === "viewer-unpark"
-      ? `What it is busy with: ${busyWithText(busyWith)}. Run check_setup again every half minute or so.`
-      : `What it is busy with: ${busyWithText(busyWith)}. Do not re-send that call — it would run a second time. ` +
-        "Run check_setup again every half minute or so; once the panel answers, read the project back to confirm what landed.";
+    `What it is busy with: ${busyWithText(busyWith)}. Do not re-send that call — it would run a second time. ` +
+    "Run check_setup again every half minute or so; once the panel answers, read the project back to confirm what landed.";
   return [...nextSteps.slice(0, waitAt + 1), line, ...nextSteps.slice(waitAt + 1)];
 }
 
