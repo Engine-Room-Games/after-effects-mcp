@@ -82,6 +82,10 @@ interface FrameInfo {
   time: number;
   compId: number;
   layerId?: number;
+  /** Which route the render took (issue #282): "direct", "wrapper" or "copy". */
+  isolation?: string;
+  /** Set when the temporary comp could not be removed, or left a saved project unsaved. */
+  note?: string;
 }
 
 interface SheetInfo {
@@ -92,6 +96,8 @@ interface SheetInfo {
   height: number;
   compId: number;
   times?: number[];
+  isolation?: string;
+  note?: string;
 }
 
 interface ReadFrame {
@@ -282,6 +288,8 @@ export function createFramePipeline(opts: FramePipelineOptions = {}) {
         time: info.time,
         compId: info.compId,
         layerId: info.layerId,
+        isolation: info.isolation,
+        note: info.note,
         reason:
           "Every pixel of this frame is fully transparent — the frame is empty. " +
           "No image was sent because there is nothing in it to see. Usually this means " +
@@ -304,6 +312,8 @@ export function createFramePipeline(opts: FramePipelineOptions = {}) {
       time: info.time,
       compId: info.compId,
       layerId: info.layerId,
+      isolation: info.isolation,
+      note: info.note,
       mimeType: "image/png",
       base64: buffer.toString("base64"),
       bytes: buffer.length,
@@ -502,6 +512,8 @@ export function createFramePipeline(opts: FramePipelineOptions = {}) {
       fullHeight: info.height,
       downsample: ds,
       compId: info.compId,
+      isolation: info.isolation,
+      note: info.note,
       tiles: sheet.tiles,
       mimeType: "image/png",
       base64: sheet.buffer.toString("base64"),

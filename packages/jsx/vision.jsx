@@ -66,13 +66,42 @@ function __resolveDownsample(comp, requested) {
 // *picture* was not the one asked for — the worse of the two failures, because
 // an agent that can see a frame believes it.
 //
-// What is skipped is only the *assignment*, and only when the comp is already
-// at the factor asked for. Every assignment to resolutionFactor is its own undo
-// step in After Effects ("Resolution change"), so set-and-restore cost two steps
-// per rendered frame — ten for one frame plus a four-tile sheet — and buried the
-// user's real edits under no-ops (issue #116). When the factor already matches,
-// the render happens at the requested resolution with nothing assigned, which
-// keeps #72's guarantee and leaves the project untouched.
+// What the factor is never set on any more is the USER'S comp (issue #282).
+// Setting it there and putting it back — and, for screenshot_layer, flipping
+// every solo switch and putting them back — was visible: the Resolution
+// dropdown and the solo column flickered in the user's own timeline while the
+// frame rendered, and a crash mid-render would have left them flipped. So a
+// screenshot that needs anything changed renders a TEMPORARY comp instead and
+// removes it afterwards, in a finally:
+//
+//   * "wrapper" (screenshot_frame, contact sheets, the mogrt poster): a new
+//     comp of the same size, aspect, rate and duration holding the user's comp
+//     as one precomp layer, at the factor asked for. After Effects renders a
+//     nested comp at the CONTAINING comp's resolution — that is what the
+//     "Preserve resolution when nested" comp setting exists to switch off — so
+//     a comp with that setting on takes the copy route below instead. Cheap: one
+//     comp and one layer, whatever the user's comp holds.
+//   * "copy" (screenshot_layer, and a comp that preserves its resolution when
+//     nested): CompItem.duplicate() of the user's comp, the factor and the solo
+//     switches set on the COPY. A copy renders exactly what the old in-place
+//     solo rendered — parenting, track mattes, adjustment layers and
+//     expressions that reach other layers all come along, which copying the one
+//     layer into a fresh comp would have broken — and the user's comp is never
+//     written. Dearer on a comp with hundreds of layers.
+//   * "direct": the comp is already at the factor asked for (and, for a layer,
+//     the target is already the only soloed layer). Nothing needs changing, so
+//     the user's comp renders as it is, with nothing created and no undo step —
+//     the zero-cost case issue #116 measured.
+//
+// What a temporary comp still costs, and cannot avoid: creating and removing an
+// item are project changes. They share one named undo step,
+// "AE MCP: screenshot" (#116's grouping, below) — undoing it is a no-op — and
+// After Effects may mark the project as having unsaved changes. Project.dirty
+// is read-only, so that cannot be put back; the result says so in `note` when a
+// screenshot is what turned a saved project unsaved. Measured on 26.5 (recipe
+// 79 in docs/verification-recipes.md): wrapper and copy frames are
+// pixel-identical to the comp rendered at Full. The `isolation` field on every
+// result says which route a frame took.
 function __factorIs(rf, f) {
   return !!rf && rf[0] === f && rf[1] === f;
 }
@@ -81,39 +110,128 @@ function __factorFor(factor) {
   return (factor > 1) ? Math.round(factor) : 1;
 }
 
-function __saveFrameAt(comp, time, file, factor) {
-  var f = __factorFor(factor);
-  var previous = comp.resolutionFactor;
-  if (__factorIs(previous, f)) {
-    comp.saveFrameToPng(time, file);
-    return;
-  }
+// The temporary comp's name and comment. The comment is what a later sweep or
+// a person can recognise one by if a crash ever leaves one behind.
+var __SCREENSHOT_TEMP_NAME = "AE MCP screenshot (temporary)";
+var __SCREENSHOT_TEMP_TAG = "ae-mcp-screenshot-temp:v1";
+
+function __projectDirty() {
   try {
-    comp.resolutionFactor = [f, f];
-    comp.saveFrameToPng(time, file);
+    var d = app.project.dirty;
+    return d === true ? true : (d === false ? false : null);
+  } catch (e) { return null; }
+}
+
+function __preservesNestedResolution(comp) {
+  try { return comp.preserveNestedResolution === true; } catch (e) { return false; }
+}
+
+// Comp-level render switches the wrapper mirrors from the user's comp. They
+// decide nothing for the wrapper's one still layer, but if After Effects ever
+// gates a nested comp's motion blur or frame blending on the containing comp's
+// switch, the wrapper does not switch them off. The precomp LAYER's own
+// switches are left at their defaults on purpose: motion blur on a precomp
+// layer can blur the motion inside it, which would be a render the user's comp
+// does not make.
+var __WRAPPER_MIRRORED = [
+  "displayStartTime", "motionBlur", "shutterAngle", "shutterPhase",
+  "motionBlurSamplesPerFrame", "motionBlurAdaptiveSampleLimit", "frameBlending", "draft3d"
+];
+
+// Builds the temporary comp for a route and hands it to `use`; removes it
+// afterwards whatever `use` did. `state.leftover` is set when the removal
+// itself fails, so the caller can say so instead of reporting a clean success.
+//
+// `prepare(temp)` runs inside the same try as `use`, so a temp comp that was
+// created and then could not be configured is still removed.
+function __withTempComp(comp, route, f, state, prepare, use) {
+  var temp = null;
+  // The name a leftover is reported under. Known before anything can fail, so
+  // a temp comp whose removal fails is named even when reading it back fails too.
+  var tempName = __SCREENSHOT_TEMP_NAME;
+  try {
+    if (route === "copy") {
+      temp = comp.duplicate();
+      if (!temp) throw new Error("could not isolate the screenshot: After Effects did not create the temporary comp");
+      // A duplicate lands beside the original as "<name> 2". Renamed and moved
+      // to the project root at once, so it is recognisable as ours — the same
+      // name and place as a wrapper — and never sits in the user's folder.
+      try { temp.name = __SCREENSHOT_TEMP_NAME; } catch (eRn) { try { tempName = temp.name; } catch (eRn2) {} }
+      try { temp.parentFolder = app.project.rootFolder; } catch (eF) {}
+      if (temp.numLayers !== comp.numLayers) {
+        throw new Error("could not isolate the screenshot: the temporary copy of comp " + comp.id + " has " +
+          temp.numLayers + " layers where the comp has " + comp.numLayers);
+      }
+    } else {
+      temp = app.project.items.addComp(__SCREENSHOT_TEMP_NAME, comp.width, comp.height,
+        comp.pixelAspect, comp.duration, comp.frameRate);
+    }
+    if (!temp) throw new Error("could not isolate the screenshot: After Effects did not create the temporary comp");
+    try { temp.comment = __SCREENSHOT_TEMP_TAG; } catch (eC) {}
+    if (route !== "copy") {
+      for (var m = 0; m < __WRAPPER_MIRRORED.length; m++) {
+        var k = __WRAPPER_MIRRORED[m];
+        try { temp[k] = comp[k]; } catch (eM) {}
+      }
+      temp.layers.add(comp);
+    }
+    temp.resolutionFactor = [f, f];
+    if (prepare) prepare(temp);
+    return use(temp);
   } finally {
-    // Restore unconditionally — a failed render must never leave the user
-    // looking at a half-resolution comp. This covers factor 1 too: the render
-    // happens at Full and the viewer goes back to Quarter afterwards.
-    comp.resolutionFactor = previous;
+    if (temp) {
+      try {
+        temp.remove();
+      } catch (eR) {
+        state.leftover = tempName;
+      }
+    }
   }
+}
+
+// The route a frame of `comp` at factor `f` takes. See the long note above.
+// A comp that preserves its resolution when nested takes the copy route: the
+// wrapper's factor would not reach it. Guide layers need no route of their own:
+// saveFrameToPng never renders them, on any route (measured on 26.5).
+function __frameRoute(comp, f) {
+  if (__factorIs(comp.resolutionFactor, f)) return "direct";
+  if (__preservesNestedResolution(comp)) return "copy";
+  return "wrapper";
+}
+
+// Render several times of `comp` at factor `factor` through one route, one
+// temp comp for all of them. `renderAll(source)` does the saveFrameToPng calls
+// against whichever comp it is handed.
+function __renderIsolated(comp, factor, state, renderAll) {
+  var f = __factorFor(factor);
+  var route = __frameRoute(comp, f);
+  state.isolation = route;
+  if (route === "direct") return renderAll(comp);
+  return __withTempComp(comp, route, f, state, null, renderAll);
+}
+
+// One frame, the one-call form. mogrt.jsx's poster renders through this. It
+// returns the state so a caller can surface a leftover temp comp.
+function __saveFrameAt(comp, time, file, factor) {
+  var state = {};
+  __renderIsolated(comp, factor, state, function (src) { src.saveFrameToPng(time, file); });
+  return state;
 }
 
 // The one undo step a screenshot is allowed to cost (issue #116).
 //
-// A screenshot changes nothing, but it has to *borrow* the comp's resolution
-// and, for screenshot_layer, every layer's solo switch — and After Effects
-// records each of those assignments as its own step, restore included. Grouped,
-// the borrow and the restore collapse into one step the user can recognise by
-// name in Edit > History, instead of 2 + 2N anonymous ones.
+// A screenshot changes nothing in the user's comp, but the temporary comp it
+// renders through is created, configured and removed, and After Effects
+// records each of those as a step. Grouped, they collapse into one step the
+// user can recognise by name in Edit > History.
 //
 // Three rules, all of which the tests hold:
-//   * no group at all when nothing will be assigned — a comp already at the
-//     requested factor, e.g. Full at downsample 1 — so that case costs zero steps;
+//   * no group at all when nothing is created — the "direct" route — so that
+//     case costs zero steps;
 //   * no group of our own when one of ours is already open (a screenshot inside
 //     run_batch, or the dispatcher's group around another op): AE's groups do
 //     not nest, and an inner endUndoGroup would close the outer one and leave
-//     the rest of that batch ungrouped. The borrow joins the step already open;
+//     the rest of that batch ungrouped. The temp comp joins the step already open;
 //   * the group goes through withUndo, so it opens and closes inside this one
 //     evalScript call and is counted by __beginUndoGroup like every other.
 // The ops stay `noUndo` at the dispatcher for exactly this reason: the decision
@@ -123,6 +241,30 @@ var __SCREENSHOT_UNDO_NAME = "AE MCP: screenshot";
 function __screenshotGroup(needed, fn) {
   if (!needed || __UNDO_OPEN) return fn();
   return withUndo(__SCREENSHOT_UNDO_NAME, fn);
+}
+
+// What the result says about the temporary comp, when there is anything to say.
+// `wasDirty` is Project.dirty before the call; only a project that was saved and
+// is unsaved now is worth a sentence.
+function __isolationNote(state, wasDirty) {
+  var parts = [];
+  if (state.leftover) {
+    parts.push("The screenshot rendered, but the temporary comp it rendered through (\"" + state.leftover +
+      "\") could not be removed. Delete it from the Project panel; nothing else in the project uses it.");
+  }
+  if (state.isolation && state.isolation !== "direct" && wasDirty === false && __projectDirty() === true) {
+    parts.push("After Effects now shows the project as having unsaved changes: the screenshot rendered " +
+      "through a temporary comp, which counts as a change even though it was removed again. Nothing in the " +
+      "user's comps changed. Mention it only if the user asks why the project looks modified.");
+  }
+  return parts.length ? parts.join(" ") : null;
+}
+
+function __withIsolationFields(result, state, wasDirty) {
+  result.isolation = state.isolation;
+  var note = __isolationNote(state, wasDirty);
+  if (note) result.note = note;
+  return result;
 }
 
 // Several times in one call. Every requested time gets an entry, in order,
@@ -139,29 +281,33 @@ function __contactSheetFrames(comp, args) {
     ds = __clampDownsample(args.downsample);
   }
   var tiles = [];
-  // Every tile renders at the same factor, so the whole sheet is one undo step
-  // at most rather than two per tile.
-  __screenshotGroup(!__factorIs(comp.resolutionFactor, __factorFor(ds)), function () {
-    for (var i = 0; i < times.length; i++) {
-      var entry = { time: times[i], downsample: ds };
-      try {
-        var p = __tmpPngPath();
-        __saveFrameAt(comp, times[i], new File(p), ds);
-        entry.path = p;
-      } catch (e) {
-        // One time that will not render must not cost the other five.
-        entry.error = String(e && e.message ? e.message : e);
+  var state = {};
+  var wasDirty = __projectDirty();
+  // Every tile renders at the same factor through the same temporary comp, so
+  // the whole sheet is one undo step at most rather than one per tile.
+  __screenshotGroup(__frameRoute(comp, __factorFor(ds)) !== "direct", function () {
+    __renderIsolated(comp, ds, state, function (src) {
+      for (var i = 0; i < times.length; i++) {
+        var entry = { time: times[i], downsample: ds };
+        try {
+          var p = __tmpPngPath();
+          src.saveFrameToPng(times[i], new File(p));
+          entry.path = p;
+        } catch (e) {
+          // One time that will not render must not cost the other five.
+          entry.error = String(e && e.message ? e.message : e);
+        }
+        tiles.push(entry);
       }
-      tiles.push(entry);
-    }
+    });
   });
-  return {
+  return __withIsolationFields({
     contactSheet: true,
     tiles: tiles,
     downsample: ds,
     width: comp.width, height: comp.height,
     times: times, compId: comp.id
-  };
+  }, state, wasDirty);
 }
 
 OPS.screenshot_frame = noUndo(function (args) {
@@ -171,57 +317,78 @@ OPS.screenshot_frame = noUndo(function (args) {
   var ds = __resolveDownsample(c, args.downsample);
   var path = __tmpPngPath();
   var f = new File(path);
-  // saveFrameToPng is async-ish; the panel polls the file's existence/size.
-  __screenshotGroup(!__factorIs(c.resolutionFactor, __factorFor(ds)), function () {
-    __saveFrameAt(c, t, f, ds);
+  var state = {};
+  var wasDirty = __projectDirty();
+  // saveFrameToPng is async-ish; the server polls the file's existence/size.
+  __screenshotGroup(__frameRoute(c, __factorFor(ds)) !== "direct", function () {
+    __renderIsolated(c, ds, state, function (src) { src.saveFrameToPng(t, f); });
   });
-  return {
+  return __withIsolationFields({
     path: path,
     width: c.width, height: c.height,
     downsample: ds,
     time: t, compId: c.id
-  };
+  }, state, wasDirty);
 });
+
+// The solo switches a copy of `comp` needs so only layer index `targetIndex`
+// renders: every layer whose solo is not already what it should be, by index —
+// a duplicate keeps the layer order and gives every layer a new id.
+function __soloPlan(comp, targetIndex) {
+  var plan = [];
+  for (var i = 1; i <= comp.numLayers; i++) {
+    var want = (i === targetIndex);
+    if (comp.layer(i).solo !== want) plan.push({ index: i, want: want });
+  }
+  return plan;
+}
 
 OPS.screenshot_layer = noUndo(function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
-  var t = (args.time !== undefined && args.time !== null) ? args.time : c.time;
-  // Solo the target alone, render, put every switch back. Only the switches
-  // that are actually wrong get assigned: each assignment is an undo step of
-  // its own, and a layer already in the right state has nothing to restore.
-  var changed = [];
-  for (var i = 1; i <= c.numLayers; i++) {
-    var ll = c.layer(i);
-    var want = (ll.id === l.id);
-    if (ll.solo !== want) changed.push({ layer: ll, was: ll.solo, want: want });
+  // After Effects will not solo a switched-off layer ("Solo flag can not be
+  // set..."), and a switched-off layer renders nothing anyway. Refused before
+  // anything is created, in words an agent can act on.
+  if (l.enabled === false) {
+    throw new Error("screenshot_layer: layer " + l.id + " (\"" + l.name + "\") is switched off (its eye is " +
+      "off), so it renders nothing and After Effects will not solo it. Nothing was changed. Switch it on with " +
+      "set_layer({enabled: true}) first if the user wants it visible, or use screenshot_frame for the comp.");
   }
+  var t = (args.time !== undefined && args.time !== null) ? args.time : c.time;
   var ds = __resolveDownsample(c, args.downsample);
+  var fac = __factorFor(ds);
+  var targetIndex = l.index;
+  var targetName = l.name;
+  // Read only: nothing in the user's comp is assigned. The switches are set on
+  // a copy, and only the ones that are actually wrong.
+  var plan = __soloPlan(c, targetIndex);
+  var route = (plan.length === 0 && __factorIs(c.resolutionFactor, fac)) ? "direct" : "copy";
   var path = __tmpPngPath();
   var f = new File(path);
-  var needed = changed.length > 0 || !__factorIs(c.resolutionFactor, __factorFor(ds));
-  __screenshotGroup(needed, function () {
-    // Inside the try, so a switch AE refuses part-way still restores the ones
-    // that were already flipped.
-    var applied = 0;
-    try {
-      for (var k = 0; k < changed.length; k++) {
-        changed[k].layer.solo = changed[k].want;
-        applied = k + 1;
-      }
-      __saveFrameAt(c, t, f, ds);
-    } finally {
-      for (var j = applied - 1; j >= 0; j--) {
-        try { changed[j].layer.solo = changed[j].was; } catch (e) {}
-      }
+  var state = { isolation: route };
+  var wasDirty = __projectDirty();
+  __screenshotGroup(route !== "direct", function () {
+    if (route === "direct") {
+      c.saveFrameToPng(t, f);
+      return;
     }
+    __withTempComp(c, "copy", fac, state, function (copy) {
+      var target = copy.layer(targetIndex);
+      if (!target || target.name !== targetName) {
+        throw new Error("could not isolate layer " + l.id + " for the screenshot: the temporary copy of comp " +
+          c.id + " has a different layer at index " + targetIndex);
+      }
+      for (var k = 0; k < plan.length; k++) copy.layer(plan[k].index).solo = plan[k].want;
+    }, function (copy) {
+      copy.saveFrameToPng(t, f);
+    });
   });
-  return {
+  return __withIsolationFields({
     path: path,
     width: c.width, height: c.height,
     downsample: ds,
     time: t, compId: c.id, layerId: l.id
-  };
+  }, state, wasDirty);
 });
 
 // The same two renders under the internal names the server sends (issue #220,

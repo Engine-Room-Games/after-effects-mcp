@@ -58,6 +58,15 @@ only quitting and reopening After Effects will.
   reset (issue #283).
   supersedes: the AE MCP Bridge panel opens at every After Effects launch
   supersedes: keep the AE MCP Bridge panel open
+- **A screenshot never changes the comp it shows.** When the frame needs a
+  different resolution, or `screenshot_layer` needs a solo, it renders a
+  temporary comp and removes it again; the user's Resolution dropdown and solo
+  switches stay as they were. `isolation` on the result says how: `"direct"`,
+  `"wrapper"` or `"copy"`. The temporary comp is still one `AE MCP: screenshot`
+  undo step, and can leave a saved project showing unsaved changes — `note`
+  says so; mention it only if the user asks (issue #282).
+  supersedes: screenshot_layer solos the layer in the comp
+  supersedes: screenshots borrow the comp's resolution
 - **`get_selection` never takes keyboard focus.** When the active item is not
   a comp, it answers `comp: null` with a `reason` saying a composition viewer
   is open but its comp cannot be read without focusing it; ask the user which

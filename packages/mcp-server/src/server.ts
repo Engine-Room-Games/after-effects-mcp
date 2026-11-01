@@ -1206,6 +1206,7 @@ export function createServer(opts: CreateServerOptions = {}) {
           downsample?: number; time: number; compId: number; layerId?: number;
           base64: string; bytes: number; warning?: string;
           converted?: boolean; sourceBitDepth?: number;
+          isolation?: string; note?: string;
           // A contact sheet is the same image content block with a map of what
           // is in it. The per-tile record is the only thing that tells the agent
           // which cell is which time, and which cells are marked blocks rather
@@ -1232,6 +1233,11 @@ export function createServer(opts: CreateServerOptions = {}) {
             // Surfaced when a requested downsample could not be applied, so the
             // agent knows it is looking at a full-resolution frame.
             warning: v.warning,
+            // Which route the render took — "direct" (the comp as it is),
+            // "wrapper" or "copy" (a temporary comp, removed again; issue #282)
+            // — and a note when that temporary comp left something behind.
+            isolation: v.isolation,
+            note: v.note,
             // Present only for a `times` call. `tiles` is what makes the sheet
             // readable as data as well as a picture — cell rectangle, time and
             // status per tile, in the order they were asked for.

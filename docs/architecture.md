@@ -862,9 +862,10 @@ reason. As decided:
 
 The promise read-only mode makes, then, is *nothing you call here changes the
 After Effects project or writes a file a person would look for*. Two things sit
-just inside that line and are deliberate. A screenshot borrows the comp's
-resolution factor and restores it, which can leave one net-nil undo step
-(#116), and writes its PNG to the temp directory. And a failed call still
+just inside that line and are deliberate. A screenshot may render through a
+temporary comp it creates and removes in the same call (#282), which can leave
+one net-nil undo step (#116) and mark a saved project unsaved, and writes its
+PNG to the temp directory. And a failed call still
 stamps `lastSeen`/`lastVersion` on a matching journal entry
 (`annotateFailure`) — bookkeeping the model does not control and cannot aim.
 

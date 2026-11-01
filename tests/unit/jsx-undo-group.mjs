@@ -155,17 +155,32 @@ let passed = 0;
   const read = (f) => fs.readFileSync(path.join(root, "packages", "jsx", f), "utf8");
   const loadVision = (startFactor) => {
     const log = [];
+    // A temporary comp (issue #282): the wrapper or copy a screenshot renders
+    // through. Its own assignments are logged as `tmp:*`; the user's comp's as
+    // `rf` / `solo`, which must never appear.
+    const temp = (kind) => {
+      const t = {
+        kind, numLayers: 1, pixelAspect: 1, duration: 10, frameRate: 25,
+        set resolutionFactor(v) { log.push(`tmp:${kind}:rf`); },
+        layer() { return { name: "lay", set solo(v) { log.push(`tmp:${kind}:solo`); } }; },
+        saveFrameToPng() { log.push(`render:${kind}`); },
+        remove() { log.push(`tmp:${kind}:remove`); },
+      };
+      t.layers = { add() { log.push(`tmp:${kind}:add`); } };
+      return t;
+    };
     const comp = {
-      id: 5, width: 1920, height: 1080, time: 0,
+      id: 5, width: 1920, height: 1080, time: 0, pixelAspect: 1, duration: 10, frameRate: 25,
       _rf: startFactor,
       get resolutionFactor() { return this._rf; },
       set resolutionFactor(v) { log.push("rf"); this._rf = v; },
       numLayers: 1,
       layer() { return lay; },
       saveFrameToPng() { log.push("render"); },
+      duplicate() { log.push("tmp:copy:create"); return temp("copy"); },
     };
     const lay = {
-      id: 9, _solo: false,
+      id: 9, index: 1, name: "lay", _solo: false,
       get solo() { return this._solo; },
       set solo(v) { log.push("solo"); this._solo = v; },
     };
@@ -173,6 +188,10 @@ let passed = 0;
       app: {
         beginUndoGroup: (n) => log.push(`begin:${n}`),
         endUndoGroup: () => log.push("end"),
+        project: {
+          dirty: true,
+          items: { addComp() { log.push("tmp:wrapper:create"); return temp("wrapper"); } },
+        },
       },
       Folder: { temp: { fsName: "/tmp" } },
       File: function (p) { this.path = p; },
@@ -197,11 +216,15 @@ let passed = 0;
     passed++;
   }
 
-  // Comp at Quarter: one named group, set and restore inside it.
+  // Comp at Quarter: one named group around the wrapper's whole life.
   {
     const { log, call } = loadVision([4, 4]);
     call("screenshot_frame", { compId: 5, downsample: 1 });
-    assert.deepEqual(log, ["begin:AE MCP: screenshot", "rf", "render", "rf", "end"]);
+    assert.deepEqual(log, [
+      "begin:AE MCP: screenshot",
+      "tmp:wrapper:create", "tmp:wrapper:add", "tmp:wrapper:rf", "render:wrapper", "tmp:wrapper:remove",
+      "end",
+    ], "the user's comp is never assigned; the wrapper lives and dies inside the group");
     passed++;
   }
 
@@ -214,14 +237,16 @@ let passed = 0;
     passed += 2;
   }
 
-  // screenshot_layer: solo and resolution borrowed inside one group.
+  // screenshot_layer: a copy with the solo set on it, inside one group.
   {
     const { log, call } = loadVision([4, 4]);
     call("screenshot_layer", { compId: 5, layerId: 9, downsample: 1 });
-    assert.equal(log[0], "begin:AE MCP: screenshot");
-    assert.equal(log[log.length - 1], "end");
-    assert.equal(opens(log), 1);
-    passed += 3;
+    assert.deepEqual(log, [
+      "begin:AE MCP: screenshot",
+      "tmp:copy:create", "tmp:copy:rf", "tmp:copy:solo", "render:copy", "tmp:copy:remove",
+      "end",
+    ], "the solo is set on the copy, never on the user's layer");
+    passed++;
   }
 
   // Inside run_batch: the batch's group is the only one. A nested begin would
