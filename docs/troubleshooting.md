@@ -19,7 +19,8 @@ Back to the [README](../README.md).
 | A panel answers, but the setup check reports none installed | An older install is still serving. Quit After Effects, remove the old one from the CEP extensions folder, reinstall, then reopen AE. |
 | "No project folder to write to" | Your app didn't tell the server where it's working. Say which folder you want. |
 | Style guide can't be saved | The After Effects project has never been saved. Save it, then try again. |
-| You need the panel's own log | In After Effects: **Window → Extensions → AE MCP Bridge**. |
+| You need the panel's own log | In After Effects: **Window → Extensions → AE MCP Bridge**. The connection runs in the background and no longer opens a window at launch; this window only shows its status and log, and closing it changes nothing. It reads "no answer for …s (After Effects may be busy)" while After Effects is running something long — that is normal and clears by itself. If it keeps saying so with nothing running, quit and reopen After Effects once, then ask for the setup to be checked. |
+| An empty or blank "AE MCP Bridge" frame after updating | A workspace saved with the old panel docked. It should now show the status window; if the frame stays empty, close it, or use Window → Workspace → Reset to Saved Layout. Nothing depends on it. |
 
 About that secret key: every request to the panel must carry it, except one — a
 quick "are you there?" health check, which can't read or change anything in

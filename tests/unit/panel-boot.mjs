@@ -223,10 +223,18 @@ async function stranger(port = 0) {
  * 7777: with the #92 fix a test panel started there would recognise it as one
  * of us and wait for it for ever.
  */
-function bootPanel(extDir, { dirnameAt = extDir, config = { port: 0 } } = {}) {
+function bootPanel(extDir, { dirnameAt = extDir, config = { port: 0 }, cepEvents = false } = {}) {
   const source = fs.readFileSync(path.join(extDir, "client", "main.js"), "utf8");
   const csSource = fs.readFileSync(path.join(extDir, "client", "csinterface.js"), "utf8");
   const host = makeHost(extDir);
+  // CEP's application-scoped events (issue #283): what the bridge tells the
+  // status panel. Off by default, as in every check written before them.
+  if (cepEvents) {
+    host.dispatched = [];
+    host.cepListeners = {};
+    host.dispatchEvent = (ev) => { host.dispatched.push({ type: ev.type, scope: ev.scope, data: ev.data }); };
+    host.addEventListener = (type, fn) => { (host.cepListeners[type] ??= []).push(fn); };
+  }
   const dom = makeDom();
 
   // The panel writes a port file into the user's home and binds a real socket.
@@ -612,6 +620,35 @@ await check("\"EvalScript error.\" comes back coded as After Effects refusing to
     assert.doesNotMatch(body.error, /syntax or runtime/);
     assert.match(body.error, /declined to run it while busy/);
   } finally { booted.host.raw = null; }
+});
+
+await check("mirrors its status to the status panel over a CEP event, and answers when asked (issue #283)", async () => {
+  const p = bootPanel(dir, { cepEvents: true });
+  try {
+    assert.equal(await settled(p.dom), "ready", logText(p.dom));
+    const STATUS = "games.engine-room.ae-mcp.event.status";
+    const lastState = async () => {
+      const deadline = Date.now() + 3000;
+      for (;;) {
+        const mine = p.host.dispatched.filter((e) => e.type === STATUS);
+        const last = mine.length ? JSON.parse(mine[mine.length - 1].data) : null;
+        if (last && last.status === "ready") return { last, count: mine.length };
+        if (Date.now() > deadline) throw new Error(`no "ready" status event; got ${JSON.stringify(last)}`);
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    };
+    const { last, count } = await lastState();
+    assert.equal(p.host.dispatched[0].scope, "APPLICATION");
+    assert.equal(last.port, p.dom.nodes.port.textContent, "the event must carry the port the bridge bound");
+    assert.equal(last.jsx, "loaded");
+    assert.match(last.ae, /AEFT 26\.3/);
+    assert.ok(last.log.some((l) => /Bridge listening on/.test(l.text)), "the log must travel with the status");
+    // The status panel's request is answered at once, not on the next change.
+    const askers = p.host.cepListeners["games.engine-room.ae-mcp.event.status-request"] ?? [];
+    assert.equal(askers.length, 1, "the bridge must listen for the status panel's request");
+    askers[0]({ type: "games.engine-room.ae-mcp.event.status-request", data: "" });
+    assert.equal(p.host.dispatched.filter((e) => e.type === STATUS).length, count + 1);
+  } finally { p.close(); }
 });
 
 await check("also boots if a host build anchors __dirname at the client folder", async () => {

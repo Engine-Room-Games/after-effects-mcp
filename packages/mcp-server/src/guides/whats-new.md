@@ -47,6 +47,17 @@ only quitting and reopening After Effects will.
 
 ## 0.6.0
 
+- **The bridge runs in the background and opens no window at launch.**
+  Window > Extensions > AE MCP Bridge is now a status window only: it shows
+  the bridge's status and log, and opening or closing it does not start, stop
+  or restart anything. "no answer for Ns (After Effects may be busy)" there
+  is normal during a long script; only if it persists with nothing running
+  did the background part fail to start — one restart of After Effects, then
+  `check_setup`. A workspace saved with the old panel docked restores the
+  status window into that frame; an empty frame there is safe to close or
+  reset (issue #283).
+  supersedes: the AE MCP Bridge panel opens at every After Effects launch
+  supersedes: keep the AE MCP Bridge panel open
 - **`get_selection` never takes keyboard focus.** When the active item is not
   a comp, it answers `comp: null` with a `reason` saying a composition viewer
   is open but its comp cannot be read without focusing it; ask the user which

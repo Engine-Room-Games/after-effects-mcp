@@ -173,8 +173,10 @@ function readTail(file: string, bytes: number): string {
 /**
  * Scan the newest CEP log for the line that says CEP refused this panel's
  * signature. The needle is built from the bundle id, never spelled out: the
- * extension id in the log is `<bundleId>.panel`, and a literal here would be
- * one more copy of a name that already lives in the manifest.
+ * extension ids in the log are `<bundleId>.bridge` (the hidden bridge) and
+ * `<bundleId>.panel` (the status window, issue #283), the prefix matches
+ * either, and a literal here would be one more copy of a name that already
+ * lives in the manifest.
  */
 export function findSignatureFailure(logs: string[], bundleId: string = BUNDLE_ID): SignatureFinding | null {
   const needle = `Signature verification failed for extension ${bundleId}`;
@@ -840,7 +842,7 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
     if (signature?.evidence === "log-clean") {
       steps.push(
         `If it has already been restarted, the CEP log shows no signature refusal (${signature.detail}), so that is not the cause. ` +
-          "Ask the user to open Window > Extensions > AE MCP Bridge in After Effects and read back what the panel says; if nothing opens at all, report it with log_issue."
+          "Ask the user to open Window > Extensions > AE MCP Bridge in After Effects and read back what the status window says — it reports on the bridge, which runs in the background with no window of its own. If it keeps reading \"no answer for …s\" with nothing running in After Effects, the bridge did not start; if nothing opens at all, report it with log_issue."
       );
     } else {
       steps.push(
@@ -851,7 +853,7 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
           `(After Effects 2026 uses CSXS.${CSXS_VERSIONS[0]}; setup_panel sets this for new installs). ` +
           "Then relaunch After Effects and run check_setup again — it reads the CEP log, and if the signature check is what is failing it reports panelSignature with the exact fix."
       );
-      steps.push("Also ask the user to open Window > Extensions > AE MCP Bridge in AE: if nothing appears at all, that is the same symptom.");
+      steps.push("Also ask the user to open Window > Extensions > AE MCP Bridge in AE: if nothing appears at all, that is the same symptom; if the status window opens but keeps reading \"no answer for …s\", the window loaded and the background bridge did not.");
     }
   }
   return steps;

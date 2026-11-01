@@ -163,6 +163,11 @@ jobs:
       - name: Panel boots from the layout setup_panel installs
         run: node tests/unit/panel-boot.mjs
 
+      # Issue #283: the bridge is a hidden, auto-started extension with Node;
+      # the visible status panel runs no second bridge.
+      - name: Panel manifest keeps the bridge hidden and the status panel inert
+        run: node tests/unit/panel-manifest.mjs
+
       # Installing while AE holds the client files open updates the bundle and
       # fails on the rest, and a check that hashed only the bundle went green on
       # a mix of two versions. This is the per-file diff that outranks it.

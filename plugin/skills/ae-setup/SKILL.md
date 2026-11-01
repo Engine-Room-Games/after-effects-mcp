@@ -154,7 +154,7 @@ their tools moved ahead of the panel, and it takes a restart to catch up.
 
 The panel binds port 7777. On one machine nothing else ever uses it, so if
 the port is taken when the panel starts, the holder is a previous copy of the
-panel itself — a leftover from a relaunch, or a second panel window. The panel
+panel itself — a leftover from a relaunch, or a second After Effects. The panel
 does not move to another port in that case: it says so in its own status
 ("waiting — port 7777 is held by another AE MCP panel"), and retries until the
 old one exits, then takes over with no restart. If a user reports that status
@@ -202,6 +202,6 @@ about.
 
 ## If it still will not connect
 
-Ask the user to open **Window > Extensions > AE MCP Bridge** inside After Effects. That panel shows its own status and a log, and will say whether it started, which port it took, whether it is waiting for a port another panel holds, or what error it hit. Have them read it back to you.
+Ask the user to open **Window > Extensions > AE MCP Bridge** inside After Effects. That window shows the bridge's status and log, and will say whether it started, which port it took, whether it is waiting for a port another panel holds, or what error it hit. Have them read it back to you. The bridge itself runs in the background and opens no window at launch; the window only reports on it, so opening or closing it changes nothing. It reads "no answer for Ns (After Effects may be busy)" while a long script runs — normal, and it clears on its own. If it keeps saying so with nothing running, the background part did not start: one restart of After Effects, then `check_setup` — and if it still says so, report it with `log_issue`. After an update, a workspace saved with the old panel docked may show an empty "AE MCP Bridge" frame: closing it, or resetting the workspace, is safe.
 
 A common cause is a stale install: the panel loaded an older script bundle than the server expects. `check_setup`'s `panelUpToDate` catches that — the fix is to quit After Effects, run `setup_panel`, then reopen AE.
