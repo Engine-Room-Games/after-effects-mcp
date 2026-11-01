@@ -192,6 +192,7 @@ function makeContext(opts) {
     __tmpPngPath: () => "/tmp/poster.png",
     __saveFrameAt: () => { if (opts.posterThrows) throw new Error("render failed"); return {}; },
     __screenshotGroup: (needed, fn) => fn(),
+    __frameRoute: () => "wrapper",
   };
   if (opts.guardFails) {
     // core.jsx's guard when beginSuppressDialogs() threw inside it: null.

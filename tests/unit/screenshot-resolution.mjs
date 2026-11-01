@@ -136,7 +136,10 @@ class MockComp {
 }
 
 class MockLayer {
-  constructor(id, name, comp) { this.id = id; this.name = name; this._solo = false; this.comp = comp; }
+  constructor(id, name, comp) {
+    this.id = id; this.name = name; this._solo = false; this.comp = comp;
+    this.enabled = true; this.guideLayer = false;
+  }
   get index() { return this.comp.layers.indexOf(this) + 1; }
   get solo() { return this._solo; }
   set solo(v) {
@@ -158,6 +161,7 @@ function makeWorld(o) {
   };
   world.app = {
     project: {
+      rootFolder: { name: "Root" },
       get dirty() { return world.dirty; },
       items: {
         addComp(name, w, h, pa, dur, fps) {
@@ -407,6 +411,44 @@ check("screenshot_layer with the target already soloed alone and the factor matc
   assert.equal(world.temps.length, 0);
   assert.deepEqual(undo, []);
   assert.equal(comp.renders[0].via, "user");
+  untouched(comp);
+});
+
+check("the copy is renamed as ours and moved to the project root, never left as '<name> 2' in the user's folder", () => {
+  const { comp, ops, world } = scene({ removeThrows: true });
+  const out = ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 });
+  const copy = world.temps[0];
+  assert.equal(copy.name, "AE MCP screenshot (temporary)");
+  assert.equal(copy.parentFolder, world.app.project.rootFolder);
+  assert.match(out.note, /\("AE MCP screenshot \(temporary\)"\) could not be removed/, "the leftover is named as it now is");
+});
+
+check("a comp with an enabled guide layer takes the copy route, so it matches the direct render", () => {
+  // AE leaves guide layers out of a nested render; the wrapper would drop them.
+  const { comp, ops, world } = scene();
+  comp.layers[0].guideLayer = true;
+  const out = ops.screenshot_frame({ compId: comp.id, downsample: 1 });
+  assert.equal(out.isolation, "copy");
+  assert.equal(world.temps[0].kind, "copy");
+  untouched(comp);
+  cleanedUp(world);
+  // A switched-off guide layer renders nowhere, so the wrapper is fine.
+  const off = scene();
+  off.comp.layers[0].guideLayer = true;
+  off.comp.layers[0].enabled = false;
+  assert.equal(off.ops.screenshot_frame({ compId: off.comp.id, downsample: 1 }).isolation, "wrapper");
+});
+
+check("screenshot_layer on a switched-off layer is refused before anything is created", () => {
+  const { comp, ops, world, undo } = scene();
+  comp.layers[1].enabled = false;
+  assert.throws(
+    () => ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 }),
+    /switched off.*Nothing was changed.*set_layer\(\{enabled: true\}\)/s,
+  );
+  assert.equal(world.temps.length, 0);
+  assert.equal(comp.renders.length, 0);
+  assert.deepEqual(undo, []);
   untouched(comp);
 });
 

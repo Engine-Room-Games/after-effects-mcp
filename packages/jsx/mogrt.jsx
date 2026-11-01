@@ -513,11 +513,12 @@ OPS.export_mogrt = noUndo(function (args) {
     try {
       var posterPath = __tmpPngPath();
       // Through a temporary comp when the comp is not at Full (issue #282),
-      // grouped so its creation and removal are one undo step. The group opens
+      // grouped so its creation and removal are one undo step — and no group
+      // at all when it renders directly and nothing is created. The group opens
       // after the export has returned, so the export itself still runs outside
       // any group (the "undo group mismatch" note at the top of this file).
       var posterState = null;
-      __screenshotGroup(true, function () {
+      __screenshotGroup(__frameRoute(comp, 1) !== "direct", function () {
         posterState = __saveFrameAt(comp, t, new File(posterPath), 1);
       });
       result.posterPngPath = posterPath;

@@ -98,10 +98,10 @@ function __resolveDownsample(comp, requested) {
 // "AE MCP: screenshot" (#116's grouping, below) — undoing it is a no-op — and
 // After Effects may mark the project as having unsaved changes. Project.dirty
 // is read-only, so that cannot be put back; the result says so in `note` when a
-// screenshot is what turned a saved project unsaved. Neither the wrapper's
-// resolution reaching the nested render nor the undo and dirty traces have been
-// measured yet — recipe 79 in docs/verification-recipes.md is the check, and the
-// `isolation` field on every result says which route a frame took.
+// screenshot is what turned a saved project unsaved. Measured on 26.5 (recipe
+// 78 in docs/verification-recipes.md): wrapper and copy frames are
+// pixel-identical to the comp rendered at Full. The `isolation` field on every
+// result says which route a frame took.
 function __factorIs(rf, f) {
   return !!rf && rf[0] === f && rf[1] === f;
 }
@@ -146,10 +146,19 @@ var __WRAPPER_MIRRORED = [
 // created and then could not be configured is still removed.
 function __withTempComp(comp, route, f, state, prepare, use) {
   var temp = null;
+  // The name a leftover is reported under. Known before anything can fail, so
+  // a temp comp whose removal fails is named even when reading it back fails too.
+  var tempName = __SCREENSHOT_TEMP_NAME;
   try {
     if (route === "copy") {
       temp = comp.duplicate();
-      if (temp && temp.numLayers !== comp.numLayers) {
+      if (!temp) throw new Error("could not isolate the screenshot: After Effects did not create the temporary comp");
+      // A duplicate lands beside the original as "<name> 2". Renamed and moved
+      // to the project root at once, so it is recognisable as ours — the same
+      // name and place as a wrapper — and never sits in the user's folder.
+      try { temp.name = __SCREENSHOT_TEMP_NAME; } catch (eRn) { try { tempName = temp.name; } catch (eRn2) {} }
+      try { temp.parentFolder = app.project.rootFolder; } catch (eF) {}
+      if (temp.numLayers !== comp.numLayers) {
         throw new Error("could not isolate the screenshot: the temporary copy of comp " + comp.id + " has " +
           temp.numLayers + " layers where the comp has " + comp.numLayers);
       }
@@ -171,21 +180,37 @@ function __withTempComp(comp, route, f, state, prepare, use) {
     return use(temp);
   } finally {
     if (temp) {
-      var name = null;
-      try { name = temp.name; } catch (eN) {}
       try {
         temp.remove();
       } catch (eR) {
-        state.leftover = name || __SCREENSHOT_TEMP_NAME;
+        state.leftover = tempName;
       }
     }
   }
 }
 
 // The route a frame of `comp` at factor `f` takes. See the long note above.
+// A wrapper is only chosen when it renders what the comp itself would. Two
+// things send a comp to the copy route instead: preserving its resolution when
+// nested (the wrapper's factor would not reach it), and an enabled guide layer
+// — After Effects leaves guide layers out of a nested comp's render, while the
+// comp rendered directly shows them, so the wrapper would answer with a
+// different picture from the "direct" route. A layer AE will not report on
+// counts as a guide layer: the copy is never wrong, only dearer.
+function __hasEnabledGuideLayer(comp) {
+  try {
+    for (var i = 1; i <= comp.numLayers; i++) {
+      var l = comp.layer(i);
+      if (l.guideLayer === true && l.enabled !== false) return true;
+    }
+  } catch (e) { return true; }
+  return false;
+}
+
 function __frameRoute(comp, f) {
   if (__factorIs(comp.resolutionFactor, f)) return "direct";
-  return __preservesNestedResolution(comp) ? "copy" : "wrapper";
+  if (__preservesNestedResolution(comp) || __hasEnabledGuideLayer(comp)) return "copy";
+  return "wrapper";
 }
 
 // Render several times of `comp` at factor `factor` through one route, one
@@ -335,6 +360,14 @@ function __soloPlan(comp, targetIndex) {
 OPS.screenshot_layer = noUndo(function (args) {
   var c = getCompById(args.compId);
   var l = getLayerById(c, args.layerId);
+  // After Effects will not solo a switched-off layer ("Solo flag can not be
+  // set..."), and a switched-off layer renders nothing anyway. Refused before
+  // anything is created, in words an agent can act on.
+  if (l.enabled === false) {
+    throw new Error("screenshot_layer: layer " + l.id + " (\"" + l.name + "\") is switched off (its eye is " +
+      "off), so it renders nothing and After Effects will not solo it. Nothing was changed. Switch it on with " +
+      "set_layer({enabled: true}) first if the user wants it visible, or use screenshot_frame for the comp.");
+  }
   var t = (args.time !== undefined && args.time !== null) ? args.time : c.time;
   var ds = __resolveDownsample(c, args.downsample);
   var fac = __factorFor(ds);
