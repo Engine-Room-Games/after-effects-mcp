@@ -190,26 +190,12 @@ function __withTempComp(comp, route, f, state, prepare, use) {
 }
 
 // The route a frame of `comp` at factor `f` takes. See the long note above.
-// A wrapper is only chosen when it renders what the comp itself would. Two
-// things send a comp to the copy route instead: preserving its resolution when
-// nested (the wrapper's factor would not reach it), and an enabled guide layer
-// — After Effects leaves guide layers out of a nested comp's render, while the
-// comp rendered directly shows them, so the wrapper would answer with a
-// different picture from the "direct" route. A layer AE will not report on
-// counts as a guide layer: the copy is never wrong, only dearer.
-function __hasEnabledGuideLayer(comp) {
-  try {
-    for (var i = 1; i <= comp.numLayers; i++) {
-      var l = comp.layer(i);
-      if (l.guideLayer === true && l.enabled !== false) return true;
-    }
-  } catch (e) { return true; }
-  return false;
-}
-
+// A comp that preserves its resolution when nested takes the copy route: the
+// wrapper's factor would not reach it. Guide layers need no route of their own:
+// saveFrameToPng never renders them, on any route (measured on 26.5).
 function __frameRoute(comp, f) {
   if (__factorIs(comp.resolutionFactor, f)) return "direct";
-  if (__preservesNestedResolution(comp) || __hasEnabledGuideLayer(comp)) return "copy";
+  if (__preservesNestedResolution(comp)) return "copy";
   return "wrapper";
 }
 

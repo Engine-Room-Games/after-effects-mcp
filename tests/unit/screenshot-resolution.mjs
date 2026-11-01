@@ -423,20 +423,13 @@ check("the copy is renamed as ours and moved to the project root, never left as 
   assert.match(out.note, /\("AE MCP screenshot \(temporary\)"\) could not be removed/, "the leftover is named as it now is");
 });
 
-check("a comp with an enabled guide layer takes the copy route, so it matches the direct render", () => {
-  // AE leaves guide layers out of a nested render; the wrapper would drop them.
+check("a guide layer does not change the route — saveFrameToPng never renders one (measured on 26.5)", () => {
   const { comp, ops, world } = scene();
   comp.layers[0].guideLayer = true;
   const out = ops.screenshot_frame({ compId: comp.id, downsample: 1 });
-  assert.equal(out.isolation, "copy");
-  assert.equal(world.temps[0].kind, "copy");
+  assert.equal(out.isolation, "wrapper");
   untouched(comp);
   cleanedUp(world);
-  // A switched-off guide layer renders nowhere, so the wrapper is fine.
-  const off = scene();
-  off.comp.layers[0].guideLayer = true;
-  off.comp.layers[0].enabled = false;
-  assert.equal(off.ops.screenshot_frame({ compId: off.comp.id, downsample: 1 }).isolation, "wrapper");
 });
 
 check("screenshot_layer on a switched-off layer is refused before anything is created", () => {
