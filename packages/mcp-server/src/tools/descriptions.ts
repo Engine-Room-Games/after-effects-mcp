@@ -108,7 +108,7 @@ export const descriptions: Record<string, string> = {
 
   // ---------- vision ----------
   screenshot_frame: "ONE-OFF visual check of a comp, as a PNG — never per-frame or in a loop. To judge MOTION pass `times` (2-6) for one tiled contact sheet, about the cost of a single frame; `time` and `times` are mutually exclusive. A picture is not exact: confirm numbers with get_layer_full / get_keyframes. Leave `downsample` unset unless you genuinely need full resolution. Non-image answers: 'Stale frame' (AE re-served an earlier render), 'Corrupt frame' (retry at downsample 6-8, or screenshot the precomps separately), 'Render timed out' (still rendering — wait, don't retry at once), `empty:true` (every pixel transparent — check time, in/out points, enabled). A bad sheet tile is marked and named in `warning`; the rest of the sheet is still good. Never disable layers to make a frame render.",
-  screenshot_layer: "ONE-OFF visual check of a single layer (solo'd) at a time — do NOT screenshot every frame. Same downsample guidance and the same 'Stale frame', 'Corrupt frame', 'Render timed out' and `empty:true` answers as screenshot_frame. No `times` here — contact sheets are screenshot_frame only.",
+  screenshot_layer: "ONE-OFF visual check of a single layer (rendered solo in a temporary copy; the comp's own switches are untouched) at a time — do NOT screenshot every frame. Same downsample guidance and the same 'Stale frame', 'Corrupt frame', 'Render timed out' and `empty:true` answers as screenshot_frame. No `times` here — contact sheets are screenshot_frame only.",
 
   // ---------- batch ----------
   run_batch:

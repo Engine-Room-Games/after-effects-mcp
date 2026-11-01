@@ -1,22 +1,23 @@
-// What resolution a screenshot is actually rendered at (issue #72).
+// What resolution a screenshot is actually rendered at (issue #72), what it
+// costs in undo history (issue #116), and that it never touches the user's
+// comp to get there (issue #282).
 //
-// `saveFrameToPng` renders at the comp's own `resolutionFactor`, and the comp's
-// resolutionFactor is the Resolution dropdown the designer left the viewer on.
-// `__saveFrameAt` set it for any factor above 1 and skipped it at 1 — so on a
-// comp parked at Quarter, `downsample: 1` returned a quarter-size frame and
-// `downsample: 2` returned one four times *larger*. The response never lied
-// about it (the panel reads the dimensions out of the PNG's IHDR), which is
-// precisely why it was invisible: the picture disagreed with the request while
-// the numbers agreed with the picture.
+// `saveFrameToPng` renders at the resolutionFactor of the comp it is called
+// on, and the user's comp's factor is the Resolution dropdown the designer left
+// the viewer on. Rendering it as it stood answered `downsample: 1` on a comp
+// parked at Quarter with a quarter-size frame (#72). Setting the factor on the
+// user's comp and putting it back — and flipping solo switches for a layer —
+// fixed that, and flickered the user's own timeline while it rendered (#282).
+// So a screenshot now renders through a TEMPORARY comp whenever anything would
+// need changing: a wrapper holding the comp as a precomp, or a copy of it with
+// the solos set on the copy. These checks hold, together:
 //
-// So this runs the real vision.jsx ops against a comp whose factor starts at
-// Quarter and records what `saveFrameToPng` saw each time it was called. Three
-// properties, all of which have to hold together:
-//
-//   * every requested factor — 1 included — is set explicitly before the render;
-//   * the user's own factor is put back afterwards, including when the render
-//     throws, because leaving someone's comp at Quarter is a worse bug than the
-//     one being fixed;
+//   * every requested factor — 1 included — is the factor the render saw;
+//   * the user's comp is never assigned: not its Resolution, not one solo;
+//   * every temporary comp is removed, including when the render throws;
+//   * a comp that needs nothing changed renders directly, with no temp comp
+//     and no undo step;
+//   * at most one named undo group per call, none nested in one already open;
 //   * omitting the factor still runs the derivation, which is what would break
 //     if a zod `.default(1)` were ever added to the screenshot schemas.
 //
@@ -44,8 +45,12 @@ function check(name, fn) {
 }
 
 // ---------------------------------------------------------------------------
-// The mock DOM. The only thing it really models is that saveFrameToPng renders
-// at whatever resolutionFactor happens to be set when it is called.
+// The mock DOM. What it models: saveFrameToPng renders at the resolutionFactor
+// of the comp it is called on — and a comp nested in a wrapper renders at the
+// WRAPPER's factor unless it preserves its own resolution when nested (the AE
+// rule the wrapper route relies on; recipe 79 is the live check). Every
+// assignment to the user's comp or its layers is recorded, because since issue
+// #282 there must be none.
 // ---------------------------------------------------------------------------
 
 const QUARTER = [4, 4];
@@ -54,21 +59,28 @@ const QUARTER = [4, 4];
 const pair = (v) => [v[0], v[1]];
 
 class MockComp {
-  constructor(o) {
+  constructor(o, world) {
     o = o || {};
-    this.id = 900;
+    this.world = world;
+    this.id = o.id || 900;
+    this.name = o.name || "Main";
     this.width = o.width || 1920;
     this.height = o.height || 1080;
+    this.pixelAspect = 1;
+    this.duration = 10;
+    this.frameRate = 25;
     this.time = 0.5;
-    // Every assignment AE would record as an undo step, in order (issue #116).
+    this.kind = o.kind || "user";
+    this.preserveNestedResolution = !!o.preserveNestedResolution;
+    // Every assignment AE would record as an undo step on THIS comp, in order.
     // Shared with the comp's layers so solo switches land in the same list.
     this.assignments = [];
     this.groupOpen = () => false;
-    // The designer's viewer setting. Quarter unless a test says otherwise.
     this._rf = (o.resolutionFactor || QUARTER).slice();
-    this.renders = [];          // { time, factor } as seen from inside the render
     this.failAt = o.failAt;     // a time whose render throws
     this.layers = [];
+    this.nested = null;         // the comp a wrapper holds
+    this.removed = false;
   }
   get resolutionFactor() { return this._rf; }
   set resolutionFactor(v) {
@@ -78,24 +90,54 @@ class MockComp {
   get numLayers() { return this.layers.length; }
   layer(i) { return this.layers[i - 1]; }
   saveFrameToPng(time, file) {
-    // Copied element by element rather than with .slice(): the factor the JSX
-    // sets is an Array from the vm realm, and deepStrictEqual compares
-    // prototypes. This is the host's array holding the same two numbers.
-    this.renders.push({ time, factor: pair(this.resolutionFactor), path: file.path });
-    if (this.failAt !== undefined && time === this.failAt) {
+    let factor = pair(this.resolutionFactor);
+    let source = this;
+    if (this.nested) {
+      source = this.nested;
+      if (this.nested.preserveNestedResolution) factor = pair(this.nested.resolutionFactor);
+    }
+    this.world.renders.push({
+      time, factor, path: file.path, via: this.kind,
+      solos: source.layers.map((l) => l._solo),
+      inGroup: this.groupOpen(),
+    });
+    if (source.failAt !== undefined && time === source.failAt) {
       throw new Error("After Effects error: could not render the frame");
     }
+  }
+  duplicate() {
+    const w = this.world;
+    const d = new MockComp({
+      id: 5000 + w.temps.length, name: this.name + " 2", width: this.width, height: this.height,
+      resolutionFactor: this._rf, kind: "copy", failAt: this.failAt,
+    }, w);
+    d.groupOpen = this.groupOpen;
+    d.layers = this.layers.map((l, i) => {
+      const c = new MockLayer(7000 + w.temps.length * 100 + i, w.copyRenamesLayer && i === 1 ? "renamed" : l.name, d);
+      c._solo = l._solo;
+      return c;
+    });
+    if (w.copyDropsLayer) d.layers.pop();
+    w.temps.push(d);
+    if (w.dirtyOnCreate) w.dirty = true;
+    return d;
+  }
+  remove() {
+    if (this.world.removeThrows) throw new Error("After Effects error: cannot remove");
+    this.removed = true;
   }
   // The size AE would write at the factor a render saw. Not used by the code
   // under test — it is how this file states "larger" and "smaller".
   renderedSize(i) {
-    const f = this.renders[i].factor[0];
+    const f = this.world.renders[i].factor[0];
     return [Math.floor(this.width / f), Math.floor(this.height / f)];
   }
+  get renders() { return this.world.renders; }
 }
 
 class MockLayer {
   constructor(id, name, comp) { this.id = id; this.name = name; this._solo = false; this.comp = comp; }
+  get index() { return this.comp.layers.indexOf(this) + 1; }
   get solo() { return this._solo; }
   set solo(v) {
     this.comp.assignments.push({ what: "solo", id: this.id, value: v, inGroup: this.comp.groupOpen() });
@@ -103,16 +145,53 @@ class MockLayer {
   }
 }
 
+function makeWorld(o) {
+  const world = {
+    renders: [],
+    temps: [],               // every temporary comp the op created
+    dirty: o.dirty === undefined ? false : o.dirty,
+    dirtyOnCreate: o.dirtyOnCreate !== false,
+    removeThrows: !!o.removeThrows,
+    copyDropsLayer: !!o.copyDropsLayer,
+    copyRenamesLayer: !!o.copyRenamesLayer,
+    groupOpen: () => false,
+  };
+  world.app = {
+    project: {
+      get dirty() { return world.dirty; },
+      items: {
+        addComp(name, w, h, pa, dur, fps) {
+          const c = new MockComp({ id: 6000 + world.temps.length, name, width: w, height: h, resolutionFactor: [1, 1], kind: "wrapper" }, world);
+          c.pixelAspect = pa; c.duration = dur; c.frameRate = fps;
+          c.groupOpen = world.groupOpen;
+          c.layers = [];
+          c.layers.add = (src) => {
+            if (o.wrapperAddThrows) throw new Error("After Effects error: cannot add layer");
+            c.nested = src;
+            const L = new MockLayer(8000, src.name, c);
+            c.layers.push(L);
+            return L;
+          };
+          world.temps.push(c);
+          if (world.dirtyOnCreate) world.dirty = true;
+          return c;
+        },
+      },
+    },
+  };
+  return world;
+}
+
 // core.jsx's undo machinery, reduced to what vision.jsx calls: withUndo opens a
 // named group and sets __UNDO_OPEN for its duration, exactly as the real one
 // does. `undo` records every begin/end, so a test can count the steps a call
 // would leave in Edit > History.
-function loadOps(comp, o) {
-  o = o || {};
+function loadOps(comp, world, o) {
   const undo = [];
   const ctx = {
     OPS: {},
     Math, Date, isFinite, Error, String,
+    app: world.app,
     noUndo: (fn) => fn,
     __UNDO_OPEN: !!o.groupAlreadyOpen,
     withUndo(name, fn) {
@@ -134,20 +213,35 @@ function loadOps(comp, o) {
   };
   vm.createContext(ctx);
   vm.runInContext(visionSrc, ctx, { filename: "vision.jsx" });
-  comp.groupOpen = () => !!ctx.__UNDO_OPEN;
-  return { ops: ctx.OPS, undo };
+  const open = () => !!ctx.__UNDO_OPEN;
+  world.groupOpen = open;
+  comp.groupOpen = open;
+  return { ops: ctx.OPS, undo, ctx };
 }
 
 function scene(o) {
-  const comp = new MockComp(o);
+  o = o || {};
+  const world = makeWorld(o);
+  const comp = new MockComp(o, world);
   comp.layers = [new MockLayer(1, "bg", comp), new MockLayer(2, "title", comp), new MockLayer(3, "chip", comp)];
-  const { ops, undo } = loadOps(comp, o);
-  return { comp, ops, undo };
+  for (const i of o.soloed || []) comp.layers[i]._solo = true;   // the user's own solos
+  const { ops, undo, ctx } = loadOps(comp, world, o);
+  return { comp, ops, undo, world, ctx };
 }
 
 const factors = (comp) => comp.renders.map((r) => r.factor);
 // What the viewer is left on once the op has finished.
 const viewer = (comp) => pair(comp.resolutionFactor);
+const solos = (comp) => comp.layers.map((l) => l._solo);
+
+// The user's comp was never written: not its Resolution, not a solo switch.
+function untouched(comp, msg) {
+  assert.deepEqual(comp.assignments, [], (msg ? msg + ": " : "") + "the user's comp must never be assigned (issue #282)");
+}
+// Every temporary comp the op created is gone again.
+function cleanedUp(world) {
+  assert.ok(world.temps.every((t) => t.removed), "every temporary comp must be removed");
+}
 
 // ---------------------------------------------------------------------------
 // The reported bug, stated as the comparison that made it visible
@@ -163,74 +257,157 @@ check("downsample 2 is never larger than downsample 1 — the whole of issue #72
   assert.ok(full[0] > half[0], "downsample 1 must be the larger of the two");
 });
 
-check("downsample 1 sets the factor rather than inheriting the comp's own", () => {
+check("downsample 1 renders at Full rather than inheriting the comp's own factor", () => {
   const { comp, ops } = scene();
   const out = ops.screenshot_frame({ compId: comp.id, time: 2, downsample: 1 });
   assert.deepEqual(factors(comp), [[1, 1]], "the render must have seen Full, not the viewer's Quarter");
   assert.equal(out.downsample, 1, "the reported factor is the one that was rendered");
 });
 
-check("every explicit factor is honoured from every starting viewer resolution", () => {
+check("every explicit factor is honoured from every starting viewer resolution, with the comp untouched", () => {
   for (const start of [[1, 1], [2, 2], [3, 3], [4, 4], [8, 8]]) {
     for (const ds of [1, 2, 3, 4, 8]) {
-      const { comp, ops } = scene({ resolutionFactor: start });
+      const { comp, ops, world } = scene({ resolutionFactor: start });
       const out = ops.screenshot_frame({ compId: comp.id, downsample: ds });
       assert.deepEqual(
         comp.renders[0].factor, [ds, ds],
         `viewer at ${start[0]}, downsample ${ds} rendered at ${comp.renders[0].factor[0]}`,
       );
       assert.equal(out.downsample, ds);
-      assert.deepEqual(viewer(comp), start, "the viewer's own setting must come back");
+      assert.deepEqual(viewer(comp), start, "the viewer's own setting is never changed");
+      untouched(comp, `viewer ${start[0]}, downsample ${ds}`);
+      cleanedUp(world);
+      assert.equal(out.isolation, start[0] === ds ? "direct" : "wrapper");
     }
   }
 });
 
 // ---------------------------------------------------------------------------
-// The restore, which the fix must not have cost
+// Isolation (issue #282): the routes, and the clean-up
 // ---------------------------------------------------------------------------
 
-check("the viewer's resolution is restored after a successful render", () => {
-  const { comp, ops } = scene();
-  ops.screenshot_frame({ compId: comp.id, downsample: 1 });
-  assert.deepEqual(viewer(comp), QUARTER);
-  ops.screenshot_frame({ compId: comp.id, downsample: 3 });
-  assert.deepEqual(viewer(comp), QUARTER);
+check("a frame that needs a different factor renders through a wrapper holding the comp", () => {
+  const { comp, ops, world } = scene();
+  const out = ops.screenshot_frame({ compId: comp.id, downsample: 1 });
+  assert.equal(out.isolation, "wrapper");
+  assert.equal(world.temps.length, 1);
+  const w = world.temps[0];
+  assert.equal(w.kind, "wrapper");
+  assert.equal(w.nested, comp, "the wrapper must hold the user's comp itself, not a copy");
+  assert.deepEqual([w.width, w.height, w.pixelAspect, w.duration, w.frameRate], [1920, 1080, 1, 10, 25]);
+  assert.equal(comp.renders[0].via, "wrapper");
+  untouched(comp);
+  cleanedUp(world);
 });
 
-check("the viewer's resolution is restored when the render throws — at factor 1 too", () => {
-  // The finally used to be reachable only above factor 1. Now that 1 sets the
-  // factor as well, 1 is the case that would leave a comp at Full if the
-  // restore were ever moved into the success path.
-  for (const ds of [1, 4]) {
-    const { comp, ops } = scene({ failAt: 2 });
+check("a comp that preserves its resolution when nested renders through a copy instead", () => {
+  // A wrapper's factor would not reach it, which would bring #72 back.
+  const { comp, ops, world } = scene({ preserveNestedResolution: true });
+  const out = ops.screenshot_frame({ compId: comp.id, downsample: 1 });
+  assert.equal(out.isolation, "copy");
+  assert.deepEqual(factors(comp), [[1, 1]]);
+  assert.equal(comp.renders[0].via, "copy");
+  untouched(comp);
+  cleanedUp(world);
+});
+
+check("the temporary comp is removed when the render throws — at factor 1 too", () => {
+  for (const ds of [1, 2]) {
+    const { comp, ops, world } = scene({ failAt: 2 });
     assert.throws(
       () => ops.screenshot_frame({ compId: comp.id, time: 2, downsample: ds }),
       /could not render the frame/,
     );
-    assert.deepEqual(
-      viewer(comp), QUARTER,
-      `a throw at downsample ${ds} left the comp at ${viewer(comp)[0]}`,
-    );
+    assert.equal(world.temps.length, 1);
+    cleanedUp(world);
+    untouched(comp);
+    assert.deepEqual(viewer(comp), QUARTER);
   }
 });
 
-check("screenshot_layer sets the factor explicitly and restores solo as well", () => {
-  const { comp, ops } = scene();
-  comp.layers[0].solo = true;                 // a solo the user set, to be put back
-  const out = ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 });
-  assert.deepEqual(factors(comp), [[1, 1]]);
-  assert.deepEqual(viewer(comp), QUARTER);
-  assert.deepEqual(comp.layers.map((l) => l.solo), [true, false, false], "solo state must be restored");
-  assert.equal(out.layerId, 2);
-  assert.equal(out.downsample, 1);
+check("a wrapper that fails part-way through being built is still removed", () => {
+  const { comp, ops, world } = scene({ wrapperAddThrows: true });
+  assert.throws(() => ops.screenshot_frame({ compId: comp.id, downsample: 1 }), /cannot add layer/);
+  assert.equal(world.temps.length, 1);
+  cleanedUp(world);
+  assert.equal(comp.renders.length, 0);
 });
 
-check("screenshot_layer restores both the resolution and the solo state on a throw", () => {
-  const { comp, ops } = scene({ failAt: 0.5 });
-  comp.layers[2].solo = true;
+check("a temporary comp that will not go away is reported, not hidden", () => {
+  const { comp, ops, world } = scene({ removeThrows: true });
+  const out = ops.screenshot_frame({ compId: comp.id, downsample: 1 });
+  assert.equal(world.temps.length, 1);
+  assert.match(out.note, /could not be removed/);
+  assert.match(out.note, /AE MCP screenshot \(temporary\)/, "the note names the item to delete");
+  untouched(comp);
+});
+
+check("a saved project that the temporary comp leaves unsaved is said, once", () => {
+  const clean = scene({ dirty: false });
+  const out = clean.ops.screenshot_frame({ compId: clean.comp.id, downsample: 1 });
+  assert.match(out.note, /unsaved changes/);
+  // Already unsaved before the call: nothing the screenshot did, nothing to say.
+  const dirty = scene({ dirty: true });
+  assert.equal(dirty.ops.screenshot_frame({ compId: dirty.comp.id, downsample: 1 }).note, undefined);
+  // No temp comp at all: nothing to say either.
+  const direct = scene({ dirty: false, resolutionFactor: [1, 1] });
+  const d = direct.ops.screenshot_frame({ compId: direct.comp.id, downsample: 1 });
+  assert.equal(d.isolation, "direct");
+  assert.equal(d.note, undefined);
+  // AE leaving the project clean: nothing to say.
+  const kept = scene({ dirty: false, dirtyOnCreate: false });
+  assert.equal(kept.ops.screenshot_frame({ compId: kept.comp.id, downsample: 1 }).note, undefined);
+});
+
+check("screenshot_layer solos the target in a copy and never in the user's comp", () => {
+  const { comp, ops, world } = scene({ soloed: [0] });   // a solo the user set
+  const out = ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 });
+  assert.equal(out.isolation, "copy");
+  assert.equal(out.layerId, 2);
+  assert.equal(out.downsample, 1);
+  assert.deepEqual(factors(comp), [[1, 1]]);
+  assert.deepEqual(comp.renders[0].solos, [false, true, false], "only the target is soloed in what rendered");
+  assert.equal(comp.renders[0].via, "copy");
+  assert.deepEqual(solos(comp), [true, false, false], "the user's solo is exactly as they left it");
+  untouched(comp);
+  cleanedUp(world);
+});
+
+check("screenshot_layer assigns only the solo switches that are wrong, on the copy", () => {
+  const { comp, ops, world } = scene({ resolutionFactor: [1, 1] });
+  ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 });
+  const copy = world.temps[0];
+  assert.deepEqual(copy.assignments.filter((a) => a.what === "solo").map((a) => a.value), [true]);
+  untouched(comp);
+});
+
+check("screenshot_layer removes the copy when the render throws", () => {
+  const { comp, ops, world } = scene({ failAt: 0.5, soloed: [2] });
   assert.throws(() => ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 }), /could not render/);
+  cleanedUp(world);
+  untouched(comp);
+  assert.deepEqual(solos(comp), [false, false, true]);
   assert.deepEqual(viewer(comp), QUARTER);
-  assert.deepEqual(comp.layers.map((l) => l.solo), [false, false, true]);
+});
+
+check("a copy that does not match the comp is refused and removed, never rendered", () => {
+  for (const o of [{ copyDropsLayer: true }, { copyRenamesLayer: true }]) {
+    const { comp, ops, world } = scene(o);
+    assert.throws(() => ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 }), /could not isolate/);
+    assert.equal(comp.renders.length, 0, "a copy that is not the comp would render the wrong thing");
+    cleanedUp(world);
+    untouched(comp);
+  }
+});
+
+check("screenshot_layer with the target already soloed alone and the factor matching renders directly", () => {
+  const { comp, ops, undo, world } = scene({ resolutionFactor: [1, 1], soloed: [1] });
+  const out = ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 });
+  assert.equal(out.isolation, "direct");
+  assert.equal(world.temps.length, 0);
+  assert.deepEqual(undo, []);
+  assert.equal(comp.renders[0].via, "user");
+  untouched(comp);
 });
 
 // ---------------------------------------------------------------------------
@@ -246,8 +423,6 @@ check("an omitted factor is derived from the comp, not taken as 1", () => {
   assert.equal(uhd.ops.screenshot_frame({ compId: uhd.comp.id }).downsample, 3);
   assert.deepEqual(uhd.comp.renders[0].factor, [3, 3]);
 
-  // Already small: the derivation lands on 1, and 1 is now an explicit Full
-  // render rather than "whatever the viewer says".
   const small = scene({ width: 800, height: 600 });
   assert.equal(small.ops.screenshot_frame({ compId: small.comp.id }).downsample, 1);
   assert.deepEqual(small.comp.renders[0].factor, [1, 1]);
@@ -255,8 +430,6 @@ check("an omitted factor is derived from the comp, not taken as 1", () => {
 });
 
 check("the screenshot schemas carry no zod default on downsample", () => {
-  // Behavioural cover for the same trap: a `.default(1)` reaches the panel as
-  // an explicit 1 and the derivation above never runs again.
   const src = fs.readFileSync(path.join(root, "packages", "shared", "src", "schemas.ts"), "utf8");
   const decl = src.slice(src.indexOf("const downsampleParam"));
   const chain = decl.slice(0, decl.indexOf(");"));
@@ -264,19 +437,20 @@ check("the screenshot schemas carry no zod default on downsample", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The contact sheet, which renders through the same function
+// The contact sheet, which renders every tile through one temporary comp
 // ---------------------------------------------------------------------------
 
-check("every tile of a sheet renders at the sheet's factor, explicit 1 included", () => {
-  const { comp, ops } = scene();
+check("every tile of a sheet renders at the sheet's factor through one wrapper", () => {
+  const { comp, ops, world } = scene();
   const out = ops.screenshot_frame({ compId: comp.id, times: [0, 1, 2], downsample: 1 });
   assert.equal(out.contactSheet, true);
   assert.deepEqual(factors(comp), [[1, 1], [1, 1], [1, 1]], "a Quarter viewer must not shrink the tiles");
   assert.equal(out.downsample, 1);
-  // Array.from, because `tiles` was built inside the vm realm and
-  // deepStrictEqual compares prototypes.
   assert.deepEqual(Array.from(out.tiles, (t) => t.downsample), [1, 1, 1]);
-  assert.deepEqual(viewer(comp), QUARTER);
+  assert.equal(world.temps.length, 1, "one temporary comp for the whole sheet");
+  assert.equal(out.isolation, "wrapper");
+  untouched(comp);
+  cleanedUp(world);
 });
 
 check("a sheet's derived per-tile factor is used for the render, not just reported", () => {
@@ -284,71 +458,70 @@ check("a sheet's derived per-tile factor is used for the render, not just report
   const out = ops.screenshot_frame({ compId: comp.id, times: [0, 1, 2] });
   assert.equal(out.downsample, 4, "ceil(2 * sqrt(3)) — a sheet costs about what one frame costs");
   assert.deepEqual(factors(comp), [[4, 4], [4, 4], [4, 4]]);
-  assert.deepEqual(viewer(comp), QUARTER);
+  // Quarter viewer, sheet factor 4: nothing to change, so it renders directly.
+  assert.equal(out.isolation, "direct");
+  untouched(comp);
 });
 
-check("one tile that will not render costs neither the others nor the restore", () => {
-  const { comp, ops } = scene({ failAt: 1 });
+check("one tile that will not render costs neither the others nor the clean-up", () => {
+  const { comp, ops, world } = scene({ failAt: 1 });
   const out = ops.screenshot_frame({ compId: comp.id, times: [0, 1, 2], downsample: 1 });
   assert.equal(out.tiles.length, 3, "every requested time keeps its cell");
   assert.equal(out.tiles[1].path, undefined);
   assert.match(out.tiles[1].error, /could not render the frame/);
   assert.ok(out.tiles[0].path && out.tiles[2].path);
   assert.deepEqual(factors(comp), [[1, 1], [1, 1], [1, 1]]);
-  assert.deepEqual(viewer(comp), QUARTER, "a failed tile must not leave the comp at Full");
+  untouched(comp);
+  cleanedUp(world);
 });
 
 // ---------------------------------------------------------------------------
 // The undo history a screenshot leaves behind (issue #116)
 //
-// Every assignment to resolutionFactor or solo is its own undo step in After
-// Effects. A screenshot borrows and restores them, so ungrouped it cost two
-// "Resolution change" steps per frame plus two per solo switch, and Cmd-Z after
-// a screenshot undid a no-op instead of the agent's last edit. The properties:
-// at most one named group per call, none at all when nothing is assigned, no
-// nested group inside one already open, and every assignment inside the group.
+// The temporary comp's creation, settings and removal are each a step in AE.
+// The properties: at most one named group per call, none at all when nothing
+// is created, no nested group inside one already open, and every change to a
+// temporary comp — and every render — inside the group.
 // ---------------------------------------------------------------------------
 
 const groups = (undo) => undo.filter((u) => u.startsWith("begin:"));
 const balanced = (undo) => groups(undo).length === undo.filter((u) => u === "end").length;
 
-check("a comp already at the requested factor renders with nothing assigned and no undo step", () => {
-  const { comp, ops, undo } = scene({ resolutionFactor: [1, 1] });
+check("a comp already at the requested factor renders directly, with no temp comp and no undo step", () => {
+  const { comp, ops, undo, world } = scene({ resolutionFactor: [1, 1] });
   ops.screenshot_frame({ compId: comp.id, downsample: 1 });
   assert.deepEqual(factors(comp), [[1, 1]], "the render still happens at the requested factor (#72)");
-  assert.deepEqual(comp.assignments, [], "no resolution change when the factor already matches");
+  assert.equal(world.temps.length, 0);
   assert.deepEqual(undo, [], "nothing changed, so no undo group either");
 });
 
 check("the same holds for a derived factor that happens to match", () => {
-  const { comp, ops, undo } = scene({ resolutionFactor: [2, 2] }); // 1080p derives 2
+  const { comp, ops, undo, world } = scene({ resolutionFactor: [2, 2] }); // 1080p derives 2
   const out = ops.screenshot_frame({ compId: comp.id });
   assert.equal(out.downsample, 2);
-  assert.deepEqual(comp.assignments, []);
+  assert.equal(world.temps.length, 0);
   assert.deepEqual(undo, []);
 });
 
-check("a factor change is one named undo group holding both the set and the restore", () => {
-  const { comp, ops, undo } = scene();          // Quarter, asked for Full
+check("a wrapper render is one named undo group holding the whole temp comp's life", () => {
+  const { comp, ops, undo, world } = scene();
   ops.screenshot_frame({ compId: comp.id, downsample: 1 });
   assert.deepEqual(undo, ["begin:AE MCP: screenshot", "end"]);
-  assert.equal(comp.assignments.length, 2, "set and restore");
-  assert.ok(comp.assignments.every((a) => a.inGroup), "both assignments must land inside the group");
+  assert.ok(world.temps[0].assignments.every((a) => a.inGroup), "the wrapper's settings land inside the group");
+  assert.ok(comp.renders.every((r) => r.inGroup));
 });
 
-check("a whole contact sheet is one undo step, not two per tile", () => {
+check("a whole contact sheet is one undo step, not one per tile", () => {
   const { comp, ops, undo } = scene();
   ops.screenshot_frame({ compId: comp.id, times: [0, 1, 2, 3], downsample: 1 });
   assert.deepEqual(groups(undo), ["begin:AE MCP: screenshot"]);
   assert.ok(balanced(undo));
-  assert.ok(comp.assignments.every((a) => a.inGroup));
-  assert.deepEqual(viewer(comp), QUARTER);
 });
 
 check("a contact sheet at the comp's own factor costs nothing", () => {
-  const { comp, ops, undo } = scene({ resolutionFactor: [1, 1] });
+  const { comp, ops, undo, world } = scene({ resolutionFactor: [1, 1] });
   ops.screenshot_frame({ compId: comp.id, times: [0, 1], downsample: 1 });
-  assert.deepEqual(comp.assignments, []);
+  assert.equal(world.temps.length, 0);
   assert.deepEqual(undo, []);
 });
 
@@ -356,49 +529,37 @@ check("a failed render still closes the group", () => {
   const { comp, ops, undo } = scene({ failAt: 2 });
   assert.throws(() => ops.screenshot_frame({ compId: comp.id, time: 2, downsample: 1 }), /could not render/);
   assert.deepEqual(undo, ["begin:AE MCP: screenshot", "end"]);
-  assert.deepEqual(viewer(comp), QUARTER);
 });
 
-check("screenshot_layer puts every solo switch and the resolution inside one group", () => {
-  const { comp, ops, undo } = scene();
-  comp.layers[0].solo = true;
-  comp.assignments.length = 0;                 // the user's own solo, not the op's
+check("screenshot_layer puts the copy, its solos and its removal inside one group", () => {
+  const { comp, ops, undo, world } = scene({ soloed: [0] });
   ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 });
   assert.deepEqual(undo, ["begin:AE MCP: screenshot", "end"]);
-  assert.ok(comp.assignments.length > 0);
-  assert.ok(comp.assignments.every((a) => a.inGroup), "every borrowed switch must be inside the group");
-  assert.deepEqual(comp.layers.map((l) => l.solo), [true, false, false]);
-});
-
-check("screenshot_layer assigns only the solo switches that are wrong", () => {
-  // Three layers, none soloed, target #2: one switch on, the same one back.
-  // The old loop assigned every layer twice — 2N steps for an N-layer comp.
-  const { comp, ops } = scene({ resolutionFactor: [1, 1] });
-  ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 });
-  const solos = comp.assignments.filter((a) => a.what === "solo");
-  assert.deepEqual(solos.map((a) => [a.id, a.value]), [[2, true], [2, false]]);
-  assert.equal(comp.assignments.filter((a) => a.what === "resolution").length, 0);
-});
-
-check("screenshot_layer with the target already soloed alone and the factor matching costs nothing", () => {
-  const { comp, ops, undo } = scene({ resolutionFactor: [1, 1] });
-  comp.layers[1].solo = true;
-  comp.assignments.length = 0;
-  ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 });
-  assert.deepEqual(comp.assignments, []);
-  assert.deepEqual(undo, []);
-  assert.equal(comp.renders.length, 1);
+  assert.ok(world.temps[0].assignments.length > 0);
+  assert.ok(world.temps[0].assignments.every((a) => a.inGroup), "every switch on the copy is inside the group");
 });
 
 check("inside a group that is already open (run_batch), no nested group is opened", () => {
-  // AE's undo groups do not nest: an inner endUndoGroup would close the
-  // batch's group and leave the rest of the batch ungrouped.
-  const { comp, ops, undo } = scene({ groupAlreadyOpen: true });
+  const { comp, ops, undo, world } = scene({ groupAlreadyOpen: true });
   ops.screenshot_frame({ compId: comp.id, downsample: 1 });
   ops.screenshot_frame({ compId: comp.id, times: [0, 1], downsample: 1 });
   ops.screenshot_layer({ compId: comp.id, layerId: 2, downsample: 1 });
-  assert.deepEqual(undo, [], "the borrow joins the step that is already open");
-  assert.deepEqual(viewer(comp), QUARTER);
+  assert.deepEqual(undo, [], "the temp comps join the step that is already open");
+  untouched(comp);
+  cleanedUp(world);
+});
+
+// ---------------------------------------------------------------------------
+// The mogrt poster renders through the same function
+// ---------------------------------------------------------------------------
+
+check("__saveFrameAt (the mogrt poster) isolates too, and returns what it did", () => {
+  const { comp, world, ctx } = scene();
+  const st = ctx.__saveFrameAt(comp, 1, new ctx.File("/tmp/poster.png"), 1);
+  assert.equal(st.isolation, "wrapper");
+  assert.deepEqual(factors(comp), [[1, 1]]);
+  untouched(comp);
+  cleanedUp(world);
 });
 
 console.log(`screenshot-resolution: ${passed} checks passed`);

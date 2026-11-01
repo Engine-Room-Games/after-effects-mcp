@@ -50,7 +50,7 @@ var __CP_COVERS = "A checkpoint is a shallow copy of one comp: its own layers (w
 // Comp settings a revert restores, in the order they are written. Size and
 // rate before duration, duration before the work area, which must fit inside
 // it. resolutionFactor is left alone on purpose: it is a viewer preference,
-// and screenshots borrow and restore it themselves.
+// and screenshots never touch it (they render through a temporary comp, #282).
 var __CP_COMP_FIELDS = [
   "width", "height", "pixelAspect", "frameRate", "duration", "displayStartTime",
   "motionBlur", "shutterAngle", "shutterPhase", "motionBlurSamplesPerFrame", "motionBlurAdaptiveSampleLimit",

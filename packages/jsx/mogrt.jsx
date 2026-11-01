@@ -512,9 +512,20 @@ OPS.export_mogrt = noUndo(function (args) {
     // never a failure that hides both.
     try {
       var posterPath = __tmpPngPath();
-      __saveFrameAt(comp, t, new File(posterPath), 1);
+      // Through a temporary comp when the comp is not at Full (issue #282),
+      // grouped so its creation and removal are one undo step. The group opens
+      // after the export has returned, so the export itself still runs outside
+      // any group (the "undo group mismatch" note at the top of this file).
+      var posterState = null;
+      __screenshotGroup(true, function () {
+        posterState = __saveFrameAt(comp, t, new File(posterPath), 1);
+      });
       result.posterPngPath = posterPath;
       result.posterTime = t;
+      if (posterState && posterState.leftover) {
+        result.posterWarning = "The poster frame rendered, but the temporary comp it rendered through (\"" +
+          posterState.leftover + "\") could not be removed. Delete it from the Project panel.";
+      }
     } catch (ePoster) {
       result.posterWarning = "The template was exported, but the poster frame at " + t + "s could not be " +
         "rendered (" + (ePoster && ePoster.message ? ePoster.message : String(ePoster)) + "), so it keeps " +
