@@ -37,3 +37,35 @@ var SystemPath = {
   EXTENSION: "extension",
   HOST_APPLICATION: "hostApplication",
 };
+
+// Events between the extensions of this bundle (issue #283): the bridge runs
+// as a hidden extension and the visible status panel is a separate one, with
+// its own page and no Node, so the two talk over CEP's application-scoped
+// events. Each method is guarded: a host without the native call (and the
+// unit tests' stub) must cost the caller nothing.
+function CSEvent(type, scope, appId, extensionId) {
+  this.type = type;
+  this.scope = scope || "APPLICATION";
+  this.appId = appId;
+  this.extensionId = extensionId;
+  this.data = "";
+}
+
+CSInterface.prototype.dispatchEvent = function (event) {
+  if (!window.__adobe_cep__ || !window.__adobe_cep__.dispatchEvent) return false;
+  if (typeof event.data === "object") event.data = JSON.stringify(event.data);
+  window.__adobe_cep__.dispatchEvent(event);
+  return true;
+};
+
+CSInterface.prototype.addEventListener = function (type, listener, obj) {
+  if (!window.__adobe_cep__ || !window.__adobe_cep__.addEventListener) return false;
+  window.__adobe_cep__.addEventListener(type, listener, obj);
+  return true;
+};
+
+CSInterface.prototype.requestOpenExtension = function (extensionId, params) {
+  if (!window.__adobe_cep__ || !window.__adobe_cep__.requestOpenExtension) return false;
+  window.__adobe_cep__.requestOpenExtension(extensionId, params === undefined ? "" : params);
+  return true;
+};

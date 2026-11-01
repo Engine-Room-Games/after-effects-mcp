@@ -1,8 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Two extensions, one bundle (issue #283).
+
+  games.engine-room.ae-mcp.panel is the bridge: client/index.html + main.js,
+  the HTTP/WS server, Node enabled. It is an invisible extension (Type Custom,
+  AutoVisible false, no Menu) started by After Effects' activate event, so it
+  runs at every launch and never opens a window. The id is the one the bridge
+  has always had: CEP's signature log line and check_setup match on it.
+
+  games.engine-room.ae-mcp.status is the optional window under
+  Window > Extensions > AE MCP Bridge. No Node, no server: it shows what the
+  bridge reports over a CEP event (client/status.js), and closing or opening
+  it never touches the bridge.
+
+  If a host turns out not to start the hidden extension, the fallback is to
+  give the bridge back its old Lifecycle and UI (Type Panel, AutoVisible true,
+  a Menu) and drop the status extension; index.html still renders the status.
+  See docs/fragile-areas-bridge.md, "CEP and the panel".
+-->
 <ExtensionManifest Version="11.0" ExtensionBundleId="games.engine-room.ae-mcp" ExtensionBundleVersion="0.5.2"
                    ExtensionBundleName="AE MCP Bridge" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
     <Extension Id="games.engine-room.ae-mcp.panel" Version="0.5.2" />
+    <Extension Id="games.engine-room.ae-mcp.status" Version="0.5.2" />
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
@@ -29,10 +49,27 @@
           </CEFCommandLine>
         </Resources>
         <Lifecycle>
-          <AutoVisible>true</AutoVisible>
+          <AutoVisible>false</AutoVisible>
           <StartOn>
             <Event>com.adobe.csxs.events.ApplicationActivate</Event>
+            <Event>applicationActivate</Event>
           </StartOn>
+        </Lifecycle>
+        <UI>
+          <Type>Custom</Type>
+          <Geometry>
+            <Size><Height>1</Height><Width>1</Width></Size>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+    <Extension Id="games.engine-room.ae-mcp.status">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./client/status.html</MainPath>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>true</AutoVisible>
         </Lifecycle>
         <UI>
           <Type>Panel</Type>

@@ -23,12 +23,38 @@
   var $jsx = document.getElementById("jsx");
   var $reqs = document.getElementById("reqs");
   var $log = document.getElementById("log");
-  function setStatus(text, klass) {
-    $status.textContent = text;
-    $status.className = klass || "";
+  // The bridge runs as a hidden extension (issue #283), so this page's DOM is
+  // seen by nobody unless the manifest is flipped back to a visible Panel. What
+  // it shows is mirrored to the separate status panel (client/status.js) over
+  // a CEP event: the whole state, at most every 250ms, and at once when the
+  // status panel asks. The status panel never runs a bridge of its own.
+  var STATUS_EVENT = "games.engine-room.ae-mcp.status";
+  var STATUS_REQUEST = "games.engine-room.ae-mcp.status.request";
+  var mirror = { status: "", statusClass: "", port: "", portClass: "", ae: "", jsx: "", jsxClass: "", reqs: 0, log: [] };
+  var mirrorCs = null;
+  var mirrorTimer = null;
+  function publishNow() {
+    mirrorTimer = null;
+    if (!mirrorCs) return;
+    try {
+      var ev = new CSEvent(STATUS_EVENT, "APPLICATION");
+      ev.data = JSON.stringify(mirror);
+      mirrorCs.dispatchEvent(ev);
+    } catch (e) {}
   }
+  function publish() {
+    if (mirrorCs && mirrorTimer === null) mirrorTimer = setTimeout(publishNow, 250);
+  }
+  function setField(name, $el, text, klass) {
+    $el.textContent = text;
+    if (klass !== undefined) $el.className = klass;
+    mirror[name] = text;
+    if (klass !== undefined) mirror[name + "Class"] = klass;
+    publish();
+  }
+  function setStatus(text, klass) { setField("status", $status, text, klass || ""); }
   var __reqCount = 0;
-  function bumpReq() { __reqCount += 1; $reqs.textContent = String(__reqCount); }
+  function bumpReq() { __reqCount += 1; $reqs.textContent = String(__reqCount); mirror.reqs = __reqCount; publish(); }
   function log(level, msg) {
     var d = document.createElement("div");
     d.className = (level === "error" ? "err" : level === "warn" ? "warn" : "");
@@ -37,6 +63,9 @@
     $log.insertBefore(d, $log.firstChild);
     // Trim
     while ($log.childNodes.length > 80) $log.removeChild($log.lastChild);
+    mirror.log.unshift({ level: d.className, text: d.textContent });
+    if (mirror.log.length > 80) mirror.log.length = 80;
+    publish();
   }
 
   // CSInterface comes from the plain <script> tag before this one, so it needs
@@ -52,6 +81,13 @@
     cs = new CSInterface();
     extDir = cs.getSystemPath(SystemPath.EXTENSION);
     clientDir = path.join(extDir, "client");
+    // Only where CEP provides events: without them there is no status panel
+    // to tell, and nothing is scheduled.
+    if (window.__adobe_cep__ && window.__adobe_cep__.dispatchEvent && window.__adobe_cep__.addEventListener) {
+      mirrorCs = cs;
+      cs.addEventListener(STATUS_REQUEST, publishNow);
+      publish();
+    }
   } catch (e) {
     setStatus("cannot start — CSInterface is unavailable", "err");
     log("error", "new CSInterface() failed: " + e.message);
@@ -347,14 +383,13 @@
     return evalScript(loadScript).then(function (raw) {
       if (raw === "ok") {
         loadedBundleHash = diskHash;
-        $jsx.textContent = "loaded";
-        $jsx.className = "ok";
+        setField("jsx", $jsx, "loaded", "ok");
         return;
       }
-      $jsx.textContent = "fail: " + raw; $jsx.className = "err";
+      setField("jsx", $jsx, "fail: " + raw, "err");
       throw new Error("__AEMCP not defined after loading bundle.jsx: " + raw);
     }, function (e) {
-      $jsx.textContent = "fail: " + e.message; $jsx.className = "err";
+      setField("jsx", $jsx, "fail: " + e.message, "err");
       throw e;
     });
   }
@@ -945,7 +980,7 @@
   setStatus("Starting…");
   try {
     var host = cs.getHostEnvironment();
-    $ae.textContent = (host && host.appName ? host.appName : "AE") + " " + (host && host.appVersion ? host.appVersion : "");
+    setField("ae", $ae, (host && host.appName ? host.appName : "AE") + " " + (host && host.appVersion ? host.appVersion : ""));
   } catch (e) {}
 
   var config = readConfig();
@@ -959,8 +994,7 @@
       running = s;
       // The only write of the port file, and only with the port actually bound.
       writePortFile(s.port);
-      $port.textContent = String(s.port);
-      $port.className = "ok";
+      setField("port", $port, String(s.port), "ok");
       setStatus("ready", "ok");
       log("info", "Bridge listening on http://127.0.0.1:" + s.port +
         (s.port !== config.port && config.port !== 0 ? " (configured port " + config.port + " was taken — see above)" : ""));
