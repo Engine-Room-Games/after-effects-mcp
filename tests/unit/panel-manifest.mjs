@@ -164,14 +164,39 @@ check("status.js asks at once, and renders what the bridge answers", () => {
 check("a bridge never heard from: CEP is asked to open it once, and the silence is counted, not called death", () => {
   const s = runStatus();
   s.advance(6000);
-  assert.deepEqual(s.host.opened, [BRIDGE_ID]);
   assert.equal(s.nodes.status.textContent, "no answer for 6s (After Effects may be busy)");
   assert.equal(s.nodes.status.className, "warn");
+  // A window a saved workspace restores at launch waits out the bridge's own
+  // 7–11 s startup: no open request before 30 s.
+  s.advance(22000);
+  assert.deepEqual(s.host.opened, [], "asked CEP to open the bridge while it may still be starting");
+  s.advance(2000);
+  assert.deepEqual(s.host.opened, [BRIDGE_ID]);
   s.advance(20000);
   assert.deepEqual(s.host.opened, [BRIDGE_ID], "opening is asked once, not on every tick");
-  assert.equal(s.nodes.status.textContent, "no answer for 26s (After Effects may be busy)");
-  assert.doesNotMatch(s.nodes.status.textContent, /not running/);
+  assert.equal(s.nodes.status.textContent, "no answer for 50s (After Effects may be busy)");
   // A bridge that comes up late still takes the window over.
+  s.say({ status: "ready", statusClass: "ok", port: "7777" });
+  assert.equal(s.nodes.status.textContent, "ready");
+});
+
+check("a bridge restored at launch that answers at 10 s is never asked to open", () => {
+  const s = runStatus();
+  s.advance(10000);
+  s.say({ status: "ready", statusClass: "ok", port: "7777" });
+  s.advance(40000);
+  assert.deepEqual(s.host.opened, []);
+});
+
+check("past two minutes of silence the window says the bridge may have stopped and names check_setup", () => {
+  const s = runStatus();
+  s.say({ status: "ready", statusClass: "ok", port: "7777" });
+  s.advance(118000);
+  assert.match(s.nodes.status.textContent, /may be busy/);
+  s.advance(2000);
+  assert.equal(s.nodes.status.textContent, "no answer for 120s — the bridge may have stopped; ask the agent to run check_setup");
+  assert.equal(s.nodes.status.className, "err");
+  assert.deepEqual(s.host.opened, [], "a bridge that once answered is never re-opened from here");
   s.say({ status: "ready", statusClass: "ok", port: "7777" });
   assert.equal(s.nodes.status.textContent, "ready");
 });

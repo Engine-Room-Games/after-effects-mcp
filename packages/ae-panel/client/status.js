@@ -28,6 +28,12 @@
   var STATUS_REQUEST = "games.engine-room.ae-mcp.event.status-request";
   var ASK_EVERY_MS = 2000;
   var SILENT_AFTER_MS = 6000;
+  // A window restored by a saved workspace opens at launch, while the bridge
+  // takes 7–11 s to answer (measured on AE 26.5). Asking CEP to open it before
+  // then would be asked on nearly every launch, mid-startup.
+  var OPEN_AFTER_MS = 30000;
+  // Past this, a bridge that once answered is more likely gone than busy.
+  var STOPPED_AFTER_MS = 120000;
 
   function $(id) { return document.getElementById(id); }
   function set(id, text, klass) {
@@ -85,14 +91,20 @@
     var now = new Date().getTime();
     var since = lastHeard || startedAt;
     ask();
-    if (now - since < SILENT_AFTER_MS) return;
-    if (!lastHeard && !openedBridge) {
+    var quiet = now - since;
+    if (quiet < SILENT_AFTER_MS) return;
+    if (!lastHeard && !openedBridge && quiet >= OPEN_AFTER_MS) {
       openedBridge = true;
       try { cs.requestOpenExtension(BRIDGE_ID, ""); } catch (e) {}
     }
+    var secs = Math.round(quiet / 1000);
     // The port and the log stay as last reported: they are still true of a
     // bridge that is busy, and the next answer replaces all of it.
-    set("status", "no answer for " + Math.round((now - since) / 1000) + "s (After Effects may be busy)", "warn");
+    if (quiet >= STOPPED_AFTER_MS) {
+      set("status", "no answer for " + secs + "s — the bridge may have stopped; ask the agent to run check_setup", "err");
+    } else {
+      set("status", "no answer for " + secs + "s (After Effects may be busy)", "warn");
+    }
   }
 
   ask();

@@ -173,8 +173,10 @@ function readTail(file: string, bytes: number): string {
 /**
  * Scan the newest CEP log for the line that says CEP refused this panel's
  * signature. The needle is built from the bundle id, never spelled out: the
- * extension id in the log is `<bundleId>.panel`, and a literal here would be
- * one more copy of a name that already lives in the manifest.
+ * extension ids in the log are `<bundleId>.bridge` (the hidden bridge) and
+ * `<bundleId>.panel` (the status window, issue #283), the prefix matches
+ * either, and a literal here would be one more copy of a name that already
+ * lives in the manifest.
  */
 export function findSignatureFailure(logs: string[], bundleId: string = BUNDLE_ID): SignatureFinding | null {
   const needle = `Signature verification failed for extension ${bundleId}`;
