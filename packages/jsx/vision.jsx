@@ -99,7 +99,7 @@ function __resolveDownsample(comp, requested) {
 // After Effects may mark the project as having unsaved changes. Project.dirty
 // is read-only, so that cannot be put back; the result says so in `note` when a
 // screenshot is what turned a saved project unsaved. Measured on 26.5 (recipe
-// 78 in docs/verification-recipes.md): wrapper and copy frames are
+// 79 in docs/verification-recipes.md): wrapper and copy frames are
 // pixel-identical to the comp rendered at Full. The `isolation` field on every
 // result says which route a frame took.
 function __factorIs(rf, f) {
