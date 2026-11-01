@@ -626,7 +626,7 @@ await check("mirrors its status to the status panel over a CEP event, and answer
   const p = bootPanel(dir, { cepEvents: true });
   try {
     assert.equal(await settled(p.dom), "ready", logText(p.dom));
-    const STATUS = "games.engine-room.ae-mcp.status";
+    const STATUS = "games.engine-room.ae-mcp.event.status";
     const lastState = async () => {
       const deadline = Date.now() + 3000;
       for (;;) {
@@ -644,9 +644,9 @@ await check("mirrors its status to the status panel over a CEP event, and answer
     assert.match(last.ae, /AEFT 26\.3/);
     assert.ok(last.log.some((l) => /Bridge listening on/.test(l.text)), "the log must travel with the status");
     // The status panel's request is answered at once, not on the next change.
-    const askers = p.host.cepListeners["games.engine-room.ae-mcp.status.request"] ?? [];
+    const askers = p.host.cepListeners["games.engine-room.ae-mcp.event.status-request"] ?? [];
     assert.equal(askers.length, 1, "the bridge must listen for the status panel's request");
-    askers[0]({ type: "games.engine-room.ae-mcp.status.request", data: "" });
+    askers[0]({ type: "games.engine-room.ae-mcp.event.status-request", data: "" });
     assert.equal(p.host.dispatched.filter((e) => e.type === STATUS).length, count + 1);
   } finally { p.close(); }
 });

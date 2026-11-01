@@ -33,8 +33,9 @@ function check(name, fn) {
   catch (err) { console.error(`panel-manifest: ${name}`); throw err; }
 }
 
-const BRIDGE_ID = "games.engine-room.ae-mcp.panel";
-const STATUS_ID = "games.engine-room.ae-mcp.status";
+const BRIDGE_ID = "games.engine-room.ae-mcp.bridge";
+// The old visible bridge's id, so a saved workspace restores a Panel into its frame.
+const STATUS_ID = "games.engine-room.ae-mcp.panel";
 
 const manifest = read("CSXS", "manifest.xml").replace(/<!--[\s\S]*?-->/g, "");
 const listed = [...manifest.matchAll(/<ExtensionList>([\s\S]*?)<\/ExtensionList>/g)][0][1];
@@ -104,7 +105,9 @@ const ids = (src) => ({
 
 check("main.js and status.js agree on the event names, and status.js names the bridge's id", () => {
   assert.deepEqual(ids(statusJs), ids(mainJs));
-  assert.equal(ids(mainJs).status, "games.engine-room.ae-mcp.status");
+  assert.equal(ids(mainJs).status, "games.engine-room.ae-mcp.event.status");
+  assert.ok(![BRIDGE_ID, STATUS_ID].includes(ids(mainJs).status) && ![BRIDGE_ID, STATUS_ID].includes(ids(mainJs).request),
+    "an event type must not be an extension id");
   assert.equal(statusJs.match(/BRIDGE_ID = "([^"]+)"/)?.[1], BRIDGE_ID);
 });
 
@@ -139,13 +142,13 @@ function runStatus() {
   vm.runInContext(read("client", "csinterface.js"), sandbox);
   vm.runInContext(statusJs, sandbox);
   const advance = (ms) => { for (let t = 0; t < ms; t += 2000) { now += 2000; for (const fn of ticks) fn(); } };
-  const say = (state) => { for (const fn of host.listeners["games.engine-room.ae-mcp.status"] ?? []) fn({ data: JSON.stringify(state) }); };
+  const say = (state) => { for (const fn of host.listeners["games.engine-room.ae-mcp.event.status"] ?? []) fn({ data: JSON.stringify(state) }); };
   return { host, nodes, advance, say };
 }
 
 check("status.js asks at once, and renders what the bridge answers", () => {
   const s = runStatus();
-  assert.equal(s.host.dispatched[0].type, "games.engine-room.ae-mcp.status.request");
+  assert.equal(s.host.dispatched[0].type, "games.engine-room.ae-mcp.event.status-request");
   s.say({ status: "ready", statusClass: "ok", port: "7777", portClass: "ok", ae: "AEFT 26.5", jsx: "loaded", jsxClass: "ok", reqs: 3,
     log: [{ level: "", text: "[10:00:00] Bridge listening on http://127.0.0.1:7777" }] });
   assert.equal(s.nodes.status.textContent, "ready");
@@ -158,17 +161,32 @@ check("status.js asks at once, and renders what the bridge answers", () => {
   assert.deepEqual(s.host.opened, []);
 });
 
-check("status.js asks CEP to open the bridge once when nothing answers, then says it is not running", () => {
+check("a bridge never heard from: CEP is asked to open it once, and the silence is counted, not called death", () => {
   const s = runStatus();
   s.advance(6000);
   assert.deepEqual(s.host.opened, [BRIDGE_ID]);
-  assert.match(s.nodes.status.textContent, /no answer from the bridge/);
+  assert.equal(s.nodes.status.textContent, "no answer for 6s (After Effects may be busy)");
+  assert.equal(s.nodes.status.className, "warn");
   s.advance(20000);
   assert.deepEqual(s.host.opened, [BRIDGE_ID], "opening is asked once, not on every tick");
-  assert.equal(s.nodes.status.textContent, "the bridge is not running");
+  assert.equal(s.nodes.status.textContent, "no answer for 26s (After Effects may be busy)");
+  assert.doesNotMatch(s.nodes.status.textContent, /not running/);
   // A bridge that comes up late still takes the window over.
   s.say({ status: "ready", statusClass: "ok", port: "7777" });
   assert.equal(s.nodes.status.textContent, "ready");
+});
+
+check("a bridge gone quiet behind a long script: no open request, the last port kept, recovery on the next answer", () => {
+  const s = runStatus();
+  s.say({ status: "ready", statusClass: "ok", port: "7777", portClass: "ok" });
+  s.advance(12000); // a 12 s ExtendScript op: no answers meanwhile
+  assert.deepEqual(s.host.opened, [], "a bridge that has answered is busy, not missing — never ask CEP to open it");
+  assert.equal(s.nodes.status.textContent, "no answer for 12s (After Effects may be busy)");
+  assert.equal(s.nodes.port.textContent, "7777", "the last known port stays");
+  s.say({ status: "ready", statusClass: "ok", port: "7777", portClass: "ok" });
+  assert.equal(s.nodes.status.textContent, "ready");
+  s.advance(4000);
+  assert.equal(s.nodes.status.textContent, "ready", "a fresh answer resets the count");
 });
 
 console.log(`panel-manifest: ${passed} checks passed`);

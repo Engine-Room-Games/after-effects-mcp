@@ -28,8 +28,9 @@
   // it shows is mirrored to the separate status panel (client/status.js) over
   // a CEP event: the whole state, at most every 250ms, and at once when the
   // status panel asks. The status panel never runs a bridge of its own.
-  var STATUS_EVENT = "games.engine-room.ae-mcp.status";
-  var STATUS_REQUEST = "games.engine-room.ae-mcp.status.request";
+  // Event types are their own namespace, never an extension id.
+  var STATUS_EVENT = "games.engine-room.ae-mcp.event.status";
+  var STATUS_REQUEST = "games.engine-room.ae-mcp.event.status-request";
   var mirror = { status: "", statusClass: "", port: "", portClass: "", ae: "", jsx: "", jsxClass: "", reqs: 0, log: [] };
   var mirrorCs = null;
   var mirrorTimer = null;
@@ -848,7 +849,7 @@
    * whatever it got to the port file. On one machine nothing else ever holds
    * 7777, so the thing being walked around was always a previous instance of
    * this same panel — a CEPHtmlEngine that lingered across an After Effects
-   * relaunch, or a second panel window — and the walk routed round it in
+   * relaunch, or a second After Effects — and the walk routed round it in
    * silence, leaving the port file as a second source of truth that could
    * disagree with the socket. Four incidents in a week (issue #92).
    *
@@ -954,7 +955,7 @@
   }
 
   // ---------- Shutdown ----------
-  // When the panel window closes or After Effects quits, give the port back and
+  // When the bridge extension unloads (After Effects quits), give the port back and
   // take this panel's port-file entry with it. A panel that exits cleanly must
   // not leave a file naming a port nobody listens on — that is the other half
   // of how the port file came to disagree with the socket (issue #92). A

@@ -840,7 +840,7 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
     if (signature?.evidence === "log-clean") {
       steps.push(
         `If it has already been restarted, the CEP log shows no signature refusal (${signature.detail}), so that is not the cause. ` +
-          "Ask the user to open Window > Extensions > AE MCP Bridge in After Effects and read back what the panel says; if nothing opens at all, report it with log_issue."
+          "Ask the user to open Window > Extensions > AE MCP Bridge in After Effects and read back what the status window says — it reports on the bridge, which runs in the background with no window of its own. If it keeps reading \"no answer for …s\" with nothing running in After Effects, the bridge did not start; if nothing opens at all, report it with log_issue."
       );
     } else {
       steps.push(
@@ -851,7 +851,7 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
           `(After Effects 2026 uses CSXS.${CSXS_VERSIONS[0]}; setup_panel sets this for new installs). ` +
           "Then relaunch After Effects and run check_setup again — it reads the CEP log, and if the signature check is what is failing it reports panelSignature with the exact fix."
       );
-      steps.push("Also ask the user to open Window > Extensions > AE MCP Bridge in AE: if nothing appears at all, that is the same symptom.");
+      steps.push("Also ask the user to open Window > Extensions > AE MCP Bridge in AE: if nothing appears at all, that is the same symptom; if the status window opens but keeps reading \"no answer for …s\", the window loaded and the background bridge did not.");
     }
   }
   return steps;

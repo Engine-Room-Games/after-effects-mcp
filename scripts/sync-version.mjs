@@ -35,8 +35,8 @@ const targets = [
   // CEP schema version and must stay at 11.0.
   ["packages/ae-panel/CSXS/manifest.xml", /(ExtensionBundleVersion=")([^"]+)(")/],
   ["packages/ae-panel/CSXS/manifest.xml", /(<Extension Id="games\.engine-room\.ae-mcp\.panel" Version=")([^"]+)(")/],
-  // The status panel beside the hidden bridge (issue #283).
-  ["packages/ae-panel/CSXS/manifest.xml", /(<Extension Id="games\.engine-room\.ae-mcp\.status" Version=")([^"]+)(")/],
+  // The hidden bridge beside the status panel (issue #283).
+  ["packages/ae-panel/CSXS/manifest.xml", /(<Extension Id="games\.engine-room\.ae-mcp\.bridge" Version=")([^"]+)(")/],
 ];
 
 let drifted = 0;
