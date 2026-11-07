@@ -378,6 +378,19 @@ await check("release.sh smoke-runs every artifact after signing and before taggi
   }
 });
 
+await check("release.sh reaches main by a merged pull request, and only then pushes the tag", () => {
+  const sh = read("scripts", "release.sh");
+  assert.doesNotMatch(sh, /git push[^\n]* origin main/, "main refuses a direct push");
+  assert.doesNotMatch(sh, /^[^#\n]*gh pr merge[^\n]*--(admin|squash|rebase)/m, "the tag names this exact commit, and the rule is not to be bypassed");
+  const checks = sh.indexOf('gh pr checks "$RELEASE_BRANCH"');
+  const merge = sh.indexOf('gh pr merge "$RELEASE_BRANCH" --repo "$REPO" --merge');
+  const ancestor = sh.indexOf('git merge-base --is-ancestor "$TAG" origin/main');
+  const tag = sh.indexOf('git push --quiet origin "$TAG"');
+  const publish = sh.lastIndexOf("--draft=false");
+  assert.ok(checks >= 0 && checks < merge && merge < ancestor && ancestor < tag && tag < publish, "CI, merge, tag, publish, in that order");
+  assert.ok(sh.indexOf("git add -A") < sh.indexOf('git push --quiet origin "HEAD:refs/heads/$RELEASE_BRANCH"'));
+});
+
 console.log(`release-checks: ${passed} checks passed`);
 // Settle before exiting: Node 24 on Windows can assert at exit straight after
 // child-process and socket activity (see docs/fragile-areas-server.md).

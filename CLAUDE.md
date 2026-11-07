@@ -236,7 +236,9 @@ CI (`.github/workflows/ci.yml`) builds and smoke-tests on macos-latest and windo
 
 ## Releasing
 
-`make release` is local-only and does the whole thing in one pass: bump → build → test → sign the panel once → npm tarball → `.mcpb` → binaries → codesign → notarize → smoke-run all three → commit → tag (its message records the tarball's SHA-256) → draft GitHub release with every asset → push → publish the draft. The npm tarball is packed by the script; publishing the release is what triggers `release.yml`, which downloads that tarball, refuses it unless it matches the digest in the tag, and publishes it to npm over OIDC — CI builds nothing and signs nothing. Every artifact carries the same signed panel (issue #182).
+`make release` is local-only and does the whole thing in one pass: bump → build → test → sign the panel once → npm tarball → `.mcpb` → binaries → codesign → notarize → smoke-run all three → commit → tag (its message records the tarball's SHA-256) → draft GitHub release with every asset → release PR, CI, merge → push the tag → publish the draft. The npm tarball is packed by the script; publishing the release is what triggers `release.yml`, which downloads that tarball, refuses it unless it matches the digest in the tag, and publishes it to npm over OIDC — CI builds nothing and signs nothing. Every artifact carries the same signed panel (issue #182).
+
+`main` takes changes only through a PR with CI green, and that binds admins too, so the script opens `release/<version>`, waits for CI and merges it with a **merge commit**: the tag and the digest in it name that exact commit, which a squash or rebase would replace. Never pass `--admin`.
 
 Everything that can fail happens **before** the tag is pushed. A failed notarization costs a `git checkout -- .` and nothing else — that ordering is deliberate, so do not move the artifact build after the tag.
 
