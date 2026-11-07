@@ -61,7 +61,6 @@ only quitting and reopening After Effects will.
   numbers, where it used to set only the Point of Interest and lose the z
   (`[x, y]` still sets the Point of Interest alone); an ambient light has no
   Position, so a z there is refused (issue #291).
-  supersedes: three-component position needs a 3D layer
 - **The bridge runs in the background and opens no window at launch.**
   Window > Extensions > AE MCP Bridge is now a status window only: it shows
   the bridge's status and log, and opening or closing it does not start, stop

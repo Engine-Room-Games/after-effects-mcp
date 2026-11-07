@@ -80,6 +80,12 @@ check("set_transform refuses a z on a 2D layer and writes none of the call", () 
   assert.equal(ae.json(`flat.property("Transform").property("Position").numKeys`), 0);
 });
 
+check("set_transform refuses before its earlier fields: Scale is written ahead of Anchor Point", () => {
+  const ae = scene();
+  refused(ae.call("set_transform", { compId: 100, layerId: 1, properties: { scale: [50, 50], anchorPoint: [1, 2, 3] } }), /z 3/, /Nothing was changed/);
+  assert.deepEqual(ae.json(`flat.property("Transform").property("Scale").value`), [100, 100, 100]);
+});
+
 check("add_keyframe refuses it, on Position and on Anchor Point", () => {
   const ae = scene();
   refused(ae.call("add_keyframe", { compId: 100, layerId: 1, propertyPath: ["Transform", "Position"], time: 1, value: [1, 2, 3] }), /add_keyframe/);
