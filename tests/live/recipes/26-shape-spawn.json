@@ -1,6 +1,6 @@
 {
   "recipe": 26,
-  "title": "create_shape_layer spawns at [0,0] unless asked for the centre",
+  "title": "create_shape_layer spawns at the comp origin, read back as [0,0,0] on a 2D layer, unless asked for the centre",
   "manual": "Screenshot: the rect sits centred on (400,200), near the top-left — not half a frame away.",
   "steps": [
     {
@@ -29,8 +29,13 @@
       "save": "shape",
       "expect": [
         {
+          "path": "threeDLayer",
+          "equals": false
+        },
+        {
           "path": "position",
           "equals": [
+            0,
             0,
             0
           ]
@@ -38,6 +43,7 @@
         {
           "path": "anchorPoint",
           "equals": [
+            0,
             0,
             0
           ]
@@ -73,7 +79,8 @@
           "path": "position",
           "equals": [
             1920,
-            1080
+            1080,
+            0
           ]
         }
       ]

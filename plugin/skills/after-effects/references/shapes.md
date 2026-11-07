@@ -16,7 +16,8 @@ Effects' own spawn point is the comp centre, which silently offsets a drawing
 authored in comp coordinates by half a frame; pass `position: "center"` if you
 want that back, or any `[x, y]` to place the origin yourself. The result echoes
 the position and anchor it ended up with, so nobody has to render a frame to
-learn the coordinate system.
+learn the coordinate system. They come back as After Effects reads them, three
+numbers on a 2D layer too: `[0,0,0]`.
 
 The layer it makes is empty: `create_shape_layer` takes no `fill`, `stroke`,
 `strokeWidth` or `shapes`, and refuses them by name rather than ignoring them.

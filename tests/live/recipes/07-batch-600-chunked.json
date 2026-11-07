@@ -69,8 +69,12 @@
       "progress": true,
       "expect": [
         {
-          "path": "$text",
-          "matches": "\"undoSteps\": 24"
+          "path": "status",
+          "equals": "completed"
+        },
+        {
+          "path": "result.undoSteps",
+          "equals": 24
         },
         {
           "path": "$progress",

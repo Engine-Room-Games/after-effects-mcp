@@ -138,6 +138,11 @@ that does it.
   (`true` is pre-expression). To bake a driven property, sample every time
   you need first, then remove the expression, then the keys: each of those
   changes what the next read returns.
+- **A 2D layer's Position, Anchor Point and Scale read three numbers:** a
+  Position written as `[0, 0]` reads back `[0, 0, 0]`, from a script and from
+  the tools alike (measured on 26.5). Do not compare one with `[x, y]`, and do
+  not take the third number for a 3D layer: `threeDLayer` says that. Writes take
+  either length, and on a 2D layer a third number is dropped with no error.
 - **`setValue` on a comp that is not open in a viewer can throw with the
   value already applied.** Seen on shape rectangle Size: `invalid numeric
   result (divide by zero?)` for every rect after the first, with every value
@@ -267,8 +272,8 @@ as a script, so they are in the `shapes` topic. The raw-scripting traps:
 
 - **`setTemporalEaseAtKey` wants one `KeyframeEase` per ease dimension, and
   that count belongs to the property, not to its value.** Measured on 26.3:
-  Opacity and sliders take 1; a 2D layer's **Scale takes 3** while its value
-  reads `[x, y]`; a shape's **Ellipse Size takes 2** while its value reads
+  Opacity and sliders take 1; a 2D layer's **Scale takes 3** though only two of
+  its numbers mean anything; a shape's **Ellipse Size takes 2** while its value reads
   `[w, h]`; Position and Anchor Point take 1 whether the layer is 2D or 3D,
   because the ease runs along the motion path. Each of those is the opposite of
   the sensible guess — and one session on 26.3 had a 2D layer's Position
