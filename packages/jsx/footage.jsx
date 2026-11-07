@@ -194,6 +194,7 @@ OPS.create_footage_layer = function (args) {
   if (!item) throw new Error("No project item with id " + args.itemId);
   if (item instanceof FolderItem) throw new Error("Item " + args.itemId + " (\"" + item.name + "\") is a folder, not footage");
 
+  __refuseZOnNewLayer(args.position, "create_footage_layer");
   var layer = comp.layers.add(item);
   if (typeof args.name === "string" && args.name.length > 0) layer.name = args.name;
   if (args.position !== undefined && args.position !== null) {

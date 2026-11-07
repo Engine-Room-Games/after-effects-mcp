@@ -322,6 +322,7 @@ OPS.add_keyframe = function (args) {
   var l = getLayerById(c, args.layerId);
   var prop = walkProperty(l, args.propertyPath);
   var value = __hexValue(prop, args.value, "add_keyframe");
+  __refuseLostZ(prop, value, "add_keyframe");
   var interp = args.interpolation;
   // A key already at this time: read the ease side to keep before anything is
   // written, so a refusal there really does leave the property untouched.

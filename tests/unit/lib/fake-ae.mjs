@@ -105,11 +105,18 @@ function installFakeAe(g) {
     if (!(i >= 1 && i <= this._keys.length) || Math.floor(i) !== i) fail("keyIndex " + i + " out of range (1.." + this._keys.length + ")");
     return this._keys[i - 1];
   };
+  // A 2D layer's Position and Anchor Point keep [x, y, 0] of anything written
+  // to them, and say nothing (issue #291, measured on 26.5).
+  Property.prototype._written = function (v) {
+    if (this._flatOn && this._flatOn.threeDLayer === false && v && v.length === 3) return [v[0], v[1], 0];
+    return v;
+  };
   Property.prototype.setValue = function (v) {
     if (this._keys.length) fail("can not use setValue on a property with keyframes; use setValueAtTime");
-    this._value = copy(v);
+    this._value = copy(this._written(v));
   };
   Property.prototype.setValueAtTime = function (t, v) {
+    v = this._written(v);
     for (var i = 0; i < this._keys.length; i++) {
       if (Math.abs(this._keys[i].time - t) < 1e-6) { this._keys[i].value = copy(v); return; }
     }
@@ -220,8 +227,14 @@ function installFakeAe(g) {
     self.parent = null; self.source = null;
     var root = new Group(name, "ADBE AV Layer", false);
     var tr = root._add(new Group("Transform", "ADBE Transform Group", false));
-    tr._add(new Property("Anchor Point", "ADBE Anchor Point", [0, 0], T.TwoD_SPATIAL));
-    tr._add(new Property("Position", "ADBE Position", [comp.width / 2, comp.height / 2], T.TwoD_SPATIAL));
+    var anchorP = tr._add(new Property("Anchor Point", "ADBE Anchor Point", [0, 0], T.TwoD_SPATIAL));
+    var positionP = tr._add(new Property("Position", "ADBE Position", [comp.width / 2, comp.height / 2], T.TwoD_SPATIAL));
+    tr.propertyDepth = 1;
+    [anchorP, positionP].forEach(function (p) {
+      p._flatOn = self;
+      p.propertyDepth = 2;
+      p.propertyGroup = function (n) { return n === 2 ? self : tr; };
+    });
     tr._add(new Property("Scale", "ADBE Scale", [100, 100, 100], T.ThreeD));
     tr._add(new Property("Rotation", "ADBE Rotate Z", 0, T.OneD));
     tr._add(new Property("Opacity", "ADBE Opacity", 100, T.OneD));
@@ -273,7 +286,7 @@ function installFakeAe(g) {
       },
     },
   };
-  g.FAKE = { comp: Comp, items: ITEMS };
+  g.FAKE = { comp: Comp, items: ITEMS, Property: Property };
 }
 
 /**

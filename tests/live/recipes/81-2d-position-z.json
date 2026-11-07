@@ -1,0 +1,1299 @@
+{
+  "recipe": 81,
+  "title": "A z a 2D layer would lose is refused; a z that lands is not",
+  "steps": [
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "z",
+        "width": 1000,
+        "height": 800,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "comp",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_comp",
+      "args": {
+        "name": "src",
+        "width": 100,
+        "height": 100,
+        "frameRate": 30,
+        "duration": 5
+      },
+      "save": "src",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_null_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "Flat"
+      },
+      "save": "flat",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_null_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "Deep"
+      },
+      "save": "deep",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "set_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${deep.id}",
+        "threeDLayer": true
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${flat.id}",
+        "properties": {
+          "position": [
+            10,
+            20
+          ],
+          "anchorPoint": [
+            0,
+            0
+          ]
+        }
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${flat.id}",
+        "properties": {
+          "opacity": 50,
+          "position": [
+            5,
+            6,
+            70
+          ]
+        }
+      },
+      "expectError": "z 70.*'Flat' is 2D.*Nothing was changed"
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${flat.id}",
+        "properties": {
+          "anchorPoint": [
+            1,
+            2,
+            3
+          ]
+        }
+      },
+      "expectError": "Anchor Point.*Nothing was changed"
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${flat.id}",
+        "time": 1,
+        "keyframe": true,
+        "properties": {
+          "position": [
+            7,
+            8,
+            9
+          ]
+        }
+      },
+      "expectError": "z 9"
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${flat.id}",
+        "propertyPath": [
+          "Transform",
+          "Position"
+        ],
+        "time": 1,
+        "value": [
+          9,
+          9,
+          99
+        ]
+      },
+      "expectError": "add_keyframe: z 99"
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${flat.id}",
+        "propertyPath": [
+          "Transform",
+          "Anchor Point"
+        ],
+        "time": 1,
+        "value": [
+          9,
+          9,
+          99
+        ]
+      },
+      "expectError": "add_keyframe: z 99"
+    },
+    {
+      "call": "set_shape_property",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${flat.id}",
+        "contentPath": [
+          "Transform"
+        ],
+        "property": "Anchor Point",
+        "value": [
+          4,
+          4,
+          44
+        ]
+      },
+      "expectError": "set_shape_property: z 44"
+    },
+    {
+      "call": "run_batch",
+      "args": {
+        "ops": [
+          {
+            "op": "set_transform",
+            "args": {
+              "compId": "${comp.id}",
+              "layerId": "${flat.id}",
+              "properties": {
+                "position": [
+                  3,
+                  3,
+                  33
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "expectError": "z 33"
+    },
+    {
+      "call": "create_shape_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "position": [
+          1,
+          2,
+          30
+        ]
+      },
+      "expectError": "Nothing was created"
+    },
+    {
+      "call": "create_text_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "text": "x",
+        "position": [
+          1,
+          2,
+          30
+        ]
+      },
+      "expectError": "Nothing was created"
+    },
+    {
+      "call": "create_precomp_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "sourceCompId": "${src.id}",
+        "position": [
+          1,
+          2,
+          30
+        ]
+      },
+      "expectError": "Nothing was created"
+    },
+    {
+      "call": "create_footage_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "itemId": "${src.id}",
+        "position": [
+          1,
+          2,
+          30
+        ]
+      },
+      "expectError": "Nothing was created"
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${flat.id});setValueChecked(l.property(\"ADBE Transform Group\").property(\"ADBE Position\"),[1,2,3]);"
+      },
+      "expectError": "z 3"
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${flat.id});addKeys(l.property(\"ADBE Transform Group\").property(\"ADBE Position\"),[[1,[1,2,3]]]);"
+      },
+      "expectError": "addKeys"
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});shape(c,{position:[1,2,3]});"
+      },
+      "expectError": "Nothing was created"
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${flat.id});var t=l.property(\"ADBE Transform Group\");return {pos:t.property(\"ADBE Position\").value,anc:t.property(\"ADBE Anchor Point\").value,keys:t.property(\"ADBE Position\").numKeys,layers:c.numLayers};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            10,
+            20,
+            0
+          ]
+        },
+        {
+          "path": "anc",
+          "equals": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "path": "keys",
+          "equals": 0
+        },
+        {
+          "path": "layers",
+          "equals": 2
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});return {opacity:getLayerById(c,${flat.id}).property(\"ADBE Transform Group\").property(\"ADBE Opacity\").value};"
+      },
+      "expect": [
+        {
+          "path": "opacity",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "call": "create_null_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "Keys"
+      },
+      "save": "keys",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "set_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${keys.id}",
+        "threeDLayer": true
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${keys.id}",
+        "time": 0,
+        "keyframe": true,
+        "properties": {
+          "position": [
+            1,
+            1,
+            100
+          ]
+        }
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${keys.id}",
+        "time": 1,
+        "keyframe": true,
+        "properties": {
+          "position": [
+            2,
+            2,
+            200
+          ]
+        }
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "copy_animation",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${keys.id}",
+        "propertyPaths": [
+          [
+            "Transform",
+            "Position"
+          ]
+        ],
+        "targets": [
+          {
+            "layerId": "${flat.id}"
+          }
+        ]
+      },
+      "expectError": "z of 100.*'Flat' is 2D"
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${flat.id});var t=l.property(\"ADBE Transform Group\");return {pos:t.property(\"ADBE Position\").value,anc:t.property(\"ADBE Anchor Point\").value,keys:t.property(\"ADBE Position\").numKeys,layers:c.numLayers};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            10,
+            20,
+            0
+          ]
+        },
+        {
+          "path": "anc",
+          "equals": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "path": "keys",
+          "equals": 0
+        },
+        {
+          "path": "layers",
+          "equals": 3
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${flat.id}",
+        "properties": {
+          "position": [
+            5,
+            6,
+            0
+          ],
+          "anchorPoint": [
+            1,
+            2,
+            0
+          ]
+        }
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${flat.id});var t=l.property(\"ADBE Transform Group\");return {pos:t.property(\"ADBE Position\").value,anc:t.property(\"ADBE Anchor Point\").value,keys:t.property(\"ADBE Position\").numKeys,layers:c.numLayers};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            5,
+            6,
+            0
+          ]
+        },
+        {
+          "path": "anc",
+          "equals": [
+            1,
+            2,
+            0
+          ]
+        },
+        {
+          "path": "keys",
+          "equals": 0
+        },
+        {
+          "path": "layers",
+          "equals": 3
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${flat.id}",
+        "properties": {
+          "position": [
+            7,
+            8
+          ],
+          "anchorPoint": [
+            0,
+            0
+          ]
+        }
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${flat.id});var t=l.property(\"ADBE Transform Group\");return {pos:t.property(\"ADBE Position\").value,anc:t.property(\"ADBE Anchor Point\").value,keys:t.property(\"ADBE Position\").numKeys,layers:c.numLayers};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            7,
+            8,
+            0
+          ]
+        },
+        {
+          "path": "anc",
+          "equals": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "path": "keys",
+          "equals": 0
+        },
+        {
+          "path": "layers",
+          "equals": 3
+        }
+      ]
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${flat.id}",
+        "propertyPath": [
+          "Transform",
+          "Position"
+        ],
+        "time": 1,
+        "value": [
+          3,
+          4,
+          0
+        ]
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${flat.id});var t=l.property(\"ADBE Transform Group\");return {pos:t.property(\"ADBE Position\").value,anc:t.property(\"ADBE Anchor Point\").value,keys:t.property(\"ADBE Position\").numKeys,layers:c.numLayers};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            3,
+            4,
+            0
+          ]
+        },
+        {
+          "path": "anc",
+          "equals": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "path": "keys",
+          "equals": 1
+        },
+        {
+          "path": "layers",
+          "equals": 3
+        }
+      ]
+    },
+    {
+      "call": "create_shape_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "position": [
+          1,
+          2,
+          0
+        ]
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "create_text_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "text": "x",
+        "position": [
+          1,
+          2,
+          0
+        ]
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "create_precomp_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "sourceCompId": "${src.id}",
+        "position": [
+          1,
+          2,
+          0
+        ]
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${deep.id}",
+        "properties": {
+          "position": [
+            5,
+            6,
+            70
+          ],
+          "anchorPoint": [
+            1,
+            2,
+            3
+          ]
+        }
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${deep.id});var t=l.property(\"ADBE Transform Group\");return {pos:t.property(\"ADBE Position\").value,anc:t.property(\"ADBE Anchor Point\").value,keys:t.property(\"ADBE Position\").numKeys,layers:c.numLayers};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            5,
+            6,
+            70
+          ]
+        },
+        {
+          "path": "anc",
+          "equals": [
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "path": "keys",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${deep.id}",
+        "propertyPath": [
+          "Transform",
+          "Position"
+        ],
+        "time": 1,
+        "value": [
+          1,
+          2,
+          3
+        ]
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${deep.id});var t=l.property(\"ADBE Transform Group\");return {pos:t.property(\"ADBE Position\").value,anc:t.property(\"ADBE Anchor Point\").value,keys:t.property(\"ADBE Position\").numKeys,layers:c.numLayers};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "path": "anc",
+          "equals": [
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "path": "keys",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "call": "create_null_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "Late"
+      },
+      "save": "late",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "run_batch",
+      "args": {
+        "ops": [
+          {
+            "op": "set_layer",
+            "args": {
+              "compId": "${comp.id}",
+              "layerId": "${late.id}",
+              "threeDLayer": true
+            }
+          },
+          {
+            "op": "set_transform",
+            "args": {
+              "compId": "${comp.id}",
+              "layerId": "${late.id}",
+              "properties": {
+                "position": [
+                  3,
+                  3,
+                  33
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${late.id});var t=l.property(\"ADBE Transform Group\");return {pos:t.property(\"ADBE Position\").value,anc:t.property(\"ADBE Anchor Point\").value,keys:t.property(\"ADBE Position\").numKeys,layers:c.numLayers};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            3,
+            3,
+            33
+          ]
+        },
+        {
+          "path": "anc",
+          "equals": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "path": "keys",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "call": "create_camera_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "position": [
+          100,
+          200,
+          -300
+        ]
+      },
+      "save": "cam",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${cam.id});return {pos:l.property(\"ADBE Transform Group\").property(\"ADBE Position\").value,poi:l.property(\"ADBE Transform Group\").property(\"ADBE Anchor Point\").value};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            100,
+            200,
+            -300
+          ]
+        },
+        {
+          "path": "poi",
+          "equals": [
+            100,
+            200,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${cam.id}",
+        "properties": {
+          "position": [
+            1,
+            2,
+            -400
+          ]
+        }
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${cam.id});return {pos:l.property(\"ADBE Transform Group\").property(\"ADBE Position\").value};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            1,
+            2,
+            -400
+          ]
+        }
+      ]
+    },
+    {
+      "call": "create_light_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "position": [
+          100,
+          200,
+          -300
+        ]
+      },
+      "save": "lit",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${lit.id});return {pos:l.property(\"ADBE Transform Group\").property(\"ADBE Position\").value,poi:l.property(\"ADBE Transform Group\").property(\"ADBE Anchor Point\").value};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            100,
+            200,
+            -300
+          ]
+        },
+        {
+          "path": "poi",
+          "equals": [
+            100,
+            200,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${lit.id}",
+        "properties": {
+          "position": [
+            1,
+            2,
+            -400
+          ]
+        }
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${lit.id});return {pos:l.property(\"ADBE Transform Group\").property(\"ADBE Position\").value};"
+      },
+      "expect": [
+        {
+          "path": "pos",
+          "equals": [
+            1,
+            2,
+            -400
+          ]
+        }
+      ]
+    },
+    {
+      "call": "create_camera_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "position": [
+          100,
+          200,
+          0
+        ]
+      },
+      "save": "cam0",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});var l=getLayerById(c,${cam0.id});return {z:l.property(\"ADBE Transform Group\").property(\"ADBE Position\").value[2],poi:l.property(\"ADBE Transform Group\").property(\"ADBE Anchor Point\").value};"
+      },
+      "expect": [
+        {
+          "path": "z",
+          "lte": -1
+        },
+        {
+          "path": "poi",
+          "equals": [
+            100,
+            200,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "return {n:app.project.itemByID(${comp.id}).numLayers};"
+      },
+      "save": "before",
+      "expect": [
+        {
+          "path": "n",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "create_light_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "lightType": "ambient",
+        "position": [
+          1,
+          2,
+          3
+        ]
+      },
+      "expectError": "Nothing was created"
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "return {same:app.project.itemByID(${comp.id}).numLayers === ${before.n}};"
+      },
+      "expect": [
+        {
+          "path": "same",
+          "equals": true
+        }
+      ]
+    },
+    {
+      "call": "create_null_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "Split"
+      },
+      "save": "split",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${split.id}",
+        "separateDimensions": true
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${split.id}",
+        "propertyPath": [
+          "Transform",
+          "Z Position"
+        ],
+        "time": 1,
+        "value": 44
+      },
+      "expectError": "z 44.*is 2D"
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var c=app.project.itemByID(${comp.id});\nfunction anim(t){var a=t.property(\"ADBE Text Properties\").property(\"ADBE Text Animators\").addProperty(\"ADBE Text Animator\");a.property(\"ADBE Text Animator Properties\").addProperty(\"ADBE Text Position 3D\");}\nvar f=getLayerById(c,${flat.id});f.property(\"ADBE Effect Parade\").addProperty(\"ADBE Point3D Control\");\nvar a=c.layers.addText(\"flat\");anim(a);\nvar b=c.layers.addText(\"half\");b.threeDLayer=true;anim(b);\nvar d=c.layers.addText(\"chars\");d.threeDPerChar=true;anim(d);\nreturn {a:a.id,b:b.id,d:d.id,three:d.threeDLayer};"
+      },
+      "save": "txt",
+      "expect": [
+        {
+          "path": "three",
+          "equals": true
+        }
+      ]
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${flat.id}",
+        "propertyPath": [
+          "Effects",
+          "3D Point Control",
+          "3D Point"
+        ],
+        "time": 1,
+        "value": [
+          1,
+          2,
+          3
+        ]
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var l=getLayerById(app.project.itemByID(${comp.id}),${flat.id});return {v:l.property(\"ADBE Effect Parade\").property(1).property(1).keyValue(1)};"
+      },
+      "expect": [
+        {
+          "path": "v",
+          "equals": [
+            1,
+            2,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${txt.a}",
+        "propertyPath": [
+          "Text",
+          "Animators",
+          "Animator 1",
+          "Properties",
+          "Position"
+        ],
+        "time": 1,
+        "value": [
+          1,
+          2,
+          3
+        ]
+      },
+      "expectError": "per-character 3D"
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${txt.b}",
+        "propertyPath": [
+          "Text",
+          "Animators",
+          "Animator 1",
+          "Properties",
+          "Position"
+        ],
+        "time": 1,
+        "value": [
+          1,
+          2,
+          3
+        ]
+      },
+      "expectError": "per-character 3D"
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${txt.d}",
+        "propertyPath": [
+          "Text",
+          "Animators",
+          "Animator 1",
+          "Properties",
+          "Position"
+        ],
+        "time": 1,
+        "value": [
+          1,
+          2,
+          3
+        ]
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "run_jsx",
+      "args": {
+        "code": "var l=getLayerById(app.project.itemByID(${comp.id}),${txt.d});return {v:l.property(\"ADBE Text Properties\").property(\"ADBE Text Animators\").property(1).property(\"ADBE Text Animator Properties\").property(\"ADBE Text Position 3D\").keyValue(1)};"
+      },
+      "expect": [
+        {
+          "path": "v",
+          "equals": [
+            1,
+            2,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${txt.d}",
+        "properties": {
+          "position": [
+            5,
+            6,
+            7
+          ]
+        }
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    }
+  ]
+}

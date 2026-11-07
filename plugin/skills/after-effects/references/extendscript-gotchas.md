@@ -85,12 +85,15 @@ on this page, and a version you write yourself re-derives the bug.
 - **`walkProperty(layer, ["Transform", "Position"])`** — a property path,
   resolved the way the tools resolve it.
 - **`addKeys(prop, [[t, v], …])`** — returns the key index of each, in order, so
-  the next call can ease them without searching.
+  the next call can ease them without searching. Refuses a z a 2D layer would
+  drop, before the first key; a bare `setValueAtTime` drops it silently.
 - **`ease(prop, keyIndex, easeIn, easeOut)`** — sizes the KeyframeEase array
   itself; see "Keyframes and easing" below for why that is not optional.
 - **`shape(comp, {name, position})`** — a shape layer whose origin is `[0,0]`.
+  The new layer is 2D, so a non-zero z is refused before it exists.
 - **`setValueChecked(prop, value)`** — `setValue` that does not fail a write
-  that landed; see "Reading and writing values" below.
+  that landed, and refuses a z a 2D layer would drop, where a bare `setValue`
+  keeps `[x, y, 0]` and says nothing; see "Reading and writing values" below.
 - **`withoutUndoGroup(fn)`** — closes the undo group around one statement, which
   is what `copyToComp` needs.
 

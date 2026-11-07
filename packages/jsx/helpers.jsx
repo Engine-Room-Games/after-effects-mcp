@@ -84,7 +84,13 @@ function ease(prop, keyIndex, easeIn, easeOut) {
 function addKeys(prop, pairs) {
   if (!pairs || !pairs.length) return [];
   var out = [];
-  for (var i = 0; i < pairs.length; i++) {
+  var i;
+  // Checked before the first key, so a z a 2D layer would lose (#291) leaves no
+  // keys behind it.
+  for (i = 0; i < pairs.length; i++) {
+    __refuseLostZ(prop, pairs[i] instanceof Array ? pairs[i][1] : pairs[i].value, "addKeys");
+  }
+  for (i = 0; i < pairs.length; i++) {
     var p = pairs[i];
     var t;
     var v;
@@ -111,6 +117,7 @@ function shape(comp, opts) {
   var c = comp;
   if (typeof c === "number") c = getCompById(c);
   var o = opts || {};
+  __refuseZOnNewLayer(o.position, "shape");
   var l = c.layers.addShape();
   if (o.name) l.name = o.name;
   var pos = o.position ? o.position : [0, 0];

@@ -39,12 +39,11 @@ class Prop {
   setValue(x) { this.v = x; }
 }
 
+const REFUSED_X = -999;
+
 class PositionProp extends Prop {
-  constructor(v, isThreeD) { super(v); this.isThreeD = isThreeD; }
   setValue(x) {
-    if (x.length === 3 && !this.isThreeD()) {
-      throw new Error("Unable to execute script at line 1. Value array does not have 2 elements.");
-    }
+    if (x[0] === REFUSED_X) throw new Error("After Effects error: refused.");
     this.v = x;
   }
 }
@@ -62,9 +61,8 @@ class MockShapeLayer {
     // AE's own defaults for a scripted shape layer: origin at the comp centre,
     // anchor at zero. That pairing is the whole problem.
     this.props = {
-      // AE refuses a three-component position on a 2D layer, which is the one
-      // bad value the argument check cannot catch on its own.
-      Position: new PositionProp([comp.width / 2, comp.height / 2], () => this.threeDLayer),
+      // Can refuse a write, so the rollback has something to roll back.
+      Position: new PositionProp([comp.width / 2, comp.height / 2]),
       "Anchor Point": new Prop([0, 0]),
     };
   }
@@ -76,7 +74,7 @@ class MockShapeLayer {
   }
 }
 
-function makeContext({ width = 3840, height = 2160, threeD = false } = {}) {
+function makeContext({ width = 3840, height = 2160 } = {}) {
   const removed = [];
   const comp = {
     id: 12, name: "Main", width, height, duration: 10,
@@ -84,7 +82,6 @@ function makeContext({ width = 3840, height = 2160, threeD = false } = {}) {
     layers: {
       addShape() {
         const l = new MockShapeLayer(comp, 99);
-        l.threeDLayer = threeD;
         l.remove = () => { removed.push(l); comp.numLayers--; };
         comp.numLayers++;
         return l;
@@ -165,22 +162,16 @@ check("an explicit 2D position is honoured", () => {
   assert.deepEqual(plain(r.position), [300, 250]);
 });
 
-check("an explicit 3D position keeps its third component on a 3D layer", () => {
-  const ctx = makeContext({ threeD: true });
-  const r = ctx.OPS.create_shape_layer({ compId: 12, position: [300, 250, -40] });
-  assert.deepEqual(plain(r.position), [300, 250, -40]);
-});
-
-check("a 3D position on a 2D layer is refused, and takes the empty layer with it", () => {
-  // The one bad value the argument check cannot see: it is a well-formed
-  // vector and AE is the thing that says no. Leaving an empty shape layer
-  // behind a thrown error is the half-built failure this repo refuses.
+check("a position write AE refuses takes the empty layer with it", () => {
+  // Leaving an empty shape layer behind a thrown error is the half-built
+  // failure this repo refuses. tests/unit/lost-z.mjs holds the z on a new layer,
+  // which AE does not refuse and which is stopped before the layer exists.
   const ctx = makeContext();
   assert.throws(
-    () => ctx.OPS.create_shape_layer({ compId: 12, position: [300, 250, -40] }),
+    () => ctx.OPS.create_shape_layer({ compId: 12, position: [REFUSED_X, 250] }),
     (e) => {
-      assert.match(e.message, /\[300, 250, -40\]/, "name the position it could not set");
-      assert.match(e.message, /3D layer/, "say what would make it work");
+      assert.match(e.message, /\[-999, 250\]/, "name the position it could not set");
+      assert.match(e.message, /refused/, "and what After Effects said");
       assert.match(e.message, /removed/);
       return true;
     },

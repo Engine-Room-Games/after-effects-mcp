@@ -120,6 +120,7 @@ function __readBackForCompare(prop) {
 // throw — the write landed and AE said otherwise — and false for a clean write.
 // Throws the original error for anything else.
 function __setValue(prop, value) {
+  __refuseLostZ(prop, value, "setValue");
   try {
     prop.setValue(value);
     return false;
@@ -129,6 +130,78 @@ function __setValue(prop, value) {
     if (back.ok && __valueMatches(value, back.value)) return true;
     throw e;
   }
+}
+
+// A z with nowhere to go (issue #291). A 2D layer's Position and Anchor Point
+// read as three numbers, but write [x, y, z] to one and After Effects keeps
+// [x, y, 0] and throws nothing, on setValue and setValueAtTime alike, and the z
+// does not come back if the layer turns 3D later. Measured, AE 26.5. So the
+// refusal is made before the write, by the #152 rule: what only exists in 3D is
+// refused on a 2D layer, and nothing is left half done.
+//
+// It goes by match name and the owning layer, never by the value type. The
+// lookalikes hold a z on a 2D layer: a 3D Point effect control reads
+// ThreeD_SPATIAL too, and its z lands. Also measured: cameras and lights read
+// threeDLayer as undefined and hold their z; a text layer with per-character
+// 3D reads threeDLayer true and holds it. A text animator's Position and Anchor
+// Point follow per-character 3D alone: on a layer that is 3D without it, the z
+// is still lost. Anything that cannot be read is not refused. Z Position, on a
+// layer with separated dimensions, is the same z written as a bare number.
+var __Z_NEEDS_3D_LAYER = { "ADBE Position": true, "ADBE Anchor Point": true, "ADBE Position_2": true };
+var __Z_NEEDS_3D_CHARS = { "ADBE Text Position 3D": true, "ADBE Text Anchor Point 3D": true };
+
+/** Does this value carry a third number other than 0? */
+function __hasZ(value) {
+  return !!value && typeof value[2] === "number" && !__numClose(0, value[2]);
+}
+
+/** The z in a value bound for `prop`, or null if it has none but 0. */
+function __zFor(prop, value) {
+  var separated = false;
+  try { separated = prop.matchName === "ADBE Position_2"; } catch (e) { separated = false; }
+  if (separated) return typeof value === "number" && !__numClose(0, value) ? value : null;
+  return __hasZ(value) ? value[2] : null;
+}
+
+function __zIsDropped(prop) {
+  var mn = null;
+  var layer = null;
+  try {
+    mn = prop.matchName;
+    if (__Z_NEEDS_3D_LAYER[mn] !== true && __Z_NEEDS_3D_CHARS[mn] !== true) return false;
+    layer = prop.propertyGroup(prop.propertyDepth);
+  } catch (e) {
+    return false;
+  }
+  if (!layer) return false;
+  if (__Z_NEEDS_3D_CHARS[mn] === true) return layer.threeDPerChar === false;
+  if (typeof CameraLayer !== "undefined" && layer instanceof CameraLayer) return false;
+  if (typeof LightLayer !== "undefined" && layer instanceof LightLayer) return false;
+  return layer.threeDLayer === false;
+}
+
+/** Why `prop` cannot hold a z, and what to do about it. Only meaningful when __zIsDropped(prop). */
+function __lostZReason(prop) {
+  var layer = prop.propertyGroup(prop.propertyDepth);
+  if (__Z_NEEDS_3D_CHARS[prop.matchName] === true) {
+    return "text layer '" + layer.name + "' has no per-character 3D, so its animators hold only x and y. " +
+      "Turn it on first (threeDPerChar = true in run_jsx), or pass z 0";
+  }
+  return "layer '" + layer.name + "' is 2D, so it holds only x and y. Make it 3D first with set_layer threeDLayer:true, or drop the z";
+}
+
+/** Throws, before anything is written, when `value` carries a z that `prop` would drop. */
+function __refuseLostZ(prop, value, op) {
+  var z = __zFor(prop, value);
+  if (z === null || !__zIsDropped(prop)) return;
+  throw new Error(op + ": z " + z + " for " + prop.name + " would be lost: " + __lostZReason(prop) + ". Nothing was changed.");
+}
+
+/** The same refusal for a layer about to be created, and always 2D: call it before adding the layer. */
+function __refuseZOnNewLayer(position, op) {
+  if (!__hasZ(position)) return;
+  throw new Error(op + ": position has a z of " + position[2] + ", and a new layer is 2D, so it would be lost. Nothing was created. " +
+    "Pass [x, y]; for depth, make the layer 3D with set_layer threeDLayer:true, then set_transform its position.");
 }
 
 // keyframe:true with no time used to fall through to a static write and report
@@ -161,6 +234,7 @@ function __requireKeyTime(keyframe, time, op) {
 function __setOrKeyAtTime(prop, value, time, keyframe, op) {
   __requireKeyTime(keyframe, time, op || "__setOrKeyAtTime");
   value = __hexValue(prop, value, op || "__setOrKeyAtTime");
+  __refuseLostZ(prop, value, op || "__setOrKeyAtTime");
   var hasTime = time !== undefined && time !== null;
   if (hasTime && (keyframe || prop.numKeys > 0)) prop.setValueAtTime(time, value);
   else __setValue(prop, value);
