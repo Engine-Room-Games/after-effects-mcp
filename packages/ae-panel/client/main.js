@@ -819,6 +819,8 @@
   //   other  — something answered over HTTP, but not as the panel
   //   silent — accepted the connection and said nothing at all. The one case
   //            that can be a panel whose After Effects is busy (issue #288)
+  //   gone   — the connection was refused: the holder exited after the bind
+  //            failed, so the port has just come free
   //   odd    — anything else: it hung up, spoke something other than HTTP, or
   //            started an answer and stalled. A panel does none of these
   function identifyHolder(port) {
@@ -843,7 +845,9 @@
         finish({ kind: answering ? "odd" : "silent", detail: said });
         req.destroy();
       });
-      req.on("error", function (e) { finish({ kind: "odd", detail: e.message }); });
+      req.on("error", function (e) {
+        finish({ kind: e.code === "ECONNREFUSED" ? "gone" : "odd", detail: e.message });
+      });
     });
   }
 
@@ -851,6 +855,9 @@
   // start port walks the same number of steps.
   var WALK_LIMIT = 22;
   var MAX_PORT = 65535;
+  // A port that refuses connections and will not bind is not free after all
+  // (a socket bound and not listening), so this is a few tries, not a wait.
+  var GONE_RETRIES = 3;
 
   /**
    * Bind the configured port, and decide what to do when it is taken.
@@ -886,6 +893,7 @@
     // and each kind of wait has its own first-time explanation to give.
     var panelWaits = 0;
     var silentWaits = 0;
+    var goneRetries = 0;
 
     function bindWith(p) {
       return startHttp(p).then(function (server) {
@@ -981,6 +989,12 @@
             return waitForHolder(p, holder);
           }
           if (holder.kind === "silent" && !cfg.allowPortWalk) return waitForSilentHolder(p, holder);
+          // The holder left between the failed bind and the question. Walking
+          // now would be the #92 drift, on a port nothing holds any more.
+          if (holder.kind === "gone" && goneRetries < GONE_RETRIES) {
+            goneRetries += 1;
+            return new Promise(function (r) { setTimeout(r, retryMs); }).then(function () { return attempt(p, tries); });
+          }
           var why = holder.kind === "other"
             ? "something that is not an AE MCP panel (" + holder.detail + ")"
             : "something that did not identify itself (" + holder.detail + ")";
@@ -1033,7 +1047,9 @@
   // to answer at all stays unbound. "EvalScript error." is not an answer: a busy
   // engine can say it too, and booting on it would put the bridge in that
   // engine. So it is asked again, and only a host that gives no answer through
-  // every try boots as normal.
+  // every try boots as normal. Failing open there is deliberate: a host that
+  // still refuses scripts also refuses the bundle load, which fails the boot
+  // before anything binds, so the load is the backstop.
   //
   // "headless" is asked twice, a second apart, and a host that says it and then
   // cannot be asked again counts as headless. No transient true has been

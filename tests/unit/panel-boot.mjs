@@ -234,7 +234,7 @@ async function stranger(port = 0) {
  * 7777: with the #92 fix a test panel started there would recognise it as one
  * of us and wait for it for ever.
  */
-function bootPanel(extDir, { dirnameAt = extDir, config = { port: 0 }, cepEvents = false, headlessAnswer } = {}) {
+function bootPanel(extDir, { dirnameAt = extDir, config = { port: 0 }, cepEvents = false, headlessAnswer, probeAt } = {}) {
   const source = fs.readFileSync(path.join(extDir, "client", "main.js"), "utf8");
   const csSource = fs.readFileSync(path.join(extDir, "client", "csinterface.js"), "utf8");
   const host = makeHost(extDir);
@@ -287,7 +287,8 @@ function bootPanel(extDir, { dirnameAt = extDir, config = { port: 0 }, cepEvents
             return s;
           },
           // The holder probe: a table number, reached on its real socket.
-          get: (opts, cb) => realHttp.get({ ...opts, port: realPortOf(opts.port) ?? opts.port }, cb),
+          // `probeAt` replaces where it lands, to play a holder leaving mid-probe.
+          get: (opts, cb) => realHttp.get({ ...opts, port: probeAt?.() ?? realPortOf(opts.port) ?? opts.port }, cb),
         };
       }
       if (["path", "fs", "crypto", "zlib", "net", "url", "stream", "events", "util", "buffer"].includes(id)) {
@@ -816,6 +817,49 @@ for (const [what, onConnect] of [
     }
   });
 }
+
+// A real port nothing listens on, for a probe to be refused by.
+async function refusingPort() {
+  const s = net.createServer();
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  const { port } = s.address();
+  await new Promise((r) => s.close(r));
+  return port;
+}
+
+await check("a holder that exits mid-probe costs a retry of the bind, not a walk (issue #92)", async () => {
+  const holder = await stranger();
+  const q = holder.address().port;
+  const refused = await refusingPort();
+  const p = bootPanel(dir, {
+    config: { port: q, bindRetryMs: 150 },
+    probeAt: () => { holder.close(); return refused; },
+  });
+  try {
+    const status = await settled(p.dom);
+    assert.equal(status, "ready", `status: ${status}\n${logText(p.dom)}`);
+    assert.equal(Number(p.dom.nodes.port.textContent), q, "should have taken the freed port, not walked");
+    assert.doesNotMatch(logText(p.dom), /moving to port/);
+  } finally {
+    p.close();
+    holder.close();
+  }
+});
+
+await check("a port that refuses and still will not bind walks after a few tries", async () => {
+  const holder = await stranger();
+  const q = holder.address().port;
+  const refused = await refusingPort();
+  const p = bootPanel(dir, { config: { port: q, bindRetryMs: 50 }, probeAt: () => refused });
+  try {
+    assert.equal(await settled(p.dom), "ready");
+    assert.notEqual(Number(p.dom.nodes.port.textContent), q);
+    assert.match(logText(p.dom), /moving to port/);
+  } finally {
+    p.close();
+    holder.close();
+  }
+});
 
 await check("a silent holder that then answers as a panel still gets the panel's first-time log", async () => {
   let answering = false;

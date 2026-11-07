@@ -409,6 +409,19 @@ await check("a silent port no panel has claimed is not told to wait (issue #288)
   assert.doesNotMatch(text, /token/i);
 });
 
+await check("with After Effects closed the foreign-holder steps say so and need no After Effects", () => {
+  const holder = { ...bad("bridgeReachable"), evidence: "no-panel-token" };
+  const closed = healthy.map((c) => (c.name === "afterEffectsRunning" ? bad(c.name) : c));
+  const text = buildNextSteps([...closed, holder], false, true, 7777).join("\n");
+  assert.match(text, /After Effects is closed/);
+  assert.match(text, /then open After Effects/);
+  assert.doesNotMatch(text, /Window > Extensions/);
+  assert.doesNotMatch(text, /reopen After Effects/);
+  // "Could not tell" is not "closed".
+  const unknown = healthy.map((c) => (c.name === "afterEffectsRunning" ? { ...bad(c.name), evidence: "unknown" } : c));
+  assert.match(buildNextSteps([...unknown, holder], false, true, 7777).join("\n"), /Window > Extensions/);
+});
+
 await check("a broken install still outranks a foreign holder", () => {
   const holder = { ...bad("bridgeReachable"), evidence: "no-panel-token" };
   const broken = healthy.map((c) => (c.name === "panelDependencies" ? bad(c.name) : c));
@@ -418,6 +431,7 @@ await check("a broken install still outranks a foreign holder", () => {
 await check("check_setup tells a silent port with a panel token from one without", async () => {
   // A temp home: token files are read from it, and the real one may hold a live panel's.
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "port-drift-home-"));
+  const foreignFirst = await stubPanel({ healthShape: "hang", opBehaviour: "hang" });
   const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
   process.env.HOME = process.env.USERPROFILE = home;
   const run = (extra = {}) => checkSetup({
@@ -442,13 +456,26 @@ await check("check_setup tells a silent port with a panel token from one without
     assert.equal(bridge(stranded).evidence, "no-panel-token");
     assert.equal(stranded.busyWith, undefined);
 
+    // Two silent ports, neither claimed: still foreign, naming the first.
+    const unclaimed = await run({ candidates: [foreignFirst.port, silent.port], opPort: foreignFirst.port });
+    assert.equal(bridge(unclaimed).evidence, "no-panel-token");
+    assert.match(bridge(unclaimed).detail, new RegExp(`^port ${foreignFirst.port} `));
+
     fs.mkdirSync(path.join(home, ".engineroom-ae-mcp"));
     fs.writeFileSync(path.join(home, ".engineroom-ae-mcp", `token-${silent.port}`), "a-token");
     const ours = await run();
     assert.equal(bridge(ours).evidence, undefined);
     assert.match(bridge(ours).detail, /probably busy/);
     assert.match(bridge(ours).fix, /clears on its own/);
+
+    // A foreign program on the first port must not speak for a busy panel on the next.
+    const both = await run({ candidates: [foreignFirst.port, silent.port], opPort: foreignFirst.port });
+    assert.equal(bridge(both).evidence, undefined, "a busy panel must not be told waiting will not help");
+    assert.match(bridge(both).detail, new RegExp(`^port ${silent.port} .*probably busy`));
+    assert.match(bridge(both).fix, /clears on its own/);
+    assert.doesNotMatch(both.checks.find((c) => c.name === "portAgreement").fix, /another program/);
   } finally {
+    foreignFirst.close();
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;

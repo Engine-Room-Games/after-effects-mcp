@@ -55,13 +55,20 @@ const BRIDGE_BUSY_FIX =
  * as it binds and removes it on unload, so the holder is most likely not ours,
  * and waiting will not clear it. One way this reads wrong: a server that cannot
  * see the panel's files (sandboxed, another user), which is why it says "most
- * likely" and the second step is a look at the bridge window.
+ * likely" and, with After Effects open, the second step is a look at the bridge
+ * window. With it closed there is no window to look at, and the port is worth
+ * freeing first: the panel will wait on it from the moment After Effects opens.
  */
-function foreignHolderSteps(port: number): string[] {
+function foreignHolderSteps(port: number, aeClosed = false): string[] {
   return [
     `Port ${port} is open but does not answer, and no AE MCP panel has claimed it, so another program most likely holds it. Waiting will not clear that, and neither will restarting After Effects or running setup_panel.`,
-    `Ask the user to open Window > Extensions > AE MCP Bridge in After Effects. If it reads "waiting — port ${port} is held by something that does not answer", the panel cannot start until the port is free.`,
-    `Either quit the program holding port ${port}, or add "port" with a free number to ~/.engineroom-ae-mcp/config.json (%USERPROFILE%\\.engineroom-ae-mcp\\config.json on Windows), or "allowPortWalk": true to let the panel move past it. The panel reads that file at launch, so quit and reopen After Effects afterwards, then run check_setup.`,
+    aeClosed
+      ? `After Effects is closed, so nothing of its own is holding the port. Sort this out before opening it: the panel cannot start until port ${port} is free or it is told to use another.`
+      : `Ask the user to open Window > Extensions > AE MCP Bridge in After Effects. If it reads "waiting — port ${port} is held by something that does not answer", the panel cannot start until the port is free.`,
+    `Either quit the program holding port ${port}, or add "port" with a free number to ~/.engineroom-ae-mcp/config.json (%USERPROFILE%\\.engineroom-ae-mcp\\config.json on Windows), or "allowPortWalk": true to let the panel move past it. ` +
+      (aeClosed
+        ? "The panel reads that file at launch, so then open After Effects and run check_setup."
+        : "The panel reads that file at launch, so quit and reopen After Effects afterwards, then run check_setup."),
   ];
 }
 
@@ -128,7 +135,11 @@ export interface CheckSetupOptions {
 export interface BridgeProbe {
   /** The first candidate that answered as the panel, or null. */
   answering: ProbeResult | null;
-  /** When nothing answered as the panel: the first port that accepted and went quiet, or null. */
+  /**
+   * When nothing answered as the panel: the port that accepted and went quiet,
+   * or null. The first with a panel token if any has one, otherwise the first:
+   * a foreign program on 7777 must not hide a busy panel on a port it moved to.
+   */
   busy: ProbeResult | null;
   /** What was found at the op port specifically, when one was given. */
   atOpPort: ProbeResult | null;
@@ -163,7 +174,7 @@ export async function probeBridge(candidates: number[] = diagnosticPortCandidate
     const r = await probePanel(port, BRIDGE_PROBE_MS);
     probed.push(r);
     if (r.status === "panel" && !answering) answering = r;
-    if (r.status === "busy" && !busy) busy = r;
+    if (r.status === "busy" && (!busy || (panelToken(busy.port) === null && panelToken(r.port) !== null))) busy = r;
     // The first port to answer as the panel ends the search. The op port went
     // first, so if it is the one answering nothing else is asked at all.
     if (answering) break;
@@ -487,8 +498,9 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
       bridgeDetail += ` (the port file says ${fromFile}, which is stale — the socket is the authority)`;
     }
   } else if (bridge.busy) {
-    // The token and not this server's own open calls: a port that accepts and
-    // never answers strands a call whoever holds it, so a call proves nothing.
+    // probeBridge prefers a silent port with a token, so this one having none
+    // means none has. The token and not this server's own open calls: a port
+    // that accepts and never answers strands a call whoever holds it.
     foreignHolder = panelToken(bridge.busy.port) === null;
     busyWith = foreignHolder ? null : opts.busyWith?.() ?? null;
     const accepted = `port ${bridge.busy.port} accepted the connection but did not answer within ${BRIDGE_PROBE_MS / 1000}s`;
@@ -508,7 +520,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     fix: bridge.answering
       ? undefined
       : foreignHolder
-        ? foreignHolderSteps(bridge.busy!.port).join(" ")
+        ? foreignHolderSteps(bridge.busy!.port, ae.state === "not-running").join(" ")
         : bridgeTimedOut
           ? BRIDGE_BUSY_FIX
           : "If the other checks pass, restart After Effects so the panel reloads.",
@@ -771,7 +783,8 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
     by("panelSignatureIntact")?.ok !== false &&
     by("cepDebugMode")?.ok !== false;
   if (bridgeTimedOut && installSound && silentPort !== undefined && by("bridgeReachable")?.evidence === FOREIGN_HOLDER) {
-    return foreignHolderSteps(silentPort);
+    const ae = by("afterEffectsRunning");
+    return foreignHolderSteps(silentPort, ae?.ok === false && ae.evidence !== "unknown");
   }
   if (bridgeTimedOut && installSound) {
     const out = [
