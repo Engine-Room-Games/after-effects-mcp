@@ -94,10 +94,7 @@ only quitting and reopening After Effects will.
 - **`get_selection` never takes keyboard focus.** When the active item is not
   a comp, it answers `comp: null` with a `reason` saying a composition viewer
   is open but its comp cannot be read without focusing it; ask the user which
-  comp they mean. It used to focus the viewer to read it, and answer
-  `source: "viewer"` — that source no longer occurs.
-  supersedes: get_selection asks the viewer when the active item is not a comp
-  supersedes: source: "viewer"
+  comp they mean.
 - **`export_mogrt` and `render_queue` say when they saved the user's project.**
   `projectSaved: true` (with `projectSavedNote`) means this call saved it, so
   File > Revert now goes back to that state — tell the user. `export_mogrt`
@@ -158,6 +155,252 @@ only quitting and reopening After Effects will.
   `state` is `sent` or `timedOut` (After Effects is very probably running it)
   or `queued` (not sent yet: another session's call is what is running). Keep
   waiting while it is there; do not re-send that call (issue #266).
+
+- **Render from the tools: `add_to_render_queue`, `render_queue`, then
+  `await_job`.** Four new tools, with `list_render_queue` and
+  `remove_render_item`. `render_queue` answers with a `jobId` at once and a
+  background `aerender` renders a private copy of the saved project, so After
+  Effects stays usable and later edits are not in the render; `cancel_job`
+  stops it. Choose the format by template name, because a script cannot set
+  codec, bit depth or alpha. Unsaved changes are refused unless
+  `saveProject:true`, existing files unless `overwrite:true`, and outputs are
+  checked on disk before the job counts as done. Rendered items are unticked
+  as one undo step, `AE MCP: mark rendered` — tell the user. The rest is in
+  `ae_guide` topic `rendering` (issue #137).
+  supersedes: the render queue has no tool
+  supersedes: use run_jsx for the render queue
+  supersedes: render with renderQueue.render() from run_jsx
+- **`render_queue` refuses only missing footage the render draws, and one
+  output path belongs to one item.** Missing footage on switched-off or
+  out-of-span layers comes back in `missingFootageNotRendered` (or
+  `footageWarnings` when an expression calls `sampleImage()`) — mention it.
+  Footage found only relative to a moved project is refused until
+  `saveProject:true` records where it is now. A path any other queue item has
+  is refused, `overwrite:true` or not, naming the item: every item counts but a
+  Done one, including one already rendered and unticked, so remove that item to
+  render there again (issues #144, #145, #228). An output beside the project
+  now lands where asked (issue #215).
+- **Take a restore point with `checkpoint_comp`, restore with `revert_comp`.**
+  New, with `list_checkpoints` and `delete_checkpoints`, for changes that span
+  many calls, where undo cannot be relied on. A checkpoint is a copy in the
+  project folder `AE MCP Checkpoints`, and it is shallow: nested precomps and
+  footage are not covered. A revert restores into the original comp, so its id
+  and precomp uses stay, but every layer id changes: use `layerIdMap`. Check
+  `verified` and `mismatches`, and delete checkpoints when done. Checkpoint
+  comps carry `checkpoint: true`, are skipped by a project-wide `find_layers`
+  (`checkpointsSkipped`), and are not for editing (issue #136).
+  supersedes: duplicate the comp as a backup before a risky change
+- **"This layer", "these keyframes" and "here" are answered by
+  `get_selection`.** A new read-only tool: the selected layers and properties,
+  selected key times, and the playhead. Capped, and it says what it left out
+  (`omitted`, `selectedKeysOmitted`). The selection changes at any moment, so
+  read it when you need it and say which layer you took the user to mean
+  (issue #179).
+- **Move keys with `retime_keyframes`; reuse them with `copy_animation`.** Both
+  new, and both keep values, eases, tangents and key flags, which remove and
+  re-add loses. `retime_keyframes` offsets, scales, reverses or staggers; keys
+  that would land on one frame are refused, never merged. `copy_animation`
+  pastes onto other layers in any comp and refuses a property that is missing
+  or already keyed unless `replaceExisting:true` (issue #180).
+  supersedes: retime keyframes with run_jsx
+  supersedes: copy keyframes with run_jsx
+- **Fill the Essential Graphics panel with `add_essential_property`.** One
+  property per call, read back as `controllerCount`, `controllerIndex` and
+  `controllerName`; an unchanged count is a refusal, usually a property already
+  in the panel. Paths, masks, markers and layer pickers cannot go in: drive one
+  from an expression control and add the control (issue #177).
+  supersedes: the user has to drag a property into Essential Graphics
+  supersedes: export_mogrt needs a manual drag in the Essential Graphics panel
+- **`analyze_motion` reads how finished comps move.** Move lengths, ease
+  influence, overshoot, anticipation, staggers and holds, as a bounded summary
+  with `suggestedLines` for the house style's Motion section. It never writes
+  the guide: show the user first, then `set_house_style` (issue #244).
+
+- **An argument a tool does not take is refused, at any depth, on every tool.**
+  The error names the field. Such a field used to be dropped while the call
+  answered ok (issue #147).
+  supersedes: unknown arguments are ignored
+  supersedes: extra fields are stripped
+- **Each `run_batch` step is checked as its own tool, and one bad step refuses
+  the whole batch before anything runs.** Every bad step is named by its path.
+  Tools that do part of their work outside After Effects cannot be steps —
+  `screenshot_frame`, `screenshot_layer`, `snapshot_comp`, `diff_comp`,
+  `analyze_motion`, `export_mogrt`, `render_queue`, `get_house_style` and the
+  server-side tools — and are refused with the reason (issue #157).
+  supersedes: run_batch steps are not validated
+- **`create_shape_layer` takes no `fill`, `stroke`, `strokeWidth` or
+  `shapes`, and `add_text_animator` is all or nothing.** The first advertised
+  all four and applied none; passing one is now refused, so build contents with
+  `add_shape_content`. The second removes the animator it made if After Effects
+  refuses a property or range value, naming what failed, where it used to answer
+  ok over an empty animator (issues #148, #154).
+  supersedes: create_shape_layer takes fill and stroke
+- **`set_layer` `trackMatte.layerId` sets the matte, and a blend, matte or mask
+  mode name After Effects does not have is refused.** Any layer in the comp can
+  be the matte; the result reads back `trackMatte: {type, layerId,
+  matteEnabled}`. Names are case-insensitive. `lineCap`, `lineJoin` and
+  `fillRule` now take names too, as well as their numbers (issues #149, #150).
+  supersedes: set_layer trackMatte ignores layerId
+  supersedes: set the track matte layer with run_jsx
+  supersedes: an unknown blend mode leaves the layer unchanged without erroring
+  supersedes: an unknown mask mode leaves the mode unchanged without erroring
+- **`keyframe:true` needs a `time`, and fields a 2D layer does not have are
+  refused, not dropped.** `set_transform`, `set_effect_param` and
+  `set_shape_property` used to write a static value without a time. A bare
+  `set_interpolation` used to answer ok having done nothing. `set_transform`
+  refuses `orientation`, `xRotation` and `yRotation` on a 2D layer and writes
+  nothing, so `set_layer threeDLayer:true` first; `zRotation` there is its
+  `rotation` (issues #151, #152, #181).
+  supersedes: keyframe:true without a time writes a static value
+  supersedes: set_transform drops orientation on a 2D layer
+- **`set_temporal_ease` with one side keeps the other side's ease.** The side
+  you leave out used to reset, to influence 33 and speed 0. If it cannot be
+  read, the call fails and writes nothing (issue #153).
+  supersedes: set_temporal_ease with only easeIn resets easeOut
+  supersedes: always pass both easeIn and easeOut
+- **`set_mask` applies `closed`, `inTangents` or `outTangents` on their own.**
+  They used to be ignored without `vertices`. Tangent counts must match the
+  vertices; an animated path is refused, so use `add_keyframe`; a vertex count
+  change on a mask with variable-width feather points is refused rather than
+  losing them. `set_shape_path` finds a Path by match name, so it works on a
+  non-English After Effects, and refuses anything else it is pointed at
+  (issues #207, #163).
+  supersedes: set_mask needs vertices to change closed or tangents
+- **`delete_comp` refuses a comp other comps nest, naming them, unless
+  `force:true`.** With it, `removedFromComps` lists the precomp layers that went
+  too, and `renderQueueItemsRemoved` counts render items that went.
+  `delete_layer` reports its fallout in `unparentedChildren`, `lostTrackMatte`
+  and `unusedSolidLeft` (issue #160).
+  supersedes: delete_comp takes every layer that nests it with it, silently
+
+- **`set_layer` and `set_comp` set the switches that used to need a script.**
+  `set_layer`: `motionBlur`, `collapseTransformation`, `adjustmentLayer`, `guideLayer`,
+  `effectsActive`, `audioEnabled`, `quality`, `samplingQuality`,
+  `frameBlendingType`, `autoOrient`. `set_comp`: `motionBlur`, `frameBlending`.
+  Each is read back after the write (issue #181).
+  supersedes: no tool sets the collapse switch
+  supersedes: set collapseTransformation from run_jsx
+  supersedes: set motion blur from run_jsx
+  supersedes: comp.motionBlur = true
+- **`set_transform` handles separated dimensions, and keys carry their flags.**
+  `separateDimensions` flips the switch; while it is on, write `xPosition`,
+  `yPosition`, `zPosition`, not `position`. `set_interpolation` takes
+  `temporalContinuous`, `temporalAutoBezier`, `spatialContinuous`,
+  `spatialAutoBezier` and `roving`, and `get_keyframes` returns `flags` per key.
+  `set_temporal_ease` takes a list of pairs, one per dimension; `get_keyframes`
+  shows `ease.perDimension` when they differ (issue #181).
+  supersedes: separate dimensions needs run_jsx
+  supersedes: set_temporal_ease applies one pair to every dimension
+- **Box text and a repeater's transform and composite have tools; a gradient
+  fill does not.** `boxSize` on `create_text_layer` makes
+  wrapping paragraph text and on `set_text` resizes it (point text cannot be
+  converted). `add_shape_content` takes a repeater's `transform` and
+  `composite`. A gradient fill or stroke is refused, because a script cannot
+  set its colour stops at all: use the Gradient Ramp effect (`ADBE Ramp`)
+  (issue #181).
+- **Colours take hex, and a `propertyPath` that misses lists what is there.**
+  `"#ff8800"` and `"#f80"` work wherever a colour is taken, and in `value` on
+  `add_keyframe`, `set_effect_param` and `set_shape_property`, where hex is
+  refused unless the property is a colour. `#rrggbbaa` is refused: After Effects
+  ignores a colour's alpha, so use Opacity. A path miss names the segment and
+  the children of that group, name and match name (issue #170).
+
+- **`run_jsx` balances written-out undo-group calls.** Literal
+  `app.beginUndoGroup` and `app.endUndoGroup` are rerouted through a counter, a
+  stray or missing one is corrected inside the call, and the result's
+  `undoGuard` says so. Through `eval`, `Function`, `$.evalFile`, an alias of
+  `app` or a computed name they are not counted; `eval`-like routes get a note
+  beginning CAUTION. Still do not call them (issue #221).
+- **Every op runs with After Effects' dialogs suppressed, and what After Effects
+  said comes back as `aeWarnings`.** A result with it is not a clean success:
+  read the state back. In `run_jsx`, `alert`, `confirm` and `prompt` do not show;
+  they return in `suppressedDialogs`, with `confirm` answering No and `prompt`
+  Cancel (issue #225).
+  supersedes: alert in a run_jsx script blocks the bridge
+- **`setValue` throwing "invalid numeric result" does not mean it failed.**
+  Every tool now reads the property back on that one error, so a write that
+  landed is not reported as failed. In `run_jsx`, write through
+  `setValueChecked(prop, value)` (issue #129).
+  supersedes: open the comp first so setValue does not throw invalid numeric result
+- **Other scripts sharing After Effects' script engine cannot break the tools.**
+  Everything lives in one closure with a single global, `__AEMCP`, so the tools
+  no longer collide with another extension's globals. `run_jsx` scripts see
+  `OPS` and the helpers as before (issue #185).
+
+- **`cancel_job` says `ok:true` only once the job has stopped, and an unknown
+  job id fails at once.** A stopped job carries `opsRun`, and `await_job`
+  returns the partial result. `ok:false` with `status:"cancelling"` means
+  accepted but not stopped yet, so call `await_job`; `status:"completed"` means
+  it finished first. Read an error's message before telling the user anything:
+  it may say the batch could still be running. On an unknown id, `await_job` used
+  to hang for its whole timeout and `get_job` to return a bare null
+  (issues #158, #159, #163).
+  supersedes: cancel_job sets a flag and returns ok
+  supersedes: await_job on an unknown id waits for the timeout
+- **A finished job reports where it ended, and its last progress update
+  arrives.** A completed job reads `total` of `total`, "completed", where a
+  600-op batch used to stop at 575/600 and read as running. A failed or
+  cancelled batch reports the ops it reached. The final `notifications/progress`
+  now reaches the client before the response (issues #222, #261).
+- **The server sends a long `run_batch`'s chunks, so a batch stops if the server
+  does.** When the client quits or restarts mid-batch, the batch stops at a
+  chunk boundary: read the comp back, and never re-send it whole. An answer lost
+  in transit is recovered without running any op twice, and the job says so in
+  a warning (issue #220).
+  supersedes: a chunked run_batch keeps running after the client disconnects
+- **Several sessions on one After Effects share one write queue.** Writes from
+  all of them run one at a time, and a chunked `run_batch` keeps its place to
+  the end. A call that waited behind another session carries
+  `queuedBehindSession`, and progress says where it is in line. A call dropped
+  from that wait says so and nothing ran, so re-send it; a message naming the
+  *front desk* means the session passing your calls on went away, so read back
+  before re-sending (issue #223).
+  supersedes: another session's writes can land between the chunks of a run_batch
+  supersedes: the write queue is per session
+- **A connection dropped mid-call is its own failure.** The call was delivered
+  and may have landed, so read back and re-send only if it did not. It used to
+  read as the panel being unreachable (issue #163).
+
+- **An outdated panel is refused, whole, and there is no fallback; the message
+  clears once After Effects has been reopened.** The check now covers every
+  panel file, not only the script bundle, so after this update every call
+  answers with the `setup_panel` message until the user has quit After Effects,
+  run it and reopened. Relay it. The verdict is checked again every few seconds,
+  so the next call after the restart goes through (issues #243, #156).
+  supersedes: a new server against an old panel works unchanged
+  supersedes: the restart After Effects message stays until the server is restarted
+- **A released panel is signed and loads without PlayerDebugMode.** For it,
+  `cepDebugMode` always passes and `setup_panel` reports `signed: true`. A
+  failing `panelSignatureIntact` means files changed after signing: with After
+  Effects closed, run `setup_panel` with `force:true` (issue #182).
+  supersedes: After Effects needs PlayerDebugMode to load the panel
+  supersedes: setup_panel installs an unsigned panel
+- **`AE_MCP_READ_ONLY` and `AE_MCP_DISABLE_RUN_JSX` take tools away.** Read-only
+  offers only the tools that look; the other removes `run_jsx` and nothing else,
+  so rendering still works. A tool switched off is unlisted, refused if called,
+  and refused as a `run_batch` step. Do not look for a way around it: tell the
+  user the switch is on (issues #135, #161).
+- **`delete_comp`, `purge_unused_footage` and `revert_comp` may ask the user
+  first.** On a client that can show a prompt, the person is asked before
+  anything changes, and a `run_batch` with any of them asks once for the whole
+  batch. A declined prompt is an error saying the tool was not run: that is the
+  user's answer, so do not call it again unless they ask. Other clients see no
+  change (issue #245).
+- **Live resources and a timeline view, for clients that use them.**
+  `ae://project/summary` and `ae://project/active-comp` can be subscribed to, and
+  say when they change; the active comp is the one last active in a viewer, so a
+  click in the Project panel is not a change. Clients that show MCP Apps get a
+  comp timeline with `snapshot_comp` and `diff_comp`: it is for the person
+  watching, its data stays out of your context, and your results do not change
+  (issues #248, #246).
+- **Screenshots no longer add dark fringes to soft edges.** After Effects writes
+  premultiplied colour into a straight-alpha PNG, and the server now corrects
+  it, so a dark edge you see is in the comp (issue #130).
+  supersedes: screenshots show dark fringes on soft edges
+- **Results are compact JSON, and every tool carries read-only and destructive
+  hints.** Parse results: text matching on `"undoSteps": 24`, with its space, no
+  longer finds it. The hints are for clients deciding what to ask about
+  (issues #165, #166).
 
 ## 0.5.2
 

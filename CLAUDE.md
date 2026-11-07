@@ -33,7 +33,7 @@ table is how that one went stale once already.
 
 ## What this project is
 
-An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, footage import, audio cue placement, comp snapshots and diffs, Motion Graphics template export, rendering through the render queue, one-off screenshots and contact sheets, bulk batches, comp checkpoints with revert, the user's current selection, keyframe retiming and animation copy. 88 tools. macOS and Windows — the only two platforms AE runs on.
+An MCP server that lets an LLM drive Adobe After Effects 2026: comps, layers, transforms, keyframes (with full interpolation/easing/tangent control), expressions, effects, text, shapes, masks, markers, footage import, audio cue placement, comp snapshots and diffs, Motion Graphics template export, rendering through the render queue, one-off screenshots and contact sheets, bulk batches, comp checkpoints with revert, the user's current selection, keyframe retiming and animation copy. 89 tools. macOS and Windows — the only two platforms AE runs on.
 
 It ships five ways, and the ordering below is deliberate — it goes from least to most that the user has to already have installed:
 
