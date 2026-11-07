@@ -81,7 +81,7 @@ function exitWhenStdinCloses(close: () => Promise<void>): void {
   process.stdin.on("close", leave);
 }
 
-const VERSION = "0.5.2";
+const VERSION = "0.6.0";
 
 main().catch((e) => {
   logger.error("fatal", (e as Error).message);
