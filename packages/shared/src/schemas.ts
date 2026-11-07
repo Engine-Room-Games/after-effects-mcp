@@ -621,7 +621,7 @@ export const CreateShapeLayer = z.object({
   // Contents go through add_shape_content, which builds them all-or-nothing;
   // the strict parse now refuses those keys by name instead.
   position: z.union([Vec2, Vec3, z.literal("center")]).optional()
-    .describe("Where the layer's origin goes. Default [0,0]: layer space = comp space. 'center': AE's own spawn point. Anchor Point stays [0,0] either way. The layer is 2D, so [x,y]; [x,y,z] needs set_layer threeDLayer:true first."),
+    .describe("Where the layer's origin goes. Default [0,0]: layer space = comp space. 'center': AE's own spawn point. Anchor Point stays [0,0] either way. The layer is 2D, so [x,y]; a non-zero z is refused."),
 });
 export const CreateSolidLayer = z.object({
   compId: z.number(),
@@ -634,14 +634,15 @@ export const CreateSolidLayer = z.object({
 export const CreateNullLayer = z.object({ compId: z.number(), name: z.string().optional() });
 export const CreateAdjustmentLayer = z.object({ compId: z.number(), name: z.string().optional() });
 export const CreatePrecompLayer = z.object({ compId: z.number(), sourceCompId: z.number(), position: VecAny.optional() });
-export const CreateCameraLayer = z.object({ compId: z.number(), name: z.string().optional(), oneNode: z.boolean().default(false), position: VecAny.optional() });
+const SpawnPoint = VecAny.optional().describe("[x,y]: the Point of Interest. A non-zero z in [x,y,z]: Position itself is set to all three, too.");
+export const CreateCameraLayer = z.object({ compId: z.number(), name: z.string().optional(), oneNode: z.boolean().default(false), position: SpawnPoint });
 export const CreateLightLayer = z.object({
   compId: z.number(),
   name: z.string().optional(),
   lightType: z.enum(["parallel", "spot", "point", "ambient"]).default("point"),
   color: Color.optional(),
   intensity: z.number().optional(),
-  position: VecAny.optional(),
+  position: SpawnPoint,
 });
 export const DuplicateLayer = z.object({ compId: z.number(), layerId: z.number(), count: z.number().int().positive().optional().meta({ default: 1 }) });
 export const DeleteLayer = z.object({ compId: z.number(), layerId: z.number() });

@@ -414,6 +414,7 @@ jobs:
           node tests/unit/comp-checkpoint.mjs
           node tests/unit/audio-cues.mjs
           node tests/unit/shape-spawn.mjs
+          node tests/unit/lost-z.mjs
           node tests/unit/reorder-layer.mjs
           node tests/unit/ease-arity.mjs
           node tests/unit/batch-undo.mjs

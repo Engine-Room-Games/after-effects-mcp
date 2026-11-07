@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const jsxDir = path.join(root, "packages", "jsx");
-const sources = ["ids.jsx", "keyframes.jsx", "expressions.jsx", "retime.jsx"].map((f) => [
+const sources = ["ids.jsx", "values.jsx", "keyframes.jsx", "expressions.jsx", "retime.jsx"].map((f) => [
   f,
   fs.readFileSync(path.join(jsxDir, f), "utf8"),
 ]);

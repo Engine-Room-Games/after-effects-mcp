@@ -125,6 +125,7 @@ OPS.set_transform = function (args) {
       "; get_layer_full lists the transform properties this layer has."
     );
   }
+  for (i = 0; i < plan.length; i++) __refuseLostZ(plan[i][0], plan[i][1], "set_transform");
   // Fallback for a hidden property the check above did not see: name what
   // already landed, so the failure is never read as "nothing changed".
   var written = [];

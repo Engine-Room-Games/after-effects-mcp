@@ -660,6 +660,15 @@ OPS.copy_animation = function (args) {
           "threeDLayer:true, or leave it out of propertyPaths.");
         continue;
       }
+      // A 3D source's keys carry a z that a 2D target would lose in silence (#291).
+      if (__zIsDropped(tp)) {
+        var zKey = null;
+        for (var zk = 0; zk < src.keys.length && zKey === null; zk++) if (__hasZ(src.keys[zk].value)) zKey = src.keys[zk];
+        if (zKey !== null) {
+          problems.push(where + ": the keyframe at " + zKey.time + "s has a z of " + zKey.value[2] + ", which would be lost: " + __lostZReason(tp) + ".");
+          continue;
+        }
+      }
       var settable = true;
       try { settable = tp.canSetExpression !== false; } catch (eS) { settable = false; }
       // X/Y/Z Position of a separated Position are in use whatever that flag

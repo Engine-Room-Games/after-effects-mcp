@@ -230,10 +230,11 @@ check("shape takes a comp id as well as a comp", () => {
   assert.equal(c.layers.added.length, 1);
 });
 
-check("an explicit position is honoured, in 2D or 3D", () => {
+check("an explicit position is honoured; a z 0 stays, any other is refused (a new layer is 2D)", () => {
   const c = run("makeComp(23, [])");
   assert.deepEqual([...fn("shape")(c, run("({position: [960, 540]})")).props.Position], [960, 540]);
-  assert.deepEqual([...fn("shape")(c, run("({position: [1, 2, 3]})")).props.Position], [1, 2, 3]);
+  assert.deepEqual([...fn("shape")(c, run("({position: [1, 2, 0]})")).props.Position], [1, 2, 0]);
+  assert.throws(() => fn("shape")(c, run("({position: [1, 2, 3]})")), /Nothing was created/);
 });
 
 check("no options at all is still a layer at the origin", () => {

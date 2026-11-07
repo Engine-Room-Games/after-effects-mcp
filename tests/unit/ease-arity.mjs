@@ -67,6 +67,7 @@ function makeContext() {
     walkProperty: () => { throw new Error("not stubbed"); },
     // values.jsx's hex conversion; a number or array passes through it unchanged.
     __hexValue: (prop, value) => value,
+    __refuseLostZ: () => {},
   };
   vm.createContext(ctx);
   vm.runInContext(source, ctx, { filename: "keyframes.jsx" });

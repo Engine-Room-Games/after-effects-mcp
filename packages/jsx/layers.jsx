@@ -54,6 +54,7 @@ OPS.list_layers = noUndo(function (args) {
 
 OPS.create_text_layer = function (args) {
   var c = getCompById(args.compId);
+  __refuseZOnNewLayer(args.position, "create_text_layer");
   // A box size makes paragraph text (issue #181): it wraps inside the box.
   var l = args.boxSize ? c.layers.addBoxText([args.boxSize[0], args.boxSize[1]], args.text || "") : c.layers.addText(args.text || "");
   if (args.name) l.name = args.name;
@@ -197,19 +198,18 @@ OPS.create_shape_layer = function (args) {
   }
   var c = getCompById(args.compId);
   var pos = __shapeSpawnPosition(c, args.position);
+  __refuseZOnNewLayer(pos, "create_shape_layer");
   var l = c.layers.addShape();
   if (args.name) l.name = args.name;
   try {
     __setValue(l.property("Transform").property("Position"), pos);
   } catch (ePos) {
-    // The shape that can still get here is three components on a 2D layer, which
-    // AE refuses. Leaving an empty shape layer in the timeline behind a thrown
-    // error is the half-built failure add_shape_content refuses to produce.
+    // Leaving an empty shape layer in the timeline behind a thrown error is the
+    // half-built failure add_shape_content refuses to produce.
     try { l.remove(); } catch (eRm) {}
     throw new Error(
       "create_shape_layer could not set position to [" + pos.join(", ") + "]: " + ePos.message +
-      ". (A three-component position needs a 3D layer; create it 2D and set threeDLayer with set_layer first.) " +
-      "The empty layer was removed, so nothing changed."
+      ". The empty layer was removed, so nothing changed."
     );
   }
   var out = __layerSummary(l);
@@ -224,6 +224,7 @@ OPS.create_shape_layer = function (args) {
 OPS.create_precomp_layer = function (args) {
   var c = getCompById(args.compId);
   var src = getCompById(args.sourceCompId);
+  __refuseZOnNewLayer(args.position, "create_precomp_layer");
   var l = c.layers.add(src);
   if (args.position) {
     var p = args.position;
@@ -231,6 +232,22 @@ OPS.create_precomp_layer = function (args) {
   }
   return __layerSummary(l);
 };
+
+// addCamera and addLight take a 2D point, and put it on the Point of Interest:
+// Position stays AE's default whatever is passed (measured, AE 26.5). So a z
+// reaches the layer only by writing Position after the add, and there the whole
+// [x, y, z] is what was asked for (issue #291). A z of 0 stays a plain [x, y].
+function __writeSpawnZ(l, position, op) {
+  if (!__hasZ(position)) return;
+  var target = [position[0], position[1], position[2]];
+  try {
+    __setValue(l.property("Transform").property("Position"), target);
+  } catch (e) {
+    try { l.remove(); } catch (eRm) {}
+    throw new Error(op + " could not set Position to [" + target.join(", ") + "]: " + e.message +
+      ". The layer was removed, so nothing changed.");
+  }
+}
 
 OPS.create_camera_layer = function (args) {
   var c = getCompById(args.compId);
@@ -246,6 +263,7 @@ OPS.create_camera_layer = function (args) {
         ". The camera was removed, so nothing changed.");
     }
   }
+  __writeSpawnZ(l, args.position, "create_camera_layer");
   return __layerSummary(l);
 };
 
@@ -255,6 +273,7 @@ OPS.create_light_layer = function (args) {
   var l = c.layers.addLight(args.name || "Light", center);
   var lightTypeMap = { parallel: LightType.PARALLEL, spot: LightType.SPOT, point: LightType.POINT, ambient: LightType.AMBIENT };
   if (args.lightType && lightTypeMap[args.lightType]) l.lightType = lightTypeMap[args.lightType];
+  __writeSpawnZ(l, args.position, "create_light_layer");
   if (args.color) __setValue(l.lightOption.property("Color"), [args.color[0], args.color[1], args.color[2]]);
   if (args.intensity !== undefined) __setValue(l.lightOption.property("Intensity"), args.intensity);
   return __layerSummary(l);
