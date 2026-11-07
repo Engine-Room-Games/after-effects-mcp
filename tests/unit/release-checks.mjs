@@ -355,6 +355,10 @@ await check("sign-and-notarize reads notarytool's verdict instead of trusting --
   assert.match(sh, /notarytool log/, "a rejection should print Apple's log");
 });
 
+await check("release.sh names the tarball so npm cannot read it as a GitHub repo", () => {
+  assert.match(read("scripts", "release.sh"), /npm publish "\.\/\$TARBALL" --dry-run/);
+});
+
 await check("release.sh smoke-runs every artifact after signing and before tagging", () => {
   const sh = read("scripts", "release.sh");
   const at = (needle) => {
