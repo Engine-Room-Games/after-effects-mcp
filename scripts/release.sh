@@ -171,7 +171,8 @@ TARBALL="$DIST/engine-room-after-effects-mcp-$VERSION.tgz"
 [ -f "$TARBALL" ] || die "npm pack did not produce $TARBALL"
 # Same guard the release workflow applies: npm silently rewriting the manifest
 # (a dropped bin, for instance) must block the release, not warn about it.
-OUT=$(npm publish "$TARBALL" --dry-run --ignore-scripts 2>&1)
+# The ./ matters: npm reads a bare dist-release/x.tgz as a GitHub user/repo.
+OUT=$(npm publish "./$TARBALL" --dry-run --ignore-scripts 2>&1)
 if grep -qE "invalid and removed|auto-corrected" <<<"$OUT"; then
   echo "$OUT" >&2
   die "npm would rewrite the manifest on publish — fix $MANIFEST first"
