@@ -20,7 +20,9 @@
 
 import assert from "node:assert/strict";
 import http from "node:http";
+import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocketServer } from "ws";
@@ -32,7 +34,7 @@ const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panel
 const { HttpClient } = await import(dist("bridge", "httpClient.js"));
 const { BridgeTimeoutError, BridgeUnreachableError } = await import(dist("util", "errors.js"));
 const { isPanelHealth, probePanel, locatePanel, portCandidates, DEFAULT_PORT, diagnosticPortCandidates } = await import(dist("bridge", "discovery.js"));
-const { probeBridge, buildNextSteps } = await import(dist("setup", "check.js"));
+const { probeBridge, buildNextSteps, checkSetup } = await import(dist("setup", "check.js"));
 
 let passed = 0;
 async function check(name, fn) {
@@ -382,6 +384,143 @@ await check("a busy port on a different number keeps the wait advice and names t
   assert.match(steps[0], /^Wait/);
   assert.match(steps.join("\n"), /7780/);
   assert.match(steps.join("\n"), /no reconnect needed/i);
+});
+
+await check("a busy panel's advice names the port and says what a foreign holder would look like", () => {
+  const steps = buildNextSteps([...healthy, bad("bridgeReachable")], false, true, 7777);
+  const text = steps.join("\n");
+  assert.match(steps[0], /^Wait/);
+  assert.match(text, /port 7777 is still not answering/);
+  assert.match(text, /another program holds it/);
+});
+
+await check("a silent port no panel has claimed is not told to wait (issue #288)", () => {
+  const holder = { ...bad("bridgeReachable"), evidence: "no-panel-token" };
+  const steps = buildNextSteps([...healthy, holder], false, true, 7777);
+  const text = steps.join("\n");
+  assert.doesNotMatch(steps[0], /^Wait/);
+  assert.doesNotMatch(text, /clears on its own/);
+  assert.match(steps[0], /Port 7777/);
+  assert.match(steps[0], /another program/);
+  assert.match(text, /allowPortWalk/);
+  assert.match(text, /config\.json/);
+  // Still none of the other failures' remedies.
+  assert.doesNotMatch(text, /re-send/i);
+  assert.doesNotMatch(text, /token/i);
+});
+
+await check("with After Effects closed the foreign-holder steps say so and need no After Effects", () => {
+  const holder = { ...bad("bridgeReachable"), evidence: "no-panel-token" };
+  const closed = healthy.map((c) => (c.name === "afterEffectsRunning" ? bad(c.name) : c));
+  const text = buildNextSteps([...closed, holder], false, true, 7777).join("\n");
+  assert.match(text, /After Effects is closed/);
+  assert.match(text, /then open After Effects/);
+  assert.doesNotMatch(text, /Window > Extensions/);
+  assert.doesNotMatch(text, /reopen After Effects/);
+  // "Could not tell" is not "closed".
+  const unknown = healthy.map((c) => (c.name === "afterEffectsRunning" ? { ...bad(c.name), evidence: "unknown" } : c));
+  assert.match(buildNextSteps([...unknown, holder], false, true, 7777).join("\n"), /Window > Extensions/);
+});
+
+await check("a broken install still outranks a foreign holder", () => {
+  const holder = { ...bad("bridgeReachable"), evidence: "no-panel-token" };
+  const broken = healthy.map((c) => (c.name === "panelDependencies" ? bad(c.name) : c));
+  assert.match(buildNextSteps([...broken, holder], false, true, 7777).join("\n"), /setup_panel/);
+});
+
+await check("check_setup tells a silent port with a panel token from one without", async () => {
+  // A temp home: token files are read from it, and the real one may hold a live panel's.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "port-drift-home-"));
+  const foreignFirst = await stubPanel({ healthShape: "hang", opBehaviour: "hang" });
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = process.env.USERPROFILE = home;
+  const run = (extra = {}) => checkSetup({
+    candidates: [silent.port],
+    opPort: silent.port,
+    source: null,
+    debugMode: { on: true, detail: "" },
+    afterEffectsRunning: true,
+    ...extra,
+  });
+  const bridge = (r) => r.checks.find((c) => c.name === "bridgeReachable");
+  try {
+    const foreign = await run();
+    assert.equal(bridge(foreign).evidence, "no-panel-token");
+    assert.match(bridge(foreign).detail, /most likely held by another program/);
+    assert.doesNotMatch(bridge(foreign).fix, /clears on its own/);
+    assert.match(bridge(foreign).fix, new RegExp(`Port ${silent.port}`));
+    assert.match(bridge(foreign).fix, /Window > Extensions/);
+
+    // The check's own fix, not only nextSteps, has to work with After Effects closed.
+    const closed = await run({ afterEffectsRunning: false });
+    assert.match(bridge(closed).fix, /After Effects is closed/);
+    assert.doesNotMatch(bridge(closed).fix, /Window > Extensions/);
+    assert.doesNotMatch(bridge(closed).fix, /reopen After Effects/);
+    assert.match(foreign.checks.find((c) => c.name === "portAgreement").fix, /another program/);
+
+    // A foreign holder strands calls too, so one in flight does not make it a panel.
+    const stranded = await run({ busyWith: () => ({ op: "run_jsx", state: "timedOut", ms: 1000 }) });
+    assert.equal(bridge(stranded).evidence, "no-panel-token");
+    assert.equal(stranded.busyWith, undefined);
+
+    // Two silent ports, neither claimed: still foreign, naming the first.
+    const unclaimed = await run({ candidates: [foreignFirst.port, silent.port], opPort: foreignFirst.port });
+    assert.equal(bridge(unclaimed).evidence, "no-panel-token");
+    assert.match(bridge(unclaimed).detail, new RegExp(`^port ${foreignFirst.port} `));
+
+    fs.mkdirSync(path.join(home, ".engineroom-ae-mcp"));
+    fs.writeFileSync(path.join(home, ".engineroom-ae-mcp", `token-${silent.port}`), "a-token");
+    const ours = await run();
+    assert.equal(bridge(ours).evidence, undefined);
+    assert.match(bridge(ours).detail, /probably busy/);
+    assert.match(bridge(ours).fix, /clears on its own/);
+
+    // A foreign program on the first port must not speak for a busy panel on the next.
+    const both = await run({ candidates: [foreignFirst.port, silent.port], opPort: foreignFirst.port });
+    assert.equal(bridge(both).evidence, undefined, "a busy panel must not be told waiting will not help");
+    assert.match(bridge(both).detail, new RegExp(`^port ${silent.port} .*probably busy`));
+    assert.match(bridge(both).fix, /clears on its own/);
+    const agreement = (r) => r.checks.find((c) => c.name === "portAgreement");
+    assert.doesNotMatch(agreement(both).fix, /another program/);
+
+    // That op port times out and never refuses, so nothing rediscovers the panel.
+    assert.equal(agreement(both).evidence, "silent-op-port");
+    assert.doesNotMatch(agreement(both).fix, /next refused call/);
+    assert.match(agreement(both).fix, new RegExp(`set AE_MCP_PORT to ${silent.port}`), "a new server would start on 7777, not there");
+
+    // A new server starts on the port file's port, so a reconnect alone is enough.
+    fs.writeFileSync(path.join(home, ".engineroom-ae-mcp", "port"), String(silent.port));
+    const filed = await run({ candidates: [foreignFirst.port, silent.port], opPort: foreignFirst.port });
+    assert.match(agreement(filed).fix, /reconnect the MCP server/);
+    assert.doesNotMatch(agreement(filed).fix, /AE_MCP_PORT/);
+
+    // An op port that refuses does rediscover, so that promise stands.
+    const refusing = await run({ candidates: [stale, silent.port], opPort: stale });
+    assert.equal(agreement(refusing).evidence, undefined);
+    assert.match(agreement(refusing).fix, /next refused call/);
+  } finally {
+    foreignFirst.close();
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+await check("a silent op port is never promised a switch on the next refused call (issue #288)", () => {
+  const steps = buildNextSteps(
+    [...healthy, bad("bridgeReachable"),
+      { ...bad("portAgreement", "tool calls are being sent to port 7780", "Port 7780 times out. Reconnect."), evidence: "silent-op-port" }],
+    false,
+    true,
+    7777
+  );
+  const text = steps.join("\n");
+  assert.match(steps[0], /^Wait/);
+  assert.match(text, /Port 7780 times out\. Reconnect\./);
+  assert.doesNotMatch(text, /next refused call/);
+  assert.doesNotMatch(text, /no reconnect needed/i);
 });
 
 await check("an agreeing port changes nothing about the other advice", () => {

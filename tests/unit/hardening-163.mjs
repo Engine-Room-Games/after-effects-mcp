@@ -268,6 +268,9 @@ function makeHost(extDir, events) {
     getSystemPath: () => extDir,
     getHostEnvironment: () => JSON.stringify({ appName: "AEFT", appVersion: "26.3" }),
     evalScript: (script, cb) => {
+      // The boot's one-line host check (issue #288) reads `app`, which this
+      // parse-only stub does not have.
+      if (script.indexOf("app.isUISuppressed") >= 0) return void setTimeout(() => cb("interactive"), 0);
       if (script.indexOf("$.evalFile") >= 0) {
         events.push("reload:start");
         return void setTimeout(() => { events.push("reload:end"); cb("ok"); }, 0);

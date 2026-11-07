@@ -126,7 +126,7 @@ are in before you say anything.
 | `panelSignatureIntact` | Present only for a signed install. Its files changed after it was signed — usually a developer's edit — and After Effects refuses such a panel. With After Effects closed, run `setup_panel` with `force: true`. It passes with a note (`evidence: "voided"`) when the debug preference is on, because then the panel normally still loads — unless CEP checks signatures anyway (the Windows bug below) and `panelSignature` fails; then `nextSteps` is the same forced reinstall, not hand signing. |
 | `panelRunningCurrent` | AE is *running* an older panel than these tools ship. This is the one that predicts whether calls will actually work — `panelUpToDate` can pass while this fails, for the whole window between installing an update and restarting AE. |
 | `afterEffectsRunning` | AE is closed. If the panel also needs installing, install it now and then ask them to open AE. If it passes (AE is open) and the panel needs installing, ask them to quit AE first — installing with it open does not work. |
-| `bridgeReachable` | Everything is installed but the panel isn't answering **on any port** — it asks the default port and the port file's port both, and reports whichever answers. Read the detail: if a port **timed out**, After Effects is busy and you should wait, not restart. If nothing is listening anywhere, one restart of AE is reasonable, because the panel loads only at launch; if that has already been tried, read `panelSignature` and `nextSteps` before suggesting a second. |
+| `bridgeReachable` | Everything is installed but the panel isn't answering **on any port** — it asks the default port and the port file's port both, and reports whichever answers. Read the detail: if a port **timed out**, After Effects is busy and you should wait, not restart — unless the detail says the port is most likely held by another program, where waiting will not help and `nextSteps` has the way out. If nothing is listening anywhere, one restart of AE is reasonable, because the panel loads only at launch; if that has already been tried, read `panelSignature` and `nextSteps` before suggesting a second. |
 | `bridgeToken` | The panel answers but requires a token this server cannot produce, so every call is refused before it reaches After Effects. The panel is fine: do not restart it and do not run `setup_panel`. The detail names the file the token should be in; `nextSteps` says what to do when it is not there. |
 | `portAgreement` | The panel answers, but on a different port from the one tool calls go to. The server is stale, the panel is fine. Retry the call, or reconnect the MCP server. Never restart After Effects for this. |
 | `panelSignature` | CEP's own log says it refused to load the panel because its signature failed verification — even with `cepDebugMode` on. An Adobe CEP 12 bug, seen on Windows. No restart and no reinstall helps; `nextSteps` carries the self-signing fix. If the panel was already signed and intact (`evidence: "failure-logged-signed"`), `nextSteps` also asks for a `log_issue` report. When it *passes* on a silent bridge, its `evidence` says whether the log was clean or there was no log to read. |
@@ -161,10 +161,19 @@ old one exits, then takes over with no restart. If a user reports that status
 and it does not clear, the leftover process is still running; quitting After
 Effects fully and reopening it clears it.
 
-The panel moves only when something that is *not* an AE MCP panel holds the
-port, and it logs which port it chose and why. People who really run two
-After Effects instances at once can opt back into moving past their own panel
-with a small file the panel reads at launch,
+If the holder accepts connections and says nothing, the panel cannot tell a
+busy copy of itself from another program, so it waits too: "waiting — port 7777
+is held by something that does not answer". That clears by itself when After
+Effects finishes what it is doing. If it stays with nothing running, another
+program holds the port, and restarting After Effects will not help. `check_setup`
+says "most likely held by another program" when no panel has claimed that port.
+Quit that program, or set a different `port` in the file below, then reopen After
+Effects.
+
+The panel moves only when the holder answers as something else, hangs up, or
+speaks something other than HTTP, and it logs which port it chose and why. People
+who really run two After Effects instances at once can opt back into moving past
+their own panel and a silent holder with a small file the panel reads at launch,
 `~/.engineroom-ae-mcp/config.json` (`%USERPROFILE%\.engineroom-ae-mcp\config.json`
 on Windows): `{ "port": 7777, "allowPortWalk": true }`. The server is told
 which port to use with `AE_MCP_PORT`, and with that set it never looks
