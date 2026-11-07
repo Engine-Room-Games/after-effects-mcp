@@ -63,9 +63,11 @@ only quitting and reopening After Effects will.
   panel too; the bridge now stays off there, so with After Effects closed the
   tools report that it is not reachable, instead of running scripts in an
   empty project. Premiere's Dynamic Link frames and `render_queue` are
-  unaffected. A panel also waits for a port holder that does not answer
-  rather than moving to the next port, unless `allowPortWalk` is on (issue
-  #288).
+  unaffected. A panel also waits for a port holder that accepts connections
+  and does not answer, rather than moving to the next port, unless
+  `allowPortWalk` is on; `check_setup` says when no panel has claimed that
+  port, so it is most likely another program and waiting will not help
+  (issue #288).
 - **A screenshot never changes the comp it shows.** When the frame needs a
   different resolution, or `screenshot_layer` needs a solo, it renders a
   temporary comp and removes it again; the user's Resolution dropdown and solo

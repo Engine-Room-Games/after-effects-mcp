@@ -496,11 +496,12 @@
   //
   //   port          the port to bind. Default 7777. 0 binds an ephemeral port,
   //                 which is what the offline tests use.
-  //   allowPortWalk when the port is held by another AE MCP panel, move to the
-  //                 next free one instead of waiting for it. For people who run
-  //                 two After Effects instances at once. Off by default: on one
-  //                 machine the holder is a zombie, and walking around it is
-  //                 what issue #92 was.
+  //   allowPortWalk when the port is held by another AE MCP panel, or by
+  //                 something that accepts connections and never answers, move
+  //                 to the next free one instead of waiting for it. For people
+  //                 who run two After Effects instances at once. Off by default:
+  //                 on one machine the holder is a zombie or a busy panel, and
+  //                 walking around it is what issue #92 was.
   //
   // Anything unreadable is logged and ignored; the defaults are what shipped.
   var DEFAULT_PORT = 7777;
@@ -815,13 +816,18 @@
 
   // Never rejects: every outcome is a classification the caller acts on.
   //   panel  — another AE MCP panel; its health body is attached
-  //   other  — something answered, but not as the panel
-  //   silent — accepted the connection and said nothing, or errored
+  //   other  — something answered over HTTP, but not as the panel
+  //   silent — accepted the connection and said nothing at all. The one case
+  //            that can be a panel whose After Effects is busy (issue #288)
+  //   odd    — anything else: it hung up, spoke something other than HTTP, or
+  //            started an answer and stalled. A panel does none of these
   function identifyHolder(port) {
     return new Promise(function (resolve) {
       var done = false;
+      var answering = false;
       function finish(r) { if (!done) { done = true; resolve(r); } }
       var req = http.get({ host: "127.0.0.1", port: port, path: "/health", timeout: 1500 }, function (res) {
+        answering = true;
         var bufs = [];
         res.on("data", function (c) { bufs.push(c); });
         res.on("end", function () {
@@ -830,10 +836,14 @@
           if (res.statusCode === 200 && isOurHealth(body)) finish({ kind: "panel", health: body });
           else finish({ kind: "other", detail: "answered HTTP " + res.statusCode + (body ? " with an unfamiliar body" : " with no JSON") });
         });
-        res.on("error", function (e) { finish({ kind: "silent", detail: e.message }); });
+        res.on("error", function (e) { finish({ kind: "odd", detail: e.message }); });
       });
-      req.on("timeout", function () { req.destroy(); finish({ kind: "silent", detail: "accepted the connection but did not answer within 1.5s" }); });
-      req.on("error", function (e) { finish({ kind: "silent", detail: e.message }); });
+      req.on("timeout", function () {
+        var said = answering ? "started an answer and stalled" : "accepted the connection but did not answer within 1.5s";
+        finish({ kind: answering ? "odd" : "silent", detail: said });
+        req.destroy();
+      });
+      req.on("error", function (e) { finish({ kind: "odd", detail: e.message }); });
     });
   }
 
@@ -860,17 +870,22 @@
    * holder and the port chosen, because that is the one case where the port
    * file legitimately says something other than 7777.
    *
-   * A holder that answers nothing is treated as ours (issue #288). /health goes
-   * unanswered while ExtendScript holds a panel's thread, so a silent holder is
-   * most often a panel whose After Effects is busy, and walking past it is the
-   * same drift as above. The panel keeps trying the bind and re-asks every time.
+   * A holder that accepts the connection and then says nothing is treated as
+   * ours (issue #288). /health goes unanswered while ExtendScript holds a
+   * panel's thread, so a silent holder is most often a panel whose After Effects
+   * is busy, and walking past it is the same drift as above. The panel keeps
+   * trying the bind and re-asks every time. Only silence counts: a holder that
+   * hangs up or speaks something other than HTTP walks like any other stranger.
    * `allowPortWalk` in config.json opts back into walking past both, for people
    * who really run two After Effects instances.
    */
   function startServers(cfg) {
     var startPort = cfg.port;
     var retryMs = cfg.bindRetryMs;
-    var waits = 0;
+    // One count each: a holder can go from silent to answering between retries,
+    // and each kind of wait has its own first-time explanation to give.
+    var panelWaits = 0;
+    var silentWaits = 0;
 
     function bindWith(p) {
       return startHttp(p).then(function (server) {
@@ -922,7 +937,7 @@
         ? String(holder.health.bundleHash).slice(0, 12)
         : "no bundleHash — a panel older than 0.3";
       setStatus("waiting — port " + p + " is held by another AE MCP panel", "warn");
-      if (waits === 0) {
+      if (panelWaits === 0) {
         log("warn", "port " + p + " is already held by another AE MCP panel (bundle " + hash + ", " +
           (same ? "the same version as this one" : "a DIFFERENT version from this one") + "). " +
           "Not moving to another port: that would leave the port file pointing at whichever panel bound last, " +
@@ -932,26 +947,26 @@
           "panel process is still running: quit After Effects fully, check Activity Monitor / Task Manager for a " +
           "leftover CEPHtmlEngine, and reopen it. To run two After Effects at once instead, set " +
           "\"allowPortWalk\": true in " + configFile + ".");
-      } else if (waits % 30 === 0) {
-        log("info", "still waiting for port " + p + " (" + waits + " attempts)");
+      } else if (panelWaits % 30 === 0) {
+        log("info", "still waiting for port " + p + " (" + panelWaits + " attempts)");
       }
-      waits += 1;
+      panelWaits += 1;
       return new Promise(function (r) { setTimeout(r, retryMs); }).then(function () { return attempt(p, 0); });
     }
 
     function waitForSilentHolder(p, holder) {
       setStatus("waiting — port " + p + " is held by something that does not answer", "warn");
-      if (waits === 0) {
+      if (silentWaits === 0) {
         log("warn", "port " + p + " is held by something that did not identify itself (" + holder.detail + "). " +
           "Not moving to another port: an AE MCP panel does not answer while After Effects is busy with a script, " +
           "and moving would leave two panels and a port file pointing at the wrong one (issues #92, #288).");
         log("warn", "Retrying the bind every " + (retryMs / 1000) + "s; this panel takes the port the moment it " +
           "is free, with no restart. If this persists and nothing is busy, another program holds port " + p + ": " +
           "set a different \"port\" in " + configFile + ", or \"allowPortWalk\": true to move past it.");
-      } else if (waits % 30 === 0) {
-        log("info", "still waiting for port " + p + " (" + waits + " attempts)");
+      } else if (silentWaits % 30 === 0) {
+        log("info", "still waiting for port " + p + " (" + silentWaits + " attempts)");
       }
-      waits += 1;
+      silentWaits += 1;
       return new Promise(function (r) { setTimeout(r, retryMs); }).then(function () { return attempt(p, 0); });
     }
 
@@ -1013,16 +1028,42 @@
   // engines, so it does not answer this. CEP's host environment and capabilities
   // are identical in all three.
   //
-  // Anything but the exact answer boots as normal: a version without the
-  // property behaves as it always has. An engine too busy to answer stays
-  // unbound, which is also the right outcome, since nothing is bound before
-  // this resolves.
+  // A version without the property answers "interactive" at once and boots as
+  // it always has. Nothing is bound before this resolves, so an engine too busy
+  // to answer at all stays unbound. "EvalScript error." is not an answer: a busy
+  // engine can say it too, and booting on it would put the bridge in that
+  // engine. So it is asked again, and only a host that gives no answer through
+  // every try boots as normal.
+  //
+  // "headless" is asked twice, a second apart, and a host that says it and then
+  // cannot be asked again counts as headless. No transient true has been
+  // measured in a normal After Effects, but one would cost the user the bridge
+  // until a restart, while the recheck costs a real engine one second of a
+  // process nobody is waiting on. The first "interactive" is taken as final, so
+  // a normal launch pays nothing for any of this.
   var HEADLESS_CHECK = "app.isUISuppressed === true ? 'headless' : 'interactive'";
+  var HEADLESS_TRIES = 5;
+  var HEADLESS_RETRY_MS = 1000;
   function isHeadlessHost() {
-    return evalScript(HEADLESS_CHECK, { label: "headless check" }).then(
-      function (raw) { return raw === "headless"; },
-      function () { return false; }
-    );
+    function ask(tries, saidHeadless) {
+      function again(said) {
+        if (tries <= 1) {
+          if (!said) log("warn", "After Effects gave no answer to the render engine check, so the bridge is starting as normal.");
+          return said;
+        }
+        return new Promise(function (r) { setTimeout(r, HEADLESS_RETRY_MS); })
+          .then(function () { return ask(tries - 1, said); });
+      }
+      return evalScript(HEADLESS_CHECK, { label: "render engine check" }).then(
+        function (raw) {
+          if (raw === "interactive") return false;
+          if (raw !== "headless") return again(saidHeadless);
+          return saidHeadless ? true : again(true);
+        },
+        function () { return again(saidHeadless); }
+      );
+    }
+    return ask(HEADLESS_TRIES, false);
   }
 
   // ---------- Boot sequence ----------

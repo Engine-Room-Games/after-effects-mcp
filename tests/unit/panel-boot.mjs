@@ -21,6 +21,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
@@ -80,9 +81,12 @@ function makeHost(extDir) {
       // loadJsxBundle asks ExtendScript to evaluate the bundle and answer "ok".
       if (script.indexOf("app.isUISuppressed") >= 0) {
         return void setTimeout(() => {
-          if (host.headlessAnswer === "never") return;
-          if (host.headlessAnswer === "error") return cb("EvalScript error.");
-          cb(host.headlessAnswer ?? "interactive");
+          // A list is one answer per asking; its last entry repeats.
+          const list = host.headlessAnswer;
+          const answer = Array.isArray(list) ? (list.length > 1 ? list.shift() : list[0]) : list;
+          if (answer === "never") return;
+          if (answer === "error") return cb("EvalScript error.");
+          cb(answer ?? "interactive");
         }, 0);
       }
       if (script.indexOf("$.evalFile") >= 0) {
@@ -778,6 +782,66 @@ await check("does not walk past a holder that answers nothing: waits, then takes
   }
 });
 
+// A raw TCP holder: `onConnect` is everything it ever does with a connection.
+async function rawHolder(onConnect) {
+  const sockets = new Set();
+  const server = tablePorts(net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+    onConnect(socket);
+  }));
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const close = server.close;
+  server.close = (...a) => { for (const s of sockets) s.destroy(); return close(...a); };
+  return server;
+}
+
+for (const [what, onConnect] of [
+  ["speaks something other than HTTP", (s) => s.write("SSH-2.0-OpenSSH_9.6\r\n")],
+  ["hangs up at once", (s) => s.destroy()],
+  ["starts an HTTP answer and stalls", (s) => s.write("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")],
+]) {
+  await check(`walks past a raw TCP holder that ${what}, as it always has (issue #288)`, async () => {
+    const holder = await rawHolder(onConnect);
+    const q = holder.address().port;
+    const p = bootPanel(dir, { config: { port: q, bindRetryMs: 150 } });
+    try {
+      const status = await settled(p.dom);
+      assert.equal(status, "ready", `status: ${status}\n${logText(p.dom)}`);
+      assert.notEqual(Number(p.dom.nodes.port.textContent), q, "only a holder that stays silent may hold the panel back");
+      assert.match(logText(p.dom), /something that did not identify itself/);
+    } finally {
+      p.close();
+      holder.close();
+    }
+  });
+}
+
+await check("a silent holder that then answers as a panel still gets the panel's first-time log", async () => {
+  let answering = false;
+  const holder = tablePorts(http.createServer((req, res) => {
+    if (!answering) return;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ ok: true, bundleHash: "not-this-bundle" }));
+  }));
+  await new Promise((r) => holder.listen(0, "127.0.0.1", r));
+  const q = holder.address().port;
+  const p = bootPanel(dir, { config: { port: q, bindRetryMs: 150 } });
+  try {
+    await statusMatches(p.dom, /does not answer/);
+    assert.match(logText(p.dom), /did not identify itself/);
+    answering = true;
+    await statusMatches(p.dom, /held by another AE MCP panel/);
+    const log = logText(p.dom);
+    assert.match(log, /a DIFFERENT version from this one/, "the version compare must not be lost to the silent wait");
+    assert.match(log, /CEPHtmlEngine/, "the zombie hint must not be lost to the silent wait");
+  } finally {
+    p.close();
+    holder.closeAllConnections?.();
+    holder.close();
+  }
+});
+
 await check("allowPortWalk still walks past a holder that answers nothing", async () => {
   const silent = await silentHolder();
   const q = silent.address().port;
@@ -802,7 +866,58 @@ await check("in a hidden render engine it binds nothing, writes nothing and load
     assert.match(logText(p.dom), /bridge stays off/);
     assert.equal(p.dom.nodes.port.textContent, "");
     assert.equal(fs.existsSync(p.portFile), false, "a render engine must never touch the port file");
-    assert.equal(p.host.evalCalls.length, 1, "the check must be the only script an engine is asked to run");
+    assert.equal(p.host.evalCalls.length, 2, "asked once and rechecked once");
+    assert.ok(p.host.evalCalls.every((s) => s.includes("app.isUISuppressed")), "the check must be the only script an engine is asked to run");
+  } finally {
+    p.close();
+  }
+});
+
+await check("a normal launch is asked once: the first interactive is final", async () => {
+  const p = bootPanel(dir, { config: { port: 0 } });
+  try {
+    assert.equal(await settled(p.dom), "ready");
+    assert.equal(p.host.evalCalls.filter((s) => s.includes("app.isUISuppressed")).length, 1);
+  } finally {
+    p.close();
+  }
+});
+
+await check("a busy engine's EvalScript error is asked again, not read as a normal host (issue #288)", async () => {
+  const p = bootPanel(dir, { config: { port: 0 }, headlessAnswer: ["error", "headless"] });
+  try {
+    await statusMatches(p.dom, /^not started/);
+    assert.equal(p.dom.nodes.port.textContent, "", "an engine must not bind on a refused check");
+    assert.equal(fs.existsSync(p.portFile), false);
+  } finally {
+    p.close();
+  }
+});
+
+await check("a normal host that refuses the check once boots on the next answer", async () => {
+  const p = bootPanel(dir, { config: { port: 0 }, headlessAnswer: ["error", "interactive"] });
+  try {
+    assert.equal(await settled(p.dom), "ready");
+    assert.equal(p.host.evalCalls.filter((s) => s.includes("app.isUISuppressed")).length, 2);
+  } finally {
+    p.close();
+  }
+});
+
+await check("a single true that does not hold on the recheck boots as normal", async () => {
+  const p = bootPanel(dir, { config: { port: 0 }, headlessAnswer: ["headless", "interactive"] });
+  try {
+    assert.equal(await settled(p.dom), "ready");
+  } finally {
+    p.close();
+  }
+});
+
+await check("a host that said headless and cannot be asked again stays off", async () => {
+  const p = bootPanel(dir, { config: { port: 0 }, headlessAnswer: ["headless", "error"] });
+  try {
+    await statusMatches(p.dom, /^not started/);
+    assert.equal(p.dom.nodes.port.textContent, "");
   } finally {
     p.close();
   }
@@ -811,8 +926,11 @@ await check("in a hidden render engine it binds nothing, writes nothing and load
 await check("a host that cannot answer the check boots as normal, unless it never answers", async () => {
   const errored = bootPanel(dir, { config: { port: 0 }, headlessAnswer: "error" });
   try {
+    assert.equal(errored.dom.nodes.port.textContent, "", "nothing may bind on the first refusal");
     const status = await settled(errored.dom);
     assert.equal(status, "ready", `status: ${status}\n${logText(errored.dom)}`);
+    assert.equal(errored.host.evalCalls.filter((s) => s.includes("app.isUISuppressed")).length, 5);
+    assert.match(logText(errored.dom), /gave no answer to the render engine check/);
   } finally {
     errored.close();
   }

@@ -82,7 +82,7 @@ export async function enableDebugMode(): Promise<number[]> {
  *            matches are then narrowed to the application itself (see
  *            `afterEffectsFromPgrep`): the pattern alone also matches
  *            `aerender`, its helpers and CEPHtmlEngine, none of which is the
- *            After Effects that loads the panel.
+ *            After Effects a user works in.
  *   Windows: `tasklist /FI "IMAGENAME eq AfterFX.exe" /NH` — narrowed to rows
  *            whose image name is exactly AfterFX.exe (`afterEffectsFromTasklist`),
  *            so aerender.exe never counts. A plain non-zero exit with no match is
@@ -90,8 +90,10 @@ export async function enableDebugMode(): Promise<number[]> {
  *            that could not run at all is a failure.
  *
  * A render running in `aerender` (render_queue, a render farm) is therefore
- * "not-running": aerender does not load the CEP panel, so it holds none of
- * the files setup_panel replaces. `detail` names what was found.
+ * "not-running". aerender's hidden engine does load the CEP panel (measured on
+ * 26.5, issue #288), and the bridge then stays off there, so it binds no port.
+ * Whether that engine holds panel files open against setup_panel on Windows has
+ * not been measured. `detail` names what was found.
  */
 export interface AfterEffectsProcess {
   state: "running" | "not-running" | "unknown";

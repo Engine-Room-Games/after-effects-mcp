@@ -50,6 +50,28 @@ const BRIDGE_BUSY_FIX =
   "before restarting anything — it usually clears on its own. " +
   "On macOS, if the user has switched to another desktop, ask them to switch back to the one After Effects is on.";
 
+/**
+ * The port is silent and no panel token exists for it. A panel writes its token
+ * as it binds and removes it on unload, so the holder is most likely not ours,
+ * and waiting will not clear it. One way this reads wrong: a server that cannot
+ * see the panel's files (sandboxed, another user), which is why it says "most
+ * likely" and the second step is a look at the bridge window.
+ */
+function foreignHolderSteps(port: number): string[] {
+  return [
+    `Port ${port} is open but does not answer, and no AE MCP panel has claimed it, so another program most likely holds it. Waiting will not clear that, and neither will restarting After Effects or running setup_panel.`,
+    `Ask the user to open Window > Extensions > AE MCP Bridge in After Effects. If it reads "waiting — port ${port} is held by something that does not answer", the panel cannot start until the port is free.`,
+    `Either quit the program holding port ${port}, or add "port" with a free number to ~/.engineroom-ae-mcp/config.json (%USERPROFILE%\\.engineroom-ae-mcp\\config.json on Windows), or "allowPortWalk": true to let the panel move past it. The panel reads that file at launch, so quit and reopen After Effects afterwards, then run check_setup.`,
+  ];
+}
+
+/** When the busy advice has run out: a token proves a panel held the port once, not that it holds it now. */
+function stillSilentStep(port: string): string {
+  return `Only if ${port} is still not answering after a minute, with nothing running in After Effects, ask the user to open Window > Extensions > AE MCP Bridge. ` +
+    `If it reads "waiting" and says the port is held by something that does not answer, another program holds it and a restart will not help: quit that program, or set a different "port" in ~/.engineroom-ae-mcp/config.json and reopen After Effects. ` +
+    "Otherwise treat it as disconnected and quit and reopen After Effects.";
+}
+
 export interface Check {
   name: string;
   ok: boolean;
@@ -113,6 +135,9 @@ export interface BridgeProbe {
   /** Everything asked, in the order asked. */
   probed: ProbeResult[];
 }
+
+/** `evidence` on bridgeReachable when the silent port has no panel token; nextSteps keys on it. */
+const FOREIGN_HOLDER = "no-panel-token";
 
 /** check_setup's detail for an "unverifiable" running panel; nextSteps keys on it. */
 export const UNVERIFIABLE_DETAIL = "the running panel could not read its own files to report its version";
@@ -452,6 +477,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
   const bridgeTimedOut = !bridge.answering && bridge.busy !== null;
   let bridgeDetail: string;
   let busyWith: BusyWith | null = null;
+  let foreignHolder = false;
   if (bridge.answering) {
     // Only the port this server's calls went to proves those calls are done;
     // another panel answering on a diagnostic port says nothing about them.
@@ -461,8 +487,14 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
       bridgeDetail += ` (the port file says ${fromFile}, which is stale — the socket is the authority)`;
     }
   } else if (bridge.busy) {
-    bridgeDetail = `port ${bridge.busy.port} accepted the connection but did not answer within ${BRIDGE_PROBE_MS / 1000}s — After Effects is probably busy`;
-    busyWith = opts.busyWith?.() ?? null;
+    // The token and not this server's own open calls: a port that accepts and
+    // never answers strands a call whoever holds it, so a call proves nothing.
+    foreignHolder = panelToken(bridge.busy.port) === null;
+    busyWith = foreignHolder ? null : opts.busyWith?.() ?? null;
+    const accepted = `port ${bridge.busy.port} accepted the connection but did not answer within ${BRIDGE_PROBE_MS / 1000}s`;
+    bridgeDetail = foreignHolder
+      ? `${accepted}, and no AE MCP panel has a token for that port, so it is most likely held by another program`
+      : `${accepted} — After Effects is probably busy`;
     if (busyWith) bridgeDetail += `: ${busyWithText(busyWith)}`;
   } else {
     const ports = bridge.probed.map((p) => p.port).join(", ");
@@ -475,9 +507,12 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     detail: bridgeDetail,
     fix: bridge.answering
       ? undefined
-      : bridgeTimedOut
-        ? BRIDGE_BUSY_FIX
-        : "If the other checks pass, restart After Effects so the panel reloads.",
+      : foreignHolder
+        ? foreignHolderSteps(bridge.busy!.port).join(" ")
+        : bridgeTimedOut
+          ? BRIDGE_BUSY_FIX
+          : "If the other checks pass, restart After Effects so the panel reloads.",
+    ...(foreignHolder ? { evidence: FOREIGN_HOLDER } : {}),
   });
 
   // Do ops and the panel agree on a port? Only the server can ask — it is the
@@ -507,6 +542,11 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
         : `The server's port is stale; the panel is fine. Retry the failed call — the server re-checks the port whenever a call is refused and switches to ${bridge.answering.port} by itself. ` +
           "If it still fails, reconnect the MCP server (restart the client's connection to it) so it starts on the right port. " +
           "Do NOT restart After Effects for this: a panel is listening, and a restart would cost the user their work in progress for nothing.";
+    } else if (foreignHolder) {
+      detail =
+        `tool calls are being sent to port ${opPort} (${bridge.atOpPort?.detail ?? "not probed"}); ` +
+        `port ${bridge.busy!.port} accepted a connection but no AE MCP panel has claimed it`;
+      fix = `See bridgeReachable: port ${bridge.busy!.port} is most likely held by another program.`;
     } else {
       detail =
         `tool calls are being sent to port ${opPort} (${bridge.atOpPort?.detail ?? "not probed"}); ` +
@@ -651,7 +691,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
   }
 
   const ready = checks.every((c) => c.ok);
-  const nextSteps = buildNextSteps(checks, ready, bridgeTimedOut);
+  const nextSteps = buildNextSteps(checks, ready, bridgeTimedOut, bridge.busy?.port);
   if (!busyWith) return { ready, checks, nextSteps };
   return { ready, checks, nextSteps: withBusyStep(nextSteps, busyWith), busyWith };
 }
@@ -674,7 +714,7 @@ export function withBusyStep(nextSteps: string[], busyWith: BusyWith): string[] 
  * Ordered remediation, phrased so the agent can read it straight out to a user
  * who has never opened a terminal.
  */
-export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut = false): string[] {
+export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut = false, silentPort?: number): string[] {
   if (ready) return ["Everything is connected. After Effects is ready to drive."];
 
   const by = (name: string) => checks.find((c) => c.name === name);
@@ -730,6 +770,9 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
     by("panelDependencies")?.ok !== false &&
     by("panelSignatureIntact")?.ok !== false &&
     by("cepDebugMode")?.ok !== false;
+  if (bridgeTimedOut && installSound && silentPort !== undefined && by("bridgeReachable")?.evidence === FOREIGN_HOLDER) {
+    return foreignHolderSteps(silentPort);
+  }
   if (bridgeTimedOut && installSound) {
     const out = [
       "Wait — do not restart anything yet. The panel is answering its port but is too busy to reply, which almost always means After Effects is still running a script.",
@@ -740,7 +783,7 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
     if (agreement && agreement.ok === false) {
       out.push(`${agreement.detail}. Once it answers, the server switches to it on the next refused call — no reconnect needed.`);
     }
-    out.push("Only if it is still not answering after a minute should you treat it as disconnected and quit and reopen After Effects.");
+    out.push(stillSilentStep(silentPort === undefined ? "the panel's port" : `port ${silentPort}`));
     return out;
   }
 

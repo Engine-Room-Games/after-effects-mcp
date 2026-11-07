@@ -20,7 +20,9 @@
 
 import assert from "node:assert/strict";
 import http from "node:http";
+import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocketServer } from "ws";
@@ -32,7 +34,7 @@ const { sourceBundleHash, sourceClientHash } = await import(dist("setup", "panel
 const { HttpClient } = await import(dist("bridge", "httpClient.js"));
 const { BridgeTimeoutError, BridgeUnreachableError } = await import(dist("util", "errors.js"));
 const { isPanelHealth, probePanel, locatePanel, portCandidates, DEFAULT_PORT, diagnosticPortCandidates } = await import(dist("bridge", "discovery.js"));
-const { probeBridge, buildNextSteps } = await import(dist("setup", "check.js"));
+const { probeBridge, buildNextSteps, checkSetup } = await import(dist("setup", "check.js"));
 
 let passed = 0;
 async function check(name, fn) {
@@ -382,6 +384,77 @@ await check("a busy port on a different number keeps the wait advice and names t
   assert.match(steps[0], /^Wait/);
   assert.match(steps.join("\n"), /7780/);
   assert.match(steps.join("\n"), /no reconnect needed/i);
+});
+
+await check("a busy panel's advice names the port and says what a foreign holder would look like", () => {
+  const steps = buildNextSteps([...healthy, bad("bridgeReachable")], false, true, 7777);
+  const text = steps.join("\n");
+  assert.match(steps[0], /^Wait/);
+  assert.match(text, /port 7777 is still not answering/);
+  assert.match(text, /another program holds it/);
+});
+
+await check("a silent port no panel has claimed is not told to wait (issue #288)", () => {
+  const holder = { ...bad("bridgeReachable"), evidence: "no-panel-token" };
+  const steps = buildNextSteps([...healthy, holder], false, true, 7777);
+  const text = steps.join("\n");
+  assert.doesNotMatch(steps[0], /^Wait/);
+  assert.doesNotMatch(text, /clears on its own/);
+  assert.match(steps[0], /Port 7777/);
+  assert.match(steps[0], /another program/);
+  assert.match(text, /allowPortWalk/);
+  assert.match(text, /config\.json/);
+  // Still none of the other failures' remedies.
+  assert.doesNotMatch(text, /re-send/i);
+  assert.doesNotMatch(text, /token/i);
+});
+
+await check("a broken install still outranks a foreign holder", () => {
+  const holder = { ...bad("bridgeReachable"), evidence: "no-panel-token" };
+  const broken = healthy.map((c) => (c.name === "panelDependencies" ? bad(c.name) : c));
+  assert.match(buildNextSteps([...broken, holder], false, true, 7777).join("\n"), /setup_panel/);
+});
+
+await check("check_setup tells a silent port with a panel token from one without", async () => {
+  // A temp home: token files are read from it, and the real one may hold a live panel's.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "port-drift-home-"));
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = process.env.USERPROFILE = home;
+  const run = (extra = {}) => checkSetup({
+    candidates: [silent.port],
+    opPort: silent.port,
+    source: null,
+    debugMode: { on: true, detail: "" },
+    afterEffectsRunning: true,
+    ...extra,
+  });
+  const bridge = (r) => r.checks.find((c) => c.name === "bridgeReachable");
+  try {
+    const foreign = await run();
+    assert.equal(bridge(foreign).evidence, "no-panel-token");
+    assert.match(bridge(foreign).detail, /most likely held by another program/);
+    assert.doesNotMatch(bridge(foreign).fix, /clears on its own/);
+    assert.match(bridge(foreign).fix, new RegExp(`Port ${silent.port}`));
+    assert.match(foreign.checks.find((c) => c.name === "portAgreement").fix, /another program/);
+
+    // A foreign holder strands calls too, so one in flight does not make it a panel.
+    const stranded = await run({ busyWith: () => ({ op: "run_jsx", state: "timedOut", ms: 1000 }) });
+    assert.equal(bridge(stranded).evidence, "no-panel-token");
+    assert.equal(stranded.busyWith, undefined);
+
+    fs.mkdirSync(path.join(home, ".engineroom-ae-mcp"));
+    fs.writeFileSync(path.join(home, ".engineroom-ae-mcp", `token-${silent.port}`), "a-token");
+    const ours = await run();
+    assert.equal(bridge(ours).evidence, undefined);
+    assert.match(bridge(ours).detail, /probably busy/);
+    assert.match(bridge(ours).fix, /clears on its own/);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 await check("an agreeing port changes nothing about the other advice", () => {
