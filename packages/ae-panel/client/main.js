@@ -856,11 +856,16 @@
    * So the holder is identified first. If it is one of us, this panel does not
    * move: it says so in its status and log, and retries the bind on an interval
    * so it takes the port over the moment the other one exits, with no restart.
-   * If it is something else, or answers nothing, the walk happens as before —
-   * loudly, naming the holder and the port chosen, because that is the one
-   * case where the port file legitimately says something other than 7777.
-   * `allowPortWalk` in config.json opts back into walking past our own panel,
-   * for people who really run two After Effects instances.
+   * If it is something else, the walk happens as before — loudly, naming the
+   * holder and the port chosen, because that is the one case where the port
+   * file legitimately says something other than 7777.
+   *
+   * A holder that answers nothing is treated as ours (issue #288). /health goes
+   * unanswered while ExtendScript holds a panel's thread, so a silent holder is
+   * most often a panel whose After Effects is busy, and walking past it is the
+   * same drift as above. The panel keeps trying the bind and re-asks every time.
+   * `allowPortWalk` in config.json opts back into walking past both, for people
+   * who really run two After Effects instances.
    */
   function startServers(cfg) {
     var startPort = cfg.port;
@@ -934,6 +939,22 @@
       return new Promise(function (r) { setTimeout(r, retryMs); }).then(function () { return attempt(p, 0); });
     }
 
+    function waitForSilentHolder(p, holder) {
+      setStatus("waiting — port " + p + " is held by something that does not answer", "warn");
+      if (waits === 0) {
+        log("warn", "port " + p + " is held by something that did not identify itself (" + holder.detail + "). " +
+          "Not moving to another port: an AE MCP panel does not answer while After Effects is busy with a script, " +
+          "and moving would leave two panels and a port file pointing at the wrong one (issues #92, #288).");
+        log("warn", "Retrying the bind every " + (retryMs / 1000) + "s; this panel takes the port the moment it " +
+          "is free, with no restart. If this persists and nothing is busy, another program holds port " + p + ": " +
+          "set a different \"port\" in " + configFile + ", or \"allowPortWalk\": true to move past it.");
+      } else if (waits % 30 === 0) {
+        log("info", "still waiting for port " + p + " (" + waits + " attempts)");
+      }
+      waits += 1;
+      return new Promise(function (r) { setTimeout(r, retryMs); }).then(function () { return attempt(p, 0); });
+    }
+
     function attempt(p, tries) {
       return bindWith(p).catch(function (e) {
         if (e.code !== "EADDRINUSE") throw e;
@@ -944,6 +965,7 @@
             }
             return waitForHolder(p, holder);
           }
+          if (holder.kind === "silent" && !cfg.allowPortWalk) return waitForSilentHolder(p, holder);
           var why = holder.kind === "other"
             ? "something that is not an AE MCP panel (" + holder.detail + ")"
             : "something that did not identify itself (" + holder.detail + ")";
@@ -977,6 +999,32 @@
     window.addEventListener("unload", shutdown);
   }
 
+  // ---------- A host with no user in it (issue #288) ----------
+  // CEP loads this extension into every process that calls itself AEFT, and two
+  // of those are hidden render engines with no window and no project of the
+  // user's: `aerendercore -m -livelink`, which Premiere's Dynamic Link starts,
+  // and `aerendercore -noui`, which aerender starts, render_queue included. A
+  // bridge there takes the port, and every tool call lands in an After Effects
+  // the user cannot see.
+  //
+  // Measured on 26.5 in both engines: app.isUISuppressed is true, and false in
+  // a normal After Effects at launch, with a project opened by file, and during
+  // suppressed dialogs; it is read-only. app.isRenderEngine is false in both
+  // engines, so it does not answer this. CEP's host environment and capabilities
+  // are identical in all three.
+  //
+  // Anything but the exact answer boots as normal: a version without the
+  // property behaves as it always has. An engine too busy to answer stays
+  // unbound, which is also the right outcome, since nothing is bound before
+  // this resolves.
+  var HEADLESS_CHECK = "app.isUISuppressed === true ? 'headless' : 'interactive'";
+  function isHeadlessHost() {
+    return evalScript(HEADLESS_CHECK, { label: "headless check" }).then(
+      function (raw) { return raw === "headless"; },
+      function () { return false; }
+    );
+  }
+
   // ---------- Boot sequence ----------
   setStatus("Starting…");
   try {
@@ -989,17 +1037,29 @@
     log("info", "read " + config.source + ": port " + config.port + (config.allowPortWalk ? ", allowPortWalk on" : ""));
   }
 
-  loadJsxBundle()
-    .then(function () { return startServers(config); })
-    .then(function (s) {
-      running = s;
-      // The only write of the port file, and only with the port actually bound.
-      writePortFile(s.port);
-      setField("port", $port, String(s.port), "ok");
-      setStatus("ready", "ok");
-      log("info", "Bridge listening on http://127.0.0.1:" + s.port +
-        (s.port !== config.port && config.port !== 0 ? " (configured port " + config.port + " was taken — see above)" : ""));
-      log("info", "Calls are authenticated: the MCP server reads this session's token from " + tokenFile(s.port) + ".");
+  function bootBridge() {
+    return loadJsxBundle()
+      .then(function () { return startServers(config); })
+      .then(announceBridge);
+  }
+
+  function announceBridge(s) {
+    running = s;
+    // The only write of the port file, and only with the port actually bound.
+    writePortFile(s.port);
+    setField("port", $port, String(s.port), "ok");
+    setStatus("ready", "ok");
+    log("info", "Bridge listening on http://127.0.0.1:" + s.port +
+      (s.port !== config.port && config.port !== 0 ? " (configured port " + config.port + " was taken — see above)" : ""));
+    log("info", "Calls are authenticated: the MCP server reads this session's token from " + tokenFile(s.port) + ".");
+  }
+
+  isHeadlessHost()
+    .then(function (headless) {
+      if (!headless) return bootBridge();
+      // No port, no port file, no token, no bundle in the engine.
+      setStatus("not started — this is a render engine, not After Effects", "warn");
+      log("info", "This host is a hidden render engine (Premiere Dynamic Link or aerender), so the bridge stays off here.");
     })
     .catch(function (e) {
       setStatus("failed", "err");

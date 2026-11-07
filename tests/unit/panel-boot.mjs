@@ -78,6 +78,13 @@ function makeHost(extDir) {
     evalScript: (script, cb) => {
       evalCalls.push(script);
       // loadJsxBundle asks ExtendScript to evaluate the bundle and answer "ok".
+      if (script.indexOf("app.isUISuppressed") >= 0) {
+        return void setTimeout(() => {
+          if (host.headlessAnswer === "never") return;
+          if (host.headlessAnswer === "error") return cb("EvalScript error.");
+          cb(host.headlessAnswer ?? "interactive");
+        }, 0);
+      }
       if (script.indexOf("$.evalFile") >= 0) {
         host.namespaceGone = false;
         return void setTimeout(() => cb(host.loadAnswer ?? "ok"), 0);
@@ -223,10 +230,11 @@ async function stranger(port = 0) {
  * 7777: with the #92 fix a test panel started there would recognise it as one
  * of us and wait for it for ever.
  */
-function bootPanel(extDir, { dirnameAt = extDir, config = { port: 0 }, cepEvents = false } = {}) {
+function bootPanel(extDir, { dirnameAt = extDir, config = { port: 0 }, cepEvents = false, headlessAnswer } = {}) {
   const source = fs.readFileSync(path.join(extDir, "client", "main.js"), "utf8");
   const csSource = fs.readFileSync(path.join(extDir, "client", "csinterface.js"), "utf8");
   const host = makeHost(extDir);
+  host.headlessAnswer = headlessAnswer;
   // CEP's application-scoped events (issue #283): what the bridge tells the
   // status panel. Off by default, as in every check written before them.
   if (cepEvents) {
@@ -734,6 +742,87 @@ await check("walks past a holder that is not an AE MCP panel, and says which por
     p.close();
     other.closeAllConnections?.();
     other.close();
+  }
+});
+
+// Accepts the connection and never answers: what a panel looks like while
+// ExtendScript holds its thread.
+async function silentHolder() {
+  const server = tablePorts(http.createServer(() => {}));
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return server;
+}
+
+await check("does not walk past a holder that answers nothing: waits, then takes the port over (issue #288)", async () => {
+  const silent = await silentHolder();
+  const q = silent.address().port;
+  const p = bootPanel(dir, { config: { port: q, bindRetryMs: 150 } });
+  try {
+    const status = await statusMatches(p.dom, /^waiting/);
+    assert.match(status, new RegExp(`port ${q} is held by something that does not answer`));
+    const log = logText(p.dom);
+    assert.match(log, /did not identify itself/);
+    assert.match(log, /allowPortWalk/, "the way out has to be named");
+    assert.equal(p.dom.nodes.port.textContent, "");
+    assert.equal(fs.existsSync(p.portFile), false, "the port file was written for a port that was never bound");
+
+    silent.closeAllConnections?.();
+    silent.close();
+    const after = await settled(p.dom);
+    assert.equal(after, "ready", `status: ${after}\n${logText(p.dom)}`);
+    assert.equal(Number(p.dom.nodes.port.textContent), q, "should have taken the same port, not walked");
+  } finally {
+    p.close();
+    silent.closeAllConnections?.();
+    silent.close();
+  }
+});
+
+await check("allowPortWalk still walks past a holder that answers nothing", async () => {
+  const silent = await silentHolder();
+  const q = silent.address().port;
+  const p = bootPanel(dir, { config: { port: q, allowPortWalk: true } });
+  try {
+    const status = await settled(p.dom);
+    assert.equal(status, "ready", `status: ${status}\n${logText(p.dom)}`);
+    assert.notEqual(Number(p.dom.nodes.port.textContent), q);
+    assert.match(logText(p.dom), /something that did not identify itself/);
+  } finally {
+    p.close();
+    silent.closeAllConnections?.();
+    silent.close();
+  }
+});
+
+await check("in a hidden render engine it binds nothing, writes nothing and loads no bundle (issue #288)", async () => {
+  const p = bootPanel(dir, { config: { port: 0 }, headlessAnswer: "headless" });
+  try {
+    const status = await statusMatches(p.dom, /^not started/);
+    assert.match(status, /render engine/);
+    assert.match(logText(p.dom), /bridge stays off/);
+    assert.equal(p.dom.nodes.port.textContent, "");
+    assert.equal(fs.existsSync(p.portFile), false, "a render engine must never touch the port file");
+    assert.equal(p.host.evalCalls.length, 1, "the check must be the only script an engine is asked to run");
+  } finally {
+    p.close();
+  }
+});
+
+await check("a host that cannot answer the check boots as normal, unless it never answers", async () => {
+  const errored = bootPanel(dir, { config: { port: 0 }, headlessAnswer: "error" });
+  try {
+    const status = await settled(errored.dom);
+    assert.equal(status, "ready", `status: ${status}\n${logText(errored.dom)}`);
+  } finally {
+    errored.close();
+  }
+  const stuck = bootPanel(dir, { config: { port: 0 }, headlessAnswer: "never" });
+  try {
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(stuck.dom.nodes.port.textContent, "", "nothing may bind before the check has answered");
+    assert.equal(fs.existsSync(stuck.portFile), false);
+  } finally {
+    stuck.close();
   }
 });
 
