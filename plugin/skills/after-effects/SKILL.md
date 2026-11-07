@@ -263,14 +263,10 @@ so with `queuedBehind` and `waitedMs`. Reads are never queued: `list_*`,
 sessions on the same After Effects take turns with yours the same way; a call
 that waited behind one also carries `queuedBehindSession`, naming it.
 
-That queue is this session's only. **A second AI client connected to the same
-After Effects has its own**, and neither sees the other's. After Effects still
-runs one call at a time, so two calls never mix — but while the other client's
-script runs, After Effects answers nothing to anyone, and your call simply
-takes longer, with nothing in its result to say why. The other client's writes
-can also land between the chunks of a long `run_batch` of yours (measured).
-If the user says another session is working in the same project, re-read what
-you are about to build on rather than trusting what you last saw.
+A turn lasts one call, or one whole `run_batch`, so another session's writes can
+still land between two of your calls. If the user says another session is
+working in the same project, re-read what you are about to build on rather than
+trusting what you last saw.
 
 ## Five failures that read alike, with remedies that contradict
 

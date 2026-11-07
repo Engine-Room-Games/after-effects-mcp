@@ -1488,7 +1488,7 @@ export const SetHouseStyle = z
 export const CheckSetup = z.object({}).strict();
 export const SetupPanel = z.object({
   enableDebugMode: z.boolean().optional().meta({ default: true })
-    .describe("Also set Adobe's PlayerDebugMode (AE needs it to load this unsigned panel) and CEP's LogLevel where unset, so CEP logs why a panel fails to load. Default true."),
+    .describe("Also set Adobe's PlayerDebugMode (an unsigned panel needs it to load; a signed one does not) and CEP's LogLevel where unset, so CEP logs why a panel fails to load. Default true."),
   force: z.boolean().optional().meta({ default: false })
     .describe("Replace an existing symlinked (development) install with a copy. Default false."),
   afterEffectsClosed: z.boolean().optional().meta({ default: false })

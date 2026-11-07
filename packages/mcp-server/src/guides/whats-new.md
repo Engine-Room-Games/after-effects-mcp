@@ -94,10 +94,7 @@ only quitting and reopening After Effects will.
 - **`get_selection` never takes keyboard focus.** When the active item is not
   a comp, it answers `comp: null` with a `reason` saying a composition viewer
   is open but its comp cannot be read without focusing it; ask the user which
-  comp they mean. It used to focus the viewer to read it, and answer
-  `source: "viewer"` — that source no longer occurs.
-  supersedes: get_selection asks the viewer when the active item is not a comp
-  supersedes: source: "viewer"
+  comp they mean.
 - **`export_mogrt` and `render_queue` say when they saved the user's project.**
   `projectSaved: true` (with `projectSavedNote`) means this call saved it, so
   File > Revert now goes back to that state — tell the user. `export_mogrt`
