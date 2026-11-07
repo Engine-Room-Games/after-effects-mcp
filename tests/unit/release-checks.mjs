@@ -17,6 +17,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+// release.sh runs this suite with these set. The artifacts here are fakes with
+// no panel at all, so a signing requirement inherited from it fails them.
+delete process.env.AE_MCP_PANEL_SIGN;
+delete process.env.AE_MCP_PANEL_CERT;
+delete process.env.AE_MCP_SIGNED_PANEL;
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (...p) => fs.readFileSync(path.join(root, ...p), "utf8");
 const { parseNotaryResult, checkToolList, runnableTargets, smokeServer, wsProblem } = await import(
