@@ -1,6 +1,6 @@
 {
   "recipe": 23,
-  "title": "run_jsx helpers: shape() spawns at [0,0]",
+  "title": "run_jsx helpers: shape() spawns at the comp origin, which AE reads as [0,0,0]",
   "manual": "ease() on Opacity and on an Ellipse Size: record the number each returns (see recipe 25).",
   "steps": [
     {
@@ -34,6 +34,7 @@
       "expect": [
         {
           "equals": [
+            0,
             0,
             0
           ]
