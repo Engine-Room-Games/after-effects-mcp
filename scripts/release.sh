@@ -234,7 +234,7 @@ git tag -a "$TAG" -m "$VERSION" -m "npm-tarball-sha256: $TARBALL_SHA"
 # The release is created as a DRAFT before anything is pushed, with every asset
 # uploaded: the upload is the slowest, flakiest step left, and as a draft it can
 # fail with nothing public and nothing to undo but the draft itself. Publishing
-# the draft after the push is what starts release.yml, which downloads the .tgz
+# the draft after the tag is pushed is what starts release.yml, which downloads the .tgz
 # and publishes it to npm over OIDC — no build, no signing in CI.
 step "Creating the GitHub release as a draft"
 NOTES=$(cat <<EOF
@@ -271,29 +271,81 @@ if ! gh release create "$TAG" "${ASSETS[@]}" \
   die "creating the draft release failed — nothing has been pushed; the release commit and tag were undone locally (git checkout -- . discards the version bump)"
 fi
 
-push_failed() {
+# main takes changes only through a pull request with CI green, and that rule
+# binds administrators too. So the release commit goes in by PR, and the tag
+# follows it only once it is on main. The merge must be a real merge commit:
+# the tag, the digest in it and every artifact name this exact commit, which a
+# squash or rebase would replace. Never add --admin to get past a failure here.
+RELEASE_BRANCH="release/$VERSION"
+
+undo_steps() {
   cat >&2 <<EOF
 
-Pushing failed. The draft release $TAG exists on GitHub (unpublished, so npm
-has not been touched), and the release commit and tag exist locally.
+To undo everything (npm has not been touched, and $TAG is not on origin):
 
-Either retry the push, then publish the draft:
-
-  git push origin main && git push origin $TAG
-  gh release edit $TAG --repo $REPO --draft=false
-
-or undo everything (check first that neither push reached origin):
-
+  gh pr close $RELEASE_BRANCH --repo $REPO --delete-branch
   gh release delete $TAG --repo $REPO --yes
   git tag -d $TAG
   git reset --mixed HEAD~1 && git checkout -- .
 EOF
+}
+
+not_merged() {
+  cat >&2 <<EOF
+
+$1 $TAG is not on main yet. The draft release exists on GitHub (unpublished, so
+npm has not been touched), and the release commit and tag exist locally.
+
+If CI is what failed and a re-run passes, finish by hand:
+
+  gh pr merge $RELEASE_BRANCH --repo $REPO --merge --delete-branch
+  git fetch origin main && git merge --ff-only origin/main
+  git push origin $TAG
+  gh release edit $TAG --repo $REPO --draft=false
+EOF
+  undo_steps
   exit 1
 }
 
-step "Pushing"
-git push --quiet origin main || push_failed
-git push --quiet origin "$TAG" || push_failed
+step "Opening the release pull request"
+# HEAD:refs/heads/…, with no -u: tracking the release branch would leave main's
+# upstream pointing at a branch the merge deletes.
+git push --quiet origin "HEAD:refs/heads/$RELEASE_BRANCH" || not_merged "Pushing the release branch failed."
+gh pr create --repo "$REPO" --base main --head "$RELEASE_BRANCH" \
+  --title "release: $VERSION" \
+  --body "The version bump for $VERSION, opened by release.sh. Do not squash or rebase: the tag and the signed artifacts name this exact commit." \
+  >/dev/null || not_merged "Opening the release pull request failed."
+
+step "Waiting for CI"
+# `gh pr checks --watch` gives up at once if the checks have not registered yet.
+for _ in $(seq 1 24); do
+  [ "$(gh pr view "$RELEASE_BRANCH" --repo "$REPO" --json statusCheckRollup -q '.statusCheckRollup | length')" != "0" ] && break
+  sleep 5
+done
+gh pr checks "$RELEASE_BRANCH" --repo "$REPO" --watch --fail-fast --interval 20 >/dev/null \
+  || not_merged "CI did not pass on the release pull request."
+
+step "Merging the release pull request"
+gh pr merge "$RELEASE_BRANCH" --repo "$REPO" --merge --delete-branch --match-head-commit "$(git rev-parse HEAD)" >/dev/null \
+  || not_merged "Merging the release pull request failed; if main moved during the release, undo and start again."
+
+git fetch --quiet origin main
+git merge-base --is-ancestor "$TAG" origin/main \
+  || not_merged "The merge reported success, but the release commit is not on origin/main."
+git merge --quiet --ff-only origin/main
+
+step "Pushing the tag"
+if ! git push --quiet origin "$TAG"; then
+  cat >&2 <<EOF
+
+The release commit is on main and the draft release holds every asset, but
+pushing the tag failed, so npm has not been published yet. To finish, run:
+
+  git push origin $TAG
+  gh release edit $TAG --repo $REPO --draft=false
+EOF
+  exit 1
+fi
 
 step "Publishing the release"
 if ! gh release edit "$TAG" --repo "$REPO" --draft=false; then
