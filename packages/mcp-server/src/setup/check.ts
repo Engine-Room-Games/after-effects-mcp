@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
+  DEFAULT_PORT,
   diagnosticPortCandidates,
   panelToken,
   pinnedPort,
@@ -149,6 +150,8 @@ export interface BridgeProbe {
 
 /** `evidence` on bridgeReachable when the silent port has no panel token; nextSteps keys on it. */
 const FOREIGN_HOLDER = "no-panel-token";
+/** `evidence` on portAgreement when ops go to a silent port and a busy panel sits on another; nextSteps keys on it. */
+const SILENT_OP_PORT = "silent-op-port";
 
 /** check_setup's detail for an "unverifiable" running panel; nextSteps keys on it. */
 export const UNVERIFIABLE_DETAIL = "the running panel could not read its own files to report its version";
@@ -535,6 +538,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
     const agrees = bridge.answering !== null && bridge.answering.port === opPort;
     let detail: string;
     let fix: string | undefined;
+    let evidence: string | undefined;
     if (agrees) {
       detail = `tool calls go to port ${opPort} and the panel answers there`;
     } else if (bridge.answering) {
@@ -559,6 +563,20 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
         `tool calls are being sent to port ${opPort} (${bridge.atOpPort?.detail ?? "not probed"}); ` +
         `port ${bridge.busy!.port} accepted a connection but no AE MCP panel has claimed it`;
       fix = `See bridgeReachable: port ${bridge.busy!.port} is most likely held by another program.`;
+    } else if (bridge.atOpPort?.status === "busy" && bridge.busy!.port !== opPort) {
+      // Rediscovery runs only on a refusal, and a port that accepts and goes
+      // quiet never refuses: its calls time out, and a timeout is never moved.
+      const panelPort = bridge.busy!.port;
+      const startsThere = pinnedPort() === null && (fromFile ?? DEFAULT_PORT) === panelPort;
+      const reconnect = "reconnect the MCP server (restart the client's connection to it)";
+      evidence = SILENT_OP_PORT;
+      detail =
+        `tool calls are being sent to port ${opPort} (${bridge.atOpPort.detail}); ` +
+        `port ${panelPort} is the one a panel has claimed, and it is busy`;
+      fix =
+        `Port ${opPort} accepts tool calls and does not answer, so each one times out, and a timed-out call never makes the server look for another port: it will not find port ${panelPort} by itself. ` +
+        `Once After Effects is free and port ${panelPort} answers, ${startsThere ? `${reconnect}, which starts on that port` : `set AE_MCP_PORT to ${panelPort}, then ${reconnect}`}. ` +
+        "Do not restart After Effects: a panel is there.";
     } else {
       detail =
         `tool calls are being sent to port ${opPort} (${bridge.atOpPort?.detail ?? "not probed"}); ` +
@@ -567,7 +585,7 @@ export async function checkSetup(opts: CheckSetupOptions = {}): Promise<SetupRep
         `Wait for After Effects to finish what it is doing, then retry the call — once port ${bridge.busy!.port} answers, the server switches to it on the next refused call. ` +
         "Do not restart After Effects: something is listening there.";
     }
-    checks.push({ name: "portAgreement", ok: agrees, detail, fix });
+    checks.push({ name: "portAgreement", ok: agrees, detail, fix, ...(evidence ? { evidence } : {}) });
   }
 
   // A panel that answers and then refuses every call looks, to every other
@@ -794,7 +812,11 @@ export function buildNextSteps(checks: Check[], ready: boolean, bridgeTimedOut =
       "On macOS, if they have moved to a different desktop, ask them to switch back to the one After Effects is on.",
     ];
     if (agreement && agreement.ok === false) {
-      out.push(`${agreement.detail}. Once it answers, the server switches to it on the next refused call — no reconnect needed.`);
+      out.push(
+        agreement.evidence === SILENT_OP_PORT
+          ? `${agreement.detail}. ${agreement.fix}`
+          : `${agreement.detail}. Once it answers, the server switches to it on the next refused call — no reconnect needed.`
+      );
     }
     out.push(stillSilentStep(silentPort === undefined ? "the panel's port" : `port ${silentPort}`));
     return out;

@@ -449,6 +449,13 @@ await check("check_setup tells a silent port with a panel token from one without
     assert.match(bridge(foreign).detail, /most likely held by another program/);
     assert.doesNotMatch(bridge(foreign).fix, /clears on its own/);
     assert.match(bridge(foreign).fix, new RegExp(`Port ${silent.port}`));
+    assert.match(bridge(foreign).fix, /Window > Extensions/);
+
+    // The check's own fix, not only nextSteps, has to work with After Effects closed.
+    const closed = await run({ afterEffectsRunning: false });
+    assert.match(bridge(closed).fix, /After Effects is closed/);
+    assert.doesNotMatch(bridge(closed).fix, /Window > Extensions/);
+    assert.doesNotMatch(bridge(closed).fix, /reopen After Effects/);
     assert.match(foreign.checks.find((c) => c.name === "portAgreement").fix, /another program/);
 
     // A foreign holder strands calls too, so one in flight does not make it a panel.
@@ -473,7 +480,24 @@ await check("check_setup tells a silent port with a panel token from one without
     assert.equal(bridge(both).evidence, undefined, "a busy panel must not be told waiting will not help");
     assert.match(bridge(both).detail, new RegExp(`^port ${silent.port} .*probably busy`));
     assert.match(bridge(both).fix, /clears on its own/);
-    assert.doesNotMatch(both.checks.find((c) => c.name === "portAgreement").fix, /another program/);
+    const agreement = (r) => r.checks.find((c) => c.name === "portAgreement");
+    assert.doesNotMatch(agreement(both).fix, /another program/);
+
+    // That op port times out and never refuses, so nothing rediscovers the panel.
+    assert.equal(agreement(both).evidence, "silent-op-port");
+    assert.doesNotMatch(agreement(both).fix, /next refused call/);
+    assert.match(agreement(both).fix, new RegExp(`set AE_MCP_PORT to ${silent.port}`), "a new server would start on 7777, not there");
+
+    // A new server starts on the port file's port, so a reconnect alone is enough.
+    fs.writeFileSync(path.join(home, ".engineroom-ae-mcp", "port"), String(silent.port));
+    const filed = await run({ candidates: [foreignFirst.port, silent.port], opPort: foreignFirst.port });
+    assert.match(agreement(filed).fix, /reconnect the MCP server/);
+    assert.doesNotMatch(agreement(filed).fix, /AE_MCP_PORT/);
+
+    // An op port that refuses does rediscover, so that promise stands.
+    const refusing = await run({ candidates: [stale, silent.port], opPort: stale });
+    assert.equal(agreement(refusing).evidence, undefined);
+    assert.match(agreement(refusing).fix, /next refused call/);
   } finally {
     foreignFirst.close();
     for (const [k, v] of Object.entries(saved)) {
@@ -482,6 +506,21 @@ await check("check_setup tells a silent port with a panel token from one without
     }
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+await check("a silent op port is never promised a switch on the next refused call (issue #288)", () => {
+  const steps = buildNextSteps(
+    [...healthy, bad("bridgeReachable"),
+      { ...bad("portAgreement", "tool calls are being sent to port 7780", "Port 7780 times out. Reconnect."), evidence: "silent-op-port" }],
+    false,
+    true,
+    7777
+  );
+  const text = steps.join("\n");
+  assert.match(steps[0], /^Wait/);
+  assert.match(text, /Port 7780 times out\. Reconnect\./);
+  assert.doesNotMatch(text, /next refused call/);
+  assert.doesNotMatch(text, /no reconnect needed/i);
 });
 
 await check("an agreeing port changes nothing about the other advice", () => {
