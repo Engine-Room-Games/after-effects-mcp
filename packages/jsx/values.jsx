@@ -145,13 +145,22 @@ function __setValue(prop, value) {
 // threeDLayer as undefined and hold their z; a text layer with per-character
 // 3D reads threeDLayer true and holds it. A text animator's Position and Anchor
 // Point follow per-character 3D alone: on a layer that is 3D without it, the z
-// is still lost. Anything that cannot be read is not refused.
-var __Z_NEEDS_3D_LAYER = { "ADBE Position": true, "ADBE Anchor Point": true };
+// is still lost. Anything that cannot be read is not refused. Z Position, on a
+// layer with separated dimensions, is the same z written as a bare number.
+var __Z_NEEDS_3D_LAYER = { "ADBE Position": true, "ADBE Anchor Point": true, "ADBE Position_2": true };
 var __Z_NEEDS_3D_CHARS = { "ADBE Text Position 3D": true, "ADBE Text Anchor Point 3D": true };
 
 /** Does this value carry a third number other than 0? */
 function __hasZ(value) {
   return !!value && typeof value[2] === "number" && !__numClose(0, value[2]);
+}
+
+/** The z in a value bound for `prop`, or null if it has none but 0. */
+function __zFor(prop, value) {
+  var separated = false;
+  try { separated = prop.matchName === "ADBE Position_2"; } catch (e) { separated = false; }
+  if (separated) return typeof value === "number" && !__numClose(0, value) ? value : null;
+  return __hasZ(value) ? value[2] : null;
 }
 
 function __zIsDropped(prop) {
@@ -178,13 +187,14 @@ function __lostZReason(prop) {
     return "text layer '" + layer.name + "' has no per-character 3D, so its animators hold only x and y. " +
       "Turn it on first (threeDPerChar = true in run_jsx), or pass z 0";
   }
-  return "layer '" + layer.name + "' is 2D, so it holds only x and y. Make it 3D first with set_layer threeDLayer:true, or pass [x, y]";
+  return "layer '" + layer.name + "' is 2D, so it holds only x and y. Make it 3D first with set_layer threeDLayer:true, or drop the z";
 }
 
 /** Throws, before anything is written, when `value` carries a z that `prop` would drop. */
 function __refuseLostZ(prop, value, op) {
-  if (!__hasZ(value) || !__zIsDropped(prop)) return;
-  throw new Error(op + ": z " + value[2] + " for " + prop.name + " would be lost: " + __lostZReason(prop) + ". Nothing was changed.");
+  var z = __zFor(prop, value);
+  if (z === null || !__zIsDropped(prop)) return;
+  throw new Error(op + ": z " + z + " for " + prop.name + " would be lost: " + __lostZReason(prop) + ". Nothing was changed.");
 }
 
 /** The same refusal for a layer about to be created, and always 2D: call it before adding the layer. */

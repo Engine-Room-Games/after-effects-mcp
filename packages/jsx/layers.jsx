@@ -237,6 +237,8 @@ OPS.create_precomp_layer = function (args) {
 // Position stays AE's default whatever is passed (measured, AE 26.5). So a z
 // reaches the layer only by writing Position after the add, and there the whole
 // [x, y, z] is what was asked for (issue #291). A z of 0 stays a plain [x, y].
+// A write that fails anyway leaves no layer behind; what is known to fail is
+// refused before the add.
 function __writeSpawnZ(l, position, op) {
   if (!__hasZ(position)) return;
   var target = [position[0], position[1], position[2]];
@@ -269,6 +271,11 @@ OPS.create_camera_layer = function (args) {
 
 OPS.create_light_layer = function (args) {
   var c = getCompById(args.compId);
+  // An ambient light hides Position (measured, AE 26.5), so a z has nowhere to land.
+  if (args.lightType === "ambient" && __hasZ(args.position)) {
+    throw new Error("create_light_layer: an ambient light has no Position, so a z of " + args.position[2] +
+      " would be lost. Nothing was created. Pass [x, y], or use another lightType.");
+  }
   var center = (args.position && args.position.length >= 2) ? [args.position[0], args.position[1]] : [c.width / 2, c.height / 2];
   var l = c.layers.addLight(args.name || "Light", center);
   var lightTypeMap = { parallel: LightType.PARALLEL, spot: LightType.SPOT, point: LightType.POINT, ambient: LightType.AMBIENT };

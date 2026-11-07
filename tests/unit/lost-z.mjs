@@ -31,7 +31,7 @@ function check(name, fn) {
   passed++;
 }
 
-const FILES = ["ids.jsx", "values.jsx", "comps.jsx", "layers.jsx", "transforms.jsx", "keyframes.jsx", "retime.jsx", "footage.jsx", "shapes.jsx", "helpers.jsx"];
+const FILES = ["ids.jsx", "values.jsx", "comps.jsx", "layers.jsx", "snapshot.jsx", "transforms.jsx", "keyframes.jsx", "retime.jsx", "footage.jsx", "shapes.jsx", "batch.jsx", "helpers.jsx"];
 
 /** Comp 100 with a 2D layer (id 1), a 3D layer (id 2), and layers.add* that build fakes. */
 function scene() {
@@ -158,9 +158,52 @@ check("a 3D layer keeps its z, through every route", () => {
 
 check("a layer made 3D earlier in a batch is judged as it is by then", () => {
   const ae = scene();
-  ae.run(`flat.threeDLayer = true`);
-  assert.equal(ae.call("set_transform", { compId: 100, layerId: 1, properties: { position: [5, 6, 70] } }).ok, true);
+  const r = ae.call("run_batch", { ops: [
+    { op: "set_layer", args: { compId: 100, layerId: 1, threeDLayer: true } },
+    { op: "set_transform", args: { compId: 100, layerId: 1, properties: { position: [5, 6, 70] } } },
+  ] });
+  assert.equal(r.ok, true, JSON.stringify(r));
   assert.deepEqual(pos(ae, 1), [5, 6, 70]);
+});
+
+check("a batch step takes the same refusal", () => {
+  const ae = scene();
+  const r = ae.call("run_batch", { ops: [{ op: "set_transform", args: { compId: 100, layerId: 1, properties: { position: [5, 6, 70] } } }] });
+  refused(r, /z 70/, /'Flat' is 2D/);
+});
+
+// Z Position exists on a separated 2D layer: read as a bare number, not an array.
+function separated(ae, layer, name) {
+  ae.run(`
+    (function () {
+      var tr = ${layer}.property("Transform");
+      var z = tr._add(new FAKE.Property("Z Position", "ADBE Position_2", 0, PropertyValueType.OneD));
+      z.propertyDepth = 2;
+      z.propertyGroup = function (n) { return n === 2 ? ${layer} : tr; };
+      ${name} = z;
+    })();
+  `);
+}
+
+check("Z Position on a separated 2D layer is refused; a 0 and a 3D layer are not", () => {
+  const ae = scene();
+  separated(ae, "flat", "this.flatZ");
+  separated(ae, "deep", "this.deepZ");
+  refused(ae.call("add_keyframe", { compId: 100, layerId: 1, propertyPath: ["Transform", "Z Position"], time: 1, value: 44 }), /add_keyframe: z 44/, /'Flat' is 2D/);
+  assert.equal(ae.json("flatZ.numKeys"), 0);
+  assert.equal(ae.call("add_keyframe", { compId: 100, layerId: 2, propertyPath: ["Transform", "Z Position"], time: 1, value: 44 }).ok, true);
+  assert.equal(ae.run(`__zFor(flatZ, 0)`), null);
+  assert.equal(ae.run(`__zFor(flatZ, 44)`), 44);
+});
+
+check("copy_animation refuses a Z Position key onto a separated 2D target", () => {
+  const ae = scene();
+  separated(ae, "flat", "this.flatZ");
+  separated(ae, "deep", "this.deepZ");
+  ae.run(`deepZ.setValueAtTime(1, 44)`);
+  const r = ae.call("copy_animation", { compId: 100, layerId: 2, propertyPaths: [["Transform", "Z Position"]], targets: [{ layerId: 1 }] });
+  refused(r, /z of 44/, /'Flat' is 2D/);
+  assert.equal(ae.json("flatZ.numKeys"), 0);
 });
 
 // The cases a judgement by value type or by `!threeDLayer` gets wrong, on the
@@ -204,6 +247,14 @@ check("cameras and lights: a z reaches Position, [x, y] stays where it was", () 
   }
 });
 
+check("an ambient light with a z is refused before any layer is added", () => {
+  const ae = scene();
+  ae.run(`comp.layers.addLight = function () { throw new Error("addLight was called"); };`);
+  refused(ae.call("create_light_layer", { compId: 100, lightType: "ambient", position: [1, 2, 3] }), /ambient/, /Nothing was created/);
+  ae.run(`comp.layers.addLight = function (name) { var l = spawn(name, "null"); l.threeDLayer = undefined; return l; };`);
+  assert.equal(ae.call("create_light_layer", { compId: 100, lightType: "ambient", position: [1, 2, 0] }).ok, true);
+});
+
 check("a camera or light whose Position will not take the write is removed, not left half built", () => {
   const ae = scene();
   ae.run(`
@@ -214,7 +265,7 @@ check("a camera or light whose Position will not take the write is removed, not 
     };
   `);
   const n = layerCount(ae);
-  refused(ae.call("create_light_layer", { compId: 100, lightType: "ambient", position: [1, 2, 3] }), /hidden/, /removed/);
+  refused(ae.call("create_light_layer", { compId: 100, position: [1, 2, 3] }), /hidden/, /removed/);
   assert.equal(layerCount(ae), n);
 });
 

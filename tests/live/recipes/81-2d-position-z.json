@@ -1,5 +1,5 @@
 {
-  "recipe": 80,
+  "recipe": 81,
   "title": "A z a 2D layer would lose is refused; a z that lands is not",
   "steps": [
     {
@@ -1082,7 +1082,7 @@
           3
         ]
       },
-      "expectError": "removed"
+      "expectError": "Nothing was created"
     },
     {
       "call": "run_jsx",
@@ -1095,6 +1095,48 @@
           "equals": true
         }
       ]
+    },
+    {
+      "call": "create_null_layer",
+      "args": {
+        "compId": "${comp.id}",
+        "name": "Split"
+      },
+      "save": "split",
+      "expect": [
+        {
+          "path": "id",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "call": "set_transform",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${split.id}",
+        "separateDimensions": true
+      },
+      "expect": [
+        {
+          "path": "$isError",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "call": "add_keyframe",
+      "args": {
+        "compId": "${comp.id}",
+        "layerId": "${split.id}",
+        "propertyPath": [
+          "Transform",
+          "Z Position"
+        ],
+        "time": 1,
+        "value": 44
+      },
+      "expectError": "z 44.*is 2D"
     },
     {
       "call": "run_jsx",

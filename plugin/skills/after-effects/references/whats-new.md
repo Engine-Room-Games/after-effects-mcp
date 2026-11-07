@@ -53,13 +53,15 @@ only quitting and reopening After Effects will.
   `add_keyframe`, `copy_animation` from a 3D source, a `run_batch` step of any
   of those, the `create_*_layer` tools with a `position`, and the `run_jsx`
   helpers `addKeys`, `shape` and `setValueChecked` now refuse a non-zero z and
-  change nothing; a text animator's Position and Anchor Point refuse one
+  change nothing, and so does Z Position on a separated 2D layer; a text animator's Position and Anchor Point refuse one
   unless the layer has per-character 3D. A z of 0 still works, and so does any
   z on a 3D layer. A bare `prop.setValue` in a script still drops it. To put a
   layer in depth, `set_layer threeDLayer:true` first. On `create_camera_layer`
   and `create_light_layer` the z now lands: `[x, y, z]` sets Position to those
   numbers, where it used to set only the Point of Interest and lose the z
-  (`[x, y]` still sets the Point of Interest alone) (issue #291).
+  (`[x, y]` still sets the Point of Interest alone); an ambient light has no
+  Position, so a z there is refused (issue #291).
+  supersedes: three-component position needs a 3D layer
 - **The bridge runs in the background and opens no window at launch.**
   Window > Extensions > AE MCP Bridge is now a status window only: it shows
   the bridge's status and log, and opening or closing it does not start, stop

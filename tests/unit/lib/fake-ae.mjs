@@ -286,7 +286,7 @@ function installFakeAe(g) {
       },
     },
   };
-  g.FAKE = { comp: Comp, items: ITEMS };
+  g.FAKE = { comp: Comp, items: ITEMS, Property: Property };
 }
 
 /**
