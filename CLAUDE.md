@@ -17,7 +17,7 @@ session is a tax on every request the user ever makes.
 | [`docs/fragile-areas-ae.md`](docs/fragile-areas-ae.md) | Measured After Effects and ExtendScript behaviour: undo, shapes, text, audio, mogrt, expressions, `run_jsx`. |
 | [`docs/fragile-areas-bridge.md`](docs/fragile-areas-bridge.md) | The bridge, ports, CEP, the panel, and the screenshot pipeline. |
 | [`docs/fragile-areas-server.md`](docs/fragile-areas-server.md) | Tool schemas and the MCP protocol, the journal's caches, packaging and binaries. |
-| [`docs/verification-recipes.md`](docs/verification-recipes.md) | The 76 recipes run by hand against a live AE 2026. |
+| [`docs/verification-recipes.md`](docs/verification-recipes.md) | The 82 recipes run by hand against a live AE 2026. |
 
 **Nothing in `docs/` is generated** — hand-written, like this file. The generated
 prose is elsewhere and is called out below.
@@ -121,6 +121,7 @@ One line each. The annotated version — why each file is the way it is — is i
 | `…/jobs/batchDriver.ts` | Drives a chunked `run_batch`: one `_continue_job` per chunk under the batch's lease, a lost answer recovered from `_get_job`, never an op run twice, every stop saying how far it got. |
 | `…/frames/pipeline.ts` | Screenshots, contact sheets and `.mogrt` thumbnails finished on the server: the completeness wait, normalising, the stale check, tiling, the zip patch. |
 | `…/frames/{pngCodec,frameReader,frameCache,contactSheet,mogrtThumbnail}.ts` | Image finishing — PNG codec, frame readiness, contact sheets, `.mogrt` thumbnails. The only copy since #243; `image-parity.mjs` pins their outputs. |
+| `…/frames/frameDir.ts` | The folder the server tells the panel to write frames into (`__frameDir`): one it can read, which `Folder.temp` on macOS is not. |
 | `…/frames/sharedFrameCache.ts` | The stale-frame window as a file per panel port (`frames-<port>.jsonl`), shared by every server on one AE; lines tagged per AE instance, writes under a lock. |
 | `…/snapshots/store.ts` | In-memory comp fingerprints; `missingMessage()` is why it is a class and not a `Map`. |
 | `…/snapshots/diff.ts` | `diff_comp`'s diff, a port of `snapshot.jsx`'s kept byte-identical by a parity test. Change one, change both. |

@@ -511,7 +511,7 @@ OPS.export_mogrt = noUndo(function (args) {
     // saved): a poster frame that fails to render is a warning on a success,
     // never a failure that hides both.
     try {
-      var posterPath = __tmpPngPath();
+      var posterPath = __tmpPngPath(args.__frameDir);
       // Through a temporary comp when the comp is not at Full (issue #282),
       // grouped so its creation and removal are one undo step — and no group
       // at all when it renders directly and nothing is created. The group opens

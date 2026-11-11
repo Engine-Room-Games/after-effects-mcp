@@ -203,7 +203,15 @@ function loadOps(comp, world, o) {
       ctx.__UNDO_OPEN = true;
       try { return fn(); } finally { ctx.__UNDO_OPEN = false; undo.push("end"); }
     },
-    Folder: { temp: { fsName: "/tmp/ae-mcp-test" } },
+    // `new Folder(path)`: exists unless the test says the folder cannot be made.
+    Folder: Object.assign(
+      function Folder(p) {
+        this.fsName = p;
+        this.exists = false;
+        this.create = () => !(o.frameDirUnmakeable);
+      },
+      { temp: { fsName: "/tmp/ae-mcp-test" } },
+    ),
     File: class { constructor(p) { this.path = p; } },
     getCompById: (id) => {
       assert.equal(id, comp.id, "the handler must resolve the comp it was given");
@@ -595,6 +603,25 @@ check("__saveFrameAt (the mogrt poster) isolates too, and returns what it did", 
   assert.deepEqual(factors(comp), [[1, 1]]);
   untouched(comp);
   cleanedUp(world);
+});
+
+// Issue #299: the server names the folder; Folder.temp is only the fallback.
+check("every frame is written into the folder the server named", () => {
+  const { ops, comp } = scene();
+  const dir = "/Users/x/.engineroom-ae-mcp/frames";
+  const inDir = (p) => p.indexOf(dir + "/ae-mcp-") === 0 && /\.png$/.test(p);
+  assert.ok(inDir(ops._screenshot_frame({ compId: comp.id, time: 0, __frameDir: dir }).path));
+  assert.ok(inDir(ops._screenshot_layer({ compId: comp.id, layerId: 2, time: 0, __frameDir: dir }).path));
+  const sheet = ops._screenshot_frame({ compId: comp.id, times: [0, 1], __frameDir: dir });
+  for (const t of sheet.tiles) assert.ok(inDir(t.path), "a contact-sheet tile went somewhere else: " + t.path);
+});
+
+check("with no folder named, or one that cannot be made, the frame goes to Folder.temp", () => {
+  const a = scene();
+  assert.equal(a.ops._screenshot_frame({ compId: a.comp.id, time: 0 }).path.indexOf("/tmp/ae-mcp-test/ae-mcp-"), 0);
+  const b = scene({ frameDirUnmakeable: true });
+  const p = b.ops._screenshot_frame({ compId: b.comp.id, time: 0, __frameDir: "/nope" }).path;
+  assert.equal(p.indexOf("/tmp/ae-mcp-test/ae-mcp-"), 0);
 });
 
 console.log(`screenshot-resolution: ${passed} checks passed`);
