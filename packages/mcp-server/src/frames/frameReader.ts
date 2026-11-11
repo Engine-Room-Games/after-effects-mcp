@@ -70,17 +70,32 @@ export function unlinkQuietly(file: string): void {
   try { fs.unlinkSync(file); } catch (e) {}
 }
 
-/** True when the last 12 bytes are a zero-length IEND — the file ends where a PNG ends. */
-function endsWithIend(file: string, size: number): boolean {
-  if (size < 12) return false;
+/** Why a file that exists could not be opened or read: `EPERM (operation not permitted)`. */
+function describeReadError(e: unknown): string {
+  const err = e as NodeJS.ErrnoException | undefined;
+  const code = err && typeof err.code === "string" ? err.code : "";
+  const text = err && err.message ? String(err.message).split(",")[0].replace(/^[A-Z]+:\s*/, "") : String(e);
+  return code ? code + " (" + text + ")" : text;
+}
+
+/**
+ * Whether the last 12 bytes are a zero-length IEND — the file ends where a PNG
+ * ends — or the error that stopped this process finding out.
+ *
+ * The error is returned, never folded into "no": a file the operating system
+ * will not let this process open is not a file with no IEND chunk, and saying
+ * so sent every reader after a corrupt render that never happened (issue #299).
+ */
+function probeTail(file: string, size: number): { iend: boolean; error?: string } {
+  if (size < 12) return { iend: false };
   let fd: number | null = null;
   try {
     fd = fs.openSync(file, "r");
     const tail = Buffer.alloc(12);
     fs.readSync(fd, tail, 0, 12, size - 12);
-    return tail.readUInt32BE(0) === 0 && tail.toString("ascii", 4, 8) === "IEND";
+    return { iend: tail.readUInt32BE(0) === 0 && tail.toString("ascii", 4, 8) === "IEND" };
   } catch (e) {
-    return false;
+    return { iend: false, error: describeReadError(e) };
   } finally {
     if (fd !== null) { try { fs.closeSync(fd); } catch (e2) {} }
   }
@@ -115,6 +130,11 @@ function readHead(file: string, n: number): Buffer | null {
  * Rejections:
  *   FRAME_INCOMPLETE  the file exists, stopped changing, and is not a PNG.
  *                     Re-rendering can fix it, and this fails within stallMs.
+ *   FRAME_UNREADABLE  the file exists and stopped changing, and this process
+ *                     could not open or read it. Nothing is known about its
+ *                     contents, and a re-render would be refused the same way.
+ *                     Held for stallMs first: a file still being written can
+ *                     refuse a reader for a moment, and that is not this.
  *   RENDER_TIMEOUT    it never got there inside the budget. Re-rendering
  *                     immediately would only spend the budget a second time.
  */
@@ -129,6 +149,8 @@ export function waitForCompletePng(file: string, opts?: WaitForCompletePngOption
     let lastGrewAt = Date.now();
     let headChecked = false;
     let reason = "After Effects has not written the file yet";
+    // Set while the last look at the file was refused by the operating system.
+    let unreadable: string | null = null;
 
     function fail(code: string, detail: string): void {
       unlinkQuietly(file);
@@ -156,9 +178,11 @@ export function waitForCompletePng(file: string, opts?: WaitForCompletePngOption
             if (!early.complete && !early.growable) return fail("FRAME_INCOMPLETE", early.reason as string);
           }
         }
-        if (endsWithIend(file, size)) {
+        const tail = probeTail(file, size);
+        unreadable = tail.error || null;
+        if (tail.iend) {
           let buf: Buffer | null = null;
-          try { buf = fs.readFileSync(file); } catch (e) { buf = null; }
+          try { buf = fs.readFileSync(file); } catch (e) { buf = null; unreadable = describeReadError(e); }
           if (buf) {
             const st = inspectPngStructure(buf);
             if (st.complete) {
@@ -168,10 +192,17 @@ export function waitForCompletePng(file: string, opts?: WaitForCompletePngOption
             if (!st.growable) return fail("FRAME_INCOMPLETE", st.reason as string);
             reason = st.reason as string;
           }
-        } else if (size > 0) {
+        } else if (size > 0 && !unreadable) {
           reason = "the file reached " + size + " bytes with no IEND chunk";
         }
+        if (unreadable) reason = "this server could not read the file: " + unreadable;
         if (size > 0 && Date.now() - lastGrewAt > stallMs) {
+          if (unreadable) {
+            return fail(
+              "FRAME_UNREADABLE",
+              "After Effects wrote " + size + " bytes to " + file + ", and this server could not read them: " + unreadable
+            );
+          }
           return fail(
             "FRAME_INCOMPLETE",
             "After Effects wrote " + size + " bytes, stopped for " +
@@ -191,18 +222,23 @@ export function waitForCompletePng(file: string, opts?: WaitForCompletePngOption
   });
 }
 
+/** The failures this module diagnoses; anything else passing through is not its to rewrite. */
+export function isFrameErrorCode(code: unknown): boolean {
+  return code === "FRAME_INCOMPLETE" || code === "FRAME_UNREADABLE" || code === "RENDER_TIMEOUT";
+}
+
 /**
  * Turn a one-sentence reader failure into the message an agent acts on.
  *
  * `attempts` is how many renders were spent, so the advice does not tell
  * somebody to retry something that has already been retried for them.
  *
- * Anything without one of the two codes is returned untouched: an ExtendScript
+ * Anything without one of the three codes is returned untouched: an ExtendScript
  * error travelling through here is not this module's to rewrite.
  */
 export function dressFrameError<T>(err: T, attempts: number): T | FrameError {
   const fe = err as unknown as FrameError | null | undefined;
-  if (!fe || (fe.code !== "FRAME_INCOMPLETE" && fe.code !== "RENDER_TIMEOUT")) return err;
+  if (!fe || !isFrameErrorCode(fe.code)) return err;
   const tried = attempts > 1 ? " Both the first attempt and one automatic re-render failed the same way." : "";
   let lines: string[];
   if (fe.code === "FRAME_INCOMPLETE") {
@@ -223,6 +259,24 @@ export function dressFrameError<T>(err: T, attempts: number): T | FrameError {
       "",
       "Do NOT disable layers to make the render succeed: this is a limit of the render",
       "path, not a problem with the project.",
+    ];
+  } else if (fe.code === "FRAME_UNREADABLE") {
+    lines = [
+      "Frame unreadable: " + fe.detail + ". Nothing was sent.",
+      "",
+      "This is NOT a corrupt frame and NOT a timeout. After Effects rendered the frame",
+      "and wrote the file; the operating system refused this server when it tried to",
+      "read it. Nothing is wrong with the project or the comp.",
+      "",
+      "What to do next:",
+      "1. Do NOT retry, and do not change `downsample`: the next file is written to the",
+      "   same folder and would be refused the same way.",
+      "2. Call `check_setup`. An out-of-date panel writes frames to a folder macOS keeps",
+      "   other programs out of; `setup_panel` and an After Effects restart fixes that.",
+      "3. Otherwise tell the user the folder named above is one this program is not",
+      "   allowed to read, and log it with `log_issue`.",
+      "4. Meanwhile verify the animation by reading keyframes (get_keyframes /",
+      "   get_layer_full) instead. That is exact; a picture is not.",
     ];
   } else {
     lines = [

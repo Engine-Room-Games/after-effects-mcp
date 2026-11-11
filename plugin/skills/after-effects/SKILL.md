@@ -210,7 +210,7 @@ result reports the dimensions and the factor actually applied — trust those.
 Space single frames out; rapid back-to-back requests are the pattern most likely
 to come back stale, and a sheet does the spacing for you.
 
-Four results are not a picture, and their remedies point in different
+Five results are not a picture, and their remedies point in different
 directions, so read which one you got before you retry anything:
 
 - **`Stale frame`** — After Effects re-served pixels it rendered for a
@@ -225,6 +225,10 @@ directions, so read which one you got before you retry anything:
 - **`Render timed out`** — After Effects was still working when the panel gave
   up, and probably still is. Wait a few seconds before doing anything else; a
   retry issued now queues behind it.
+- **`Frame unreadable`** — After Effects rendered the frame and the operating
+  system refused the tools the file. **Not corrupt, not a timeout,** and nothing
+  about the comp: do not retry or change `downsample`. Call `check_setup` — an
+  out-of-date panel is the usual cause — and relay what the error names.
 - **`empty: true`** — every pixel at that time is fully transparent. That is a
   fact about the composition: the wrong time, a layer outside its in/out points,
   disabled, or at zero opacity.

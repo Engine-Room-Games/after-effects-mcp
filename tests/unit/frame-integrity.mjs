@@ -246,6 +246,39 @@ await check("something that is not a PNG fails immediately, without waiting", as
   );
 });
 
+// Issue #299: on macOS a file After Effects wrote to its own temp folder can be
+// stat'ed by the server and not opened. That was folded into "no IEND chunk"
+// and reported as a corrupt render that never happened.
+const canDenyRead = process.platform !== "win32" && !(process.getuid && process.getuid() === 0);
+await check("a file the server may not open is unreadable, never corrupt, and says why", async () => {
+  if (!canDenyRead) return;
+  const file = tmpPath();
+  fs.writeFileSync(file, PNG);
+  fs.chmodSync(file, 0o000);
+  const started = Date.now();
+  await assert.rejects(
+    () => waitForCompletePng(file, FAST),
+    (e) => {
+      assert.equal(e.code, "FRAME_UNREADABLE", `a refused read is its own failure, got ${e.code}`);
+      assert.match(e.detail, /EACCES|EPERM/, "the operating system's own reason must be in the message");
+      assert.ok(e.detail.includes(file), "the file is named, so the folder at fault can be found");
+      assert.ok(e.detail.includes(String(PNG.length)), "what After Effects wrote is still reported");
+      assert.doesNotMatch(e.detail, /no IEND/, "nothing is known about the contents of a file that was never read");
+      return true;
+    },
+  );
+  assert.ok(Date.now() - started >= FAST.stallMs, "a file still being written can refuse a reader briefly; wait that out");
+});
+
+await check("a refusal that clears inside the stall window still delivers the frame", async () => {
+  if (!canDenyRead) return;
+  const file = tmpPath();
+  fs.writeFileSync(file, PNG);
+  fs.chmodSync(file, 0o000);
+  setTimeout(() => fs.chmodSync(file, 0o600), 80);
+  assert.deepEqual(await waitForCompletePng(file, FAST), PNG);
+});
+
 await check("a frame that never arrives is a timeout, not a corrupt file", async () => {
   const started = Date.now();
   await assert.rejects(
@@ -298,6 +331,20 @@ await check("a second attempt says so, so nobody is told to retry what was retri
 await check("an error that is not one of these two is passed through untouched", () => {
   const other = new Error("Unknown op: something_else");
   assert.equal(dressFrameError(other, 1), other, "an ExtendScript error is not this module's to rewrite");
+});
+
+await check("an unreadable frame is dressed as neither of the other two, and sends nobody to retry", () => {
+  const unreadable = dressFrameError(
+    { code: "FRAME_UNREADABLE", detail: "After Effects wrote 5526 bytes to /x/y.png, and this server could not read them: EPERM (operation not permitted)" },
+    1,
+  );
+  assert.equal(unreadable.code, "FRAME_UNREADABLE");
+  assert.match(unreadable.message, /^Frame unreadable: /);
+  assert.match(unreadable.message, /EPERM/);
+  assert.match(unreadable.message, /NOT a corrupt frame and NOT a timeout/);
+  assert.match(unreadable.message, /Do NOT retry/);
+  assert.match(unreadable.message, /check_setup/);
+  assert.doesNotMatch(unreadable.message, /^Corrupt frame|^Render timed out/m);
 });
 
 await check("the codes survive dressing, because the server branches on them", () => {

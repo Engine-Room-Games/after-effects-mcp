@@ -137,6 +137,7 @@ const COMP = { id: 7, width: TILE_W * 4, height: TILE_H * 4 };
 
 function dispatchStub(op, args) {
   if (op !== "_screenshot_frame") throw new Error(`Unknown op: ${op}`);
+  seenFrameDirs.push(args.__frameDir);
   if (args.times && args.times.length) {
     const ds = args.downsample || 4;
     return {
@@ -161,7 +162,11 @@ function dispatchStub(op, args) {
   };
 }
 
-const frames = createFramePipeline({ warn: () => {} });
+// The folder the pipeline tells the panel to write into (issue #299). The stub
+// records what it was told; where it writes is still this file's choice.
+const frameDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ae-shot-dir-")), "frames");
+const seenFrameDirs = [];
+const frames = createFramePipeline({ warn: () => {}, frameDir });
 
 /** One screenshot_frame call, answered the way the bridge answers `/op`. */
 async function op(args, expect = "ok") {
@@ -341,11 +346,40 @@ await check("contact-sheet tiles are un-premultiplied once, not twice", async ()
   assert.deepEqual(pixelAt(sheet, b.x + 40, b.y + 30), [24, 44, 64, 128]);
 });
 
+await check("every render, re-renders included, was told to write into the server's own folder", () => {
+  assert.ok(seenFrameDirs.length > 5, "the stub saw no renders");
+  for (const d of seenFrameDirs) assert.equal(d, frameDir, "a render was sent with no folder to write into");
+  assert.ok(fs.statSync(frameDir).isDirectory(), "the folder must exist before After Effects is asked to write into it");
+});
+
+await check("a stale frame nobody collected is swept; a fresh one and a stranger's file are left", async () => {
+  const { prepareFrameDir } = await import("../../packages/mcp-server/dist/frames/frameDir.js");
+  const old = path.join(frameDir, "ae-mcp-1700000000000-12345.png");
+  const fresh = path.join(frameDir, "ae-mcp-1700000000001-54321.png");
+  const other = path.join(frameDir, "notes.txt");
+  for (const f of [old, fresh, other]) fs.writeFileSync(f, "x");
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  fs.utimesSync(old, twoHoursAgo, twoHoursAgo);
+  fs.utimesSync(other, twoHoursAgo, twoHoursAgo);
+  assert.equal(prepareFrameDir(frameDir), frameDir);
+  assert.deepEqual(fs.readdirSync(frameDir).sort(), [path.basename(fresh), "notes.txt"].sort());
+  assert.equal(prepareFrameDir(path.join(other, "under-a-file")), null, "a folder that cannot be made is reported, not thrown");
+});
+
+await check("with no folder named, the args go to the panel untouched", async () => {
+  const bare = createFramePipeline({ warn: () => {}, frameDir: null });
+  let seen;
+  plan.queue = [png(77)];
+  await bare.run("screenshot_frame", { compId: COMP.id, time: 9 }, async (rawOp, a) => { seen = a; return dispatchStub(rawOp, a); });
+  assert.deepEqual(Object.keys(seen).sort(), ["compId", "time"]);
+});
+
 await check("every temp frame was cleaned up, whatever the verdict", () => {
   const left = fs.readdirSync(renderDir);
   assert.deepEqual(left, [], `temp frames left behind: ${left.join(", ")}`);
 });
 
 fs.rmSync(renderDir, { recursive: true, force: true });
+fs.rmSync(path.dirname(frameDir), { recursive: true, force: true });
 console.log(`screenshot-pipeline: ${passed} checks passed`);
 process.exit(0);

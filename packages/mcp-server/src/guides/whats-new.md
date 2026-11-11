@@ -45,6 +45,27 @@ it. The distinction worth reading carefully: if it says the panel is *installed*
 but the running one is older, running `setup_panel` again changes nothing and
 only quitting and reopening After Effects will.
 
+## 0.6.1
+
+- **Screenshots work again on macOS; a `Corrupt frame` on every screenshot was
+  never a corrupt frame.** In 0.6.0 every `screenshot_frame`, `screenshot_layer`
+  and contact sheet could fail with `Corrupt frame … no IEND chunk` on a file
+  that was whole, and an `export_mogrt` with `posterTime` kept After Effects'
+  own thumbnail: After Effects wrote the frame into a temp folder macOS lets no
+  other program read. Frames are now written to a folder the tools own. The
+  panel changed, so this needs `setup_panel` and an After Effects restart —
+  until then the tools refuse with the update message. Nothing about a project
+  has to change, and no workaround (a `run_jsx` `saveFrameToPng` to another
+  folder, staying on 0.5.2) is needed any more.
+  supersedes: screenshot_frame always fails with Corrupt frame
+  supersedes: screenshots are broken in 0.6.0
+  supersedes: save frames with saveFrameToPng to a folder outside TemporaryItems
+- **`Frame unreadable` is a fifth screenshot result, and it means do not
+  retry.** When the operating system refuses the tools a frame After Effects
+  wrote, the error now says so, names the file and quotes the system's reason
+  (`EPERM`, `EACCES`) instead of reporting a corrupt render. A higher
+  `downsample` does not help: call `check_setup`, and relay the error.
+
 ## 0.6.0
 
 - **A z for a 2D layer is refused, not dropped.** A 2D layer's Position and

@@ -28,6 +28,7 @@ import { logger } from "../util/logger.js";
 import { normalizePng, decodePng8, unpremultiply8, alphaIndexFor } from "./pngCodec.js";
 import {
   waitForCompletePng,
+  isFrameErrorCode,
   dressFrameError,
   frameError,
   unlinkQuietly,
@@ -43,6 +44,7 @@ import {
   RETRY_MIN_MS,
 } from "./contactSheet.js";
 import { patchThumbnail } from "./mogrtThumbnail.js";
+import { defaultFrameDir, prepareFrameDir } from "./frameDir.js";
 
 /** The ops a `server-images` panel answers with paths, keyed by the tool they stand in for. */
 export const RAW_IMAGE_OPS = {
@@ -72,6 +74,11 @@ export interface FramePipelineOptions {
     match(key: string, hash: string): FrameCacheMatch | null;
     remember(key: string, hash: string, meta?: FrameCacheMeta | null): void;
   };
+  /**
+   * The folder the panel is told to write frames into (frameDir.ts). Defaults
+   * to the server's own; null names none, leaving the panel its temp folder.
+   */
+  frameDir?: string | null;
 }
 
 interface FrameInfo {
@@ -135,7 +142,7 @@ function pngDimensions(buf: Buffer): { width: number; height: number } | null {
 /** A failure this module diagnosed, in the shape the panel's own failures reach `server.ts`. */
 function asAeError(err: unknown): unknown {
   const e = err as FrameError | undefined;
-  if (e && !(e instanceof AeError) && (e.code === "FRAME_INCOMPLETE" || e.code === "RENDER_TIMEOUT")) {
+  if (e && !(e instanceof AeError) && isFrameErrorCode(e.code)) {
     return new AeError(e.message, undefined, undefined, e.code);
   }
   return err;
@@ -194,6 +201,34 @@ export function createFramePipeline(opts: FramePipelineOptions = {}) {
   const readOpts = opts.frameRead ?? {};
   const sheetBudget = opts.sheetBudgetMs ?? CONTACT_SHEET_BUDGET_MS;
   const frameCache = opts.frameCache ?? createFrameCache();
+  const frameDirWanted = opts.frameDir === undefined ? defaultFrameDir() : opts.frameDir;
+  let frameDirSwept = false;
+
+  /**
+   * The args with the folder to write into added. Made (and swept, once) on
+   * every call rather than at startup: the folder can be deleted under a
+   * running server, and a frame written nowhere is a failed screenshot.
+   */
+  function withFrameDir(args: unknown): unknown {
+    if (!frameDirWanted) return args;
+    let dir: string | null;
+    if (frameDirSwept) {
+      try {
+        fs.mkdirSync(frameDirWanted, { recursive: true, mode: 0o700 });
+        dir = frameDirWanted;
+      } catch {
+        dir = null;
+      }
+    } else {
+      dir = prepareFrameDir(frameDirWanted);
+      frameDirSwept = dir !== null;
+    }
+    if (!dir) {
+      warn("could not create " + frameDirWanted + "; After Effects will write the frame to its own temp folder");
+      return args;
+    }
+    return { ...((args as Record<string, unknown> | null | undefined) ?? {}), __frameDir: dir };
+  }
 
   /**
    * Wait for the PNG, normalise it, and hand back what the result needs. The
@@ -602,7 +637,9 @@ export function createFramePipeline(opts: FramePipelineOptions = {}) {
      * the panel's result shape; rejects with an AeError carrying `code` for a
      * failure diagnosed here, exactly as the panel's would arrive.
      */
-    async run(tool: ImageTool, args: unknown, send: SendRaw): Promise<unknown> {
+    async run(tool: ImageTool, args: unknown, sendRaw: SendRaw): Promise<unknown> {
+      // Every send, the contact sheet's per-tile re-render included.
+      const send: SendRaw = (op, a) => sendRaw(op, withFrameDir(a));
       try {
         if (tool === "export_mogrt") return await exportMogrt(send, args);
         const a = args as { times?: unknown[] } | undefined;

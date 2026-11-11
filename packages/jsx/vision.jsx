@@ -1,8 +1,19 @@
 // vision.jsx — saveFrameToPng wrapper, returns the temp file path which the
 // MCP server then reads and base64-encodes (frames/pipeline.ts).
 
-function __tmpPngPath() {
-  var folder = Folder.temp;
+// Where a frame is written for the server to read. The server names the folder
+// (`__frameDir`, one it owns and can read) because the default below is not one
+// it can count on: on macOS Folder.temp is <tmp>/TemporaryItems, and macOS
+// lets a second program stat a file After Effects wrote there but refuses to
+// open or delete it (measured, issue #299). Folder.temp stays only as the
+// answer when no folder was named or the named one cannot be made.
+function __tmpPngPath(dir) {
+  var folder = null;
+  if (typeof dir === "string" && dir.length > 0) {
+    var named = new Folder(dir);
+    if (named.exists || named.create()) folder = named;
+  }
+  if (!folder) folder = Folder.temp;
   var name = "ae-mcp-" + (new Date().getTime()) + "-" + Math.floor(Math.random() * 1e6) + ".png";
   return folder.fsName + "/" + name;
 }
@@ -290,7 +301,7 @@ function __contactSheetFrames(comp, args) {
       for (var i = 0; i < times.length; i++) {
         var entry = { time: times[i], downsample: ds };
         try {
-          var p = __tmpPngPath();
+          var p = __tmpPngPath(args.__frameDir);
           src.saveFrameToPng(times[i], new File(p));
           entry.path = p;
         } catch (e) {
@@ -315,7 +326,7 @@ OPS.screenshot_frame = noUndo(function (args) {
   if (args.times && args.times.length) return __contactSheetFrames(c, args);
   var t = (args.time !== undefined && args.time !== null) ? args.time : c.time;
   var ds = __resolveDownsample(c, args.downsample);
-  var path = __tmpPngPath();
+  var path = __tmpPngPath(args.__frameDir);
   var f = new File(path);
   var state = {};
   var wasDirty = __projectDirty();
@@ -363,7 +374,7 @@ OPS.screenshot_layer = noUndo(function (args) {
   // a copy, and only the ones that are actually wrong.
   var plan = __soloPlan(c, targetIndex);
   var route = (plan.length === 0 && __factorIs(c.resolutionFactor, fac)) ? "direct" : "copy";
-  var path = __tmpPngPath();
+  var path = __tmpPngPath(args.__frameDir);
   var f = new File(path);
   var state = { isolation: route };
   var wasDirty = __projectDirty();
