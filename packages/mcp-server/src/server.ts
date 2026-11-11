@@ -213,7 +213,7 @@ export function createServer(opts: CreateServerOptions = {}) {
   logPolicy(policy);
 
   const server = new Server(
-    { name: "after-effects-mcp", version: "0.6.0" },
+    { name: "after-effects-mcp", version: "0.6.1" },
     {
       // `subscribe`: the live project resources (issue #248; resources/live.ts).
       // The guides never change, so subscribing to one is accepted and silent.
