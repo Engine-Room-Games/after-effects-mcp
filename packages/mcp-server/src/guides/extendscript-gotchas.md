@@ -383,6 +383,17 @@ output modules anyway.
   would block After Effects and the bridge until someone clicked it. They come
   back on the result as `suppressedDialogs`. `confirm` answers No and `prompt`
   answers Cancel.
+- **Replacing the open project is refused while it has unsaved changes.**
+  After Effects would ask "Save changes?"; with dialogs held back it does not
+  ask, it saves the project over its file. So `app.open()`, `app.newProject()`
+  and `app.project.close()` throw while `app.project.dirty` is true. Ask the
+  user, then run `app.project.save()` first to keep the changes or
+  `app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES)` to discard them. A
+  project that was never saved needs `app.project.save(new File(path))`: its
+  Save dialog is not held back and blocks After Effects until someone answers.
+  **Only written-out calls are refused.** By any other route the save happens,
+  and the result says so with `projectSaved: true` — tell the user, because
+  File > Revert now goes back to that state.
 - **`copyToComp` needs the group closed**, which is the opposite problem — see
   "Layers and comps".
 

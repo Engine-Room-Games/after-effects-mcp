@@ -444,6 +444,28 @@ function __rjMentionsUndo(t) {
   return t.indexOf("beginUndoGroup") >= 0 || t.indexOf("endUndoGroup") >= 0;
 }
 
+// The project guard (issue #304) rides the same rewrite, and has its own fast
+// path so a script that never replaces the project pays nothing: `newProject`
+// anywhere, `open` written after `app .`, or `close` written after `project .`.
+// It reads strings and comments too — a false yes costs the rewrite's time and
+// nothing else.
+function __rjAfterMember(owner) {
+  return function (s, at, end) {
+    var dot = __rjSkipSpaceBack(s, at - 1);
+    if (dot < 0 || s.charAt(dot) !== ".") return false;
+    var e = __rjSkipSpaceBack(s, dot - 1);
+    var b = e - owner.length + 1;
+    if (b < 0 || s.substring(b, e + 1) !== owner) return false;
+    return b === 0 || !__rjIsIdentChar(s.charAt(b - 1));
+  };
+}
+
+function __rjMentionsProject(t) {
+  return t.indexOf("newProject") >= 0 ||
+    __rjFindWord(t, "open", __rjAfterMember("app")) ||
+    __rjFindWord(t, "close", __rjAfterMember("project"));
+}
+
 function __rjBuildSource(code, libraries) {
   var prefix = __RJ_WRAP_PREFIX;
   var segments = [];
@@ -455,8 +477,9 @@ function __rjBuildSource(code, libraries) {
       var lib = __rjLibrarySource(libraries[i]);
       __rjCheckLibraryParses(lib);
       var libText = lib.text;
-      if (__rjMentionsUndo(libText)) {
-        mentions = true;
+      var libUndo = __rjMentionsUndo(libText);
+      if (libUndo) mentions = true;
+      if (libUndo || __rjMentionsProject(libText)) {
         var gl = __rjRewriteUndoText(libText);
         rewrites += gl.rewrites;
         libText = gl.text;
@@ -473,8 +496,9 @@ function __rjBuildSource(code, libraries) {
     }
   }
   var text = code;
-  if (__rjMentionsUndo(code)) {
-    mentions = true;
+  var codeUndo = __rjMentionsUndo(code);
+  if (codeUndo) mentions = true;
+  if (codeUndo || __rjMentionsProject(code)) {
     var gc = __rjRewriteUndoText(code);
     rewrites += gc.rewrites;
     text = gc.text;
@@ -521,6 +545,9 @@ function __rjBuildSource(code, libraries) {
 // result instead (__rjOpaqueRoutes).
 
 var __RJ_UNDO_WORDS = { beginUndoGroup: "__rjUndoBegin", endUndoGroup: "__rjUndoEnd" };
+// The calls that replace the open project (issue #304), rewritten by the same
+// pass: `app . open`, `app . newProject`, and `app . project . close`.
+var __RJ_PROJECT_WORDS = { open: "__rjAppOpen", newProject: "__rjAppNewProject" };
 
 function __rjIsIdentChar(c) {
   return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") ||
@@ -555,6 +582,7 @@ function __rjRewriteUndoText(src) {
   var out = [];
   var sig = [];          // significant code tokens: {tok, at: index into out}
   var rewrites = 0;
+  var projectRewrites = 0;
   var i = 0;
   while (i < n) {
     var c = s.charAt(i);
@@ -593,19 +621,32 @@ function __rjRewriteUndoText(src) {
       j = i;
       while (j < n && __rjIsIdentChar(s.charAt(j))) j++;
       var word = s.substring(i, j);
-      var target = (word === "beginUndoGroup" || word === "endUndoGroup") ? __RJ_UNDO_WORDS[word] : null;
+      var isUndo = (word === "beginUndoGroup" || word === "endUndoGroup");
+      var target = isUndo ? __RJ_UNDO_WORDS[word]
+        : ((word === "open" || word === "newProject") ? __RJ_PROJECT_WORDS[word] : null);
       var t1 = sig.length > 0 ? sig[sig.length - 1] : null;
       var t2 = sig.length > 1 ? sig[sig.length - 2] : null;
       var t3 = sig.length > 2 ? sig[sig.length - 3] : null;
+      var t4 = sig.length > 3 ? sig[sig.length - 4] : null;
+      var t5 = sig.length > 4 ? sig[sig.length - 5] : null;
       if (target && t1 && t1.tok === "." && t2 && t2.tok === "app" && !(t3 && t3.tok === ".")) {
         // `app . beginUndoGroup` -> `__rjUndoBegin`, keeping any newline that
         // sat between the pieces so every later line keeps its number.
         out[t2.at] = target;
         for (var k = t2.at + 1; k < out.length; k++) out[k] = __rjOnlyNewlines(out[k]);
-        rewrites++;
+        if (isUndo) rewrites++; else projectRewrites++;
         sig.length = sig.length - 2;
         out.push("");
         sig.push({ tok: target, at: out.length - 1 });
+      } else if (word === "close" && t1 && t1.tok === "." && t2 && t2.tok === "project" && t3 && t3.tok === "." &&
+          t4 && t4.tok === "app" && !(t5 && t5.tok === ".")) {
+        // `app . project . close` -> `__rjProjectClose`, the same way.
+        out[t4.at] = "__rjProjectClose";
+        for (var k2 = t4.at + 1; k2 < out.length; k2++) out[k2] = __rjOnlyNewlines(out[k2]);
+        projectRewrites++;
+        sig.length = sig.length - 4;
+        out.push("");
+        sig.push({ tok: "__rjProjectClose", at: out.length - 1 });
       } else {
         out.push(word);
         sig.push({ tok: word, at: out.length - 1 });
@@ -617,7 +658,7 @@ function __rjRewriteUndoText(src) {
     if (!__rjIsSpaceChar(c)) sig.push({ tok: c, at: out.length - 1 });
     i++;
   }
-  return { text: out.join(""), rewrites: rewrites };
+  return { text: out.join(""), rewrites: rewrites, projectRewrites: projectRewrites };
 }
 
 // The routes the rewrite cannot see into.
@@ -814,6 +855,101 @@ function __rjUndoGuardReport(g) {
   return report;
 }
 
+// ---------- Replacing the open project (issue #304) ----------
+// Every op runs with dialogs suppressed (#225), and "Save changes?" is a
+// dialog. Measured on AE 27.0: with unsaved changes in a project that has a
+// file, app.open(), app.newProject() and
+// app.project.close(CloseOptions.PROMPT_TO_SAVE_CHANGES) each SAVE it over its
+// file and carry on — no throw, nothing through app.onError, nothing on the
+// result. With unsaved changes in a project that was never saved, the Save
+// dialog comes up anyway, suppression or not, and blocks evalScript until
+// someone answers it in After Effects; cancelled, app.open() returns the
+// project that was already open, as if it had worked.
+//
+// A save is the user's decision, so the calls written out in the script are
+// rewritten (__rjRewriteUndoText) to the functions below, which refuse while
+// the project has unsaved changes and name the two ways on. Like the undo
+// guard, that covers literal calls only. For every other route — eval, an
+// alias of `app`, a computed name — __rjProjectBefore/__rjProjectSaved compare
+// the project file around the script and put `projectSaved` on the result, so
+// a save nobody asked for is at least never silent.
+function __rjProjectUnsaved() {
+  try { return app.project.dirty === true; } catch (e) { return false; }
+}
+
+function __rjRefuseUnsaved(call) {
+  var f = null;
+  try { f = app.project.file; } catch (e) {}
+  throw new Error(call + " was not run: the open project has unsaved changes. " +
+    (f
+      ? "With its dialogs suppressed After Effects does not ask; it would save them over " + f.fsName + ". "
+      : "It has never been saved, so After Effects would put up a Save dialog that blocks this connection until " +
+        "someone answers it in After Effects. ") +
+    "Ask the user which they want, then run it again after " +
+    (f ? "app.project.save()" : "app.project.save(new File(path))") + " to keep the changes, or after " +
+    "app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES) to discard them. Everything before this line already ran.");
+}
+
+function __rjAppOpen(file) {
+  if (__rjProjectUnsaved()) __rjRefuseUnsaved("app.open()");
+  return arguments.length ? app.open(file) : app.open();
+}
+
+function __rjAppNewProject() {
+  if (__rjProjectUnsaved()) __rjRefuseUnsaved("app.newProject()");
+  return app.newProject();
+}
+
+// SAVE_CHANGES and DO_NOT_SAVE_CHANGES say what the script wants and are passed
+// through; anything else leaves the answer to a prompt nobody will see.
+function __rjProjectClose(option) {
+  var decided = false;
+  try {
+    decided = arguments.length > 0 && typeof CloseOptions !== "undefined" &&
+      (option === CloseOptions.SAVE_CHANGES || option === CloseOptions.DO_NOT_SAVE_CHANGES);
+  } catch (e) {}
+  if (!decided && __rjProjectUnsaved()) __rjRefuseUnsaved("app.project.close()");
+  return arguments.length ? app.project.close(option) : app.project.close();
+}
+
+function __rjFileStamp(path) {
+  try {
+    var f = new File(path);
+    var m = f.modified;
+    return String(m ? m.getTime() : null) + "/" + String(f.length);
+  } catch (e) { return null; }
+}
+
+// null unless the project has a file and unsaved changes — the only state in
+// which a script can save it without meaning to.
+//
+// File.modified counts whole seconds (measured on AE 27.0: two saves 15 ms
+// apart read the same), and a save usually leaves the length alone. So a file
+// last written in the second this call starts in is waited out, under a second
+// and only then: after that, a save by the script cannot read like no save.
+function __rjProjectBefore() {
+  try {
+    var f = app.project.file;
+    if (!f || app.project.dirty !== true) return null;
+    var m = new File(f.fsName).modified;
+    var age = m ? new Date().getTime() - m.getTime() : -1;
+    if (age >= 0 && age < 1000) { try { $.sleep(1005 - age); } catch (e1) {} }
+    return { path: f.fsName, stamp: __rjFileStamp(f.fsName) };
+  } catch (e) { return null; }
+}
+
+// The note for a project file written while the script ran, or null. Read off
+// the file, not off `dirty`: closing without saving and reopening the same
+// project leaves it clean too.
+function __rjProjectSaved(before) {
+  if (!before || before.stamp === null) return null;
+  var after = __rjFileStamp(before.path);
+  if (after === null || after === before.stamp) return null;
+  return "This call saved the project: it had unsaved changes, and " + before.path + " was written while the " +
+    "script ran. With dialogs suppressed, app.open(), app.newProject() and app.project.close() save without " +
+    "asking. Tell the user — File > Revert now goes back to this state, not to the one before it.";
+}
+
 // undoGroup:false is a per-call opt-out, read by dispatch() through the
 // predicate form of __meta.noUndo. It exists because AE refuses copyToComp for
 // a layer with a parent or a linked expression while an undo group is open,
@@ -854,6 +990,7 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
     // diff:true fingerprints the comp before and after, inside this one call —
     // see snapshot.jsx. Null unless asked for, so the ordinary path is untouched.
     var __d = __diffStart(args, null);
+    var __p = __rjProjectBefore();
     // alert/confirm/prompt are blocking dialogs, and one up inside evalScript
     // stalls the bridge until someone clicks it. Declared here, they shadow the
     // globals for the eval'd script — eval resolves names through this
@@ -873,15 +1010,18 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
       // so the diff note has to be on it by then, and the source mapping is
       // what makes the reported line the caller's own (#46).
       __diffAnnotateError(e, __d);
+      var __ps = __rjProjectSaved(__p);
       __rjThrowWithSource(e, code, args.scriptPath, built,
         (__gr ? " || undo: " + __gr.note : "") +
+        (__ps ? " || project: " + __ps : "") +
         (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : ""));
     }
     __rjUndoGuardFinish(__g);
     var __report = __rjUndoGuardReport(__g);
     var __out = __rjResult(__value, undoGroupName);
     if (__d) __out = __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
-    if (__report || __shown.length) {
+    var __saved = __rjProjectSaved(__p);
+    if (__report || __shown.length || __saved) {
       // Always an envelope: a script that returned 1 must not read as an
       // untroubled 1 when its undo calls were changed under it.
       if (!__d && !__rjIsNullEnvelope(__out)) {
@@ -889,6 +1029,7 @@ OPS.run_jsx = noUndoWhen(function (args) { return args.undoGroup === false; }, f
       }
       if (__report) __out.undoGuard = __report;
       if (__shown.length) __out.suppressedDialogs = __shown;
+      if (__saved) { __out.projectSaved = true; __out.projectSavedNote = __saved; }
     }
     return __out;
   } finally {
@@ -999,6 +1140,7 @@ OPS._run_jsx = function (args) {
     __g.opaque = built.opaqueRoutes ? built.opaqueRoutes : [];
     var undoGroupName = (args.undoGroup === false) ? false : "AE MCP: run_jsx";
     var __d = __diffStart(args, null);
+    var __p = __rjProjectBefore();
     var __shown = [];
     var alert = function (m) { __shown.push("alert: " + String(m)); };
     var confirm = function (m) { __shown.push("confirm (answered No): " + String(m)); return false; };
@@ -1010,20 +1152,24 @@ OPS._run_jsx = function (args) {
       __rjUndoGuardFinish(__g);
       var __gr = __rjUndoGuardReport(__g);
       __diffAnnotateError(e, __d);
+      var __ps = __rjProjectSaved(__p);
       __rjThrowRaw(e,
         (__gr ? " || undo: " + __gr.note : "") +
+        (__ps ? " || project: " + __ps : "") +
         (__shown.length ? " || dialogs the script tried to show (not shown): " + __shown.join(" | ") : ""));
     }
     __rjUndoGuardFinish(__g);
     var __report = __rjUndoGuardReport(__g);
     var __out = __rjResult(__value, undoGroupName);
     if (__d) __out = __rjWithDiff(__out, __diffFinish(__d), undoGroupName);
-    if (__report || __shown.length) {
+    var __saved = __rjProjectSaved(__p);
+    if (__report || __shown.length || __saved) {
       if (!__d && !__rjIsNullEnvelope(__out)) {
         __out = { ok: true, returned: __out, undoGroup: undoGroupName };
       }
       if (__report) __out.undoGuard = __report;
       if (__shown.length) __out.suppressedDialogs = __shown;
+      if (__saved) { __out.projectSaved = true; __out.projectSavedNote = __saved; }
     }
     return __out;
   } finally {

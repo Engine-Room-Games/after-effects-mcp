@@ -84,6 +84,8 @@ export function mentionsUndo(t: string): boolean {
 }
 
 const UNDO_WORDS: Record<string, string> = { beginUndoGroup: "__rjUndoBegin", endUndoGroup: "__rjUndoEnd" };
+/** raw.jsx `__RJ_PROJECT_WORDS` (issue #304): the calls that replace the open project. */
+const PROJECT_WORDS: Record<string, string> = { open: "__rjAppOpen", newProject: "__rjAppNewProject" };
 
 /** raw.jsx `__rjIsIdentChar`. */
 function isIdentChar(c: string): boolean {
@@ -116,12 +118,13 @@ function onlyNewlines(s: string): string {
  * no line moves. Skips string and comment literals; does not recognise regex
  * literals, exactly as the jsx does not.
  */
-export function rewriteUndoText(src: string): { text: string; rewrites: number } {
+export function rewriteUndoText(src: string): { text: string; rewrites: number; projectRewrites: number } {
   const s = String(src);
   const n = s.length;
   const out: string[] = [];
   const sig: { tok: string; at: number }[] = [];
   let rewrites = 0;
+  let projectRewrites = 0;
   let i = 0;
   while (i < n) {
     const c = s.charAt(i);
@@ -160,17 +163,31 @@ export function rewriteUndoText(src: string): { text: string; rewrites: number }
       j = i;
       while (j < n && isIdentChar(s.charAt(j))) j++;
       const word = s.substring(i, j);
-      const target = word === "beginUndoGroup" || word === "endUndoGroup" ? UNDO_WORDS[word] : null;
+      const isUndo = word === "beginUndoGroup" || word === "endUndoGroup";
+      const target = isUndo ? UNDO_WORDS[word] : word === "open" || word === "newProject" ? PROJECT_WORDS[word] : null;
       const t1 = sig.length > 0 ? sig[sig.length - 1] : null;
       const t2 = sig.length > 1 ? sig[sig.length - 2] : null;
       const t3 = sig.length > 2 ? sig[sig.length - 3] : null;
+      const t4 = sig.length > 3 ? sig[sig.length - 4] : null;
+      const t5 = sig.length > 4 ? sig[sig.length - 5] : null;
       if (target && t1 && t1.tok === "." && t2 && t2.tok === "app" && !(t3 && t3.tok === ".")) {
         out[t2.at] = target;
         for (let k = t2.at + 1; k < out.length; k++) out[k] = onlyNewlines(out[k]);
-        rewrites++;
+        if (isUndo) rewrites++; else projectRewrites++;
         sig.length = sig.length - 2;
         out.push("");
         sig.push({ tok: target, at: out.length - 1 });
+      } else if (
+        word === "close" && t1 && t1.tok === "." && t2 && t2.tok === "project" && t3 && t3.tok === "." &&
+        t4 && t4.tok === "app" && !(t5 && t5.tok === ".")
+      ) {
+        // `app . project . close` -> `__rjProjectClose` (issue #304).
+        out[t4.at] = "__rjProjectClose";
+        for (let k = t4.at + 1; k < out.length; k++) out[k] = onlyNewlines(out[k]);
+        projectRewrites++;
+        sig.length = sig.length - 4;
+        out.push("");
+        sig.push({ tok: "__rjProjectClose", at: out.length - 1 });
       } else {
         out.push(word);
         sig.push({ tok: word, at: out.length - 1 });
@@ -182,7 +199,7 @@ export function rewriteUndoText(src: string): { text: string; rewrites: number }
     if (!isSpaceChar(c)) sig.push({ tok: c, at: out.length - 1 });
     i++;
   }
-  return { text: out.join(""), rewrites };
+  return { text: out.join(""), rewrites, projectRewrites };
 }
 
 /** raw.jsx `__rjSkipSpaceForward`. */
@@ -208,6 +225,31 @@ function findWord(s: string, word: string, test: (s: string, at: number, end: nu
     at = s.indexOf(word, at + 1);
   }
   return false;
+}
+
+/** raw.jsx `__rjAfterMember`. */
+function afterMember(owner: string): (s: string, at: number, end: number) => boolean {
+  return (s, at) => {
+    const dot = skipSpaceBack(s, at - 1);
+    if (dot < 0 || s.charAt(dot) !== ".") return false;
+    const e = skipSpaceBack(s, dot - 1);
+    const b = e - owner.length + 1;
+    if (b < 0 || s.substring(b, e + 1) !== owner) return false;
+    return b === 0 || !isIdentChar(s.charAt(b - 1));
+  };
+}
+
+/**
+ * raw.jsx `__rjMentionsProject` — the fast path of the project guard (issue
+ * #304). The functions the rewrite points at live in raw.jsx; nothing about
+ * them crosses the bridge.
+ */
+export function mentionsProject(t: string): boolean {
+  return (
+    t.indexOf("newProject") >= 0 ||
+    findWord(t, "open", afterMember("app")) ||
+    findWord(t, "close", afterMember("project"))
+  );
 }
 
 /** raw.jsx `__rjCalledHere`. */
@@ -330,8 +372,9 @@ export function buildRunJsxSource(code: string, libraries?: readonly Pick<RunJsx
       if (!raw || typeof raw.path !== "string" || !raw.path || typeof raw.text !== "string" || isBlank(raw.text)) return null;
       const lib = { path: String(raw.path), text: endWithNewline(raw.text) };
       let libText = lib.text;
-      if (mentionsUndo(libText)) {
-        mentions = true;
+      const libUndo = mentionsUndo(libText);
+      if (libUndo) mentions = true;
+      if (libUndo || mentionsProject(libText)) {
         const gl = rewriteUndoText(libText);
         rewrites += gl.rewrites;
         libText = gl.text;
@@ -345,8 +388,9 @@ export function buildRunJsxSource(code: string, libraries?: readonly Pick<RunJsx
     }
   }
   let text = code;
-  if (mentionsUndo(code)) {
-    mentions = true;
+  const codeUndo = mentionsUndo(code);
+  if (codeUndo) mentions = true;
+  if (codeUndo || mentionsProject(code)) {
     const gc = rewriteUndoText(code);
     rewrites += gc.rewrites;
     text = gc.text;
