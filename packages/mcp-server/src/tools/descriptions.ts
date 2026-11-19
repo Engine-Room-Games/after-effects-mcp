@@ -139,6 +139,7 @@ export const descriptions: Record<string, string> = {
     "A failure names the line of YOUR script (or says it cannot); everything before it already ran — read the state back, never re-run to see if it fails again. " +
     "AE refuses copyToComp for a layer with a parent or a linked expression inside an undo group: wrap just that part in `withoutUndoGroup(function(){ … })`, or pass undoGroup:false. Keep loops short — ExtendScript freezes the user's UI. " +
     "A heavy comp open in the viewer slows every change (AE re-runs its expressions each time): before a big rebuild, ask the user to switch to a light comp or close that viewer tab. " +
+    "`app.open()`, `app.newProject()`, `app.project.close()` throw on unsaved changes: ask the user, then save or discard first; `projectSaved:true` on a result means it saved — say so. " +
     "`diff:true` appends what the script changed (the answer is then `{ok, returned, diff}`), also to an error. Read ae_guide topic 'extendscript-gotchas' before writing anything substantial.",
 
   // ---------- footage ----------

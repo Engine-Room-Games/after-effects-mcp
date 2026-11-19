@@ -45,6 +45,30 @@ it. The distinction worth reading carefully: if it says the panel is *installed*
 but the running one is older, running `setup_panel` again changes nothing and
 only quitting and reopening After Effects will.
 
+## 0.6.2
+
+- **A `run_jsx` script cannot replace a project that has unsaved changes; save
+  or discard first, and ask the user which.** `app.open()`, `app.newProject()`
+  and `app.project.close()` used to answer After Effects' "Save changes?"
+  prompt on their own: with dialogs held back, After Effects saved the open
+  project over its file and carried on, with nothing on the result. Written out
+  in a script or a library they now throw while `app.project.dirty` is true and
+  nothing is saved. To go on, run `app.project.save()` first to keep the
+  changes, or `app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES)` to discard
+  them — the user decides, not the script. A project that has never been saved
+  is refused too: its Save dialog is not held back and froze the connection
+  until someone answered it. The panel changed, so this needs `setup_panel` and
+  an After Effects restart.
+  supersedes: read app.project.dirty before app.open and stop if it is true
+  supersedes: app.open saves the current project silently
+- **`projectSaved: true` on a `run_jsx` result means the script saved the
+  project, and the user should hear it.** The refusal above sees only calls
+  written out as `app.open(…)`, `app.newProject()` and `app.project.close(…)`.
+  When the project file is written while a script runs by any route — through
+  `eval`, an alias of `app`, or the script's own `app.project.save()` — the
+  result carries `projectSaved` and a `projectSavedNote`, and an error carries
+  the same note. File > Revert now goes back to that state.
+
 ## 0.6.1
 
 - **Screenshots work again on macOS; a `Corrupt frame` on every screenshot was

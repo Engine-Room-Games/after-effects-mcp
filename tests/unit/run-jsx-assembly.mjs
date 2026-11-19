@@ -162,6 +162,11 @@ const builderFixtures = [
   ["unterminated string and comment", "var s = 'abc\napp.beginUndoGroup('x');\n/* never closed app.endUndoGroup()", undefined],
   ["escaped quotes", "var s = 'it\\'s app.beginUndoGroup'; app.endUndoGroup();", undefined],
   ["regex literal with a quote", "var r = /'/; app.beginUndoGroup('x');", undefined],
+  ["project calls", "app.project.save();\napp.open(new File('/b.aep'));\napp.newProject();\napp.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);", undefined],
+  ["project calls split over lines", "app\n  .\n  open(f);\napp . project\n . close ( );", undefined],
+  ["project calls as members of something else", "foo.app.open(f); x.app.project.close(); myapp.newProject; f.open('r'); f.close();", undefined],
+  ["project calls in a string and a comment", "var s = 'app.open(f)'; // app.newProject()\n/* app.project.close() */ return s;", undefined],
+  ["project call in a library, undo in the script", "app.beginUndoGroup('x'); swap(); app.endUndoGroup();", [L("/t/p.jsx", "function swap(){ return app.open(new File('/b.aep')); }")]],
   ["unicode and odd spaces", "var s = \"é\"; app .﻿beginUndoGroup('x'); app.endUndoGroup();", undefined],
 ];
 
@@ -221,6 +226,7 @@ await check("builder parity: generated sources (rewrite, fast path, cautions)", 
     "app", ".", " ", "\n", "\r\n", "\t", "beginUndoGroup", "endUndoGroup", "(", ")", "'", "\"", "\\", "/", "*",
     "//", "/*", "*/", "eval", "Function", "new ", "$", "evalFile", "\\u0062", "\\u0065", "x", "foo", ";", " ",
     "withoutUndoGroup", "UndoGroup", "0", "_", "é",
+    "open", "close", "project", "newProject", "app.", "project.", ".close", ".open",
   ];
   let seed = 0x2206;
   const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
@@ -231,6 +237,7 @@ await check("builder parity: generated sources (rewrite, fast path, cautions)", 
     assert.deepEqual(asm.rewriteUndoText(code), plain(e0.get("__rjRewriteUndoText")(code)), `rewrite diverged on ${JSON.stringify(code)}`);
     assert.deepEqual(asm.opaqueRoutes(code), plain(e0.get("__rjOpaqueRoutes")(code)), `cautions diverged on ${JSON.stringify(code)}`);
     assert.equal(asm.mentionsUndo(code), e0.get("__rjMentionsUndo")(code));
+    assert.equal(asm.mentionsProject(code), e0.get("__rjMentionsProject")(code), `project fast path diverged on ${JSON.stringify(code)}`);
     const { shape } = tsBuild(code, undefined);
     assert.deepEqual(shape, esBuild(e0, code, undefined), `diverged on ${JSON.stringify(code)}`);
   }
@@ -244,6 +251,7 @@ await check("builder parity: generated libraries that parse", () => {
     "function a(){ app.beginUndoGroup('x'); }", "var s = 'app.endUndoGroup()';", "// app.endUndoGroup()",
     "/* eval( */ var q = 1;", "function b(){ return eval('1'); }", "var t = \"\\u0062eginUndoGroup\";",
     "app\n.\nendUndoGroup();", "var r = /'/;", "function c(){}\r\nfunction d(){}", "x.app.beginUndoGroup;",
+    "function e(){ return app.open(f); }", "var u = app\n.project\n.close;", "var v = 'app.newProject()';",
   ];
   let seed = 7;
   const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
